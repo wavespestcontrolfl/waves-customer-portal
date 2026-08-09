@@ -6156,6 +6156,20 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // SECOND invalidation pass, after the terminal status committed
+      // (codex P1, PR #3304 GH r8g): the pre-write pass stamps the durable
+      // call-side block first, so a composer that had already locked the
+      // call could still have inserted between that stamp and the scan.
+      // This sweeps whatever landed. Best-effort — the block marker keeps
+      // any straggler unsendable, and the scheduler queue retries.
+      try {
+        const { invalidateDraftForCall: invalidateAgain } = require('./estimator-engine');
+        await invalidateAgain(call.id, {
+          reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
+        });
+      } catch (sweepErr) {
+        logger.warn(`[call-proc] post-terminal draft sweep failed (non-blocking): ${sweepErr.message}`);
+      }
       await writeLegacyShadowRouteDecision({
         call,
         extracted,

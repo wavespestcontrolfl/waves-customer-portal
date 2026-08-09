@@ -569,6 +569,14 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
   // wrong-identity draft live indefinitely. Returns
   // { ok, invalidated, error }; the caller decides whether to retry.
   try {
+    // DURABLE VERDICT FIRST, scan second (codex P0, PR #3304 GH r8g):
+    // stamping the call before enumerating drafts is what closes the
+    // late-composer window — a detached composer that locks the call
+    // between the scan and a later stamp would otherwise insert an
+    // unmarked wrong-identity (or rejected-call) draft that stays
+    // sendable. The creators' in-lock fence and the send/accept/decline
+    // revalidation both read this marker.
+    await markDraftBlockOnCall(callLogId, reason);
     // STRICT lookup: existingDraftForCall converts DB errors to null,
     // which would read here as "no draft to invalidate". EVERY
     // uninvalidated row for this call is quarantined, not just the newest
@@ -697,14 +705,6 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
       logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
       invalidatedAny = true;
     }
-    // DURABLE call-side verdict for an identity conflict (codex P0, PR
-    // #3304 GH r8f): the drafts that exist are marked above, but a
-    // DETACHED composer that built its context before the conflict
-    // appeared can still insert afterwards — and its in-lock fence checks
-    // rejection and linkage, neither of which sees an identity conflict.
-    // Stamping the CALL makes the verdict visible to that fence
-    // (callRejectedForDrafting reads it) until a later pass disproves it.
-    if (identityConflict) await markIdentityConflictOnCall(callLogId, reason);
     return { ok: true, invalidated: invalidatedAny };
   } catch (qErr) {
     if (qErr.ownershipLost) {
@@ -717,36 +717,50 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
   }
 }
 
-// The call-side identity-conflict verdict the creators' in-lock fence
-// reads. Best-effort: the estimate markers are the primary block, this
-// closes the LATE-composer window (codex P0, PR #3304 GH r8f).
-async function markIdentityConflictOnCall(callLogId, reason) {
+// ONE call-side verdict marker for every forced invalidation — identity
+// conflict OR pipeline rejection. Written BEFORE the draft scan so no
+// composer can slip a draft in behind it; read by the creators' in-lock
+// fence (callRejectedForDrafting) and by send/accept/decline
+// revalidation (staleCallLinkageReason).
+async function markDraftBlockOnCall(callLogId, reason) {
   try {
     await db('call_log').where({ id: callLogId }).update({
       metadata: db.raw(
-        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_identity_conflict}', ?::jsonb, true)",
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
         [JSON.stringify({ reason, at: new Date().toISOString() })],
       ),
       updated_at: new Date(),
     });
   } catch (err) {
-    logger.warn(`[estimator-engine] identity-conflict call marker failed for ${callLogId}: ${err.message}`);
+    logger.warn(`[estimator-engine] draft-block call marker failed for ${callLogId}: ${err.message}`);
   }
 }
 
 // Cleared the moment a pass reads a CONCLUSIVELY clean context — the
-// conflict is gone and drafting must resume.
-async function clearIdentityConflictOnCall(callLogId) {
-  try {
-    await db('call_log').where({ id: callLogId })
-      .whereRaw("COALESCE(metadata->'estimator_identity_conflict'->>'reason', '') <> ''")
-      .update({
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_identity_conflict'"),
-        updated_at: new Date(),
-      });
-  } catch (err) {
-    logger.warn(`[estimator-engine] identity-conflict call marker clear failed for ${callLogId}: ${err.message}`);
+// verdict is gone and drafting must resume. Both call-side keys go
+// together (codex P1, PR #3304 GH r8g): a leftover quarantine-queue entry
+// blocks the valid replacement draft just as hard as the verdict itself.
+// A clear that will not land THROWS: the pass fails and retries, which
+// defers the draft rather than losing it to a permanent block.
+async function clearDraftBlockOnCall(callLogId) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await db('call_log').where({ id: callLogId })
+        .where(function anyMarker() {
+          this.whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
+            .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''");
+        })
+        .update({
+          metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block') - 'estimator_quarantine_pending'"),
+          updated_at: new Date(),
+        });
+      return;
+    } catch (err) { lastErr = err; }
   }
+  const blocked = new Error(`draft-block marker clear failed for call ${callLogId}: ${lastErr?.message || 'unknown'}`);
+  blocked.draftBlockClearFailed = true;
+  throw blocked;
 }
 
 // DURABLE retry queue for a quarantine that could not persist (codex P0,
@@ -836,7 +850,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       // cleared" and discard the only durable retry for a conflict that
       // was never disproved.
       if (freshContext && !freshContext.error) {
-        await clearIdentityConflictOnCall(row.id);
+        await clearDraftBlockOnCall(row.id);
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
         continue;
@@ -902,7 +916,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // in-lock fences can tell it apart from a competing reprocess.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
-    if (!dryRun && context && !context.error) await clearIdentityConflictOnCall(callLogId);
+    if (!dryRun && context && !context.error) await clearDraftBlockOnCall(callLogId);
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
