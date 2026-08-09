@@ -1182,8 +1182,10 @@ describe('Tree & Shrub v4.7 commercial + draft-review interactions', () => {
       || require('../services/estimator-engine/draft-builder')._test;
     const lineRequiresReview = draftPriv.lineRequiresReview;
     // Palm-only: treeCountSource is default_zero but the palms ARE the
-    // plant count for this line.
-    expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 10, annual: 400 })).toBe(false);
+    // plant count for this line — provided they actually priced (a
+    // service-line count folds into the legacy terms; see the GH-review
+    // block below for the property-sourced case that must stay blocked).
+    expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 10, palmCountSource: 'service_line', annual: 400 })).toBe(false);
     // Neither count → still review-blocked (the pricer quoted fixed costs only).
     expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', annual: 400 })).toBe(true);
     expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 0, annual: 400 })).toBe(true);
@@ -1385,5 +1387,52 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     });
     // No T&S anywhere → inject nothing.
     expect(signal({ result: { results: { pest: {} } } })).toBeNull();
+  });
+});
+
+describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
+  test('unpriced PROPERTY palms stay in the draft review lane (GH P1)', () => {
+    const { _private: draftPriv } = require('../services/estimator-engine/draft-builder');
+    const base = { service: 'tree_shrub', treeCountSource: 'default_zero', annual: 400 };
+    // Property palms with the reserve OFF price nothing — the fixed-cost
+    // underquote this gate exists to catch.
+    expect(draftPriv.lineRequiresReview({ ...base, palmCount: 8, palmCountSource: 'property', palmReserveActive: false })).toBe(true);
+    // Service-line palms fold into the legacy terms, so they DO price.
+    expect(draftPriv.lineRequiresReview({ ...base, palmCount: 8, palmCountSource: 'service_line', palmReserveActive: false })).toBe(false);
+    // Once armed, property palms price through the reserve.
+    expect(draftPriv.lineRequiresReview({ ...base, palmCount: 8, palmCountSource: 'property', palmReserveActive: true })).toBe(false);
+    // No palms at all still blocks.
+    expect(draftPriv.lineRequiresReview(base)).toBe(true);
+  });
+
+  test('the knob replay signal has ONE home shared by both authoritative paths (GH P1)', () => {
+    const shared = require('../services/estimate-tree-shrub-knob-replay');
+    const { estimateTreeShrubKnobSignal } = require('../routes/estimate-public');
+    // estimate-public re-exports the shared implementation — no drift.
+    expect(estimateTreeShrubKnobSignal).toBe(shared.treeShrubKnobSignalForReplay);
+    const stamped = { result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } } };
+    expect(shared.treeShrubKnobSignalForReplay(stamped)).toEqual({
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
+    });
+  });
+
+  test('the server-authoritative recompute replays the saved knobs (membership-lapse reconcile, GH P1)', async () => {
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    let seenInput = null;
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, services: { treeShrub: { tier: 'standard' } } },
+        result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
+      },
+      {
+        translateV2CallToV1Input: null,
+        needsSync: () => false,
+        generateEstimate: (input) => { seenInput = input; return { lineItems: [], totals: {} }; },
+        mapV1ToLegacyShape: () => ({ results: {} }),
+      },
+    );
+    expect(seenInput?.treeShrubPricingKnobs).toEqual({
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
+    });
   });
 });

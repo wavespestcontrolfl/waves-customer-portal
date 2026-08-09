@@ -12290,52 +12290,12 @@ function savedFloorReplayOverrides(estData) {
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
-  const tsKnobs = estimateTreeShrubKnobSignal(estData);
+  const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
+    .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
   return overrides;
 }
 
-// Saved Tree & Shrub knob state (v4.7 density / routine-palm-reserve /
-// callback-reserve). These are DB-authoritative and mutate live constants,
-// so an admin flip between save and view would otherwise re-price an
-// already-sent quote and then lock/bill the new amount. Stamped on the
-// stored T&S line as pricingKnobs; a stored estimate with NO stamp predates
-// the knobs entirely and replays NEUTRAL — it could only ever have been
-// priced with them off.
-const NEUTRAL_TREE_SHRUB_KNOBS = {
-  densityFactor: 1,
-  perPalmAnnual: 0,
-  minutesPerPalmVisit: 0,
-  callbackReservePerVisit: 0,
-};
-function estimateTreeShrubKnobSignal(estData = {}) {
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
-  const lineItems = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-  ];
-  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
-  // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
-  // source here — without it those quotes would replay off live knobs.
-  const tsMeta = result?.results?.tsMeta && typeof result.results.tsMeta === 'object'
-    ? result.results.tsMeta
-    : (estData?.result?.results?.tsMeta || null);
-  const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
-  if (!tsLine && !hasMappedTs) return null; // no T&S on this estimate — inject nothing
-  const stamped = (tsLine && tsLine.pricingKnobs) || (tsMeta && tsMeta.pricingKnobs);
-  if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
-  const pick = (key) => {
-    const n = Number(stamped[key]);
-    return Number.isFinite(n) ? n : NEUTRAL_TREE_SHRUB_KNOBS[key];
-  };
-  return {
-    densityFactor: pick('densityFactor'),
-    perPalmAnnual: pick('perPalmAnnual'),
-    minutesPerPalmVisit: pick('minutesPerPalmVisit'),
-    callbackReservePerVisit: pick('callbackReservePerVisit'),
-  };
-}
 
 // Saved pest post-discount floor state: pricingMetadata stamps first, then
 // legacy row evidence — armed-era rows carry the floor metadata itself
@@ -20908,4 +20868,4 @@ module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
 // Test hook (T&S reprice lane 2026-08-08): the saved-knob replay signal that
 // keeps an already-sent Tree & Shrub quote at its sent price after an admin
 // flips the v4.7 pricing_config knobs.
-module.exports.estimateTreeShrubKnobSignal = estimateTreeShrubKnobSignal;
+module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;

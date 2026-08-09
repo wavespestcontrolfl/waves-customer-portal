@@ -591,6 +591,19 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     if (storedManual) v1Input.manualDiscount = storedManual;
   }
 
+  // Saved Tree & Shrub knob state (v4.7). This recompute is AUTHORITATIVE —
+  // membership-lapse reconciliation replaces the stored result and totals
+  // with it — so it must replay the quote-time knobs for the same reason
+  // the public path does: an admin flip between send and reconcile would
+  // otherwise re-price an already-sent T&S quote well beyond the intended
+  // membership change. Same shared signal as extractEngineInputs; a stored
+  // value already on the inputs wins (explicit replay beats derivation).
+  if (!v1Input.treeShrubPricingKnobs) {
+    const tsKnobs = require('./estimate-tree-shrub-knob-replay')
+      .treeShrubKnobSignalForReplay(estimateData);
+    if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+  }
+
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();

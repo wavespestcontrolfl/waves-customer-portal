@@ -3950,6 +3950,13 @@ export default function EstimateToolViewV2({
           alert("Palm count is required for palm injection pricing.");
           return null;
         }
+      } else if (form.svcTs && hasInvalidPositiveInteger(form.palmCount)) {
+        // Tree & Shrub prices palms too (routine palm-care reserve), and a
+        // malformed entry is silently dropped by parsePositiveInteger — so
+        // without this the estimate would quote ZERO palms with no error and
+        // no review marker. Fail loudly instead, same as the injection path.
+        alert("Palm count must be a positive whole number.");
+        return null;
       }
 
       // Per-estimate overrides for the one-time pest_initial_roach fee.
