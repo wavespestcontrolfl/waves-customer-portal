@@ -834,7 +834,8 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(TS().callbackReservePerVisit).toBe(0);
 
     // Same fixture as the "standard 2,000 sqft worked example (v4.6)" above,
-    // with density/palm signals present — they must be inert at neutral.
+    // with density + PROPERTY-level palm signals present — both must be
+    // inert at neutral (property palms never fed T&S pricing pre-v4.7).
     const quote = priceTreeShrub(
       { bedArea: 2000, treeCount: 0, access: 'easy', shrubDensity: 'heavy', palmCount: 12 },
       { tier: 'standard' }
@@ -847,6 +848,36 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(quote.densityFactor).toBe(1);
     expect(quote.palmCount).toBe(12);
     expect(quote.palmCountSource).toBe('property');
+    expect(quote.palmReserveActive).toBe(false);
+  });
+
+  test('unarmed reserve: SERVICE-LINE palms fold into the tree terms — a split "10 palms" prices byte-identically to the pre-split treeCount 10 (pre-push P0)', () => {
+    // The intent prompt used to classify stated palms as treeCount; the
+    // producer split must not change a single dollar until the reserve arms.
+    for (const tier of ['light', 'standard', 'enhanced']) {
+      const preSplit = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier, treeCount: 10 });
+      const postSplit = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier, treeCount: 0, palmCount: 10 });
+      expect(postSplit.monthly).toBe(preSplit.monthly);
+      expect(postSplit.annual).toBe(preSplit.annual);
+      expect(postSplit.costs.materialCost).toBe(preSplit.costs.materialCost);
+      expect(postSplit.onSiteMin).toBe(preSplit.onSiteMin);
+      expect(postSplit.effectiveTreeCount).toBe(10);
+      expect(postSplit.costs.palmReserveCost).toBe(0);
+    }
+    // The ≥15 gate keeps tripping for large palm counts while unarmed.
+    const manyPalms = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 0, palmCount: 20 });
+    expect(manyPalms.manualReviewReasons).toContain('tree_count_at_or_above_15');
+  });
+
+  test('armed reserve: palms leave the tree terms and price via the reserve only — never both', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const quote = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 3, palmCount: 10 });
+    expect(quote.palmReserveActive).toBe(true);
+    expect(quote.effectiveTreeCount).toBe(3);
+    // material: (15 + 4*3 + 110)*1 + 6*10 — the $4 per-tree term bills 3, not 13.
+    expect(quote.costs.materialCost).toBeCloseTo(15 + 12 + 110 + 60, 5);
+    // minutes: 20 + 4 + round(3*1.5)=5 + 10 palm minutes.
+    expect(quote.onSiteMin).toBe(20 + 4 + 5 + 10);
   });
 
   test('density factor multiplies the measured-bed terms only (per-sqft material + bed minutes)', () => {
@@ -947,6 +978,13 @@ describe('Tree & Shrub v4.7 density source eligibility + admin validation', () =
     const ok = (data) => validatePricingConfigData('ts_material_rates', data).ok;
     expect(ok({ density_heavy: 1.3, palm_per_palm_annual: 6, palm_minutes_per_visit: 1, callback_reserve_per_visit: 2 })).toBe(true);
     expect(ok({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75 })).toBe(true);
+    // db-bridge applies fixed/per_tree/per_sqft only when > 0 — a stored 0
+    // would audit success while quotes keep the prior value (P1 r6).
+    expect(ok({ fixed: 0 })).toBe(false);
+    expect(ok({ per_tree: 0 })).toBe(false);
+    expect(ok({ per_sqft: 0 })).toBe(false);
+    // The v4.7 knobs legitimately accept 0 (bridge rebases + applies >= 0).
+    expect(ok({ palm_per_palm_annual: 0, callback_reserve_per_visit: 0 })).toBe(true);
     expect(ok({ density_heavy: 5 })).toBe(false);
     expect(ok({ density_light: 0.2 })).toBe(false);
     expect(ok({ palm_per_palm_annual: 500 })).toBe(false);
