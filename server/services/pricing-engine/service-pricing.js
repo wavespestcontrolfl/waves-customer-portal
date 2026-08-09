@@ -2680,24 +2680,31 @@ function priceTreeShrub(property, options = {}) {
   // Neutral-rollout bridge (pre-push P0): before v4.7 the intent prompt
   // classified stated palms INTO treeCount, so they priced the generic
   // per-tree material + 1.5 min/visit. The producers now split the counts,
-  // and with the reserve unarmed (0/0) those palms would price as NOTHING —
-  // an immediate underprice. Until the reserve is armed, SERVICE-LINE palms
-  // fold back into the tree terms (byte-identical to the pre-split quote,
-  // tier factors included). Property-level palm counts stay out while
-  // unarmed — they never fed T&S pricing, so folding them in would be the
-  // opposite un-neutrality. Once armed, palms price via the reserve only.
-  const palmReserveActive = (palmReserve.perPalmAnnual ?? 0) > 0
-    || (palmReserve.minutesPerPalmVisit ?? 0) > 0;
-  const effectiveTreeCount = palmReserveActive
-    ? treeCount
-    : treeCount + (palmCountSource === 'service_line' ? palmCount : 0);
-  const reservedPalmCount = palmReserveActive ? palmCount : 0;
-  const palmMinutesPerVisit = Math.round(reservedPalmCount * (palmReserve.minutesPerPalmVisit ?? 0));
+  // and with a reserve term unarmed those palms would price as NOTHING —
+  // an immediate underprice. While a term is unarmed, SERVICE-LINE palms
+  // fold back into the matching legacy term (byte-identical to the
+  // pre-split quote, tier factors included). Property-level palm counts
+  // stay out while unarmed — they never fed T&S pricing, so folding them
+  // in would be the opposite un-neutrality.
+  //
+  // The two legs arm INDEPENDENTLY (P0 r7): arming only perPalmAnnual must
+  // not silently delete the legacy palm LABOR, and arming only
+  // minutesPerPalmVisit must not delete the legacy palm MATERIAL. Each leg
+  // is either reserve-priced or legacy-priced, never neither.
+  const palmMaterialArmed = (palmReserve.perPalmAnnual ?? 0) > 0;
+  const palmLaborArmed = (palmReserve.minutesPerPalmVisit ?? 0) > 0;
+  const palmReserveActive = palmMaterialArmed || palmLaborArmed;
+  const foldablePalmCount = palmCountSource === 'service_line' ? palmCount : 0;
+  // Per-leg effective tree counts: palms ride the legacy term only where
+  // their replacement is still unarmed.
+  const materialTreeCount = treeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
+  const laborTreeCount = treeCount + (palmLaborArmed ? 0 : foldablePalmCount);
+  const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
   const onSiteMin = Math.max(
     25,
-    20 + Math.round((bedArea / 500) * densityFactor) + Math.round(effectiveTreeCount * 1.5) + palmMinutesPerVisit + accessMin,
+    20 + Math.round((bedArea / 500) * densityFactor) + Math.round(laborTreeCount * 1.5) + palmMinutesPerVisit + accessMin,
   );
 
   const frequency = tierConfig.frequency;
@@ -2711,12 +2718,12 @@ function priceTreeShrub(property, options = {}) {
   // Palm reserve material sits OUTSIDE the tier factor: it budgets the
   // annual palm nutrition/systemic calendar, which doesn't grow with extra
   // foliar visits — the per-visit palm labor already scales with frequency.
-  // While unarmed, service-line palms ride the per-tree term inside the
-  // tier factor instead (effectiveTreeCount — the pre-split economics).
-  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * reservedPalmCount;
+  // While the MATERIAL leg is unarmed, service-line palms ride the per-tree
+  // term inside the tier factor instead (materialTreeCount — pre-split).
+  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * (palmMaterialArmed ? palmCount : 0);
   const modeledMaterialCost = (
     (materialModel.fixedAnnual ?? 15)
-    + (materialModel.perTreeAnnual ?? 4) * effectiveTreeCount
+    + (materialModel.perTreeAnnual ?? 4) * materialTreeCount
     + (materialModel.perSqFtAnnual ?? 0.055) * bedArea * densityFactor
   ) * tierMaterialFactor + palmReserveAnnual;
   const materialCost = Math.max(frequency * 10, modeledMaterialCost);
@@ -2760,9 +2767,11 @@ function priceTreeShrub(property, options = {}) {
       warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
     }
   }
-  if (effectiveTreeCount >= 15) {
-    // effectiveTreeCount so a 20-palm caller keeps tripping this gate while
-    // the reserve is unarmed, exactly as the pre-split classification did.
+  // Plant-count review gate: trees plus any service-line palms, regardless
+  // of arming — a 20-palm property is a big job whether its palms price
+  // through the reserve or the legacy tree terms, and the pre-split
+  // classification tripped this gate for exactly that caller.
+  if (treeCount + foldablePalmCount >= 15) {
     manualReviewReasonsSet.add('tree_count_at_or_above_15');
     warnings.push('High tree count; manual review recommended.');
   }
@@ -2798,12 +2807,15 @@ function priceTreeShrub(property, options = {}) {
     bedAreaConfidence: bedAreaInfo.pricingConfidence,
     treeCount,
     treeCountSource,
-    effectiveTreeCount,
+    materialTreeCount,
+    laborTreeCount,
     shrubDensity,
     densityFactor,
     palmCount,
     palmCountSource,
     palmReserveActive,
+    palmMaterialArmed,
+    palmLaborArmed,
     access,
     onSiteMin,
     materialModel: {

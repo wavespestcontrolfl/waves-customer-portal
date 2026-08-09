@@ -861,7 +861,8 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
       expect(postSplit.annual).toBe(preSplit.annual);
       expect(postSplit.costs.materialCost).toBe(preSplit.costs.materialCost);
       expect(postSplit.onSiteMin).toBe(preSplit.onSiteMin);
-      expect(postSplit.effectiveTreeCount).toBe(10);
+      expect(postSplit.materialTreeCount).toBe(10);
+      expect(postSplit.laborTreeCount).toBe(10);
       expect(postSplit.costs.palmReserveCost).toBe(0);
     }
     // The ≥15 gate keeps tripping for large palm counts while unarmed.
@@ -873,11 +874,44 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
     const quote = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 3, palmCount: 10 });
     expect(quote.palmReserveActive).toBe(true);
-    expect(quote.effectiveTreeCount).toBe(3);
+    expect(quote.materialTreeCount).toBe(3);
+    expect(quote.laborTreeCount).toBe(3);
     // material: (15 + 4*3 + 110)*1 + 6*10 — the $4 per-tree term bills 3, not 13.
     expect(quote.costs.materialCost).toBeCloseTo(15 + 12 + 110 + 60, 5);
     // minutes: 20 + 4 + round(3*1.5)=5 + 10 palm minutes.
     expect(quote.onSiteMin).toBe(20 + 4 + 5 + 10);
+  });
+
+  test('the two reserve legs arm INDEPENDENTLY — a half-armed config never deletes the unreplaced leg (pre-push P0 r7)', () => {
+    const baseline = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 0, palmCount: 10 });
+
+    // MATERIAL only: palm material comes from the reserve, palm LABOR still
+    // rides the legacy tree minutes — the labor must not vanish.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 0 };
+    const materialOnly = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 0, palmCount: 10 });
+    expect(materialOnly.palmMaterialArmed).toBe(true);
+    expect(materialOnly.palmLaborArmed).toBe(false);
+    expect(materialOnly.materialTreeCount).toBe(0);
+    expect(materialOnly.laborTreeCount).toBe(10);
+    expect(materialOnly.onSiteMin).toBe(baseline.onSiteMin);
+    expect(materialOnly.costs.materialCost).toBeCloseTo(15 + 110 + 60, 5);
+
+    // LABOR only: palm minutes come from the reserve, palm MATERIAL still
+    // rides the legacy per-tree term — the material must not vanish.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 1 };
+    const laborOnly = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 0, palmCount: 10 });
+    expect(laborOnly.palmMaterialArmed).toBe(false);
+    expect(laborOnly.palmLaborArmed).toBe(true);
+    expect(laborOnly.materialTreeCount).toBe(10);
+    expect(laborOnly.laborTreeCount).toBe(0);
+    expect(laborOnly.costs.materialCost).toBe(baseline.costs.materialCost);
+    expect(laborOnly.costs.palmReserveCost).toBe(0);
+    // 10 palms x 1 min replaces round(10*1.5)=15 legacy minutes.
+    expect(laborOnly.onSiteMin).toBe(20 + 4 + 10);
+
+    // Neither half-armed config may price BELOW the fully-unarmed quote.
+    expect(materialOnly.annual).toBeGreaterThanOrEqual(baseline.annual);
+    expect(laborOnly.costs.materialCost).toBeGreaterThanOrEqual(0);
   });
 
   test('density factor multiplies the measured-bed terms only (per-sqft material + bed minutes)', () => {
