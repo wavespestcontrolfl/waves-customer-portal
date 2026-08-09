@@ -1477,11 +1477,11 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
   });
 });
 
-describe('Tree & Shrub review signals reach the operator review panel', () => {
-  // The autonomous paths already refuse these lines; the admin "Pricing
-  // Review Notes" panel renders result.pricingMetadata, which used to carry
-  // exactly ONE reason (the german-roach conflict) — so a capped, therefore
-  // underpriced, T&S estimate could be sent with nothing on screen.
+describe('Tree & Shrub prose warnings reach the operator review panel', () => {
+  // The reason TOKENS were already hoisted (§6b). What never reached the
+  // admin "Pricing Review Notes" box was each pricer's prose sentence, so
+  // the operator saw "Bed area cap reached" with no explanation and no
+  // number — on a quote whose bed area had been silently clamped.
   const { generateEstimate: gen } = require('../services/pricing-engine');
 
   test('an ESTIMATED bed area above the cap is clamped and both the reason and the prose warning surface', () => {
