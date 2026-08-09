@@ -319,6 +319,17 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     ...(estimateData.engineResult && estimateData.engineResult !== engineResult
       && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
   ];
+  // The canonical collector EXCLUDES review-gated raw rows
+  // (recurringLinesFromEngineResult filters quoteRequired/
+  // requiresManualReview), and the canonical-key filter below discards the
+  // raw twin before rowIsReviewGated ever sees it — so a mapped row that
+  // kept the price but lost the markers would publish a provisional
+  // amount. Collect the gated keys from the RAW rows first; the program
+  // loop treats a canonical row under a gated key as gated (codex 1A-ii
+  // r12).
+  const gatedRawKeys = new Set(rawLineItemsMerged
+    .filter((line) => rowIsReviewGated(line))
+    .map((line) => String(line.service || line.name || '').toLowerCase()));
   const extraSeenKeys = new Set();
   const extraLineItemRows = rawLineItemsMerged
     .map((line) => ({
@@ -436,7 +447,8 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // authority says they are NOT priced yet, so any of them fails the
     // whole draft (silent exclusion would save an itemization missing the
     // gated service — codex 1A-ii r5b).
-    if (rowIsReviewGated(row)) {
+    if (rowIsReviewGated(row)
+      || gatedRawKeys.has(String(row.service || row.name || '').toLowerCase())) {
       unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional or low-confidence)`);
       continue;
     }
@@ -832,6 +844,7 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
       programs: null,
       correctiveWork: null,
       customerResponsibilities: null,
+      responsibilitiesByFamily: null,
       suggestedTaxRate: null,
       warnings: ['Nothing was generated: this is not a commercial estimate. Author the proposal manually to convert it to a commercial contract.'],
     };
@@ -865,6 +878,14 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
     programs: outPrograms,
     correctiveWork: outCorrective,
     customerResponsibilities: deriveResponsibilities(outPrograms),
+    // Family → generated lines, so the builder can prune a deleted
+    // program's family responsibilities without stranding lines shared by
+    // the remaining families (codex 1A-ii r12).
+    responsibilitiesByFamily: outPrograms
+      ? Object.fromEntries([...new Set(outPrograms.map((p) => p.service))]
+        .map((family) => [family, FAMILY_RESPONSIBILITIES[family] || []])
+        .filter(([, lines]) => lines.length))
+      : null,
     suggestedTaxRate,
     warnings,
   };

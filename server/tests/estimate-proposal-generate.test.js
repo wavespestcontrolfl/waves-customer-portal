@@ -744,6 +744,26 @@ describe('deriveProposalDraft', () => {
 
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ category: 'COMMERCIAL', estimate_data: {} });
-    expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });
+    expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, responsibilitiesByFamily: null, suggestedTaxRate: null, warnings: [] });
+  });
+
+  test('r12: review markers on the RAW twin gate the mapped canonical row; responsibilities map by family', async () => {
+    // The canonical collector excludes gated raw rows and the canonical-key
+    // filter discards the raw twin — the marker must still gate the mapped
+    // row that kept the price.
+    const shadowGated = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annual: 468, quoteRequired: true }] },
+      },
+    });
+    expect(shadowGated.programs).toBeNull();
+    expect(shadowGated.warnings[0]).toMatch(/requires manual review/i);
+
+    // The generated draft names each family's responsibility lines so the
+    // builder can prune them when a program is deleted.
+    const draft = await deriveProposalDraft(COMMERCIAL_ESTIMATE);
+    expect(Object.keys(draft.responsibilitiesByFamily).sort()).toEqual(['mosquito', 'pest']);
+    expect(draft.responsibilitiesByFamily.mosquito).toContain('Empty or report standing water (plant saucers, gutters, containers) between visits');
   });
 });

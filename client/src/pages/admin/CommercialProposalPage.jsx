@@ -242,6 +242,12 @@ export default function CommercialProposalPage() {
   // a concurrent edit skipped applyLoaded (loadedAuthored still false), so
   // a save retry must not treat them as discardable (codex 1A-ii r2f).
   const persistedBuildingsRef = React.useRef(false);
+  // Family → generated responsibility lines, captured when Generate
+  // installs responsibilities so a later program deletion can prune the
+  // deleted family's lines (codex 1A-ii r12). Null until generation fills
+  // responsibilities; hand-authored lines are never in the map, so pruning
+  // can never touch them.
+  const generatedRespByFamilyRef = React.useRef(null);
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -399,6 +405,7 @@ export default function CommercialProposalPage() {
       // by the programs branch above.
       if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim() && programsInstalled) {
         setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
+        generatedRespByFamilyRef.current = draft.responsibilitiesByFamily || null;
         filled += 1;
       }
       if (filled > 0) {
@@ -460,6 +467,29 @@ export default function CommercialProposalPage() {
     });
   };
   const removeBuilding = (bi) => { markBuildingsEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  // Removing a program also prunes ITS family's GENERATED responsibility
+  // lines — a pest+lawn draft that loses the lawn program must not save
+  // mowing/watering/re-entry obligations for a service the agreement no
+  // longer carries (codex 1A-ii r12). Exact-line matching against the
+  // generated registry only: lines shared by a remaining program family
+  // stay, and hand-authored/edited lines are never in the registry so
+  // pruning cannot touch them.
+  const removeProgram = (idx) => {
+    markEdit();
+    const removed = programsState[idx];
+    const next = programsState.filter((_, i) => i !== idx);
+    setProgramsState(next);
+    const byFamily = generatedRespByFamilyRef.current;
+    const removedLines = (byFamily && removed && byFamily[removed.service]) || [];
+    if (!removedLines.length) return;
+    const remainingFamilies = new Set(next.map((p) => p.service));
+    const keep = new Set(Object.entries(byFamily)
+      .filter(([family]) => remainingFamilies.has(family))
+      .flatMap(([, lines]) => lines));
+    setResponsibilitiesText((text) => text.split('\n')
+      .filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())))
+      .join('\n'));
+  };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
   // runs inside ONE async closure, whose captured state variables freeze at
@@ -1037,7 +1067,7 @@ export default function CommercialProposalPage() {
                     </span>
                     {!locked && (
                       <Button variant="ghost" size="sm" title="Remove program"
-                        onClick={() => { markEdit(); setProgramsState((prev) => prev.filter((_, i) => i !== idx)); }}>
+                        onClick={() => removeProgram(idx)}>
                         <Trash2 size={14} />
                       </Button>
                     )}
