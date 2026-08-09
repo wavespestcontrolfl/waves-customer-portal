@@ -95,6 +95,28 @@ function knownEnrichedValue(value) {
   return v && v.toUpperCase() !== 'UNKNOWN' ? v : null;
 }
 
+// Below this the lookup's own reviewer copy calls the read low-confidence
+// ("AI confidence NN%", property-lookup-v2 turf-confirmation reasons), so a
+// measurement derived from it must not silently price as trustworthy.
+const LOOKUP_AI_CONFIDENCE_FLOOR = 60;
+
+// A lookup bed area is trustworthy only when the lookup does not itself
+// doubt it: adequate AI confidence AND no field-verify flag pointing at the
+// bed-area (or whole-imagery) read. Absent confidence data is treated as
+// adequate — legacy payloads carried no score and are not evidence of doubt.
+function lookupBedAreaIsTrustworthy(enriched) {
+  if (!enriched || !positive(enriched.estimatedBedAreaSf)) return false;
+  const confidence = Number(enriched.aiConfidence ?? enriched.confidenceScore);
+  if (Number.isFinite(confidence) && confidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
+  const flags = Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  return !flags.some((flag) => {
+    const field = String(flag?.field || '').toLowerCase();
+    // A flagged bed area is disqualifying outright; a flagged turf/imagery
+    // read means the same picture the bed area came from is in question.
+    return field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf');
+  });
+}
+
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
   const up = (v) => String(v || '').toUpperCase();
@@ -209,7 +231,14 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     // an AI-derived area is never labelled an operator measurement.
     // The admin estimator already prefills both fields from the same
     // enriched payload (EstimateToolViewV2) — this closes the agent path.
-    ...(!isCommercial && positive(lookupEnriched?.estimatedBedAreaSf)
+    // Only a CONFIDENT lookup area is forwarded. priceTreeShrub upgrades any
+    // estimatedBedAreaSf to pricingConfidence 'medium' with no review
+    // reason, so an area read off obstructed or stale imagery would turn a
+    // low-confidence draft into a green one-click lane. When the lookup
+    // itself says the measurement needs verification, forwarding nothing is
+    // the honest move: the pricer then falls back to the lot inference (or
+    // its 2,000 default), both of which carry their own review markers.
+    ...(!isCommercial && lookupBedAreaIsTrustworthy(lookupEnriched)
       ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
       : {}),
     // The lookup's estimatedPalmCount is deliberately NOT forwarded here.

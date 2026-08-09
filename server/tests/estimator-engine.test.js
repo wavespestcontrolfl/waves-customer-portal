@@ -1227,3 +1227,40 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
     expect(tsFallback.bedAreaSource).toBe('lot_based');
   });
 });
+
+describe('lookup bed areas carry their confidence into the agent draft', () => {
+  const facts = {
+    home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+  };
+  const build = (enriched) => buildEngineInput({
+    intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched,
+  });
+
+  test('a confident read forwards; a low-confidence one does not', () => {
+    expect(build({ estimatedBedAreaSf: 2600, aiConfidence: 82 }).estimatedBedAreaSf).toBe(2600);
+    // The lookup's own copy calls <60 low-confidence — priceTreeShrub would
+    // otherwise stamp it medium-confidence with no review reason.
+    expect(build({ estimatedBedAreaSf: 2600, aiConfidence: 41 }).estimatedBedAreaSf).toBeUndefined();
+    // Legacy payloads with no score are not evidence of doubt.
+    expect(build({ estimatedBedAreaSf: 2600 }).estimatedBedAreaSf).toBe(2600);
+  });
+
+  test('a field-verify flag on the bed area or the imagery it came from disqualifies it', () => {
+    expect(build({
+      estimatedBedAreaSf: 2600, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'estimatedBedAreaSf', reason: 'obstructed', priority: 'HIGH' }],
+    }).estimatedBedAreaSf).toBeUndefined();
+    // Stale/conflicting imagery is flagged on the turf read, but the bed area
+    // came from that same picture.
+    expect(build({
+      estimatedBedAreaSf: 2600, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'stale imagery', priority: 'HIGH' }],
+    }).estimatedBedAreaSf).toBeUndefined();
+    // An unrelated flag does not.
+    expect(build({
+      estimatedBedAreaSf: 2600, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }],
+    }).estimatedBedAreaSf).toBe(2600);
+  });
+});

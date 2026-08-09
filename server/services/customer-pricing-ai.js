@@ -344,6 +344,20 @@ function lookupEnabled() {
 // was quoted at the bare-property price. customer_turf_profiles has no
 // palm_count either. The property LOOKUP is the real source for all of
 // them; the gate below is what has to open for it to be consulted.
+// Mirrors draft-builder: below this the lookup's own copy calls the read
+// low-confidence, so a measurement derived from it must not price as exact.
+const LOOKUP_AI_CONFIDENCE_FLOOR = 60;
+function lookupBedAreaIsTrustworthy(enriched) {
+  if (!enriched || !positiveNumber(enriched.estimatedBedAreaSf)) return false;
+  const confidence = Number(enriched.aiConfidence ?? enriched.confidenceScore);
+  if (Number.isFinite(confidence) && confidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
+  const flags = Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  return !flags.some((flag) => {
+    const field = String(flag?.field || '').toLowerCase();
+    return field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf');
+  });
+}
+
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
   let source = 'customer_profile';
   const address = addressForCustomer(customer);
@@ -406,9 +420,16 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
       lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
       // Provenance rides WITH the value: a lookup-derived area is
-      // 'estimated', never the operator-measured 'explicit'.
-      if (!bedArea && positiveNumber(p.estimatedBedAreaSf)) bedAreaSource = 'estimated';
-      bedArea = positiveNumber(bedArea, p.estimatedBedAreaSf);
+      // 'estimated', never the operator-measured 'explicit'. And only a
+      // CONFIDENT read is adopted — priceTreeShrub upgrades any bed area to
+      // medium confidence with no review reason, so an area from obstructed
+      // or stale imagery would become an exact customer-facing price the
+      // lookup itself said needs verification. When in doubt we adopt
+      // nothing and the pricer falls back to its own flagged inference.
+      if (!bedArea && lookupBedAreaIsTrustworthy(p)) {
+        bedAreaSource = 'estimated';
+        bedArea = positiveNumber(p.estimatedBedAreaSf);
+      }
       stories = positiveNumber(stories, p.stories, record.stories);
       propertyType = p.propertyType || record.propertyType || propertyType;
       yearBuilt = yearBuilt || p.yearBuilt || record.yearBuilt || null;
@@ -477,7 +498,16 @@ function missingPropertyFor(serviceKeys, context) {
   // footage — the unconditional home_sqft check below otherwise turns it
   // into PROPERTY_DETAILS_NEEDED (codex #3253 r2).
   if (!serviceKeys.length) return null;
-  if (!context.hasHomeSqFt) return 'home_sqft';
+  // Home square footage is required only by the pricers that actually use a
+  // building footprint. Now that it comes from the lookup alone (property_sqft
+  // is treated LAWN area, not a footprint), an unconditional check would make
+  // a failed or disabled lookup block lawn and Tree & Shrub quotes that price
+  // off lot/lawn/bed measurements the profile already has.
+  const OUTDOOR_ONLY_SERVICES = new Set([
+    'lawn_care', 'tree_shrub', 'mosquito', 'one_time_lawn', 'one_time_mosquito', 'palm',
+  ]);
+  const needsHomeSqFt = serviceKeys.some(key => !OUTDOOR_ONLY_SERVICES.has(key));
+  if (needsHomeSqFt && !context.hasHomeSqFt) return 'home_sqft';
   const needsOutdoor = serviceKeys.some(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
   if (needsOutdoor && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
   if (serviceKeys.includes('palm') && !positiveInteger(context.palmCount)) return 'palm_count';
