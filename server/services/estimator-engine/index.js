@@ -747,7 +747,17 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}
       // generation fence, the valid pass could never clear it and its own
       // draft stayed blocked indefinitely.
       const q = db('call_log').where({ id: callLogId });
-      if (procToken) q.where('processing_token', procToken);
+      // Ownership is lost only when a PEER holds the call — a token
+      // CLEARED by this pass's own normal finalization is not a reclaim
+      // (codex P1, PR #3304 GH r10). The estimator is launched
+      // un-awaited, so its context builder routinely reports a conflict
+      // after finalization; treating that as ownershipLost reported
+      // success while nothing was invalidated.
+      if (procToken) {
+        q.where(function ownedOrUnclaimed() {
+          this.where('processing_token', procToken).orWhereNull('processing_token');
+        });
+      }
       const wrote = await q.update({
         metadata: db.raw(
           "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
@@ -764,7 +774,15 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}
         throw lost;
       }
       return;
-    } catch (err) { lastErr = err; }
+    } catch (err) {
+      // An ownership loss is a VERDICT, not a transient failure (codex P1,
+      // PR #3304 GH r10): flattening it into a generic error made the
+      // caller report a quarantine failure and queue an unconditional
+      // retry marker — which the replacement pass would then have to
+      // fight. Propagate it unchanged, immediately.
+      if (err.ownershipLost) throw err;
+      lastErr = err;
+    }
   }
   throw new Error(`draft-block marker write failed for call ${callLogId}: ${lastErr?.message || 'unknown'}`);
 }
@@ -872,9 +890,17 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     // require the call to still be rejected; for an identity conflict,
     // require the context to still report one.
     const live = await db('call_log').where({ id: row.id })
-      .first('processing_token', 'processing_status', 'metadata');
+      .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at');
     if (!live) continue;
-    if (live.processing_token != null || String(live.processing_status || '').toLowerCase() === 'processing') continue;
+    // EVERY unsettled status defers, not just a live token or literal
+    // 'processing' (codex P1, PR #3304 GH r10): the failed spam/voicemail
+    // path deliberately queues the quarantine and THEN enters
+    // extraction_failed, so a narrow check let this sweep immediately
+    // decide the call was no longer rejected and drop its own queue entry.
+    {
+      const { callReprocessInFlight } = require('../admin-estimate-persistence');
+      if (callReprocessInFlight(live)) continue;
+    }
     const identityConflict = String(pending.reason).startsWith('email_');
     if (!identityConflict) {
       const { callRejectedForDrafting } = require('../admin-estimate-persistence');

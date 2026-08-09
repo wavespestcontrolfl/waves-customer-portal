@@ -352,13 +352,18 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
     if (md?.estimator_draft_block?.reason) return 'call_draft_block';
     if (md?.estimator_quarantine_pending?.reason) return 'call_quarantine_pending';
   } catch { /* unparseable metadata: fall through to the linkage compare */ }
-  // Everything below is the LINKAGE comparison, which needs a durable
-  // linkage to compare against.
-  if (!durableLinkage) return null;
+  // The REPROCESSING fence applies to every engine draft too (codex P1,
+  // PR #3304 GH r10): a legacy or lead-less draft is just as unsafe to
+  // send while a retry is actively clearing or repointing its call — the
+  // retry has not published its block marker yet, so nothing else would
+  // stop it.
   const ownedByCaller = !!ownerProcToken && callRow.processing_token === ownerProcToken;
   if (!ownedByCaller && callReprocessInFlight(callRow)) {
     return 'call_reprocessing_before_delivery';
   }
+  // Everything below is the LINKAGE comparison, which needs a durable
+  // linkage to compare against.
+  if (!durableLinkage) return null;
   const liveStamp = (() => {
     try {
       const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});

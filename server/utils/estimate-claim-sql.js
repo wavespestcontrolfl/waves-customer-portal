@@ -41,15 +41,20 @@ async function callSideBlockForEstimateData(dbc, data) {
   if (!callLogId) return null;
   try {
     const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
-    if (!row) return null;
+    // A MISSING call row fails closed (codex P1, PR #3304 GH r10) — the
+    // same verdict staleCallLinkageReason gives it: an engine draft whose
+    // call is gone has no provenance left to validate.
+    if (!row) return 'call_missing';
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
     if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
     return null;
   } catch {
-    // A lookup failure must not take the public page down; the
-    // estimate-side markers remain the primary gate.
-    return null;
+    // FAIL CLOSED (codex P1, PR #3304 GH r10): this lookup IS the fallback
+    // guard for the case where the estimate-side marker could not be
+    // written, so returning "no block" on a transient error would disclose
+    // or mutate exactly the wrong-lead estimate it exists to protect.
+    return 'call_verdict_unavailable';
   }
 }
 
