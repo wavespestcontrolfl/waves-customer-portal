@@ -346,6 +346,7 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       // not resurrect the retired funnel row at all.
       let sourceCall = null;
       let refused = false;
+      let sidAmbiguous = false;
       if (lead.twilio_call_sid) {
         const sidRows = await db('call_log')
           .where('twilio_call_sid', lead.twilio_call_sid)
@@ -368,11 +369,15 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
           }
         }
         // >1 rows: ambiguous — leave provenance NULL, permanently
-        // conservative (fall through without refusing: the lead itself
-        // is legitimately claimed).
+        // conservative (without refusing: the lead itself is legitimately
+        // claimed). The STAMP fallback is skipped too (codex P1, PR
+        // #3303 r5): attaching a stamped call's id despite ambiguous sid
+        // ownership lets a later rejection/repoint retire or move another
+        // call's funnel history.
+        if (sidRows.length > 1) sidAmbiguous = true;
       }
       if (refused) return { recorded: false, reason: 'call_rejected' };
-      if (!sourceCall) {
+      if (!sourceCall && !sidAmbiguous) {
         sourceCall = await db('call_log')
           .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
           .whereNull('processing_token')
@@ -565,8 +570,15 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
 // unlink), 'none' (no provenanced row).
 async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLeadId, now, { toCustomerId } = {}) {
   if (!callLogId || !fromLeadId) return 'none';
+  // The source row is LOCKED and the move conditioned on its expected
+  // ownership (codex P1, PR #3303 r5): not every caller holds the call
+  // row lock (the claim-time backfill runs on the global connection), so
+  // two repoints could both read the old location and the stale one
+  // overwrite the newer transfer. A zero-row conditioned update means
+  // ownership changed under us — report 'none' and touch nothing.
   const oldRow = await dbc('ad_service_attribution')
     .where({ lead_id: fromLeadId, source_call_id: callLogId })
+    .forUpdate()
     .first('id');
   if (!oldRow) return 'none';
   if (toLeadId) {
@@ -586,9 +598,10 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
         const lead = await dbc('leads').where({ id: toLeadId }).forUpdate().first('customer_id');
         owner = lead?.customer_id || null;
       }
-      await dbc('ad_service_attribution')
-        .where({ id: oldRow.id })
+      const moved = await dbc('ad_service_attribution')
+        .where({ id: oldRow.id, lead_id: fromLeadId, source_call_id: callLogId })
         .update({ lead_id: toLeadId, customer_id: owner || null, updated_at: now });
+      if (!moved) return 'none';
       return 'transferred';
     }
     await retireCallAttributionRow(dbc, callLogId, fromLeadId);

@@ -933,7 +933,12 @@ async function applyBridge(options = {}) {
                   // own customer link.
                   backfillCustomerId = liveJoined.customer_id || null;
                 } else {
-                  backfillLeadId = null;
+                  // A STALE joined arm never falls through to the plan
+                  // (codex P1, PR #3303 r5, matching attributeResolvedLead):
+                  // a concurrent repoint would be undone by plan-matching
+                  // the FORMER lead and moving the provenanced history row
+                  // back. The next scan resolves with fresh join state.
+                  return;
                 }
               }
               if (!backfillLeadId) {
