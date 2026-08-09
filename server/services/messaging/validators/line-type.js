@@ -147,11 +147,16 @@ async function checkLineType(input, _policy, _contactState) {
   await cacheLineType(phone, lineType);
 
   if (NON_SMS_LINE_TYPES.has(lineType)) {
-    // Persist a suppression so future sends short-circuit at check_suppression
-    // (earlier in the pipeline) and we pay for the lookup exactly once. The
-    // source carries the detected type ('landline' keeps its historical value).
-    const source = lineType === 'landline' ? 'proactive_lookup_landline' : `proactive_lookup_${lineType}`;
-    await recordNonMobileSuppression({ phone, source }).catch(() => {});
+    // Landlines persist a suppression so future sends short-circuit at
+    // check_suppression (earlier in the pipeline). fixedVoip deliberately does
+    // NOT: check_suppression runs before this validator, so a persisted row
+    // would outlive LINETYPE_BLOCK_FIXED_VOIP=false and keep already-seen
+    // numbers blocked after a rollback. fixedVoip enforcement lives entirely
+    // in the (toggle-aware) NON_SMS_LINE_TYPES check against the cached line
+    // type — same one-lookup-ever economics, revert lifts it everywhere.
+    if (lineType === 'landline') {
+      await recordNonMobileSuppression({ phone, source: 'proactive_lookup_landline' }).catch(() => {});
+    }
     logger.info(`[line-type] Skipping SMS to ${maskPhone(phone)} — ${lineType} (proactive lookup)`);
     return blockResult(lineType);
   }
