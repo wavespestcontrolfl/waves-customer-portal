@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+// TTL-aware "no LIVE delivery claim" predicate + marker fragments,
+// shared with the admin routes so every whole-blob write applies the same
+// rule (dependency-free module: partial test mocks can't blank a guard).
+const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -11436,7 +11440,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .whereNull('archived_at')
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -11720,7 +11724,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .whereNull('archived_at')
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -11870,7 +11874,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       // explicit marker/claim-absent predicates as the direct guard.
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(

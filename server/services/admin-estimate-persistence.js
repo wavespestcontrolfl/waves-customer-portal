@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -52,6 +53,7 @@ const ESTIMATE_SEND_EXPIRY_DAYS = 7;
 // content. A send that crashes without clearing leaves a claim that simply
 // ages out; the TTL bounds how long a crash can defer a correction.
 const ESTIMATE_DELIVERY_CLAIM_TTL_MS = 10 * 60 * 1000;
+
 
 function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
   const at = estimatorEngine?.delivering_at;
@@ -156,7 +158,15 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
   let candidates = [];
   try {
     candidates = await db('estimates')
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') <> ''")
+      // A wedged PENDING invalidation, or a DEAD claim with no marker at
+      // all (codex P1, PR #3304 GH r8d): a process that died between
+      // stamping delivering_at and recording anything left keys that every
+      // whole-blob write refuses. The TTL arm makes those writes fall
+      // through on their own, and this clears the residue.
+      .where(function wedged() {
+        this.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') <> ''")
+          .orWhereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') <> ''");
+      })
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .orderBy('updated_at', 'asc')
       .limit(limit)
@@ -185,9 +195,17 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
         // finalize this itself — only a dead claim is ours to complete.
         if (deliveryClaimFresh(eng, nowMs)) return false;
         const pending = takePendingInvalidation(data);
-        if (!pending) return false;
+        const hadDeadClaim = !!eng.delivering_at;
         delete eng.delivering_at;
         delete eng.delivering_token;
+        if (!pending) {
+          // Dead claim, nothing pending: just clear the residue so the
+          // ordinary edit paths unblock.
+          if (!hadDeadClaim) return false;
+          await trx('estimates').where({ id: candidate.id })
+            .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+          return false;
+        }
         const outcome = await completePendingInvalidation(trx, candidate.id, { row, data, pending });
         return !outcome.obsolete;
       });
@@ -2103,7 +2121,7 @@ async function reviseAdminEstimate({
       // caller's 409 "refresh and retry".
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       .whereNotIn('status', REVISE_BLOCKED_STATUSES)
       .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
       // Mirrors the pre-read's date-expiry verdict: the payload resolution
@@ -2146,6 +2164,7 @@ module.exports = {
   ESTIMATE_SEND_EXPIRY_DAYS,
   REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS,
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
+  DELIVERY_CLAIM_NOT_LIVE_SQL,
   deliveryClaimFresh,
   staleCallLinkageReason,
   completePendingInvalidation,

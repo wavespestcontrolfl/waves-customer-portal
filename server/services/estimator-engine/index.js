@@ -635,6 +635,23 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
             await trx('estimates').where({ id: conflicted.id })
               .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
           }
+          // The SAME ownership fence the full path applies (codex P0, PR
+          // #3304 GH r8d): this branch returned early, so a stale worker
+          // that lost its processing_token could queue a forced
+          // quarantine whose claim-release later archived the REPLACEMENT
+          // worker's valid draft. Throwing rolls the marker back.
+          if (ownershipFence?.procToken) {
+            const stillOwned = await trx('call_log')
+              .where({ id: ownershipFence.callLogId || callLogId })
+              .where('processing_token', ownershipFence.procToken)
+              .forUpdate()
+              .first('id');
+            if (!stillOwned) {
+              const lost = new Error('processing claim lost before deferred quarantine');
+              lost.ownershipLost = true;
+              throw lost;
+            }
+          }
           logger.info(`[estimator-engine] invalidation of draft ${conflicted.id} DEFERRED behind a live delivery claim (${reason}) — pending marker recorded`);
           return;
         }
