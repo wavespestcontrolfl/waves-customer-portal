@@ -129,7 +129,10 @@ function detectServiceCategory(serviceType) {
   const foamTermiteToken = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring|termidor[\s_-]*foam/.test(s);
   if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona') || foamTermiteToken) return 'termite';
   if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole')) return 'rodent';
+  // 'bird box' / 'roof-entry' are rodent-exclusion hardware: the catalog
+  // row "Roof-entry cover / bird box" (rodent_bird_box) carries no rodent
+  // token of its own.
+  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole') || s.includes('bird box') || s.includes('roof-entry')) return 'rodent';
   if (s.includes('callback') || s.includes('re-treat')) return 'callback';
   return 'pest';
 }
