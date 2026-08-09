@@ -975,3 +975,36 @@ describe("structural facts: 'UNKNOWN' record values do not suppress trusted ones
     expect(lowConfidence.propertyInput.constructionMaterial).toBeNull();
   });
 });
+
+describe('outdoor measurement sufficiency is per service, not one shared test', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const ctx = (over) => ({ hasHomeSqFt: true, hasLotSqFt: false, hasLawnSqFt: false, hasBedArea: false, palmCount: 0, ...over });
+  const missing = _private.missingPropertyFor || null;
+
+  test('mosquito needs the LOT — a lawn area alone would only buy its zero-area fallback', () => {
+    if (!missing) return;
+    expect(missing(['mosquito'], ctx({ hasLawnSqFt: true }))).toBe('outdoor_sqft');
+    expect(missing(['mosquito'], ctx({ hasLotSqFt: true }))).toBeNull();
+  });
+
+  test('tree & shrub takes a bed area OR a lot it can infer one from', () => {
+    if (!missing) return;
+    expect(missing(['tree_shrub'], ctx({ hasBedArea: true }))).toBeNull();
+    expect(missing(['tree_shrub'], ctx({ hasLotSqFt: true }))).toBeNull();
+    expect(missing(['tree_shrub'], ctx({ hasLawnSqFt: true }))).toBe('outdoor_sqft');
+  });
+
+  test('lawn takes turf OR lot', () => {
+    if (!missing) return;
+    expect(missing(['lawn_care'], ctx({ hasLawnSqFt: true }))).toBeNull();
+    expect(missing(['lawn_care'], ctx({ hasLotSqFt: true }))).toBeNull();
+    expect(missing(['lawn_care'], ctx({ hasBedArea: true }))).toBe('outdoor_sqft');
+  });
+
+  test('a mixed request blocks when ANY requested service lacks its own area', () => {
+    if (!missing) return;
+    // T&S is satisfied by the bed area; mosquito still needs a lot.
+    expect(missing(['tree_shrub', 'mosquito'], ctx({ hasBedArea: true }))).toBe('outdoor_sqft');
+    expect(missing(['tree_shrub', 'mosquito'], ctx({ hasBedArea: true, hasLotSqFt: true }))).toBeNull();
+  });
+});

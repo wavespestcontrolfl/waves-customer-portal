@@ -550,15 +550,25 @@ function missingPropertyFor(serviceKeys, context) {
   ]);
   const needsHomeSqFt = serviceKeys.some(key => !OUTDOOR_ONLY_SERVICES.has(key));
   if (needsHomeSqFt && !context.hasHomeSqFt) return 'home_sqft';
-  const needsOutdoor = serviceKeys.some(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
-  // A stored bed area IS the Tree & Shrub measurement (priceTreeShrub prices
-  // from property.bedArea), so a T&S-only request must not be blocked for a
-  // missing lot/lawn it never uses.
-  const outdoorKeys = serviceKeys.filter(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
-  const outdoorSatisfiedByBedArea = outdoorKeys.length > 0
-    && outdoorKeys.every(key => key === 'tree_shrub')
-    && context.hasBedArea;
-  if (needsOutdoor && !outdoorSatisfiedByBedArea && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
+  // Each outdoor pricer consumes a DIFFERENT area, so one shared
+  // lot-or-lawn test both over- and under-blocks. Mosquito prices off the
+  // LOT and never reads a turf figure — handed only a lawn area it emits its
+  // zero-area low-confidence fallback, which this customer-facing path would
+  // then quote as a real price. Tree & Shrub prices from the bed area (or a
+  // lot it can infer one from), and lawn from turf (or a lot). Ask each
+  // service what it actually needs.
+  const OUTDOOR_AREA_SUFFICIENT = {
+    lawn_care: (c) => c.hasLawnSqFt || c.hasLotSqFt,
+    one_time_lawn: (c) => c.hasLawnSqFt || c.hasLotSqFt,
+    mosquito: (c) => c.hasLotSqFt,
+    one_time_mosquito: (c) => c.hasLotSqFt,
+    tree_shrub: (c) => c.hasBedArea || c.hasLotSqFt,
+  };
+  const outdoorUnsatisfied = serviceKeys.some((key) => {
+    const sufficient = OUTDOOR_AREA_SUFFICIENT[key];
+    return sufficient ? !sufficient(context) : false;
+  });
+  if (outdoorUnsatisfied) return 'outdoor_sqft';
   if (serviceKeys.includes('palm') && !positiveInteger(context.palmCount)) return 'palm_count';
   return null;
 }
@@ -874,5 +884,5 @@ module.exports = {
   optionServices,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
-  _private: { resolvePropertyContext },
+  _private: { resolvePropertyContext, missingPropertyFor },
 };
