@@ -345,7 +345,10 @@ function lookupEnabled() {
 // palm_count either. The property LOOKUP is the real source for all of
 // them; the gate below is what has to open for it to be consulted.
 // Shared trust predicates — the agent draft path applies the same rule.
-const { lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy } = require('./lookup-confidence');
+const {
+  lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
+} = require('./lookup-confidence');
 
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
   let source = 'customer_profile';
@@ -405,6 +408,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         errors: lookup?.errors || [],
         providers: p.propertyProviders || record._aiProviders || [],
       };
+      // An 'address' / 'all' flag means the lookup may describe a DIFFERENT
+      // premise (geocoder snapped) or have no record at all — so nothing it
+      // returned may price this customer's property, not just the bed area
+      // and features. Adopt none of it; the profile's own values stand and a
+      // missing home size fails closed to PROPERTY_DETAILS_NEEDED.
+      const lookupDescribesThisProperty = !hasGlobalVerifyFlag(p);
+      if (lookupDescribesThisProperty) {
       homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
       lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
       lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
@@ -437,7 +447,18 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // of them may move a customer-facing price — the profile defaults
       // stand instead. Records-sourced facts below (year built, construction,
       // foundation, roof) are county data, not vision, so they are unaffected.
-      features = !lookupFeaturesAreTrustworthy(p) ? features : {
+      const featuresTrusted = lookupFeaturesAreTrustworthy(p);
+      // Record-backed pool/cage survive a low AI grade — assessor data, not
+      // an imagery guess. Quoting a county-confirmed pool property as
+      // pool-less because a photo was obstructed is the wrong failure.
+      if (!featuresTrusted) {
+        if (poolFeaturesAreRecordBacked(p)) features.pool = p.pool === 'YES' || features.pool;
+        if (poolCageIsRecordBacked(p)) {
+          features.poolCage = true;
+          if (p.poolCageSize) features.poolCageSize = String(p.poolCageSize).toLowerCase();
+        }
+      }
+      features = !featuresTrusted ? features : {
         ...features,
         pool: p.pool === 'YES' || features.pool,
         poolCage: p.poolCage === 'YES' || features.poolCage,
@@ -449,6 +470,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         irrigation: !!p.irrigationVisible || features.irrigation,
         treeCount: positiveNumber(p.estimatedTreeCount, features.treeCount),
       };
+      } else {
+        // Record-backed pool/cage still price — they are assessor data, not
+        // a read of this (possibly wrong) parcel's imagery... except that a
+        // wrong-premise flag means even the RECORD may be the wrong parcel,
+        // so nothing is adopted here either. Kept explicit so the intent is
+        // not mistaken for an oversight.
+        lookupMeta.rejected = 'global_verify_flag';
+      }
     } catch (err) {
       lookupMeta = { used: false, error: err.message };
       logger.warn(`[customer-pricing-ai] property lookup failed for customer ${customer.id}: ${err.message}`);
@@ -483,6 +512,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     hasHomeSqFt: homeSqFt > 0,
     hasLotSqFt: lotSqFt > 0,
     hasLawnSqFt: lawnSqFt > 0,
+    hasBedArea: bedArea > 0,
   };
 }
 
@@ -503,7 +533,14 @@ function missingPropertyFor(serviceKeys, context) {
   const needsHomeSqFt = serviceKeys.some(key => !OUTDOOR_ONLY_SERVICES.has(key));
   if (needsHomeSqFt && !context.hasHomeSqFt) return 'home_sqft';
   const needsOutdoor = serviceKeys.some(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
-  if (needsOutdoor && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
+  // A stored bed area IS the Tree & Shrub measurement (priceTreeShrub prices
+  // from property.bedArea), so a T&S-only request must not be blocked for a
+  // missing lot/lawn it never uses.
+  const outdoorKeys = serviceKeys.filter(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
+  const outdoorSatisfiedByBedArea = outdoorKeys.length > 0
+    && outdoorKeys.every(key => key === 'tree_shrub')
+    && context.hasBedArea;
+  if (needsOutdoor && !outdoorSatisfiedByBedArea && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
   if (serviceKeys.includes('palm') && !positiveInteger(context.palmCount)) return 'palm_count';
   return null;
 }

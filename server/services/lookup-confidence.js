@@ -89,7 +89,24 @@ function lookupFeaturesAreTrustworthy(enriched) {
   ));
 }
 
+// County/assessor-backed pool + cage survive a low AI grade: the enriched
+// payload stamps poolSource ('verified' | 'county' | 'vision'), and cage
+// presence comes from the assessed extra-features roll (poolCageSqft) — that
+// is record data, not an imagery guess, so an obstructed photo is no reason
+// to quote a pool-less property. Vision-sourced pool/cage stay gated.
+function poolFeaturesAreRecordBacked(enriched) {
+  const src = String(enriched?.poolSource || '').trim().toLowerCase();
+  return src === 'county' || src === 'verified';
+}
+
+function poolCageIsRecordBacked(enriched) {
+  const sqft = Number(enriched?.poolCageSqft);
+  return Number.isFinite(sqft) && sqft > 0;
+}
+
 module.exports = {
+  poolFeaturesAreRecordBacked,
+  poolCageIsRecordBacked,
   LOOKUP_AI_CONFIDENCE_FLOOR,
   hasGlobalVerifyFlag,
   lookupConfidenceIsAdequate,

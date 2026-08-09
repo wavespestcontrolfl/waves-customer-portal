@@ -864,3 +864,71 @@ describe('lookup confidence gates every vision-derived price modifier', () => {
     expect(ctx.propertyInput.bedArea).toBeUndefined();
   });
 });
+
+describe('lookup trust: global flags, record-backed pools, bed-area-only T&S', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-trust', monthly_rate: 55, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+
+  test("an 'address' flag adopts NOTHING from the lookup — a wrong-premise quote is never produced", async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 4200, stories: 3, pool: 'YES', poolSource: 'county',
+          estimatedBedAreaSf: 5000, aiConfidence: 95,
+          fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }],
+        },
+      }),
+    });
+    // Not the neighbour's 4,200 sqft home, pool, or bed area.
+    expect(ctx.propertyInput.homeSqFt).toBeNull();
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+    expect(ctx.hasHomeSqFt).toBe(false); // fails closed → PROPERTY_DETAILS_NEEDED
+  });
+
+  test('a county-confirmed pool/cage survives a low AI grade (assessor data, not an imagery guess)', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2200, aiConfidence: 35,
+          pool: 'YES', poolSource: 'county', poolCageSqft: 900, poolCageSize: 'LARGE',
+          shrubDensity: 'HEAVY', estimatedTreeCount: 12,
+        },
+      }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.poolCageSize).toBe('large');
+    // Vision-only reads stay gated at that confidence.
+    expect(ctx.propertyInput.features.shrubs).toBe('moderate');
+    expect(ctx.propertyInput.features.treeCount).toBe(0);
+  });
+
+  test('a vision-only pool stays gated at low confidence', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, aiConfidence: 35, pool: 'YES', poolSource: 'vision' } }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+  });
+
+  test('a stored bed area alone is enough to price Tree & Shrub', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in adding tree and shrub care',
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      customer: {
+        id: 'cust-bedonly', monthly_rate: 55, bed_sqft: 2400,
+        address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+      },
+    });
+    // No lot_sqft and no lawn area, but priceTreeShrub prices from bedArea.
+    expect(result.ok).toBe(true);
+    expect(result.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
+  });
+});
