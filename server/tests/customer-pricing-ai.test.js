@@ -41,6 +41,9 @@ function activePlanDb(customerId, serviceTypes, tier = 'Bronze') {
 // the date so the suite never ages out.
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
+// property_sqft is TREATED LAWN AREA by schema, so a building footprint can
+// only come from the lookup — these fixtures carry the address every real
+// customer row has so that lookup can run.
 const propertyCustomer = (overrides = {}) => ({
   id: 'cust-1',
   waveguard_tier: 'Bronze',
@@ -48,6 +51,10 @@ const propertyCustomer = (overrides = {}) => ({
   property_sqft: 2200,
   lot_sqft: 7000,
   lawn_type: 'St. Augustine',
+  address_line1: '123 Gulf Dr',
+  city: 'Sarasota',
+  state: 'FL',
+  zip: '34236',
   ...overrides,
 });
 
@@ -61,7 +68,7 @@ describe('customer pricing AI helpers', () => {
   test('does not invent service coverage from a WaveGuard tier label', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ waveguard_tier: 'Silver', monthly_rate: 110 }),
     });
@@ -75,7 +82,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-existing', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer,
     });
@@ -92,7 +99,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-upgrade', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I want to upgrade my lawn care to something better',
       customer,
     });
@@ -106,7 +113,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-mixed', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'upgrade my lawn care and add mosquito control',
       customer,
     });
@@ -120,21 +127,21 @@ describe('customer pricing AI helpers', () => {
   test('prices a requested service from the customer property profile', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-price' }),
     });
 
     expect(result.ok).toBe(true);
     expect(result.requestedServices).toContain('Lawn Care');
-    expect(result.property.source).toBe('customer_profile');
+    expect(result.property.source).toBe('customer_profile_plus_property_lookup');
     expect(result.options.some(option => option.monthly > 0)).toBe(true);
   });
 
   test('palm injection pricing prompts for palm count instead of defaulting to one', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in palm injection',
       customer: propertyCustomer({ id: 'cust-palm' }),
     });
@@ -171,7 +178,7 @@ describe('customer pricing AI helpers', () => {
   test('uses modeled baseline for add-on delta when billing differs', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-mismatch', monthly_rate: 500 }),
     });
@@ -188,7 +195,7 @@ describe('count-based WaveGuard tier truth', () => {
     const customer = propertyCustomer({ id: 'cust-tier', waveguard_tier: 'Gold' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Pest Control', 'Lawn Care', 'Termite Bait Monitoring'], 'Gold'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Platinum',
       targetTier: 'Platinum',
       customer,
@@ -213,7 +220,7 @@ describe('count-based WaveGuard tier truth', () => {
   test('a stored Gold label does not fabricate three current services', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Platinum',
       targetTier: 'Platinum',
       customer: propertyCustomer({ id: 'cust-no-rows', waveguard_tier: 'Gold' }),
@@ -228,7 +235,7 @@ describe('count-based WaveGuard tier truth', () => {
     const customer = propertyCustomer({ id: 'cust-any-combo', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Mosquito Control', 'Termite Bait Monitoring'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Silver',
       targetTier: 'Silver',
       customer,
@@ -259,7 +266,7 @@ describe('never-re-price guard, r2 regressions', () => {
     });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I want to upgrade my lawn care',
       customer,
     });
@@ -275,7 +282,7 @@ describe('never-re-price guard, r2 regressions', () => {
     const customer = propertyCustomer({ id: 'cust-mixed-desc', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'upgrade my lawn care and add mosquito control',
       customer,
     });
@@ -293,7 +300,7 @@ describe('never-re-price guard, r2 regressions', () => {
     const customer = propertyCustomer({ id: 'cust-rodent', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Rodent Monitoring', 'Quarterly Pest Control'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Can you add rodent bait stations?',
       customer,
     });
@@ -329,7 +336,7 @@ describe('never-re-price guard, r2 regressions', () => {
     };
     const result = await buildCustomerPricingResponse({
       db: dbWithStamps,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: customerId, address_line1: '100 Main St' }),
     });
@@ -348,7 +355,7 @@ describe('combined pest & rodent ownership', () => {
     const customer = propertyCustomer({ id: 'cust-pest-rodent', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Pest & Rodent Control'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Can you add rodent bait stations?',
       customer,
     });
@@ -412,7 +419,7 @@ describe('termite monitoring ownership', () => {
     const customer = propertyCustomer({ id: 'cust-termite', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Termite Monitoring Service'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is termite protection?',
       customer,
     });
@@ -448,7 +455,7 @@ describe('commercial ownership and termite bond distinction', () => {
     const customer = propertyCustomer({ id: 'cust-commercial', waveguard_tier: null, monthly_rate: 189 });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Commercial Pest Control'], null),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is pest control?',
       customer,
     });
@@ -460,7 +467,7 @@ describe('commercial ownership and termite bond distinction', () => {
     const customer = propertyCustomer({ id: 'cust-bond', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Termite Bond'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is termite bait monitoring?',
       customer,
     });
@@ -590,7 +597,7 @@ describe('ownership lookup failure fails closed', () => {
     };
     const result = await buildCustomerPricingResponse({
       db,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-failclosed' }),
     });
@@ -649,7 +656,7 @@ describe('r5 regressions', () => {
     };
     const result = await buildCustomerPricingResponse({
       db,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Silver',
       targetTier: 'Silver',
       customer: propertyCustomer({ id: 'cust-tier-fc', waveguard_tier: 'Silver' }),

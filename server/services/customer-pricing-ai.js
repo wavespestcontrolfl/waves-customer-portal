@@ -347,9 +347,16 @@ function lookupEnabled() {
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
   let source = 'customer_profile';
   const address = addressForCustomer(customer);
-  let homeSqFt = positiveNumber(customer.property_sqft);
+  // customers.property_sqft is TREATED LAWN AREA by schema (initial_schema
+  // 20260401000001) — the agent path plumbs it to measuredTurfSf for exactly
+  // that reason. Reading it as the building footprint mispriced every
+  // footprint-driven service, and since the lookup only FILLS a missing
+  // value it could never be corrected afterwards. Home square footage comes
+  // from a genuine building source (the lookup) or not at all; a missing one
+  // fails closed to PROPERTY_DETAILS_NEEDED, which asks rather than guesses.
+  let homeSqFt = null;
   let lotSqFt = positiveNumber(customer.lot_sqft);
-  let lawnSqFt = positiveNumber(turfProfile?.lawn_sqft);
+  let lawnSqFt = positiveNumber(turfProfile?.lawn_sqft, customer.property_sqft);
   let bedArea = positiveNumber(customer.bed_sqft);
   // Provenance is load-bearing money data, not a label: the T&S pricer
   // applies its shrub-density factor to MEASURED bed areas only, so an
