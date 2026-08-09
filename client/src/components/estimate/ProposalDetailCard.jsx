@@ -122,7 +122,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
         <div>
           {/* Overview line (derived, never typed): the agreement at a glance. */}
           <div style={{ ...lineRow, padding: '6px 0', fontWeight: 600 }}>
-            <span>{programs.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} service visits per year across {programs.length} program{programs.length === 1 ? '' : 's'}</span>
+            <span>{programs.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} applications per year across {programs.length} program{programs.length === 1 ? '' : 's'}</span>
             {Number(totals.firstYearTotal) > 0 ? (
               <span style={amtStyle}>{fmtMoney(totals.firstYearTotal)} first year</span>
             ) : null}
@@ -134,7 +134,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
                 <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 4, lineHeight: 1.5 }}>{program.note}</div>
               ) : null}
               <div style={lineRow}>
-                <span>{program.frequencyPerYear} visit{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+                <span>{program.frequencyPerYear} application{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
                 <span style={amtStyle}>
                   {fmtMoney(program.pricePerApplication)}
                   {program.taxable === true ? ' *' : ''}

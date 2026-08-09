@@ -333,7 +333,7 @@ describe('EstimateProposalDocument', () => {
           pricePerApplication: 120,
           annual: 480,
           taxable: false,
-          inclusions: ['4 scheduled service visits per year'],
+          inclusions: ['4 scheduled applications per year'],
           exclusions: ['Termite treatment — separate program'],
           buildings: [{ name: 'Tower A' }],
         }],
@@ -342,7 +342,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('Service programs');
     expect(text).toContain('Quarterly pest program');
-    expect(text).toContain('4 visits per year');
+    expect(text).toContain('4 applications per year');
     expect(text).toContain('per application');
     expect(text).toContain('Covers: Tower A');
     expect(text).toContain('Investment');

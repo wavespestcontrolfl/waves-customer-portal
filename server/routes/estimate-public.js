@@ -5401,7 +5401,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="proposal-building-name">${escapeHtml(program.label)}</div>
       ${program.note ? `<div class="proposal-building-note">${escapeHtml(program.note)}</div>` : ''}
       <div class="proposal-line">
-        <span class="proposal-line-desc">${program.frequencyPerYear} visit${program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+        <span class="proposal-line-desc">${program.frequencyPerYear} application${program.frequencyPerYear === 1 ? '' : 's'} per year</span>
         <span class="proposal-line-amt">${fmtMoney(program.pricePerApplication)}${program.taxable === true ? ' *' : ''} <span class="proposal-line-freq">per application</span></span>
       </div>
       <div class="proposal-line">

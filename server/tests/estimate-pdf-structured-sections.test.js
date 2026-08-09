@@ -161,7 +161,7 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
             label: 'Quarterly pest program',
             frequencyPerYear: 4,
             pricePerApplication: 120,
-            inclusions: ['4 scheduled service visits per year'],
+            inclusions: ['4 scheduled applications per year'],
             exclusions: ['Termite treatment — separate program'],
             buildings: [{ name: 'Tower A' }],
           }],
@@ -172,7 +172,7 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     const text = extractPdfText(buffer);
     expect(text).toContain('SERVICE PROGRAMS');
     expect(text).toContain('Quarterly pest program');
-    expect(text).toContain('4 visits per year');
+    expect(text).toContain('4 applications per year');
     expect(text).toContain('Covers: Tower A');
     expect(text).toContain('Not included (quoted separately): Termite treatment');
     // Programs carry authored inclusions — no canned guarantee beside them.

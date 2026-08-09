@@ -156,11 +156,45 @@ const TAX_EXEMPT_FAMILIES = new Set(['lawn', 'tree_shrub']);
 // family fallback must not tax them (codex 1A-ii r3d).
 const INSPECTION_KEY_RE = /\bwdo\b|\binspection\b/;
 
-function commercialTaxableDefault(serviceKey, explicit) {
+// service family → canonical service_taxability keys (recurring, one-time).
+const FAMILY_TAXABILITY_KEYS = {
+  pest: ['pest_recurring', 'pest_onetime'],
+  lawn: ['lawn_recurring', 'lawn_onetime'],
+  tree_shrub: ['tree_shrub', 'tree_shrub'],
+  mosquito: ['mosquito_recurring', 'mosquito_onetime'],
+  termite: ['termite_bait', 'termite_trench'],
+  rodent: ['rodent_bait', 'rodent_exclusion'],
+};
+
+// The CANONICAL taxability source is the service_taxability table
+// (commercial is_taxable column) — loaded once per generation so future
+// table edits propagate (codex 1A-ii r6b). The family heuristic remains
+// only as the no-database fallback; explicit row flags always win, and
+// standalone inspections stay exempt (FL §212.08(6)).
+async function loadTaxabilityMap(database) {
+  if (!database) return null;
+  try {
+    const rows = await database('service_taxability').select('service_key', 'is_taxable');
+    const map = new Map();
+    for (const row of rows) map.set(String(row.service_key), row.is_taxable === true);
+    return map.size ? map : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function commercialTaxableDefault(serviceKey, explicit, { taxabilityMap = null, oneTime = false } = {}) {
   if (explicit === true || explicit === false) return explicit;
   const key = String(serviceKey || '').toLowerCase().replace(/[_-]+/g, ' ');
   if (INSPECTION_KEY_RE.test(key)) return false;
-  return !TAX_EXEMPT_FAMILIES.has(programFamilyForService(serviceKey));
+  const family = programFamilyForService(serviceKey);
+  if (taxabilityMap) {
+    const direct = taxabilityMap.get(String(serviceKey || '').toLowerCase());
+    if (direct !== undefined) return direct;
+    const mapped = (FAMILY_TAXABILITY_KEYS[family] || [])[oneTime ? 1 : 0];
+    if (mapped !== undefined && taxabilityMap.get(mapped) !== undefined) return taxabilityMap.get(mapped);
+  }
+  return !TAX_EXEMPT_FAMILIES.has(family);
 }
 
 function parseEstimateData(estimateData) {
@@ -206,7 +240,10 @@ function derivePropertyScope(estimateData) {
 function inclusionsForProgram(family, visitsPerYear) {
   const lines = [];
   if (visitsPerYear > 0) {
-    lines.push(`${visitsPerYear} scheduled service visit${visitsPerYear === 1 ? '' : 's'} per year`);
+    // "Applications", not "visits" — multiple applications can happen in
+    // one onsite visit, so a visit-count promise could overstate trips
+    // (codex 1A-ii r6b).
+    lines.push(`${visitsPerYear} scheduled application${visitsPerYear === 1 ? '' : 's'} per year`);
   }
   if (family === 'pest') {
     lines.push(...COMMERCIAL_PEST_INCLUSIONS);
@@ -219,7 +256,7 @@ function inclusionsForProgram(family, visitsPerYear) {
 // Engine recurring rows → draft programs. Only rows the engine actually
 // priced (perTreatment + visitsPerYear + annual) qualify — a row without a
 // provable cadence must not generate a program that quotes one.
-function derivePrograms(estimateData, estimate = {}) {
+function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // Same multi-shape engine-result read the estimate surfaces use
   // (result ?? engineResult ?? root — see estimate-public's
   // estimateRecurringKeysForDetails): server/agent-generated estimates
@@ -377,7 +414,7 @@ function derivePrograms(estimateData, estimate = {}) {
       // Explicit engine taxability wins; absent metadata falls to the
       // canonical commercial rule (lawn exempt, else taxable) — never a
       // silent exempt default (pre-push codex P0 / r2e).
-      taxable: commercialTaxableDefault(row.service || row.name, row.taxable),
+      taxable: commercialTaxableDefault(row.service || row.name, row.taxable, { taxabilityMap }),
       inclusions: inclusionsForProgram(family, visits),
       exclusions: PROGRAM_EXCLUSIONS[family] || [],
       buildings: [],
@@ -433,7 +470,7 @@ function derivePrograms(estimateData, estimate = {}) {
 // would ERASE an authoritative one-time charge when saved (pre-push codex
 // P0). Same authority discipline as programs: reconcile against the stored
 // onetime_total to the cent or fail the whole monetary draft.
-function deriveCorrectiveWork(estimateData, estimate = {}) {
+function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null) {
   const engineResult = estimateData.result || estimateData.engineResult || estimateData || {};
   // Canonical extraction (estimate-converter): handles oneTime.items,
   // specItems, nested results, one_time.items, and oneTimeItems shapes and
@@ -566,7 +603,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
     work.push({
       label: String(item.label || item.name || item.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: commercialTaxableDefault(item.service || item.name, item.taxable),
+      taxable: commercialTaxableDefault(item.service || item.name, item.taxable, { taxabilityMap, oneTime: true }),
       includes: item.detail ? [String(item.detail).slice(0, 200)] : [],
     });
   }
@@ -586,7 +623,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
     work.push({
       label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: commercialTaxableDefault(line.service || line.name, line.taxable),
+      taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
       includes: [],
     });
   }
@@ -595,7 +632,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
     work.push({
       label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable),
+      taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable, { taxabilityMap, oneTime: true }),
       includes: [],
     });
   }
@@ -667,8 +704,9 @@ function deriveResponsibilities(programs) {
  */
 async function deriveProposalDraft(estimate = {}, { database } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
-  const { programs, warning } = derivePrograms(estimateData, estimate);
-  const { correctiveWork, warning: oneTimeWarning } = deriveCorrectiveWork(estimateData, estimate);
+  const taxabilityMap = await loadTaxabilityMap(database);
+  const { programs, warning } = derivePrograms(estimateData, estimate, taxabilityMap);
+  const { correctiveWork, warning: oneTimeWarning } = deriveCorrectiveWork(estimateData, estimate, taxabilityMap);
   // A monetary draft is all-or-nothing across BOTH sides: installing
   // programs while the one-time side failed (or vice versa) would save an
   // itemization missing a priced charge and rewrite the authoritative

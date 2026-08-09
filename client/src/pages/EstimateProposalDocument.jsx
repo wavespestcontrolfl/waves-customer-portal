@@ -336,7 +336,7 @@ export default function EstimateProposalDocument({ data, token }) {
           <div>
             <SectionHeader>Service programs</SectionHeader>
             <div style={{ fontSize: 11.5, color: MUTED, margin: '2px 0 4px' }}>
-              {programList.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} service visits
+              {programList.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} applications
               per year across {programList.length} program{programList.length === 1 ? '' : 's'}.
             </div>
             {programList.map((program, pIdx) => (
@@ -349,7 +349,7 @@ export default function EstimateProposalDocument({ data, token }) {
                   display: 'flex', justifyContent: 'space-between', gap: 14,
                   padding: '4px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5,
                 }}>
-                  <span style={{ color: INK }}>{program.frequencyPerYear} visit{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+                  <span style={{ color: INK }}>{program.frequencyPerYear} application{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
                   <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
                     {fmtMoney(program.pricePerApplication)}
                     {program.taxable === true ? ' *' : ''}

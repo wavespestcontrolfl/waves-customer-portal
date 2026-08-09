@@ -1016,7 +1016,7 @@ export default function CommercialProposalPage() {
                           // (codex 1A-ii r6).
                           const n = Math.round(Number(nextFreq));
                           const synced = Number.isFinite(n) && n >= 1
-                            ? it.inclusionsText.replace(/^\d+ scheduled service visits? per year$/m, `${n} scheduled service visit${n === 1 ? '' : 's'} per year`)
+                            ? it.inclusionsText.replace(/^\d+ scheduled applications? per year$/m, `${n} scheduled application${n === 1 ? '' : 's'} per year`)
                             : it.inclusionsText;
                           return { ...it, frequencyPerYear: nextFreq, inclusionsText: synced };
                         }));

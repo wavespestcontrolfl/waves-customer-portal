@@ -188,7 +188,7 @@ describe('ProposalDetailCard', () => {
         pricePerApplication: 120,
         annual: 480,
         taxable: false,
-        inclusions: ['4 scheduled service visits per year'],
+        inclusions: ['4 scheduled applications per year'],
         exclusions: ['Termite treatment — separate program'],
         buildings: [{ name: 'Tower A' }],
       }],
@@ -199,13 +199,13 @@ describe('ProposalDetailCard', () => {
     }} />);
     const text = container.textContent;
     expect(text).toContain('Quarterly pest program');
-    expect(text).toContain('4 visits per year');
+    expect(text).toContain('4 applications per year');
     expect(text).toContain('per application');
     expect(text).toContain('Annual program total');
     expect(text).toContain('Covers: Tower A');
     expect(text).toContain('Not included (quoted separately): Termite treatment — separate program');
     // Overview line derives from programs.
-    expect(text).toContain('4 service visits per year across 1 program');
+    expect(text).toContain('4 applications per year across 1 program');
     // Programs carry authored inclusions — no canned stack beside them.
     expect(text).not.toContain('What your commercial pest service includes');
   });

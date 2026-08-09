@@ -178,14 +178,14 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
         frequencyPerYear: 4,
         pricePerApplication: 120,
         taxable: false,
-        inclusions: ['4 scheduled service visits per year', 'Interior treatment included on request — no extra charge, no surprise fees'],
+        inclusions: ['4 scheduled applications per year', 'Interior treatment included on request — no extra charge, no surprise fees'],
         exclusions: ['Termite treatment or monitoring — separate program, quoted on inspection'],
         buildings: [{ name: 'Tower A' }, { name: 'Clubhouse' }],
       }],
     };
     const html = renderPage('proposal-programs-token', BASE_ESTIMATE, { proposal: programsProposal });
     expect(html).toContain('Quarterly pest program');
-    expect(html).toContain('4 visits per year');
+    expect(html).toContain('4 applications per year');
     expect(html).toContain('per application');
     expect(html).toContain('Annual program total');
     expect(html).toContain('480.00');

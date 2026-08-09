@@ -102,14 +102,14 @@ describe('deriveProposalDraft', () => {
     });
     // Pest carries the owner-stated commercial terms; the cadence line is
     // derived from the priced row.
-    expect(pest.inclusions[0]).toBe('4 scheduled service visits per year');
+    expect(pest.inclusions[0]).toBe('4 scheduled applications per year');
     expect(pest.inclusions).toContain('Interior treatment included on request — no extra charge, no surprise fees');
     expect(pest.exclusions.join(' ')).toMatch(/Termite/);
     // Non-pest families stay factual — documentation line only, no
     // pest-plan claims.
     expect(mosquito.service).toBe('mosquito');
     expect(mosquito.inclusions).toEqual([
-      '9 scheduled service visits per year',
+      '9 scheduled applications per year',
       'Every visit documented — time on site, areas treated, and products applied',
     ]);
     expect(mosquito.inclusions.join(' ')).not.toMatch(/no long-term contract|tenant/i);

@@ -608,7 +608,7 @@ function proposalProgramsScenario() {
           taxable: true,
           note: null,
           inclusions: [
-            '4 scheduled service visits per year',
+            '4 scheduled applications per year',
             'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
             'Interior treatment included on request — no extra charge, no surprise fees',
             'Tenant-reported pests handled between visits — re-service requests are included in the plan',
@@ -629,7 +629,7 @@ function proposalProgramsScenario() {
           taxable: true,
           note: null,
           inclusions: [
-            '9 scheduled service visits per year',
+            '9 scheduled applications per year',
             'Every visit documented — time on site, areas treated, and products applied',
           ],
           exclusions: ['One-time event sprays — quoted separately'],

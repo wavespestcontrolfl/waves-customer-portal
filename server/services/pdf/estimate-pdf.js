@@ -261,7 +261,7 @@ function programsBlock(ctx, programs, y) {
     );
     y += Math.max(labelH, 12) + 2;
     doc.fontSize(9).font('Helvetica').fillColor(BODY).text(
-      `${program.frequencyPerYear} visit${program.frequencyPerYear === 1 ? '' : 's'} per year · ${currency(program.annual)} annual program total`,
+      `${program.frequencyPerYear} application${program.frequencyPerYear === 1 ? '' : 's'} per year · ${currency(program.annual)} annual program total`,
       L, y, { width: W },
     );
     y += 13;
