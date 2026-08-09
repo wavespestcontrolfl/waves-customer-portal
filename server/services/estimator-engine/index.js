@@ -570,9 +570,15 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
   // { ok, invalidated, error }; the caller decides whether to retry.
   try {
     // STRICT lookup: existingDraftForCall converts DB errors to null,
-    // which would read here as "no draft to invalidate".
-    const conflicted = await strictExistingDraftForCall(callLogId);
-    if (conflicted) {
+    // which would read here as "no draft to invalidate". EVERY
+    // uninvalidated row for this call is quarantined, not just the newest
+    // (codex P0, PR #3304 GH r8d): concurrent composers and historical
+    // duplicates both exist, and leaving an older row unmarked keeps a
+    // PERMANENT public token sendable.
+    const conflictedRows = await strictExistingDraftForCall(callLogId);
+    let invalidatedAny = false;
+    for (const conflicted of conflictedRows) {
+       
       await db.transaction(async (trx) => {
         const fresh = await trx('estimates')
           .where({ id: conflicted.id })
@@ -672,9 +678,9 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         }
       });
       logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
-      return { ok: true, invalidated: true };
+      invalidatedAny = true;
     }
-    return { ok: true, invalidated: false };
+    return { ok: true, invalidated: invalidatedAny };
   } catch (qErr) {
     if (qErr.ownershipLost) {
       // NOT a failure: a peer owns this call now and will re-decide.
@@ -684,6 +690,73 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     logger.error(`[estimator-engine] forced draft invalidation FAILED for call ${callLogId} (${reason}): ${qErr.message}`);
     return { ok: false, invalidated: false, error: qErr.message };
   }
+}
+
+// DURABLE retry queue for a quarantine that could not persist (codex P0,
+// PR #3304 GH r8d). The estimator runs fire-and-forget, so a transient DB
+// outage during an identity conflict or a rejected-call verdict would
+// otherwise leave the unmarked draft public and sendable with nothing
+// scheduled to try again. The failure is stamped on the CALL row and the
+// scheduler sweep below retries it until it lands.
+async function markQuarantinePending(callLogId, reason) {
+  try {
+    await db('call_log').where({ id: callLogId }).update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_quarantine_pending}', ?::jsonb, true)",
+        [JSON.stringify({ reason, at: new Date().toISOString() })],
+      ),
+      updated_at: new Date(),
+    });
+    logger.warn(`[estimator-engine] queued a DURABLE quarantine retry for call ${callLogId} (${reason})`);
+    return true;
+  } catch (markErr) {
+    logger.error(`[estimator-engine] could not queue the quarantine retry for call ${callLogId}: ${markErr.message}`);
+    return false;
+  }
+}
+
+// Drains the queue above; runs from the scheduler's recovery pass. Each
+// success clears its marker, so the sweep is idempotent and self-limiting.
+async function sweepPendingQuarantines({ limit = 50 } = {}) {
+  let rows = [];
+  try {
+    rows = await db('call_log')
+      .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''")
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id', 'metadata');
+  } catch (err) {
+    logger.warn(`[estimator-engine] pending-quarantine scan failed: ${err.message}`);
+    return 0;
+  }
+  let cleared = 0;
+  for (const row of rows) {
+    const pending = (() => {
+      try {
+        const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+        return md?.estimator_quarantine_pending || null;
+      } catch { return null; }
+    })();
+    if (!pending?.reason) continue;
+     
+    const outcome = await invalidateDraftForCall(row.id, {
+      reason: pending.reason,
+      identityConflict: String(pending.reason).startsWith('email_'),
+    });
+    if (!outcome.ok) continue;
+    try {
+       
+      await db('call_log').where({ id: row.id }).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
+        updated_at: new Date(),
+      });
+      cleared += 1;
+      logger.info(`[estimator-engine] drained a queued quarantine for call ${row.id} (${pending.reason})`);
+    } catch (clearErr) {
+      logger.warn(`[estimator-engine] quarantine marker clear failed for call ${row.id}: ${clearErr.message}`);
+    }
+  }
+  return cleared;
 }
 
 // Bounded retry around the forced invalidation (codex P0, PR #3304 GH
@@ -714,8 +787,10 @@ async function strictExistingDraftForCall(callLogId) {
     // invalidation preserves whatever archive state it finds
     // (`fresh.archived_at || new Date()`), so marking one is safe.
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-    .orderBy('created_at', 'desc')
-    .first('id', 'status', 'estimate_data');
+    // EVERY row, oldest first — a deterministic order for the per-row
+    // locks taken below.
+    .orderBy('created_at', 'asc')
+    .select('id', 'status', 'estimate_data');
 }
 
 async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true }) {
@@ -1466,6 +1541,8 @@ module.exports = {
   maybeDraftEstimateForCall,
   reconcileDraftLinksForCall,
   invalidateDraftForCall: invalidateDraftForCallWithRetry,
+  markQuarantinePending,
+  sweepPendingQuarantines,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,

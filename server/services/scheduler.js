@@ -320,6 +320,18 @@ async function recoverStaleScheduledEstimateClaims(now) {
   } catch (err) {
     logger.warn(`[scheduled-estimates] wedged pending-invalidation sweep failed: ${err.message}`);
   }
+
+  // Queued draft QUARANTINES (codex P0, PR #3304): when an identity
+  // conflict or a rejected-call verdict could not persist its invalidation
+  // — a transient DB outage during a fire-and-forget estimator pass — the
+  // processor stamps the call and this drains the queue until the marker
+  // lands. Without it the unmarked draft keeps a live public token.
+  try {
+    const { sweepPendingQuarantines } = require('./estimator-engine');
+    await sweepPendingQuarantines();
+  } catch (err) {
+    logger.warn(`[scheduled-estimates] pending-quarantine sweep failed: ${err.message}`);
+  }
 }
 
 async function claimDueScheduledEstimates(now) {

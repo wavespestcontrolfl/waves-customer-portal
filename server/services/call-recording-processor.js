@@ -6139,6 +6139,12 @@ const CallRecordingProcessor = {
           ownershipFence: { callLogId: call.id, procToken },
         });
         if (!invalidation.ok) {
+          // Queue the durable retry BEFORE failing the pass: the throw
+          // routes to extraction_failed (retried while the budget lasts),
+          // and the queue covers the case where that budget is already
+          // spent (codex P0, PR #3304 GH r8d).
+          const { markQuarantinePending } = require('./estimator-engine');
+          await markQuarantinePending(call.id, extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail');
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
         }
       }
@@ -9221,8 +9227,18 @@ const CallRecordingProcessor = {
         .then((engineOutcome) => {
           logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
         })
-        .catch((engineErr) => {
+        .catch(async (engineErr) => {
           logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
+          // A failed identity QUARANTINE must not vanish with this
+          // fire-and-forget catch (codex P0, PR #3304 GH r8d): the call
+          // finalizes as processed and is not eligible for another
+          // automatic pass, so the unmarked draft would stay public and
+          // sendable after a transient outage. Stamp the DURABLE retry
+          // queue the scheduler drains.
+          if (engineErr.quarantineFailed) {
+            const { markQuarantinePending } = require('./estimator-engine');
+            await markQuarantinePending(call.id, 'email_identity_conflict');
+          }
         });
     } else {
       // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this run
