@@ -310,6 +310,12 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
   } else if (configKey === 'ts_material_rates') {
+    // A JSON null / array payload would wipe the DB-authoritative material
+    // rates row (the loop below optional-chains straight past it), leaving
+    // every T&S quote on in-code defaults with no audit of what was lost.
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return fail('ts_material_rates must be an object of material-model values');
+    }
     // v4.7 knobs (density factors / routine palm reserve / callback
     // reserve). Strict finite numbers with the same bounds db-bridge
     // enforces at sync — without this branch an admin PUT could persist

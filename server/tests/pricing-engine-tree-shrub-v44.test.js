@@ -1101,6 +1101,10 @@ describe('Tree & Shrub v4.7 density source eligibility + admin validation', () =
     expect(ok({ callback_reserve_per_visit: true })).toBe(false); // Number(true)=1 must NOT slip through
     expect(ok({ palm_per_palm_annual: '6' })).toBe(false); // strict numbers, no numeric strings
     expect(ok({ callback_reserve_per_visit: null })).toBe(false);
+    // A null/array payload would wipe the DB-authoritative row (P1 r12).
+    expect(ok(null)).toBe(false);
+    expect(ok([])).toBe(false);
+    expect(ok('nope')).toBe(false);
   });
 });
 
