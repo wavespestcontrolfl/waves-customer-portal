@@ -26,7 +26,7 @@ const COMMERCIAL_ESTIMATE = {
             annualAfterDiscount: 468,
           },
           {
-            service: 'commercial_mosquito',
+            service: 'commercial_mosquito', billedPerApplication: true,
             name: 'Mosquito Program',
             perTreatment: 65,
             visitsPerYear: 9,
@@ -74,7 +74,7 @@ describe('cadence aliases', () => {
         result: {
           recurring: {
             services: [
-              { service: 'commercial_tree_shrub', name: 'Tree & Shrub', appsPerYear: 6, annualAfterDiscount: 540 },
+              { service: 'commercial_tree_shrub', billedPerApplication: true, name: 'Tree & Shrub', appsPerYear: 6, annualAfterDiscount: 540 },
             ],
           },
         },
@@ -180,7 +180,7 @@ describe('deriveProposalDraft', () => {
     // Engine taxability carries through.
     const taxable = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
-        result: { recurring: { services: [{ service: 'commercial_pest', name: 'Pest', taxable: true, visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+        result: { recurring: { services: [{ service: 'commercial_pest', billedPerApplication: true, name: 'Pest', taxable: true, visitsPerYear: 4, annualAfterDiscount: 468 }] } },
       },
     });
     expect(taxable.programs[0].taxable).toBe(true);
@@ -483,7 +483,7 @@ describe('deriveProposalDraft', () => {
     const hidden = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { summary: 'ancillary' },
-        engineResult: { lineItems: [{ service: 'commercial_mosquito', name: 'Mosquito', visitsPerYear: 9, annualAfterDiscount: 585 }] },
+        engineResult: { lineItems: [{ service: 'commercial_mosquito', billedPerApplication: true, name: 'Mosquito', visitsPerYear: 9, annualAfterDiscount: 585 }] },
       },
     });
     expect(hidden.programs).toHaveLength(1);
@@ -625,7 +625,7 @@ describe('deriveProposalDraft', () => {
     // A measured basis at MEDIUM+ confidence generates normally.
     const measured = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
-        result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 1260, turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH' }] } },
+        result: { recurring: { services: [{ service: 'commercial_lawn', billedPerApplication: true, name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 1260, turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH' }] } },
       },
     });
     expect(measured.programs).toHaveLength(1);
@@ -733,8 +733,8 @@ describe('deriveProposalDraft', () => {
     // generates one program.
     const mirrored = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
-        result: { recurring: { services: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 12, annualAfterDiscount: 2280 }] } },
-        engineResult: { lineItems: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
+        result: { recurring: { services: [{ service: 'commercial_pest', billedPerApplication: true, name: 'Pest', visitsPerYear: 12, annualAfterDiscount: 2280 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_pest', billedPerApplication: true, name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
       },
     });
     expect(mirrored.programs).toHaveLength(1);

@@ -171,7 +171,13 @@ const TAX_EXEMPT_FAMILIES = new Set(['lawn', 'tree_shrub']);
 // Standalone inspections are NOT taxable (canonical service_taxability
 // rows wdo_inspection / termite_inspection, FL §212.08(6)) — the termite
 // family fallback must not tax them (codex 1A-ii r3d).
-const INSPECTION_KEY_RE = /\bwdo\b|\binspection\b/;
+// Only the CANONICAL standalone-inspection keys are exempt (FL §212.08(6),
+// service_taxability seed rows) — a broad "inspection"-named match would
+// exempt keys the table treats as taxable (rodent_inspection,
+// pest_inspection → TaxCalculator's unmatched-commercial default is
+// TAXABLE), omitting sales tax from the document and invoice (codex
+// 1A-ii r11).
+const EXEMPT_INSPECTION_KEYS = new Set(['wdo_inspection', 'termite_inspection']);
 
 // service family → canonical service_taxability keys (recurring, one-time).
 // lawn/tree_shrub are DELIBERATELY absent: the service_taxability rows mark
@@ -208,8 +214,7 @@ async function loadTaxabilityMap(database) {
 
 function commercialTaxableDefault(serviceKey, explicit, { taxabilityMap = null, oneTime = false } = {}) {
   if (explicit === true || explicit === false) return explicit;
-  const key = String(serviceKey || '').toLowerCase().replace(/[_-]+/g, ' ');
-  if (INSPECTION_KEY_RE.test(key)) return false;
+  if (EXEMPT_INSPECTION_KEYS.has(String(serviceKey || '').toLowerCase())) return false;
   const family = programFamilyForService(serviceKey);
   // Billing-path classifier wins for lawn/tree (see FAMILY_TAXABILITY_KEYS
   // note) — checked BEFORE any table hit so a direct `tree_shrub` row
@@ -471,6 +476,19 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
       && (num(row.mo) > 0 || num(row.monthly) > 0)
       && row.billedPerApplication !== true) {
       unrepresentable.push(`${String(row.name || row.service || 'service')} (${family} billing cadence cannot be proven — flat-monthly vs per-application)`);
+      continue;
+    }
+    // Commercial plans bill MONTHLY on the estimate surface — the
+    // commercialRecurringEstimate classifier in estimate-public.js keys
+    // "Approve & pay monthly" off these commercial_* service keys, and
+    // acceptance invoices the first MONTH. A generated per-application
+    // program is a different billing promise whose win would invoice the
+    // first application instead (e.g. $1,200/yr at 8 apps bills $150, not
+    // the $100 month) — only an explicit billedPerApplication flag proves
+    // the row genuinely bills per application (codex 1A-ii r11).
+    if (/commercial_(lawn|tree|pest|mosquito|termite|rodent)/.test(String(row.service || row.name || '').toLowerCase())
+      && row.billedPerApplication !== true) {
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (commercial plans bill monthly — per-application billing cannot be proven)`);
       continue;
     }
     programs.push({
