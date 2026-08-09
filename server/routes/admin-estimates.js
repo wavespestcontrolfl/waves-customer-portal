@@ -2344,13 +2344,17 @@ router.post('/:id/unarchive', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!estimate.archived_at) return res.json(estimate);  // idempotent
     // A draft ARCHIVED by linkage invalidation is permanently
     // non-revivable (codex P0, PR #3304): its composed content —
     // recipient, address, pricing — belongs to the FORMER lead of a
     // repointed/unlinked call, and unarchiving would restore public-token
     // access and make the send claim succeed against the wrong customer.
     // The engine already rebuilt a corrected draft; this one is history.
+    // Checked BEFORE the idempotent return (an invalidated-but-live row is
+    // never blessed) and enforced ATOMICALLY in the UPDATE's own predicate
+    // — a concurrent invalidation between read and write zero-rows into
+    // the same 409 (codex P0 r16).
+    const invalidatedMessage = 'This draft was invalidated by a call-linkage correction — its content belongs to a different lead. A corrected draft was rebuilt; this one cannot be unarchived.';
     const invalidatedAt = (() => {
       try {
         const data = typeof estimate.estimate_data === 'string'
@@ -2358,15 +2362,14 @@ router.post('/:id/unarchive', async (req, res, next) => {
         return data?.estimatorEngine?.linkage_invalidated_at || null;
       } catch { return null; }
     })();
-    if (invalidatedAt) {
-      return res.status(409).json({
-        error: 'This draft was invalidated by a call-linkage correction — its content belongs to a different lead. A corrected draft was rebuilt; this one cannot be unarchived.',
-      });
-    }
+    if (invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
+    if (!estimate.archived_at) return res.json(estimate);  // idempotent
     const [updated] = await db('estimates')
       .where({ id: req.params.id })
+      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .update({ archived_at: null, updated_at: db.fn.now() })
       .returning('*');
+    if (!updated) return res.status(409).json({ error: invalidatedMessage });
     res.json(updated);
   } catch (err) { next(err); }
 });
