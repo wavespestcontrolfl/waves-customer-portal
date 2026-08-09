@@ -870,6 +870,46 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(manyPalms.manualReviewReasons).toContain('tree_count_at_or_above_15');
   });
 
+  test('stated palms REPLACE a density-inferred tree count instead of stacking on it (pre-push P0 r8)', () => {
+    // Pre-split, "10 palms" arrived as an EXPLICIT treeCount 10, so the
+    // treeDensity fallback never fired. Post-split the same call leaves
+    // treeCount absent and the resolver infers from lookup density — adding
+    // the folded palms on top would price 16 legacy trees for a 10-palm job.
+    const preSplit = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', treeDensity: 'moderate' },
+      { tier: 'standard', treeCount: 10 }
+    );
+    const postSplit = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', treeDensity: 'moderate' },
+      { tier: 'standard', palmCount: 10 }
+    );
+    expect(postSplit.treeCountSource).toBe('density_estimate');
+    expect(postSplit.materialTreeCount).toBe(10);
+    expect(postSplit.laborTreeCount).toBe(10);
+    expect(postSplit.annual).toBe(preSplit.annual);
+    expect(postSplit.costs.materialCost).toBe(preSplit.costs.materialCost);
+
+    // A caller-stated NON-palm count is real signal and still adds.
+    const both = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', treeDensity: 'moderate' },
+      { tier: 'standard', treeCount: 3, palmCount: 10 }
+    );
+    expect(both.materialTreeCount).toBe(13);
+  });
+
+  test('armed reserve: property-sourced palms trip the high-count review gate they now price (pre-push P1 r8)', () => {
+    const property = { bedArea: 2000, access: 'easy', palmCount: 20 };
+    // Unarmed: property palms don't price, so they don't gate either —
+    // unchanged pre-v4.7 behavior.
+    expect(priceTreeShrub(property, { tier: 'standard' }).manualReviewReasons)
+      .not.toContain('tree_count_at_or_above_15');
+    // Armed: they drive real material/labor, so a 20-palm property must not
+    // auto-price a big job without review.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    expect(priceTreeShrub(property, { tier: 'standard' }).manualReviewReasons)
+      .toContain('tree_count_at_or_above_15');
+  });
+
   test('armed reserve: palms leave the tree terms and price via the reserve only — never both', () => {
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
     const quote = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', treeCount: 3, palmCount: 10 });

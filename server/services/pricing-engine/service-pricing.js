@@ -2695,10 +2695,24 @@ function priceTreeShrub(property, options = {}) {
   const palmLaborArmed = (palmReserve.minutesPerPalmVisit ?? 0) > 0;
   const palmReserveActive = palmMaterialArmed || palmLaborArmed;
   const foldablePalmCount = palmCountSource === 'service_line' ? palmCount : 0;
+  // A DENSITY-ESTIMATED treeCount must not stack under a fold (P0 r8): with
+  // the old prompt, "10 palms" arrived AS treeCount 10 — explicit, so the
+  // treeDensity fallback never fired. Post-split the same call leaves
+  // treeCount absent, the resolver infers e.g. 6 trees from lookup density,
+  // and adding the folded palms would price 16 legacy trees where the
+  // pre-split quote priced 10. The fold REPLACES an inferred count; a
+  // caller-stated non-palm count (explicit) is real and still adds.
+  const foldBaseTreeCount = foldablePalmCount > 0 && treeCountSource === 'density_estimate'
+    ? 0
+    : treeCount;
   // Per-leg effective tree counts: palms ride the legacy term only where
   // their replacement is still unarmed.
-  const materialTreeCount = treeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
-  const laborTreeCount = treeCount + (palmLaborArmed ? 0 : foldablePalmCount);
+  const materialTreeCount = palmMaterialArmed
+    ? treeCount
+    : foldBaseTreeCount + foldablePalmCount;
+  const laborTreeCount = palmLaborArmed
+    ? treeCount
+    : foldBaseTreeCount + foldablePalmCount;
   const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
@@ -2767,11 +2781,17 @@ function priceTreeShrub(property, options = {}) {
       warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
     }
   }
-  // Plant-count review gate: trees plus any service-line palms, regardless
-  // of arming — a 20-palm property is a big job whether its palms price
-  // through the reserve or the legacy tree terms, and the pre-split
-  // classification tripped this gate for exactly that caller.
-  if (treeCount + foldablePalmCount >= 15) {
+  // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
+  // exactly what the pre-split classification counted (property palms never
+  // reached T&S pricing, so counting them would change neutral behavior).
+  // Armed: property palms drive real material/labor too, so a property with
+  // 20 known palms must trip the gate rather than auto-price a big job.
+  // The tree side mirrors the fold: an inferred count replaced by stated
+  // palms must not be counted twice here either.
+  const gatePlantCount = palmReserveActive
+    ? treeCount + palmCount
+    : foldBaseTreeCount + foldablePalmCount;
+  if (gatePlantCount >= 15) {
     manualReviewReasonsSet.add('tree_count_at_or_above_15');
     warnings.push('High tree count; manual review recommended.');
   }
