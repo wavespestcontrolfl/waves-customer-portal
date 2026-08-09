@@ -250,6 +250,7 @@ function derivePrograms(estimateData, estimate = {}) {
     ...(estimateData.engineResult && estimateData.engineResult !== engineResult
       && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
   ];
+  const extraSeenKeys = new Set();
   const extraLineItemRows = rawLineItemsMerged
     .map((line) => ({
       // Spread first so the canonical cadence resolver sees every
@@ -260,6 +261,14 @@ function derivePrograms(estimateData, estimate = {}) {
       annualAfterDiscount: line.annualAfterDiscount ?? line.annual,
     }))
     .filter((row) => !canonicalKeys.has(String(row.service || row.name || '').toLowerCase()))
+    // Both containers can mirror the SAME row — dedupe extras by service
+    // key so an alias-priced row never doubles (codex 1A-ii r4).
+    .filter((row) => {
+      const key = String(row.service || row.name || '').toLowerCase();
+      if (extraSeenKeys.has(key)) return false;
+      extraSeenKeys.add(key);
+      return true;
+    })
     .filter((row) => (visitsPerYearForRecurringService(row) > 0)
       || (recurringLineAnnualAmount(row) > 0)
       || row.manualFinalAnnual != null);
@@ -278,7 +287,9 @@ function derivePrograms(estimateData, estimate = {}) {
     // per-application price that acceptance then invoices (pre-push codex
     // P0). Fail the draft instead.
     if (rawVisits > 0 && Math.abs(rawVisits - Math.round(rawVisits)) > 1e-9) {
-      const rowAnnual = num(row.manualFinalAnnual ?? row.annualAfterDiscount ?? row.annual);
+      const rowAnnual = row.manualFinalAnnual != null
+        ? num(row.manualFinalAnnual)
+        : (recurringLineAnnualAmount(row) || null);
       if (rowAnnual > 0) {
         unrepresentable.push(`${String(row.name || row.service || 'service')} (fractional visit cadence ${rawVisits}/yr)`);
       }
@@ -407,21 +418,60 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // (one_time.items / oneTimeItems beside a result) AND agent-draft
   // engineResult containers both collect — object-deduped so shared rows
   // never double (codex 1A-ii r3d).
-  const oneTimeSeen = new Set();
-  const fromOneTime = [
-    ...estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true }),
-    ...estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true }),
-  ].filter((item) => {
-    if (oneTimeSeen.has(item)) return false;
-    oneTimeSeen.add(item);
+  // The two source shapes can mirror the SAME row as distinct objects —
+  // collapse across them by content identity with the same max-per-source
+  // rule that preserves legitimate in-source repeats (codex 1A-ii r4b).
+  const sourceLists = [
+    estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true }),
+    estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true }),
+  ];
+  const oneTimeIdentity = (item) => [
+    String(item.service || '').toLowerCase(),
+    String(item.name || item.label || '').toLowerCase(),
+    String(item.price ?? item.amount ?? item.total ?? ''),
+  ].join('|');
+  const maxPerSource = new Map();
+  for (const list of sourceLists) {
+    const counts = new Map();
+    for (const item of list) counts.set(oneTimeIdentity(item), (counts.get(oneTimeIdentity(item)) || 0) + 1);
+    for (const [key, count] of counts) maxPerSource.set(key, Math.max(maxPerSource.get(key) || 0, count));
+  }
+  const objSeen = new Set();
+  const emittedCounts = new Map();
+  const fromOneTime = sourceLists.flat().filter((item) => {
+    if (objSeen.has(item)) return false;
+    objSeen.add(item);
+    const key = oneTimeIdentity(item);
+    const already = emittedCounts.get(key) || 0;
+    if (already >= (maxPerSource.get(key) || 0)) return false;
+    emittedCounts.set(key, already + 1);
     return true;
   });
   // A lineItems row is one-time when it carries NO recurring evidence (no
   // cadence, no monthly/annual dollars) but IS priced — raw engine drafts
   // persist bed-bug/exclusion work as `{ service, price }` without the
   // legacy oneTimePrice alias (codex 1A-ii r3).
-  const lineItemsRows = Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [];
+  // BOTH raw containers contribute (a truthy ancillary result must not
+  // hide engineResult.lineItems), object-deduped (codex 1A-ii r4).
+  const rawSeen = new Set();
+  const lineItemsRows = [
+    ...(Array.isArray(engineResult.lineItems) ? engineResult.lineItems : []),
+    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
+      && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
+  ].filter((line) => {
+    if (rawSeen.has(line)) return false;
+    rawSeen.add(line);
+    return true;
+  });
   const fromLineItems = lineItemsRows.filter((line) => {
+    // Canonical included-on-program exclusion (same rule as
+    // estimateOneTimeItemsFromData): a row a program already includes must
+    // never bill again as corrective work (codex 1A-ii r4b).
+    if (line.onProg === true || line.includedOnProgram === true) return false;
+    // An EXPLICIT accepted zero stays in so the comped guard below can
+    // fail the draft instead of silently dropping promised scope
+    // (codex 1A-ii r4).
+    if (line.manualFinalOneTime === 0) return true;
     if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
     const noRecurringEvidence = !(visitsPerYearForRecurringService(line) > 0)
       && !(recurringLineAnnualAmount(line) > 0);

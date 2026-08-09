@@ -20521,8 +20521,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf')
         && ((Array.isArray(proposalPublicView?.buildings)
           && proposalPublicView.buildings.some((b) => (b.lineItems || []).length > 0))
-          // Programs-mode proposals (slice 1A-ii) price through programs.
-          || (Array.isArray(proposalPublicView?.programs) && proposalPublicView.programs.length > 0)) ? {
+          // Programs-mode proposals (slice 1A-ii) price through programs;
+          // one-time-only proposals price through corrective work alone.
+          || (Array.isArray(proposalPublicView?.programs) && proposalPublicView.programs.length > 0)
+          || (Array.isArray(proposalPublicView?.correctiveWork) && proposalPublicView.correctiveWork.length > 0)) ? {
         documentRender: true,
         publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin(),
       } : {}),
