@@ -80,12 +80,43 @@ async function reconcileExistingDraftLinks(existing, context) {
             && draftLead.twilio_call_sid === context.call.twilio_call_sid);
       }
     }
-    if ((durableRepoint || establishedAbsence) && draftLeadId !== currentLeadId) {
-      if (currentLeadId) draftData.lead_id = currentLeadId;
-      else delete draftData.lead_id;
+    // An UNLINK additionally requires the draft's own recorded linkage to
+    // have been durable (codex P1, PR #3304 r4): a phone-touched or legacy
+    // draft loses its window-bounded resolution on any later lead edit,
+    // and a non-matching historical sid is not proof it was wrong. Such
+    // drafts stay linked; only a durable repoint corrects them.
+    const draftLinkageDurable = ['sid', 'stamp'].includes(draftData.lead_linkage);
+    if ((durableRepoint || (establishedAbsence && draftLinkageDurable)) && draftLeadId !== currentLeadId) {
       await db.transaction(async (trx) => {
+        // RE-READ under the row lock and patch ONLY the linkage keys
+        // (codex P0, PR #3304 r4): draftData came from a pre-transaction
+        // read, and replacing the whole value would silently erase an
+        // admin's concurrent service/pricing edits. Mutable
+        // estimator-engine DRAFTS only — a sent/accepted/finalized
+        // estimate is a customer-facing record this reconcile must never
+        // touch.
+        const fresh = await trx('estimates')
+          .where({ id: existing.id })
+          .forUpdate()
+          .first('id', 'status', 'estimate_data');
+        if (!fresh || String(fresh.status || '').toLowerCase() !== 'draft') return;
+        const freshData = (() => {
+          try {
+            const data = typeof fresh.estimate_data === 'string'
+              ? JSON.parse(fresh.estimate_data) : (fresh.estimate_data || {});
+            return data && typeof data === 'object' ? data : {};
+          } catch { return null; }
+        })();
+        if (!freshData) return;
+        if (currentLeadId) {
+          freshData.lead_id = currentLeadId;
+          freshData.lead_linkage = context.leadLinkage || null;
+        } else {
+          delete freshData.lead_id;
+          delete freshData.lead_linkage;
+        }
         await trx('estimates').where({ id: existing.id })
-          .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
+          .update({ estimate_data: JSON.stringify(freshData), updated_at: new Date() });
         if (draftLeadId) {
           // Only if the OLD lead still points at this draft — a lead
           // relinked elsewhere is not ours to touch.
@@ -93,7 +124,13 @@ async function reconcileExistingDraftLinks(existing, context) {
             .update({ estimate_id: null });
         }
         if (currentLeadId) {
-          await trx('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
+          // Conditional: never overwrite a destination lead already
+          // pointing at a NEWER estimate (codex P0, PR #3304 r4).
+          await trx('leads').where({ id: currentLeadId })
+            .where(function unclaimedOrOurs() {
+              this.whereNull('estimate_id').orWhere('estimate_id', existing.id);
+            })
+            .update({ estimate_id: existing.id });
         }
       });
       logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);

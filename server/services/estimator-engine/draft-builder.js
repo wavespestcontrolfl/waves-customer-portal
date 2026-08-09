@@ -843,7 +843,15 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // created or touched may be linked — a stale phone-matched lead
         // (leadIsForThisCall === false) did not originate this quote and
         // linking it would advance the wrong pipeline record.
-        ...(context?.lead?.id && context?.leadIsForThisCall ? { lead_id: context.lead.id } : {}),
+        ...(context?.lead?.id && context?.leadIsForThisCall ? {
+          lead_id: context.lead.id,
+          // HOW the lead resolved ('sid' / 'stamp' / 'phone_touched') —
+          // the existing-draft reconciliation only unlinks drafts whose
+          // recorded linkage was durable; legacy rows without this key
+          // stay linked unless a repoint proves a correction (codex P1,
+          // PR #3304 r4).
+          lead_linkage: context.leadLinkage || null,
+        } : {}),
         // Existing-customer marker the accept path reads to waive the $99
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
