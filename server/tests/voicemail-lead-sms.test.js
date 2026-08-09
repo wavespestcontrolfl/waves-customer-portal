@@ -211,14 +211,17 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('fixedVoip pre-check blocks the send but RELEASES the one-shot claim (reversible block)', async () => {
+  test('fixedVoip pre-check blocks the send but RELEASES both one-shot claims (reversible block)', async () => {
     lineType.readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'fixedVoip' });
     expect(lineType.lookupLineType).not.toHaveBeenCalled();
-    expect(stampsFor()).toContain('blocked');
     // Released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP must let
-    // a future voicemail from this phone re-evaluate under the current set.
+    // a future voicemail from this phone re-evaluate under the current set —
+    // no 'blocked' lead stamp (it would wedge the reused lead at the claim
+    // predicate), lead marker removed, phone claim deleted.
+    expect(stampsFor()).not.toContain('blocked');
+    expect(leadClaimCleared()).toBe(true);
     expect(phoneClaimReleased()).toBe(true);
     expect(phoneClaimOutcomes()).not.toContain('fixedVoip');
     expect(sendCustomerMessage).not.toHaveBeenCalled();

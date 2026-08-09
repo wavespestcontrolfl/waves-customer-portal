@@ -234,14 +234,17 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
       if (lineType) await cacheLineType(phone, lineType);
     }
     if (NON_SMS_LINE_TYPES.has(lineType)) {
-      await stampStatus(leadId, 'blocked');
       if (lineType === 'landline') {
+        await stampStatus(leadId, 'blocked');
         await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
       } else {
         // fixedVoip is a REVERSIBLE block (LINETYPE_BLOCK_FIXED_VOIP): no text
-        // was sent, so releasing the one-shot claim keeps the one-text-per-
-        // phone invariant while letting a future call event re-evaluate under
-        // the then-current set instead of being consumed forever.
+        // was sent, so releasing BOTH claims keeps the one-text-per-phone
+        // invariant while letting a future voicemail re-evaluate under the
+        // then-current set. A 'blocked' lead stamp would wedge the reused open
+        // lead row at the claim predicate; the activity note is the audit
+        // trail instead.
+        await clearLeadClaim(leadId);
         await releasePhoneClaim(phone);
       }
       await logActivity(leadId, 'note', `Quote-link text-back skipped — caller number is a ${lineType}`, {

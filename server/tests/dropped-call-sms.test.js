@@ -398,16 +398,22 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(claimStamp.payload.outcome).toBe('landline');
   });
 
-  it('fixedVoip — one-shot claim RELEASED (reversible block), no send, no terminal stamp', async () => {
+  it('fixedVoip — BOTH one-shot claims released (reversible block), no send, no terminal stamp', async () => {
     state.firstResults.leads = [{ customer_id: null, address: null }];
     lineType.lookupLineType.mockResolvedValueOnce('fixedVoip');
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'fixedVoip' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // Claim released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP
-    // must let a future call event from this phone re-evaluate.
+    // Released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP must let
+    // a future call event from this phone re-evaluate — phone claim deleted,
+    // lead marker removed (a 'blocked' stamp would wedge the reused lead row
+    // at the claim predicate), no terminal claim stamp.
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
     expect(state.updates.find((u) => u.table === 'dropped_call_sms_claims')).toBeUndefined();
+    expect(state.updates.some((u) => u.table === 'leads'
+      && String(u.payload.extracted_data?.__raw || '').includes("- 'dropped_call_sms_status'"))).toBe(true);
+    expect(state.updates.some((u) => u.table === 'leads'
+      && JSON.stringify(u.payload.extracted_data?.bindings || []).includes('blocked'))).toBe(false);
   });
 
   it('template disabled — releases BOTH claims', async () => {
