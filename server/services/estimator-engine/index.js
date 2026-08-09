@@ -144,6 +144,20 @@ async function reconcileExistingDraftLinks(existing, context) {
             if (sidLinked) return;
           }
         }
+        // DESTINATION CLAIM FIRST (pre-push P0 r7): the conditional
+        // update refuses a lead already pointing at a NEWER estimate —
+        // and if that claim fails, NOTHING else may change, or the
+        // transaction would commit with estimate_data naming a
+        // destination no lead points back to while the prior linkage is
+        // already gone. Zero rows = whole reconcile no-ops.
+        if (currentLeadId) {
+          const claimed = await trx('leads').where({ id: currentLeadId })
+            .where(function unclaimedOrOurs() {
+              this.whereNull('estimate_id').orWhere('estimate_id', existing.id);
+            })
+            .update({ estimate_id: existing.id });
+          if (!claimed) return;
+        }
         if (currentLeadId) {
           freshData.lead_id = currentLeadId;
           freshData.lead_linkage = context.leadLinkage || null;
@@ -158,15 +172,6 @@ async function reconcileExistingDraftLinks(existing, context) {
           // relinked elsewhere is not ours to touch.
           await trx('leads').where({ id: freshLeadId, estimate_id: existing.id })
             .update({ estimate_id: null });
-        }
-        if (currentLeadId) {
-          // Conditional: never overwrite a destination lead already
-          // pointing at a NEWER estimate (codex P0, PR #3304 r4).
-          await trx('leads').where({ id: currentLeadId })
-            .where(function unclaimedOrOurs() {
-              this.whereNull('estimate_id').orWhere('estimate_id', existing.id);
-            })
-            .update({ estimate_id: existing.id });
         }
         relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none' };
       });
