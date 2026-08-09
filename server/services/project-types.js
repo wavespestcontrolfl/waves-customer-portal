@@ -825,9 +825,12 @@ const PROJECT_TYPES = {
       // estimate_actuals. internal — costing data, never customer report
       // content; optional + detail — the owner's 2026-07-21 closeout
       // simplification (only scope + condition required) stays intact.
-      // bed sqft is text, not count: count's 4-digit ceiling would clip
-      // exactly the >9,999 sqft outliers the 8,000 cap review needs to see.
-      { key: 'bed_sqft_serviced', label: 'Ornamental bed area serviced (sq ft)', type: 'text', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 2400' },
+      // bed sqft is measurement, not count: count's 4-digit ceiling would
+      // clip exactly the >9,999 sqft outliers the 8,000 cap review needs to
+      // see, and measurement validates numerically at entry (free text would
+      // silently vanish at the reconcile parse). The client renders unknown
+      // types as a plain text input — no client change needed.
+      { key: 'bed_sqft_serviced', label: 'Ornamental bed area serviced (sq ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 2400' },
       { key: 'palm_count_total', label: 'Palms on property', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },

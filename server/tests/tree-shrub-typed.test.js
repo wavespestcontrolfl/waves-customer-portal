@@ -105,6 +105,21 @@ describe('tree & shrub schema', () => {
     expect(byKey.customer_recommendations.type).toBe('multi_select');
   });
 
+  test('bed_sqft_serviced validates numerically at entry — free text must not vanish at the reconcile parse (pre-push P1)', () => {
+    const submit = (bedSqft) => validateTypedFindings({
+      type: 'tree_shrub',
+      expectedType: 'tree_shrub',
+      enforceRequired: false,
+      values: { bed_sqft_serviced: bedSqft },
+    });
+    expect(submit('2400').ok).toBe(true);
+    expect(submit('2,400').ok).toBe(true); // dictation digit-grouping
+    expect(submit('12400').ok).toBe(true); // above count's 4-digit ceiling by design
+    expect(submit(2400).ok).toBe(true);
+    expect(submit('about two thousand').ok).toBe(false);
+    expect(submit('24o0').ok).toBe(false);
+  });
+
   test('companion slice keeps the condition detail fields behind the expander (codex P2 on #2950)', () => {
     // Combined visits (lawn + T&S companion) run no per-line AI assessment,
     // so the companion form retains the hand-entered condition capture the

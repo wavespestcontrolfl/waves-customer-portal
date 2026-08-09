@@ -79,6 +79,23 @@ function normalizedEnum(value) {
   return text || null;
 }
 
+// Zero is a recorded observation for counts ("no palms on this property"),
+// not a missing value — positiveNumber would erase exactly the evidence an
+// overestimated count needs. Blank/garbage still reads as no-signal null.
+function nonnegativeCount(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// Measurement fields tolerate digit-grouping commas/spaces ("2,400" from
+// dictation) — entry validation enforces numeric shape, this mirrors it.
+function lenientMeasurement(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(String(value).replace(/[,\s]/g, ''));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 // Priced Tree & Shrub inputs. The full engine quote survives ONLY on
 // agent/IB drafts (estimate_data.engineResult.lineItems — the raw
 // generateEstimate output). Admin saves run the result through
@@ -93,10 +110,12 @@ function extractTreeShrubEstimate(estimateData) {
   if (Array.isArray(lineItems)) {
     const quote = lineItems.find((item) => item?.service === 'tree_shrub');
     if (quote) {
+      const bedAreaSource = normalizedEnum(quote.bedAreaSource);
       const extracted = {
         bedSqFt: positiveNumber(quote.bedAreaUsed ?? quote.bedArea),
-        bedAreaSource: normalizedEnum(quote.bedAreaSource),
-        treeCount: positiveNumber(quote.treeCount),
+        bedAreaSource,
+        bedAreaEstimated: bedAreaSource ? bedAreaSource !== 'explicit' : null,
+        treeCount: nonnegativeCount(quote.treeCount),
         access: normalizedEnum(quote.access),
         tier: normalizedEnum(quote.tier),
         onSiteMin: positiveNumber(quote.onSiteMin),
@@ -116,11 +135,14 @@ function extractTreeShrubEstimate(estimateData) {
     const selected = Array.isArray(tierRows) ? tierRows.find((row) => row?.selected) : null;
     return {
       bedSqFt: positiveNumber(tsMeta.eb),
-      // The legacy mapping collapses the source enum to one boolean; keep
-      // the two states it can still distinguish rather than inventing one.
-      bedAreaSource: tsMeta.bedAreaIsEstimated === true ? 'estimated'
-        : (tsMeta.bedAreaIsEstimated === false ? 'explicit' : null),
-      treeCount: positiveNumber(tsMeta.et),
+      // The legacy mapping collapses the four-value source enum to ONE
+      // boolean (true = lot_based|fallback, false = explicit|estimated) —
+      // reconstructing an enum from it would invent cohorts. The enum stays
+      // null here; only the coarse boolean is real signal on this path.
+      bedAreaSource: null,
+      bedAreaEstimated: typeof tsMeta.bedAreaIsEstimated === 'boolean'
+        ? tsMeta.bedAreaIsEstimated : null,
+      treeCount: nonnegativeCount(tsMeta.et),
       access: normalizedEnum(profile.access || profile.features?.access),
       tier: normalizedEnum(selected?.tier),
       onSiteMin: null,
@@ -156,9 +178,9 @@ function extractTreeShrubActuals(serviceData) {
   };
 
   const actuals = {
-    bedSqFt: positiveNumber(pick('bed_sqft_serviced')),
-    palmCount: positiveNumber(pick('palm_count_total')) ?? positiveNumber(pick('palms_serviced')),
-    treeCount: positiveNumber(pick('tree_count_total')),
+    bedSqFt: lenientMeasurement(pick('bed_sqft_serviced')),
+    palmCount: nonnegativeCount(pick('palm_count_total')) ?? nonnegativeCount(pick('palms_serviced')),
+    treeCount: nonnegativeCount(pick('tree_count_total')),
     shrubDensity: normalizedEnum(pick('shrub_density')),
     access: normalizedEnum(pick('access_difficulty')),
   };

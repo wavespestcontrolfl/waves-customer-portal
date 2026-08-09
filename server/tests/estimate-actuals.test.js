@@ -186,7 +186,7 @@ describe('buildActualsRow', () => {
       },
     });
     expect(JSON.parse(row.estimated).treeShrub).toEqual({
-      bedSqFt: 2000, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27,
+      bedSqFt: 2000, bedAreaSource: 'lot_based', bedAreaEstimated: true, treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27,
     });
     expect(JSON.parse(row.actual).treeShrub).toEqual({
       bedSqFt: 2400, palmCount: 8, treeCount: null, shrubDensity: 'heavy', access: 'easy', bedSqFtDeltaPct: 20,
@@ -209,10 +209,20 @@ describe('extractTreeShrubEstimate', () => {
       engineResult: {
         lineItems: [{ service: 'tree_shrub', bedArea: 1209, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 }],
       },
-    })).toEqual({ bedSqFt: 1209, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 });
+    })).toEqual({ bedSqFt: 1209, bedAreaSource: 'lot_based', bedAreaEstimated: true, treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 });
   });
 
-  it('falls back to the lossy admin mapping (tsMeta + selected tier + replay profile access)', () => {
+  it('a priced zero tree count survives as 0 — evidence, not a missing value', () => {
+    const extracted = extractTreeShrubEstimate({
+      engineResult: {
+        lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource: 'explicit', treeCount: 0, access: 'easy', tier: 'standard', onSiteMin: 25 }],
+      },
+    });
+    expect(extracted.treeCount).toBe(0);
+    expect(extracted.bedAreaEstimated).toBe(false);
+  });
+
+  it('falls back to the lossy admin mapping — the collapsed boolean is kept, the enum is NOT invented from it', () => {
     expect(extractTreeShrubEstimate({
       result: {
         results: {
@@ -222,7 +232,10 @@ describe('extractTreeShrubEstimate', () => {
       },
       engineRequest: { profile: { access: 'Moderate' } },
     })).toEqual({
-      bedSqFt: 2000, bedAreaSource: 'estimated', treeCount: 4,
+      // bedAreaIsEstimated=true means lot_based OR fallback; false means
+      // explicit OR operator-estimated — an enum built from it would corrupt
+      // calibration cohorts (pre-push P1).
+      bedSqFt: 2000, bedAreaSource: null, bedAreaEstimated: true, treeCount: 4,
       access: 'moderate', tier: 'enhanced', onSiteMin: null,
     });
   });
@@ -264,6 +277,15 @@ describe('extractTreeShrubActuals', () => {
         { type: 'tree_shrub', values: { palms_serviced: '6', shrub_density: 'Light' } },
       ],
     })).toEqual({ bedSqFt: null, palmCount: 6, treeCount: null, shrubDensity: 'light', access: null });
+  });
+
+  it('recorded zeros and comma-grouped measurements survive (pre-push P1s)', () => {
+    expect(extractTreeShrubActuals({
+      typedReportSnapshot: {
+        type: 'tree_shrub',
+        values: { bed_sqft_serviced: '12,400', palm_count_total: '0', tree_count_total: 0 },
+      },
+    })).toEqual({ bedSqFt: 12400, palmCount: 0, treeCount: 0, shrubDensity: null, access: null });
   });
 
   it('null when there is no T&S section or nothing was recorded', () => {
