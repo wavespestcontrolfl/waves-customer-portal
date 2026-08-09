@@ -24,6 +24,9 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The pre-delivery verdict check runs a short transaction on the same
+  // connection shape.
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   return mockDb;
 });
 jest.mock('../middleware/admin-auth', () => ({
@@ -107,7 +110,7 @@ function estimateRow(overrides = {}) {
 // finalize claim write succeeds).
 function makeBuilder(row) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'forUpdate', 'select', 'orderBy', 'limit']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(async () => row);
@@ -124,6 +127,7 @@ beforeEach(() => {
   db.mockImplementation(() => makeBuilder(estimateRow()));
   db.raw = jest.fn((expr) => expr);
   db.fn = { now: jest.fn(() => 'NOW()') };
+  db.transaction = jest.fn(async (fn) => fn(db));
   sendCustomerMessage.mockResolvedValue({ sent: true });
   smsTemplates.getTemplate.mockImplementation(async (_key, vars) => `SMS: ${vars.estimate_url}`);
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });

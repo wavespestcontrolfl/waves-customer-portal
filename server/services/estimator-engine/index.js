@@ -112,10 +112,16 @@ async function reconcileExistingDraftLinks(existing, context) {
         // Every STILL-SENDABLE or RESENDABLE status is in scope (codex
         // P0/P1, PR #3304 r13/r18): scheduled/send_failed can still
         // deliver, and sent/viewed rows support resend and keep live
-        // public-token access — archiving blocks all of it. Only mid-send
-        // ('sending') and money-bearing terminals (accepted/declined/
-        // expired) are exempt.
-        if (!fresh || !['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].includes(String(fresh.status || '').toLowerCase())) return;
+        // public-token access — archiving blocks all of it. A MID-SEND
+        // ('sending') row is marked+archived too (codex P0 r19) — its
+        // status stays untouched so the in-flight send's own terminal
+        // write can land, and sendEstimateNow's LOCKED pre-delivery
+        // verdict check serializes against this transaction and aborts
+        // when the marker committed first. Only money-bearing terminals
+        // (accepted/declined/expired) are exempt.
+        const freshStatus = String(fresh.status || '').toLowerCase();
+        const midSend = freshStatus === 'sending';
+        if (!fresh || !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshStatus)) return;
         const freshData = (() => {
           try {
             const data = typeof fresh.estimate_data === 'string'
@@ -205,9 +211,9 @@ async function reconcileExistingDraftLinks(existing, context) {
             // Scheduling is CANCELED atomically (codex P0, PR #3304 r14):
             // a 'scheduled' or 'send_failed' row returns to an inert
             // draft with no due time, so the cron can never claim the
-            // invalidated content even through a guard gap.
-            status: 'draft',
-            scheduled_at: null,
+            // invalidated content even through a guard gap. A mid-send
+            // row keeps its status — the send flow owns it (P0 r19).
+            ...(midSend ? {} : { status: 'draft', scheduled_at: null }),
             updated_at: new Date(),
           });
         if (freshLeadId) {
@@ -510,6 +516,49 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
+      // A POSITIVE identity conflict QUARANTINES the same-call draft
+      // (codex P0, PR #3304 r19): the prior draft may target the
+      // conflicting identity, and returning with only a review bell left
+      // it sendable with a live public token. Same marked-archive as the
+      // linkage invalidation, so every guard (unarchive 409, send claims,
+      // duplicate exclusion) applies; the audit reason rides along.
+      if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
+        try {
+          const conflicted = await existingDraftForCall(callLogId);
+          if (conflicted) {
+            await db.transaction(async (trx) => {
+              const fresh = await trx('estimates')
+                .where({ id: conflicted.id })
+                .forUpdate()
+                .first('id', 'status', 'archived_at', 'estimate_data');
+              if (!fresh) return;
+              const data = (() => {
+                try {
+                  const d = typeof fresh.estimate_data === 'string'
+                    ? JSON.parse(fresh.estimate_data) : (fresh.estimate_data || {});
+                  return d && typeof d === 'object' ? d : {};
+                } catch { return null; }
+              })();
+              if (!data || data.estimatorEngine?.linkage_invalidated_at) return;
+              data.estimatorEngine = {
+                ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+                linkage_invalidated_at: new Date().toISOString(),
+                identity_conflict: context.error,
+              };
+              const midSend = String(fresh.status || '').toLowerCase() === 'sending';
+              await trx('estimates').where({ id: conflicted.id }).update({
+                estimate_data: JSON.stringify(data),
+                archived_at: fresh.archived_at || new Date(),
+                ...(midSend ? {} : { status: 'draft', scheduled_at: null }),
+                updated_at: new Date(),
+              });
+            });
+            logger.info(`[estimator-engine] quarantined draft ${conflicted.id} on identity conflict (${context.error})`);
+          }
+        } catch (qErr) {
+          logger.warn(`[estimator-engine] identity-conflict quarantine failed (review bell still fires): ${qErr.message}`);
+        }
+      }
       if (!dryRun && context.call && quotePromised) {
         await notify({
           call: context.call,

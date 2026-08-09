@@ -119,14 +119,14 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('a mid-send or terminal status is never touched (sent/viewed now invalidate — they resend)', async () => {
+  test('a money-bearing terminal status is never touched (mid-send now MARKS; sent/viewed invalidate — they resend)', async () => {
     const existing = {
       id: 'est-1',
       estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
     };
     mockFreshEstimate = {
       id: 'est-1',
-      status: 'sending',
+      status: 'accepted',
       estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
     };
     const context = {

@@ -954,9 +954,15 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // archived (or marked invalidated) since the claim releases back to
   // send_failed and aborts before any provider call.
   {
-    const verdictRow = await db('estimates')
+    // FOR UPDATE inside a short transaction (codex P0, PR #3304 r19):
+    // this serializes against the reconciler's marking transaction — a
+    // marker committed first is always seen; a marker committing after
+    // this lock releases is a correction genuinely concurrent with
+    // delivery. The lock is NOT held across provider calls.
+    const verdictRow = await db.transaction((trx) => trx('estimates')
       .where({ id: estimate.id })
-      .first('archived_at', 'estimate_data');
+      .forUpdate()
+      .first('archived_at', 'estimate_data'));
     const invalidatedNow = (() => {
       if (!verdictRow) return true;
       if (verdictRow.archived_at) return true;
