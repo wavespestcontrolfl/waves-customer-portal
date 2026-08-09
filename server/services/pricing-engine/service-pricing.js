@@ -2812,11 +2812,17 @@ function priceTreeShrub(property, options = {}) {
   if (bedAreaCapped) {
     manualReviewReasonsSet.add('bed_area_cap_reached');
     const uncapped = bedAreaInfo.uncappedBedAreaEstimate;
-    warnings.push(
-      `Tree & Shrub bed area was clamped to the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
-      + (hasPositivePricingNumber(uncapped) ? ` from an estimated ${bedSqFtText(uncapped)}` : '')
-      + ' — this quote prices the capped area, so it is UNDER-priced until reviewed.',
-    );
+    // The capped FLAG is set at >= the cap, but Math.min only reduces above
+    // it — an inferred area of exactly 8,000 is flagged yet loses nothing.
+    // Only a genuine clamp may claim the quote is under-priced (codex P2);
+    // equality gets the ordinary at-cap review note.
+    const clampedDown = hasPositivePricingNumber(uncapped) && Number(uncapped) > BED_AREA_CAP;
+    warnings.push(clampedDown
+      ? `Tree & Shrub bed area was clamped to the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
+        + ` from an estimated ${bedSqFtText(uncapped)} — this quote prices the capped area,`
+        + ' so it is UNDER-priced until reviewed.'
+      : `Tree & Shrub bed area reached the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
+        + ' — nothing was clamped off, but confirm the measurement.');
   }
   if (bedArea >= BED_AREA_CAP) {
     manualReviewReasonsSet.add('bed_area_at_or_above_8000');

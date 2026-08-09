@@ -1500,10 +1500,21 @@ describe('Tree & Shrub prose warnings reach the operator review panel', () => {
     );
     // The capped warning names BOTH numbers and says plainly that the quote
     // is under-priced until reviewed.
-    const capWarning = est.pricingMetadata.warnings.find((w) => w.includes('clamped'));
+    const capWarning = est.pricingMetadata.warnings.find((w) => w.includes('was clamped'));
     expect(capWarning).toContain('8,000 sq ft');
     expect(capWarning).toContain('9,000 sq ft');
     expect(capWarning).toContain('UNDER-priced');
+  });
+
+  test('an area EXACTLY at the cap is flagged but never called under-priced (nothing was clamped off)', () => {
+    const est = gen({
+      homeSqFt: 2400, lotSqFt: 60000, estimatedBedAreaSf: 8000,
+      services: { treeShrub: { tier: 'standard' } },
+    });
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_cap_reached');
+    const warning = est.pricingMetadata.warnings.find((w) => w.includes('estimator cap'));
+    expect(warning).toContain('nothing was clamped off');
+    expect(warning).not.toContain('UNDER-priced');
   });
 
   test('an EXPLICIT oversized bed area is priced in full but still flagged for review', () => {
