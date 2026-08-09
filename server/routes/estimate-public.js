@@ -11711,6 +11711,16 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Same marker/claim rails as the select-tier and preferences writes
+      // (codex P0, PR #3304 GH r7b): this is a whole-blob estimate_data
+      // write from a pre-read, and the ms-truncated CAS below cannot
+      // exclude a same-millisecond delivery claim or pending invalidation
+      // — erasing either makes claim cleanup a no-op and leaves wrong-lead
+      // content publicly accessible and sendable.
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond

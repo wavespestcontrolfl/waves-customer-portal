@@ -9178,6 +9178,7 @@ const CallRecordingProcessor = {
     // assessment pre-draft hook below can sequence AFTER it (never a second
     // concurrent composer run for the same call).
     let estimatorEnginePromise = null;
+    let reconcileOnlyDraftLinksPending = false;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
@@ -9193,21 +9194,17 @@ const CallRecordingProcessor = {
           logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
         });
     } else {
-      // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this
-      // run is not an eligible drafting run — gate off, retry no longer
+      // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this run
+      // is not an eligible drafting run — gate off, retry no longer
       // quote-flavored, spam-classified — a linkage correction must still
       // invalidate any existing draft for this call, or the stale draft
       // keeps its old lead links and a live public token indefinitely.
-      // Corrects only; never creates. Fire-and-forget like the engine.
-      estimatorEnginePromise = (async () => {
-        try {
-          const { reconcileDraftLinksForCall } = require('./estimator-engine');
-          const outcome = await reconcileDraftLinksForCall(call.id);
-          if (outcome) logger.info(`[call-proc] reconcile-only draft-linkage pass for ${callSid}: ${outcome}`);
-        } catch (recErr) {
-          logger.warn(`[call-proc] reconcile-only draft-linkage pass failed (non-blocking): ${recErr.message}`);
-        }
-      })();
+      // It runs AFTER the token-fenced finalization (codex P0 GH r7b):
+      // this pass still holds processing_token here, and the fallback
+      // linkage context deliberately refuses a call with a live token, so
+      // firing now would silently no-op on exactly the transient-context
+      // case it exists for. See the post-finalization hook below.
+      reconcileOnlyDraftLinksPending = true;
     }
 
     // A customer-less recovery lead is the ONLY durable record for this call, so
@@ -12033,6 +12030,22 @@ const CallRecordingProcessor = {
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+    }
+
+    // Reconcile-only draft-linkage pass, AFTER the fenced finalization
+    // cleared processing_token (codex P0, PR #3304 GH r7b): the fallback
+    // context this pass may need refuses a call whose token is still held
+    // — running it earlier no-opped on the transient-context case. Fenced
+    // on `finalized` for the same reason zero-triage is: a peer that
+    // reclaimed the call owns the reconcile too. Never blocks the result.
+    if (finalized > 0 && reconcileOnlyDraftLinksPending) {
+      try {
+        const { reconcileDraftLinksForCall } = require('./estimator-engine');
+        const outcome = await reconcileDraftLinksForCall(call.id);
+        if (outcome) logger.info(`[call-proc] reconcile-only draft-linkage pass for ${callSid}: ${outcome}`);
+      } catch (recErr) {
+        logger.warn(`[call-proc] reconcile-only draft-linkage pass failed (non-blocking): ${recErr.message}`);
+      }
     }
 
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
