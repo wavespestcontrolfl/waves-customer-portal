@@ -6134,6 +6134,9 @@ const CallRecordingProcessor = {
         const { invalidateDraftForCall } = require('./estimator-engine');
         const invalidation = await invalidateDraftForCall(call.id, {
           reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
+          // Fenced on THIS pass's claim: a worker that lost its token must
+          // not invalidate a draft the replacement worker owns.
+          ownershipFence: { callLogId: call.id, procToken },
         });
         if (!invalidation.ok) {
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);

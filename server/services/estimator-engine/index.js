@@ -561,7 +561,7 @@ const CALL_ORIGIN = {
 // 409, send claims, duplicate exclusion) applies; the audit reason and the
 // lead unlink ride along. Money-bearing terminals get the marker only.
 // Never throws — the caller's review bell is the durable signal.
-async function invalidateDraftForCall(callLogId, { reason, identityConflict = false }) {
+async function invalidateDraftForCall(callLogId, { reason, identityConflict = false, ownershipFence = null }) {
   // EXPLICIT result, never a swallowed failure (codex P0, PR #3304 GH
   // r8c): callers finalized spam/voicemail processing — or reported an
   // identity-conflict draft as invalidated — while no marker or archive
@@ -652,15 +652,53 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           await trx('leads').where({ id: quarantinedLeadId, estimate_id: conflicted.id })
             .update({ estimate_id: null });
         }
+        // OWNERSHIP FENCE, last so the lock order stays estimates → leads
+        // → call_log (codex P0, PR #3304 GH r8c): the terminal caller can
+        // lose its processing_token before its own fenced write, and a
+        // stale worker must not invalidate a draft the REPLACEMENT worker
+        // legitimately owns — that would delete a valid public draft with
+        // no rebuild. Throwing rolls the whole invalidation back.
+        if (ownershipFence?.procToken) {
+          const owned = await trx('call_log')
+            .where({ id: ownershipFence.callLogId || callLogId })
+            .where('processing_token', ownershipFence.procToken)
+            .forUpdate()
+            .first('id');
+          if (!owned) {
+            const lost = new Error('processing claim lost before draft invalidation');
+            lost.ownershipLost = true;
+            throw lost;
+          }
+        }
       });
       logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
       return { ok: true, invalidated: true };
     }
     return { ok: true, invalidated: false };
   } catch (qErr) {
+    if (qErr.ownershipLost) {
+      // NOT a failure: a peer owns this call now and will re-decide.
+      logger.info(`[estimator-engine] draft invalidation for call ${callLogId} skipped — processing claim lost to a peer`);
+      return { ok: true, invalidated: false, ownershipLost: true };
+    }
     logger.error(`[estimator-engine] forced draft invalidation FAILED for call ${callLogId} (${reason}): ${qErr.message}`);
     return { ok: false, invalidated: false, error: qErr.message };
   }
+}
+
+// Bounded retry around the forced invalidation (codex P0, PR #3304 GH
+// r8c): the estimator runs detached, so a transient DB failure would
+// otherwise leave the wrong-identity or rejected draft live with no
+// scheduled retry. Three attempts; the operation is idempotent (it skips
+// an already-marked row), and the caller still fails closed if all miss.
+async function invalidateDraftForCallWithRetry(callLogId, options, attempts = 3) {
+  let last = { ok: false, invalidated: false, error: 'not_attempted' };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+     
+    last = await invalidateDraftForCall(callLogId, options);
+    if (last.ok) return last;
+  }
+  return last;
 }
 
 // existingDraftForCall's error-tolerant sibling for the paths where a
@@ -696,7 +734,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       // linkage invalidation, so every guard (unarchive 409, send claims,
       // duplicate exclusion) applies; the audit reason rides along.
       if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        quarantineOutcome = await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
+        quarantineOutcome = await invalidateDraftForCallWithRetry(callLogId, { reason: context.error, identityConflict: true });
       }
       if (!dryRun && context.call && quotePromised) {
         await notify({
@@ -811,6 +849,14 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     }
   } catch (err) {
     logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
+    // A failed identity QUARANTINE is not an ordinary engine error (codex
+    // P0, PR #3304 GH r8c): degrading it to a RED result would report the
+    // pass as handled while the wrong-identity draft and its bearer link
+    // stay public and sendable. Its own RED bell already fired inside the
+    // branch, so rethrow — the caller's failure path is the durable
+    // signal, and the next call pass re-quarantines through the
+    // reconcile-only entry (which now also runs on terminal verdicts).
+    if (err.quarantineFailed) throw err;
     result.lane = LANES.RED;
     result.reasons = [`engine error: ${err.message}`];
     if (!dryRun && context?.call && quotePromised) {
@@ -1339,7 +1385,7 @@ async function reconcileDraftLinksForCall(callLogId) {
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        const quarantine = await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
+        const quarantine = await invalidateDraftForCallWithRetry(callLogId, { reason: context.error, identityConflict: true });
         // REPLACE the stale bell (codex P1, PR #3304 GH r8): the operator
         // is otherwise left with the prior ready-to-send notification and
         // a link to the draft this pass just archived, with no visible
@@ -1419,7 +1465,7 @@ module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
   reconcileDraftLinksForCall,
-  invalidateDraftForCall,
+  invalidateDraftForCall: invalidateDraftForCallWithRetry,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,
