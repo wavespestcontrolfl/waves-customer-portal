@@ -278,6 +278,32 @@ exports.up = async function up(knex) {
 
   const inserted = { services: [], profiles: [], palm: null };
 
+  // Roll-forward after a rollback that RETAINED rows: down() deactivates
+  // referenced rows instead of deleting them and records them as
+  // `retained`. Without this, up() would see the keys exist and skip
+  // them, leaving the feature permanently off (codex r3 P1). Only rows
+  // whose UUID we recorded are touched — an admin-owned row of the same
+  // key is never reactivated.
+  let priorRetained = [];
+  if (await knex.schema.hasTable('system_settings')) {
+    const priorRow = await knex('system_settings').where({ key: STATE_KEY }).first();
+    if (priorRow) {
+      try { ({ retained: priorRetained = [] } = JSON.parse(priorRow.value)); } catch { priorRetained = []; }
+    }
+  }
+  for (const entry of priorRetained) {
+    if (!entry || !entry.id) continue;
+    const row = await knex('services').where({ id: entry.id, service_key: entry.key }).first();
+    if (!row) continue;
+    if (row.is_active !== false) {
+      console.log(`[reactivate-identities] ${entry.key}: previously retained row already active — no-op`);
+    } else {
+      await knex('services').where({ id: entry.id }).update({ is_active: true, is_archived: false });
+      console.log(`[reactivate-identities] ${entry.key}: reactivated previously retained row (${entry.id})`);
+    }
+    inserted.services.push({ key: entry.key, id: entry.id });
+  }
+
   // 1. Palm reactivation — record the exact prior values of ONLY the
   // fields changed, so down() restores them verbatim.
   const palm = await knex('services').where({ service_key: PALM_KEY }).first();
@@ -496,6 +522,15 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('system_settings')) {
-    await knex('system_settings').where({ key: STATE_KEY }).del();
+    // Retained rows keep their provenance so a later roll-forward can
+    // reactivate exactly the rows this migration created; a clean
+    // rollback (nothing retained) clears the record entirely.
+    const retained = state.services.filter((entry) => entry && retainedKeys.has(entry.key));
+    if (retained.length > 0) {
+      await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: [], palm: null, retained }) });
+      console.warn(`[reactivate-identities] down: recorded ${retained.length} retained row(s) for roll-forward reactivation`);
+    } else {
+      await knex('system_settings').where({ key: STATE_KEY }).del();
+    }
   }
 };

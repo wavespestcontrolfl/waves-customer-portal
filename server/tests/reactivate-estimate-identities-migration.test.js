@@ -242,6 +242,38 @@ describe('20260809000000 reactivation batch', () => {
     expect(svcRow(db, 'german_roach_initial')).toBeUndefined();
   });
 
+  test('down() then up() REACTIVATES a retained row — the feature comes back on redeploy', async () => {
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+    const roachId = svcRow(db, 'german_roach').id;
+    // A discount references the row, so rollback retains+deactivates it.
+    db.service_discount_rules.push({ id: 'sdr-1', service_key: 'german_roach' });
+
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db, 'german_roach')).toMatchObject({ id: roachId, is_active: false });
+
+    // Roll forward: the same row reactivates (not skipped as "exists").
+    await migration.up(fakeKnex(db));
+    expect(svcRow(db, 'german_roach')).toMatchObject({ id: roachId, is_active: true, is_archived: false });
+    // And it is owned again, so a second rollback still handles it.
+    expect(stateValue(db).services.map((e) => e.key)).toContain('german_roach');
+  });
+
+  test('roll-forward never reactivates an admin-owned row of the same key', async () => {
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+    db.service_discount_rules.push({ id: 'sdr-1', service_key: 'german_roach' });
+    await migration.down(fakeKnex(db));
+    // Admin deletes our retained row and creates their own, left inactive.
+    db.services = db.services.filter((r) => r.service_key !== 'german_roach');
+    db.services.push({ id: 'admin-roach', service_key: 'german_roach', name: 'Admin Roach', is_active: false });
+
+    await migration.up(fakeKnex(db));
+
+    // Untouched — their row, their posture.
+    expect(svcRow(db, 'german_roach')).toMatchObject({ id: 'admin-roach', is_active: false });
+  });
+
   test('names classify into their families through the shared detector', async () => {
     const db = seededDb();
     await migration.up(fakeKnex(db));
