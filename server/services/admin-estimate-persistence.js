@@ -289,7 +289,7 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false } =
   return null;
 }
 
-async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
+async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerProcToken = null } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
   if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
@@ -315,7 +315,14 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   // for a draft the earlier quote-flavored pass had legitimately created.
   // A settled REJECTION still blocks — via the resolution comparison
   // below, which finds no live lead — rather than via this gate.
-  if (callReprocessInFlight(callRow)) {
+  // The OWNING pass is not "someone else reprocessing" (codex P1, PR #3304
+  // GH r8e): the estimator engine is launched by the call processor while
+  // that pass still holds processing_token, so a composition finishing
+  // before finalization would otherwise have its own legitimate draft
+  // blocked — with no automatic retry, since the call finalizes as
+  // processed. A caller that owns the claim passes its token here.
+  const ownedByCaller = !!ownerProcToken && callRow.processing_token === ownerProcToken;
+  if (!ownedByCaller && callReprocessInFlight(callRow)) {
     return 'call_reprocessing_before_delivery';
   }
   const liveStamp = (() => {

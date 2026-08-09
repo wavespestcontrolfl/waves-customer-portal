@@ -903,7 +903,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           lead_id: context.lead.id,
           lead_linkage: context.leadLinkage,
           estimatorEngine: { callLogId: call.id },
-        }, { lockCallRow: true });
+        }, { lockCallRow: true, ownerProcToken: context.ownerProcToken || null });
         if (staleReason) {
           return {
             duplicateBlock: {

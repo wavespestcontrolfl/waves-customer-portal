@@ -732,6 +732,19 @@ async function markQuarantinePending(callLogId, reason) {
   }
 }
 
+// CAS clear of the EXACT marker processed (codex P0, PR #3304 GH r8e): a
+// peer can replace it between the scan and the clear, and dropping the
+// NEWER request would lose the only durable backstop for a concurrently
+// created wrong-identity or rejected-call draft.
+async function clearQuarantineMarker(callLogId, pending) {
+  return db('call_log').where({ id: callLogId })
+    .whereRaw("metadata->'estimator_quarantine_pending'->>'at' = ?", [String(pending?.at || '')])
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
+      updated_at: new Date(),
+    });
+}
+
 // Drains the queue above; runs from the scheduler's recovery pass. Each
 // success clears its marker, so the sweep is idempotent and self-limiting.
 async function sweepPendingQuarantines({ limit = 50 } = {}) {
@@ -755,24 +768,43 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       } catch { return null; }
     })();
     if (!pending?.reason) continue;
-     
+    // A queued retry is only valid while its VERDICT still stands (codex
+    // P0, PR #3304 GH r8e): a later reprocessing pass can legitimately
+    // re-qualify the call, and replaying the stale reason would archive
+    // every current draft — including the valid replacement — and then
+    // clear the queue. Defer while a pass is running; for a rejection,
+    // require the call to still be rejected; for an identity conflict,
+    // require the context to still report one.
+    const live = await db('call_log').where({ id: row.id })
+      .first('processing_token', 'processing_status', 'metadata');
+    if (!live) continue;
+    if (live.processing_token != null || String(live.processing_status || '').toLowerCase() === 'processing') continue;
+    const identityConflict = String(pending.reason).startsWith('email_');
+    if (!identityConflict) {
+      const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+      const stillRejected = await callRejectedForDrafting(db, row.id);
+      if (!stillRejected) {
+        await clearQuarantineMarker(row.id, pending);
+        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the call was re-qualified (${pending.reason})`);
+        continue;
+      }
+    } else {
+      const freshContext = await buildCallContext(row.id).catch(() => null);
+      const stillConflicted = ['email_matches_existing_customer', 'email_identity_conflict']
+        .includes(freshContext?.error);
+      if (freshContext && !stillConflicted) {
+        await clearQuarantineMarker(row.id, pending);
+        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
+        continue;
+      }
+    }
     const outcome = await invalidateDraftForCall(row.id, {
       reason: pending.reason,
-      identityConflict: String(pending.reason).startsWith('email_'),
+      identityConflict,
     });
     if (!outcome.ok) continue;
     try {
-       
-      // CAS on the EXACT marker processed (codex P0, PR #3304 GH r8e): a
-      // peer can replace it between the scan and here, and clearing the
-      // newer request would drop the only durable backstop for a
-      // concurrently created wrong-identity or rejected-call draft.
-      const clearedRows = await db('call_log').where({ id: row.id })
-        .whereRaw("metadata->'estimator_quarantine_pending'->>'at' = ?", [String(pending.at || '')])
-        .update({
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
-          updated_at: new Date(),
-        });
+      const clearedRows = await clearQuarantineMarker(row.id, pending);
       if (!clearedRows) continue;
       cleared += 1;
       logger.info(`[estimator-engine] drained a queued quarantine for call ${row.id} (${pending.reason})`);
@@ -817,11 +849,14 @@ async function strictExistingDraftForCall(callLogId) {
     .select('id', 'status', 'estimate_data');
 }
 
-async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true }) {
+async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
   try {
     context = await buildCallContext(callLogId);
+    // The caller's own processing claim rides the context so the creators'
+    // in-lock fences can tell it apart from a competing reprocess.
+    if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];

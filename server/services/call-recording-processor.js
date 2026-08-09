@@ -9223,7 +9223,14 @@ const CallRecordingProcessor = {
       // a drafting pass. The engine's own dedupe guards make re-entry safe
       // and it degrades to the fallback notification on any failure.
       const { maybeDraftEstimateForCall } = require('./estimator-engine');
-      estimatorEnginePromise = maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
+      estimatorEnginePromise = maybeDraftEstimateForCall({
+        callLogId: call.id,
+        quotePromised: callQuotePromised === true,
+        // THIS pass owns the claim while the engine composes — the
+        // creator's linkage fence must not read our own token as a
+        // competing reprocess (codex P1, PR #3304 GH r8e).
+        ownerProcToken: procToken,
+      })
         .then((engineOutcome) => {
           logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
         })
