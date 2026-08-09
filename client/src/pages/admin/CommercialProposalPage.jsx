@@ -380,7 +380,8 @@ export default function CommercialProposalPage() {
         filled += 1;
         monetaryFilled += 1;
       }
-      if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())) {
+      if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())
+        && !hasAuthoredBuildingLines) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
           label: w.label,
           amount: w.amount,
@@ -395,6 +396,12 @@ export default function CommercialProposalPage() {
         filled += 1;
       }
       if (filled > 0) {
+        // Taxable generated items need a rate beside them — fill the canonical
+        // FL commercial default only when the current rate is zero/unset
+        // (codex 1A-ii r3); the operator reviews it like everything else.
+        if (monetaryFilled > 0 && draft?.suggestedTaxRate && !(Number(live.taxRate) > 0)) {
+          setTaxRatePct(String(draft.suggestedTaxRate * 100));
+        }
         // Monetary sections were installed — the on-screen SYNTHESIZED
         // building lines describe the same charges and would double-count
         // on save (codex 1A-ii r2g). Authored/edited/persisted lines never
@@ -556,6 +563,16 @@ export default function CommercialProposalPage() {
         // synchronously, so formRef is committed before this continuation
         // runs.)
         const genAtSave = editGenRef.current;
+        // A program row with a name but no valid price/frequency would be
+        // FILTERED from the payload and silently deleted by the reload —
+        // surface the server's minimum-price rule instead (codex 1A-ii r3).
+        const incompleteProgram = formRef.current.programsState.find(
+          (row) => String(row.label || '').trim() && !programRowIsPriced(row),
+        );
+        if (incompleteProgram) {
+          setError(`Program “${incompleteProgram.label.trim()}” needs a per-application price of at least $0.01 and a whole-number frequency (1–52) — fix or remove it.`);
+          return false;
+        }
         const payload = buildPayload();
         if (payload.proposal.buildings.length === 0 && !(payload.proposal.programs || []).length
           && !(payload.proposal.correctiveWork || []).length) {

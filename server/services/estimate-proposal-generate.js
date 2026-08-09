@@ -29,6 +29,8 @@ const {
   visitsPerYearForRecurringService,
   estimateOneTimeItemsFromData,
   recurringLineAnnualAmount,
+  recurringServicesFromEstimateData,
+  resolveCommercialPrepayBaseRate,
 } = require('./estimate-converter');
 
 // Engine service key → proposal program family. Prefix/substring match on
@@ -221,18 +223,33 @@ function derivePrograms(estimateData, estimate = {}) {
   // r1b). Rows from either shape flow through the same representability
   // rules — a lineItems row without a provable cadence fails generation
   // with the actionable warning rather than silently derailing.
-  const rows = Array.isArray(engineResult.recurring?.services) && engineResult.recurring.services.length
-    ? engineResult.recurring.services
-    : (Array.isArray(engineResult.lineItems)
-      ? engineResult.lineItems.map((line) => ({
-        // Spread first so the canonical cadence resolver sees every
-        // persisted alias (appsPerYear/visits/apps/treatmentsPerYear).
-        ...line,
-        service: line.service ?? line.name,
-        name: line.displayName ?? line.name ?? line.service,
-        annualAfterDiscount: line.annualAfterDiscount ?? line.annual,
-      }))
-      : []);
+  // Canonical recurring collector (estimate-converter): coalesces every
+  // persisted container — recurring.services, result.recurring.services,
+  // result.results.recurring.services, filtered `services`, and the
+  // engine-result line items — deduped by service key (codex 1A-ii r2/r3:
+  // never a narrower parallel walk).
+  const canonicalRows = recurringServicesFromEstimateData(estimateData);
+  // MERGE (never either/or) with the raw engineResult.lineItems recurring
+  // rows the collector's own filter may not admit (e.g. rows priced only
+  // via annualAfterDiscount/manualFinalAnnual aliases) — deduped by service
+  // key so mixed shapes can't silently omit a priced service (codex 1A-ii
+  // r3c). One-time lineItems rows (no recurring evidence) stay out; they
+  // belong to deriveCorrectiveWork.
+  const canonicalKeys = new Set(canonicalRows.map((row) => String(row.service || row.name || '').toLowerCase()));
+  const extraLineItemRows = (Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [])
+    .map((line) => ({
+      // Spread first so the canonical cadence resolver sees every
+      // persisted alias (appsPerYear/visits/apps/treatmentsPerYear).
+      ...line,
+      service: line.service ?? line.name,
+      name: line.displayName ?? line.name ?? line.service,
+      annualAfterDiscount: line.annualAfterDiscount ?? line.annual,
+    }))
+    .filter((row) => !canonicalKeys.has(String(row.service || row.name || '').toLowerCase()))
+    .filter((row) => (visitsPerYearForRecurringService(row) > 0)
+      || (recurringLineAnnualAmount(row) > 0)
+      || row.manualFinalAnnual != null);
+  const rows = [...canonicalRows, ...extraLineItemRows];
   const programs = [];
   const unrepresentable = [];
   const fail = (reason) => ({
@@ -285,6 +302,18 @@ function derivePrograms(estimateData, estimate = {}) {
       continue;
     }
     const family = programFamilyForService(row.service || row.name);
+    // Legacy flat-monthly termite rows carry monthly AND per-visit fields
+    // with identical annual totals — the math can't prove the billing
+    // cadence, only an explicit billedPerApplication flag can (same
+    // ambiguity rule as AMBIGUOUS_CADENCE_SECTION_KEYS in the proposal
+    // model). A "$105 per application" program for a service that bills
+    // $35 flat monthly is a wrong promise (codex 1A-ii r3).
+    if (family === 'termite'
+      && (num(row.mo) > 0 || num(row.monthly) > 0)
+      && row.billedPerApplication !== true) {
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (termite billing cadence cannot be proven — flat-monthly vs per-application)`);
+      continue;
+    }
     programs.push({
       service: family,
       label: String(row.name || row.service || 'Recurring service').slice(0, 120),
@@ -358,10 +387,22 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // (codex 1A-ii r2).
   // Wrap the SELECTED engine result so the canonical extractor descends
   // into agent-draft engineResult shapes too (codex 1A-ii r2b).
-  const fromOneTime = estimateOneTimeItemsFromData({ result: engineResult });
-  const fromLineItems = Array.isArray(engineResult.lineItems)
-    ? engineResult.lineItems.filter((line) => num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0)
-    : [];
+  // collapseMirrored: same specialty row mirrored across containers
+  // collapses by content identity while LEGITIMATE repeated charges within
+  // one container are preserved (codex 1A-ii r3c).
+  const fromOneTime = estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true });
+  // A lineItems row is one-time when it carries NO recurring evidence (no
+  // cadence, no monthly/annual dollars) but IS priced — raw engine drafts
+  // persist bed-bug/exclusion work as `{ service, price }` without the
+  // legacy oneTimePrice alias (codex 1A-ii r3).
+  const lineItemsRows = Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [];
+  const fromLineItems = lineItemsRows.filter((line) => {
+    if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
+    const noRecurringEvidence = !(visitsPerYearForRecurringService(line) > 0)
+      && !(recurringLineAnnualAmount(line) > 0);
+    return noRecurringEvidence
+      && num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
+  });
   const work = [];
   const comped = [];
   // Mapped estimates persist specialty rows in BOTH oneTime.specItems and
@@ -369,11 +410,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // object identity only, so dedupe here by stable service+amount identity
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
-  const seenIdentity = new Set();
   for (const item of fromOneTime) {
-    const identity = `${String(item.service || item.name || item.label || '').toLowerCase()}|${num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total ?? item.installation?.price) ?? ''}`;
-    if (seenIdentity.has(identity)) continue;
-    seenIdentity.add(identity);
     // An EXPLICIT accepted zero is comped scope, not an unpriced row
     // (codex 1A-ii r2c) — fail rather than silently lose it.
     if (item.manualFinalOneTime === 0) {
@@ -398,11 +435,14 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
       comped.push(String(line.displayName || line.name || line.service || 'item'));
       continue;
     }
-    const amount = num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
+    const amount = num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
+      ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
     if (!(amount > 0)) continue;
-    const identity = `${String(line.service || line.name || '').toLowerCase()}|${amount}`;
-    if (seenIdentity.has(identity)) continue;
-    seenIdentity.add(identity);
+    // Skip rows the canonical containers already carried (same service +
+    // amount) — the raw lineItems mirror them for engine drafts.
+    const mirrored = fromOneTime.some((item) => String(item.service || item.name || '').toLowerCase() === String(line.service || line.name || '').toLowerCase()
+      && num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total ?? item.installation?.price) === amount);
+    if (mirrored) continue;
     work.push({
       label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
@@ -470,7 +510,7 @@ function deriveResponsibilities(programs) {
  * is null when the estimate carries no data to derive it from; the builder
  * fills only what came back and the operator edits before saving.
  */
-function deriveProposalDraft(estimate = {}) {
+async function deriveProposalDraft(estimate = {}, { database } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const { programs, warning } = derivePrograms(estimateData, estimate);
   const { correctiveWork, warning: oneTimeWarning } = deriveCorrectiveWork(estimateData, estimate);
@@ -480,11 +520,26 @@ function deriveProposalDraft(estimate = {}) {
   // totals without it (pre-push codex P0).
   const warnings = [warning, oneTimeWarning].filter(Boolean);
   const monetaryOk = warnings.length === 0;
+  const outPrograms = monetaryOk ? programs : null;
+  const outCorrective = monetaryOk ? correctiveWork : null;
+  // Taxable generated items need a tax rate beside them — a synthesized
+  // draft initializes the builder at 0%, and saving taxable programs at 0%
+  // silently undercharges (codex 1A-ii r3). Resolution goes through the
+  // CANONICAL customer tax mechanism (resolveCommercialPrepayBaseRate →
+  // TaxCalculator: verified exemptions return 0, county rates apply; the
+  // FL commercial default is its own documented pre-accept fallback) —
+  // never a hardcoded authoritative rate (codex 1A-ii r3b). The operator
+  // reviews/overrides it like every generated value.
+  const anyTaxable = [...(outPrograms || []), ...(outCorrective || [])].some((entry) => entry.taxable === true);
+  const suggestedTaxRate = anyTaxable
+    ? await resolveCommercialPrepayBaseRate(estimate.customer_id ?? estimate.customerId ?? null, { database })
+    : null;
   return {
     propertyScope: derivePropertyScope(estimateData),
-    programs: monetaryOk ? programs : null,
-    correctiveWork: monetaryOk ? correctiveWork : null,
-    customerResponsibilities: deriveResponsibilities(monetaryOk ? programs : null),
+    programs: outPrograms,
+    correctiveWork: outCorrective,
+    customerResponsibilities: deriveResponsibilities(outPrograms),
+    suggestedTaxRate,
     warnings,
   };
 }

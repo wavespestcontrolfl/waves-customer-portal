@@ -1920,7 +1920,7 @@ router.get('/:id/proposal/generated', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const { deriveProposalDraft } = require('../services/estimate-proposal-generate');
-    res.json({ draft: deriveProposalDraft(estimate) });
+    res.json({ draft: await deriveProposalDraft(estimate, { database: db }) });
   } catch (err) { next(err); }
 });
 
