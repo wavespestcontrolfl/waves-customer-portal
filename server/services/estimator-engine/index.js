@@ -165,7 +165,16 @@ async function reconcileExistingDraftLinks(existing, context) {
           };
         }
         await trx('estimates').where({ id: existing.id })
-          .update({ estimate_data: JSON.stringify(freshData), updated_at: new Date() });
+          .update({
+            estimate_data: JSON.stringify(freshData),
+            // An INVALIDATED draft is ARCHIVED atomically (codex P0, PR
+            // #3304 r9): it still carries the old recipient/address/
+            // pricing, so it must drop out of admin's sendable surface,
+            // and every duplicate guard already excludes archived rows —
+            // otherwise the stale draft would block its own rebuild.
+            ...(currentLeadId ? { archived_at: new Date() } : {}),
+            updated_at: new Date(),
+          });
         if (freshLeadId) {
           // Only if the OLD lead still points at this draft — a lead
           // relinked elsewhere is not ours to touch.
@@ -865,24 +874,32 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       return result;
     }
 
-    const draft = await createDraftEstimate({
+    let draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
       membershipSnapshot, priorQualifyingServices, origin,
     });
 
-    if (draft.blocked) {
-      result.blocked = true;
+    if (draft.blocked && !dryRun && context?.call?.id) {
       // The corrected retry can LOSE the insert race to a stale detached
       // composer (codex P1, PR #3304 r3): it passed existingDraftForCall
       // before the old run committed and lands here via the duplicate
-      // guard. Re-check now that the race is settled — when this call's
-      // draft exists, reconcile its links exactly as the short-circuit
-      // would have.
-      if (!dryRun && context?.call?.id) {
-        const lateExisting = await existingDraftForCall(context.call.id);
-        if (lateExisting) await reconcileExistingDraftLinks(lateExisting, context);
+      // guard. Reconcile now that the race is settled — and when the
+      // stale draft was INVALIDATED (archived), the blocker is gone:
+      // retry the creation ONCE so the corrected content actually lands
+      // this run instead of waiting for an external retry (codex P1 r9).
+      const lateExisting = await existingDraftForCall(context.call.id);
+      if (lateExisting && (await reconcileExistingDraftLinks(lateExisting, context)) === 'invalidated') {
+        draft = await createDraftEstimate({
+          intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
+          propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
+          membershipSnapshot, priorQualifyingServices, origin,
+        });
       }
+    }
+
+    if (draft.blocked) {
+      result.blocked = true;
       // Request-only + already-open estimate = nothing is owed and nothing
       // new exists — a "quote promised" bell here would mint a false task.
       if (quotePromised) {
