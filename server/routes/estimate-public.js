@@ -12315,8 +12315,15 @@ function estimateTreeShrubKnobSignal(estData = {}) {
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
   const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  if (!tsLine) return null; // no T&S on this estimate — inject nothing
-  const stamped = tsLine.pricingKnobs;
+  // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
+  // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
+  // source here — without it those quotes would replay off live knobs.
+  const tsMeta = result?.results?.tsMeta && typeof result.results.tsMeta === 'object'
+    ? result.results.tsMeta
+    : (estData?.result?.results?.tsMeta || null);
+  const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
+  if (!tsLine && !hasMappedTs) return null; // no T&S on this estimate — inject nothing
+  const stamped = (tsLine && tsLine.pricingKnobs) || (tsMeta && tsMeta.pricingKnobs);
   if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
   const pick = (key) => {
     const n = Number(stamped[key]);

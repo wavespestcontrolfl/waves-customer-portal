@@ -1349,3 +1349,41 @@ describe('Tree & Shrub v4.7 alternate-tier rows with palms + inferred trees', ()
     }
   });
 });
+
+describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', () => {
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+  });
+
+  test('mapV1ToLegacyShape carries pricingKnobs + palm inputs into tsMeta (admin V2 saves only this envelope)', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const estimate = generateEstimate({
+      homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000,
+      services: { treeShrub: { tier: 'standard', palmCount: 10 } },
+    });
+    const meta = mapV1ToLegacyShape(estimate).results.tsMeta;
+    expect(meta.pricingKnobs).toEqual({
+      densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 0,
+    });
+    expect(meta.palmCount).toBe(10);
+    expect(meta.palmCountSource).toBe('service_line');
+  });
+
+  test('the replay signal reads the mapped stamp, and mapped T&S with no stamp replays NEUTRAL', () => {
+    const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
+    expect(signal({
+      result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+    // Mapped legacy T&S estimate saved before the knobs existed.
+    expect(signal({ result: { results: { tsMeta: { eb: 2000, et: 3 } } } })).toEqual({
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+    });
+    expect(signal({ result: { results: { ts: [{ tier: 'standard', ann: 600 }] } } })).toEqual({
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+    });
+    // No T&S anywhere → inject nothing.
+    expect(signal({ result: { results: { pest: {} } } })).toBeNull();
+  });
+});

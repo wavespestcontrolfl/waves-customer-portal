@@ -556,6 +556,17 @@ function mapV1ToLegacyShape(v1Result) {
       belowMarginFloor: tsLI.belowMarginFloor === true,
       belowProgramFloor: tsLI.belowProgramFloor === true,
       finalMargin: tsLI.finalMargin ?? null,
+      // v4.7 quote-time knob snapshot. Admin V2 persists ONLY this mapped
+      // envelope (no raw lineItems), so without carrying the stamp here a
+      // public view/accept replay would re-price an already-sent admin
+      // quote off whatever the knobs say today
+      // (estimate-public#estimateTreeShrubKnobSignal reads it back).
+      pricingKnobs: tsLI.pricingKnobs || null,
+      // Palm inputs the replay needs to reprice the SAME job (eb/et cover
+      // beds and trees only).
+      palmCount: tsLI.palmCount ?? 0,
+      palmCountSource: tsLI.palmCountSource || 'none',
+      treeCountSource: tsLI.treeCountSource || null,
     };
   }
 
