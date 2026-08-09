@@ -1299,3 +1299,53 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     expect(signal({ result: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
   });
 });
+
+describe('Tree & Shrub v4.7 alternate-tier rows with palms + inferred trees', () => {
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+  });
+
+  const legacyRows = (estimate) => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    return mapV1ToLegacyShape(estimate).results.ts;
+  };
+
+  test('PROPERTY palms + treeDensity: every tier row matches its direct price (pre-push P0 r13)', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const property = { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, treeDensity: 'moderate', palmCount: 10 };
+    const estimate = generateEstimate({ ...property, services: { treeShrub: { tier: 'standard' } } });
+    for (const row of legacyRows(estimate)) {
+      const direct = priceTreeShrub(property, { tier: row.tier });
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
+
+  test('SERVICE-LINE palms + treeDensity: every tier row matches its direct price', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const property = { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, treeDensity: 'moderate' };
+    const estimate = generateEstimate({ ...property, services: { treeShrub: { tier: 'standard', palmCount: 10 } } });
+    for (const row of legacyRows(estimate)) {
+      const direct = priceTreeShrub(property, { tier: row.tier, palmCount: 10 });
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
+
+  test('UNARMED with service-line palms + treeDensity: tier rows still match (the neutral fold)', () => {
+    const property = { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, treeDensity: 'moderate' };
+    const estimate = generateEstimate({ ...property, services: { treeShrub: { tier: 'standard', palmCount: 10 } } });
+    for (const row of legacyRows(estimate)) {
+      const direct = priceTreeShrub(property, { tier: row.tier, palmCount: 10 });
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
+
+  test('a caller-STATED tree count still replays as explicit across tier rows', () => {
+    const property = { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, treeDensity: 'moderate' };
+    const estimate = generateEstimate({ ...property, services: { treeShrub: { tier: 'standard', treeCount: 4 } } });
+    for (const row of legacyRows(estimate)) {
+      const direct = priceTreeShrub(property, { tier: row.tier, treeCount: 4 });
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
+});

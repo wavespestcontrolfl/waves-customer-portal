@@ -79,8 +79,17 @@ function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
       // No synthetic 0 (v4.6): when no count exists anywhere, leave it
       // undefined so priceTreeShrub can run its treeDensity fallback instead
       // of pricing the per-tree material term as zero trees.
-      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount,
-      // v4.7: the palm count the selected-tier quote priced must reach the
+      // v4.7: an INFERRED count must not be replayed as if the caller had
+      // stated it — priceTreeShrub suppresses density-inferred trees when
+      // palms are priced (they may be the same plants), and passing the
+      // resolved number here would defeat that de-duplication and charge
+      // the trees alongside the palm reserve. Omit it so the pricer
+      // re-infers from treeDensity and de-dups exactly as it did for the
+      // selected tier.
+      treeCount: treeShrubTreeCountIsInferred(tsLI)
+        ? undefined
+        : (tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount),
+      // The palm count the selected-tier quote priced must reach the
       // alternate-tier rows too — those rows drive displayed, accepted, and
       // billed cadence changes, so a zero-palm recalculation would quote a
       // different job than the one selected.
@@ -90,11 +99,18 @@ function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
   };
 }
 
+// A density-derived count is a pricer INFERENCE, not caller-stated signal.
+function treeShrubTreeCountIsInferred(tsLI = {}) {
+  return tsLI.treeCountSource === 'density_estimate';
+}
+
 function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') {
   const quote = priceTreeShrub(treeShrubQuoteInput(v1Result, tsLI), {
     tier,
     access: tsLI.access || 'easy',
-    treeCount: tsLI.treeCount,
+    // Inferred counts stay inferred (see treeShrubQuoteInput) so the
+    // pricer's palm/tree de-duplication behaves identically here.
+    treeCount: treeShrubTreeCountIsInferred(tsLI) ? undefined : tsLI.treeCount,
     // Preserve the service-line palm source: palmCountSource decides
     // whether palms fold into the legacy tree terms, so passing them as a
     // property-level value instead would silently reprice the row.
