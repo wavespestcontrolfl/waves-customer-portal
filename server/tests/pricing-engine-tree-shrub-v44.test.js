@@ -264,7 +264,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     const quote = priceTreeShrub({ bedArea: 8000 }, { tier: 'standard' });
 
     expect(quote.requiresManualReview).toBe(true);
-    expect(quote.warnings).toContain('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+    expect(quote.warnings.some((w) => w.includes('estimator cap'))).toBe(true);
   });
 
   test('6-visit standard is the mandated default recommendation regardless of property signals', () => {
@@ -1474,5 +1474,77 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
     expect(treeShrubKnobSignalForReplay({
       engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } }] },
     })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+  });
+});
+
+describe('Tree & Shrub prose warnings reach the operator review panel', () => {
+  // The reason TOKENS were already hoisted (§6b). What never reached the
+  // admin "Pricing Review Notes" box was each pricer's prose sentence, so
+  // the operator saw "Bed area cap reached" with no explanation and no
+  // number — on a quote whose bed area had been silently clamped.
+  const { generateEstimate: gen } = require('../services/pricing-engine');
+
+  test('an ESTIMATED bed area above the cap is clamped and both the reason and the prose warning surface', () => {
+    const est = gen({
+      homeSqFt: 2400,
+      lotSqFt: 60000,
+      estimatedBedAreaSf: 9000,
+      services: { treeShrub: { tier: 'standard' } },
+    });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(8000);
+    expect(ts.bedAreaCapped).toBe(true);
+    expect(ts.uncappedBedAreaEstimate).toBe(9000);
+    expect(est.pricingMetadata.manualReviewReasons).toEqual(
+      expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
+    );
+    // The capped warning names BOTH numbers and says plainly that the quote
+    // is under-priced until reviewed.
+    const capWarning = est.pricingMetadata.warnings.find((w) => w.includes('was clamped'));
+    expect(capWarning).toContain('8,000 sq ft');
+    expect(capWarning).toContain('9,000 sq ft');
+    expect(capWarning).toContain('UNDER-priced');
+  });
+
+  test('an area EXACTLY at the cap is flagged but never called under-priced (nothing was clamped off)', () => {
+    const est = gen({
+      homeSqFt: 2400, lotSqFt: 60000, estimatedBedAreaSf: 8000,
+      services: { treeShrub: { tier: 'standard' } },
+    });
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_cap_reached');
+    const warning = est.pricingMetadata.warnings.find((w) => w.includes('estimator cap'));
+    expect(warning).toContain('nothing was clamped off');
+    expect(warning).not.toContain('UNDER-priced');
+  });
+
+  test('an EXPLICIT oversized bed area is priced in full but still flagged for review', () => {
+    const est = gen({ homeSqFt: 2400, lotSqFt: 60000, bedArea: 14000, services: { treeShrub: { tier: 'standard' } } });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(14000); // a measurement is never silently clamped
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    // Distinct copy: nothing was clamped here, so the operator must not be
+    // sent hunting for a clamp that never happened.
+    const warning = est.pricingMetadata.warnings.find((w) => w.includes('14,000 sq ft'));
+    expect(warning).toContain('priced IN FULL');
+    // It must not claim a clamp happened ("never clamped" is the explanation).
+    expect(warning).not.toContain('was clamped');
+  });
+
+  test('the missing-bed-area fallback and high plant counts surface too', () => {
+    const fallback = gen({ homeSqFt: 2400, services: { treeShrub: { tier: 'standard' } } });
+    expect(fallback.pricingMetadata.manualReviewReasons).toContain('missing_bed_area_fallback');
+
+    const manyPlants = gen({
+      homeSqFt: 2400, lotSqFt: 9000, bedArea: 2000,
+      services: { treeShrub: { tier: 'standard', treeCount: 20 } },
+    });
+    expect(manyPlants.pricingMetadata.manualReviewReasons).toContain('tree_count_at_or_above_15');
+  });
+
+  test('a clean quote adds nothing — the panel stays quiet', () => {
+    const est = gen({ homeSqFt: 2400, lotSqFt: 9000, bedArea: 2000, services: { treeShrub: { tier: 'standard', treeCount: 3 } } });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.manualReviewReasons).toEqual([]);
+    expect(est.pricingMetadata.manualReviewReasons).toEqual([]);
   });
 });

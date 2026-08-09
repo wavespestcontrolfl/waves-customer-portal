@@ -2192,6 +2192,13 @@ function generateEstimate(input) {
   // slicing). Surfacing metadata only — accept gating is unchanged.
   lineItems.forEach((item) => {
     (item.manualReviewReasons || []).forEach(addManualReviewReason);
+    // The reason TOKENS hoisted above render as humanized labels ("Bed area
+    // cap reached"). Each pricer also writes a prose sentence for this exact
+    // reader — "Tree & Shrub bed area hit the estimator cap; manual review
+    // recommended." — and those stayed on the line item, so the operator saw
+    // the label without the explanation or the number behind it. Same
+    // metadata-only surfacing, same box.
+    (item.warnings || []).forEach(addRoutingWarning);
   });
 
   // ── 7. Validate margins ────────────────────────────────────
