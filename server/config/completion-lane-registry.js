@@ -85,6 +85,11 @@ const BILLING_RIDER_KEYS = [
   'termite_bond_1yr',
   'termite_bond_5yr',
   'termite_bond_10yr',
+  // Estimate-gap batch (20260808080000): the rodent guarantee renewal is
+  // payment-only — EstimateViewPage explicitly says there is no visit to
+  // schedule. Its profile ships in the enforced internal_only/disabled
+  // posture directly.
+  'rodent_guarantee',
 ];
 
 // Recurring programs whose GENERIC Service Report V1 is the decided lane —
@@ -128,17 +133,18 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   // follow-up now derives from the profile on untyped completions).
   'bed_bug_treatment',
   // Estimate-gap batch (owner-directed 2026-08-08, migration
-  // 20260808080000). The three mechanical lawn add-ons stay generic
-  // because one_time_lawn_treatment's work_completed choices only
-  // describe fertilizer/pesticide/amendment/inspection work — a tech
-  // could not truthfully record dethatching on that form, and the report
-  // auto-sends. Repoint via CUTOVER_IN_FLIGHT_KEYS if the lawn schema
-  // gains mechanical actions. rodent_guarantee is a guarantee program,
-  // not a treatment — generic is its decided lane.
+  // 20260808080000), all generic for the same truthfulness rule (the
+  // report auto-sends, so the form must be able to record what actually
+  // happened): the three mechanical lawn add-ons have no truthful choices
+  // on one_time_lawn_treatment (fertilizer/pesticide/amendment/inspection
+  // only), and bora_care's advertised beetle/wood-decay-fungi targets
+  // don't exist in termite_treatment's required target_termite options.
+  // Repoint via CUTOVER_IN_FLIGHT_KEYS when the lawn schema gains
+  // mechanical actions / the termite form gains the WDO target list.
   'dethatching',
   'plugging',
   'top_dressing',
-  'rodent_guarantee',
+  'bora_care',
 ];
 
 // Registered typed findings schemas — a typed pointer that isn't a real

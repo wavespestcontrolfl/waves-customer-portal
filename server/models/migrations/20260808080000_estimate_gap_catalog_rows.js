@@ -33,11 +33,14 @@
  *  - booking_enabled false everywhere EXCEPT bora_care, which the public
  *    booking picker already offers today (parity, not policy — the
  *    picker-reads-catalog cutover is phase 3).
- *  - Completion profiles reuse ONLY project_type values live in prod:
- *    termite_treatment (bora), one_time_lawn_treatment (lawn add-ons),
- *    rodent_exclusion (mesh + bird boxes — they are exclusion hardware),
- *    and NULL for rodent_guarantee (generic typed report, the live
- *    bed_bug/tick posture) with the estate-wide
+ *  - Completion profiles reuse ONLY postures live in prod:
+ *    rodent_exclusion typed (mesh + bird boxes — exclusion hardware);
+ *    GENERIC (NULL pointer, the live bed_bug/tick posture) for bora_care
+ *    and the three mechanical lawn add-ons — in each case the candidate
+ *    typed form cannot truthfully record the work (see PROFILE_TYPES);
+ *    and the enforced billing-rider posture (internal_only/disabled,
+ *    20260712400000) for rodent_guarantee, whose renewal is
+ *    payment-only. Everything else ships the estate-wide
  *    service_report/auto_send/token_only/recurring_customer posture.
  *
  * Self-healing + reversible, same contract as 20260808070000: skips
@@ -263,15 +266,20 @@ const SERVICES = [
 ];
 
 // key → completion profile project_type (NULL = generic typed report,
-// the live bed_bug/tick posture). The three mechanical lawn add-ons stay
-// GENERIC deliberately: one_time_lawn_treatment's work_completed choices
-// only describe fertilizer/pesticide/micronutrient/amendment/inspection
-// work — a tech could not truthfully record dethatching or top dressing
-// on that form, and the report auto-sends (codex P1; extending the lawn
-// schema with mechanical actions is queued as its own coordinated
-// change).
+// the live bed_bug/tick posture). Generic-on-purpose keys, all for the
+// same truthfulness rule (a tech must be able to record what actually
+// happened on a form that auto-sends):
+//  - dethatching/plugging/top_dressing: one_time_lawn_treatment's
+//    work_completed choices only describe fertilizer/pesticide/
+//    amendment/inspection work, never mechanical work.
+//  - bora_care: termite_treatment's required target_termite field offers
+//    only termite species + 'Unknown / preventive' — a Bora-Care job
+//    sold for wood-boring beetles or wood-decay fungi (both advertised)
+//    could not be recorded truthfully (codex r3 P1; extending the
+//    termite form's targets to the WDO list is queued as its own
+//    coordinated change).
 const PROFILE_TYPES = {
-  bora_care: 'termite_treatment',
+  bora_care: null,
   dethatching: null,
   plugging: null,
   top_dressing: null,
@@ -279,6 +287,15 @@ const PROFILE_TYPES = {
   rodent_bird_box: 'rodent_exclusion',
   rodent_guarantee: null,
 };
+
+// Billing artifacts, not field work: the guarantee renewal flow is
+// payment-only (EstimateViewPage says outright there is no visit to
+// schedule), so its profile takes the enforced billing-rider posture from
+// 20260712400000 — completion_mode 'internal_only', no pointer,
+// delivery_mode 'disabled': no public report token, completion comms
+// suppressed, the service_records audit row still written, billing
+// untouched (codex r3 P2).
+const BILLING_RIDER_PROFILE_KEYS = new Set(['rodent_guarantee']);
 
 const STATE_KEY = 'migration.20260808080000.state';
 const PROFILE_MARKER = '[estimate_gap_catalog_action=inserted]';
@@ -366,14 +383,15 @@ exports.up = async function up(knex) {
     const followupDays = service.requires_follow_up
       ? (Number(service.follow_up_interval_days) || 14)
       : null;
+    const isBillingRider = BILLING_RIDER_PROFILE_KEYS.has(svc.service_key);
     await knex('service_completion_profiles').insert({
       service_key: svc.service_key,
       service_name_snapshot: service.name,
       category: service.category,
       billing_type: service.billing_type || 'one_time',
-      completion_mode: 'service_report',
-      project_type: PROFILE_TYPES[svc.service_key] ?? null,
-      delivery_mode: 'auto_send',
+      completion_mode: isBillingRider ? 'internal_only' : 'service_report',
+      project_type: isBillingRider ? null : (PROFILE_TYPES[svc.service_key] ?? null),
+      delivery_mode: isBillingRider ? 'disabled' : 'auto_send',
       creates_service_record: true,
       // Estate-wide live posture (every one-time sibling verified in prod
       // 2026-08-08): token_only + recurring_customer.
@@ -385,7 +403,7 @@ exports.up = async function up(knex) {
       notes: PROFILE_MARKER,
     });
     inserted.profiles.push(svc.service_key);
-    console.log(`[estimate-gap-catalog] ${svc.service_key}: profile inserted → service_report/${PROFILE_TYPES[svc.service_key] || 'generic'}/auto_send`);
+    console.log(`[estimate-gap-catalog] ${svc.service_key}: profile inserted → ${isBillingRider ? 'internal_only (billing rider)' : `service_report/${PROFILE_TYPES[svc.service_key] || 'generic'}/auto_send`}`);
   }
 
   await recordState(knex, inserted);
@@ -438,6 +456,21 @@ exports.down = async function down(knex) {
     }
     if (await knex.schema.hasTable('service_records')) {
       refs += (await knex('service_records').where({ service_id: entry.id }).pluck('service_id')).length;
+    }
+    // Name-only references count too (codex r3 P1): name-only scheduling
+    // is explicitly supported by this change — an unlinked visit or
+    // scheduled add-on carrying the exact catalog name resolves its typed
+    // profile through the name fallback, and deleting the row would
+    // demote it to generic. Same text-reference principle as
+    // service-library getServiceReferences.
+    const row = await knex('services').where({ id: entry.id }).first();
+    if (row && row.name) {
+      if (await knex.schema.hasTable('scheduled_services')) {
+        refs += (await knex('scheduled_services').whereRaw('lower(service_type) = lower(?)', [row.name]).pluck('id')).length;
+      }
+      if (await knex.schema.hasTable('scheduled_service_addons')) {
+        refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [row.name]).pluck('id')).length;
+      }
     }
     if (refs > 0) {
       // The SERVICE row deactivates (stops being offered — the rollback's

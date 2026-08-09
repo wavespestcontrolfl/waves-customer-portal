@@ -101,13 +101,17 @@ describe('20260808080000 estimate-gap catalog rows', () => {
         is_waveguard: false,
         booking_enabled: key === 'bora_care',
       });
-      expect(profileRow(db, key)).toMatchObject({
-        completion_mode: 'service_report',
-        delivery_mode: 'auto_send',
-        portal_visibility: 'token_only',
-        portal_attach_policy: 'recurring_customer',
-        active: true,
-      });
+      expect(profileRow(db, key)).toMatchObject(key === 'rodent_guarantee'
+        // Payment-only billing rider: the enforced 20260712400000 posture —
+        // no report token, completion comms suppressed, billing untouched.
+        ? { completion_mode: 'internal_only', project_type: null, delivery_mode: 'disabled', active: true }
+        : {
+          completion_mode: 'service_report',
+          delivery_mode: 'auto_send',
+          portal_visibility: 'token_only',
+          portal_attach_policy: 'recurring_customer',
+          active: true,
+        });
     }
     const state = stateValue(db);
     expect(state.services.map((s) => s.key).sort()).toEqual([...ALL_KEYS].sort());
@@ -137,15 +141,18 @@ describe('20260808080000 estimate-gap catalog rows', () => {
     await migration.up(fakeKnex(db));
 
     const expected = {
-      'Bora-Care Wood Treatment': { serviceKey: 'bora_care', findingsType: 'termite_treatment' },
-      // Mechanical lawn work reports GENERIC on purpose: the
-      // one_time_lawn_treatment form has no truthful mechanical choices.
-      'Lawn Dethatching': { serviceKey: 'dethatching', findingsType: null },
-      'Lawn Plugging': { serviceKey: 'plugging', findingsType: null },
-      'Lawn Top Dressing': { serviceKey: 'top_dressing', findingsType: null },
-      'Rodent Wire Mesh Exclusion': { serviceKey: 'rodent_wire_mesh', findingsType: 'rodent_exclusion' },
-      'Roof-entry cover / bird box': { serviceKey: 'rodent_bird_box', findingsType: 'rodent_exclusion' },
-      'Rodent Guarantee': { serviceKey: 'rodent_guarantee', findingsType: null },
+      // Generic on purpose (registry ONE_TIME_GENERIC_BY_DESIGN): the
+      // typed lawn form has no truthful mechanical choices, and the
+      // termite form's target options can't record Bora-Care's advertised
+      // beetle/fungi targets.
+      'Bora-Care Wood Treatment': { serviceKey: 'bora_care', findingsType: null, mode: 'service_report' },
+      'Lawn Dethatching': { serviceKey: 'dethatching', findingsType: null, mode: 'service_report' },
+      'Lawn Plugging': { serviceKey: 'plugging', findingsType: null, mode: 'service_report' },
+      'Lawn Top Dressing': { serviceKey: 'top_dressing', findingsType: null, mode: 'service_report' },
+      'Rodent Wire Mesh Exclusion': { serviceKey: 'rodent_wire_mesh', findingsType: 'rodent_exclusion', mode: 'service_report' },
+      'Roof-entry cover / bird box': { serviceKey: 'rodent_bird_box', findingsType: 'rodent_exclusion', mode: 'service_report' },
+      // Billing rider: payment-only renewal, no report, no comms.
+      'Rodent Guarantee': { serviceKey: 'rodent_guarantee', findingsType: null, mode: 'internal_only' },
     };
     for (const [label, want] of Object.entries(expected)) {
       const resolved = await resolveCompletionProfileForScheduledService(
@@ -153,8 +160,26 @@ describe('20260808080000 estimate-gap catalog rows', () => {
         fakeKnex(db),
       );
       expect({ label, serviceKey: resolved.serviceKey, findingsType: resolved.findingsType, mode: resolved.completionMode })
-        .toEqual({ label, serviceKey: want.serviceKey, findingsType: want.findingsType, mode: 'service_report' });
+        .toEqual({ label, ...want });
     }
+  });
+
+  test('down() retains a service referenced only by a NAME-ONLY visit — unlinked scheduling is first-class', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    // No service_id anywhere — the visit and the scheduled add-on carry
+    // only the exact catalog names (codex r3 P1).
+    db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'Bora-Care Wood Treatment' });
+    db.scheduled_service_addons.push({ id: 'ssa-1', service_id: null, service_name: 'Rodent Wire Mesh Exclusion' });
+
+    await migration.down(fakeKnex(db));
+
+    for (const key of ['bora_care', 'rodent_wire_mesh']) {
+      expect(svcRow(db, key)).toMatchObject({ is_active: false });
+      expect(profileRow(db, key)).toMatchObject({ active: true });
+    }
+    // The five unreferenced rows are gone.
+    expect(db.services).toHaveLength(2);
   });
 
   test('every catalog name classifies into its own family — including the tokenless bird box (new rodent tokens)', async () => {
