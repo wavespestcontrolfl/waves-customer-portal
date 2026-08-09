@@ -19,7 +19,10 @@ const {
   reconcileEstimateActuals,
   runEstimateActualsReconcile,
   varianceSummary,
-  _private: { actualDurationMinutes, buildActualsRow, deltaPct, extractEstimateProfile },
+  _private: {
+    actualDurationMinutes, buildActualsRow, deltaPct, extractEstimateProfile,
+    extractTreeShrubEstimate, extractTreeShrubActuals,
+  },
 } = require('../services/estimate-actuals');
 
 afterEach(() => {
@@ -155,6 +158,121 @@ describe('buildActualsRow', () => {
     expect(row.turf_delta_pct).toBeNull();
     expect(row.duration_delta_pct).toBe(25);
     expect(JSON.parse(row.actual).treatedSqft).toBeNull();
+  });
+
+  it('attaches the T&S calibration block with its own bed delta when both sides exist', () => {
+    const row = buildActualsRow({
+      ...baseInputs,
+      serviceRecord: {
+        ...baseInputs.serviceRecord,
+        service_line: 'tree_shrub',
+        service_data: JSON.stringify({
+          typedReportSnapshot: {
+            type: 'tree_shrub',
+            values: { bed_sqft_serviced: '2400', palm_count_total: '8', shrub_density: 'Heavy', access_difficulty: 'Easy' },
+          },
+        }),
+      },
+      estimate: {
+        id: 'est-1',
+        estimate_data: {
+          engineResult: {
+            lineItems: [
+              { service: 'pest_control', monthly: 60 },
+              { service: 'tree_shrub', bedAreaUsed: 2000, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 },
+            ],
+          },
+        },
+      },
+    });
+    expect(JSON.parse(row.estimated).treeShrub).toEqual({
+      bedSqFt: 2000, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27,
+    });
+    expect(JSON.parse(row.actual).treeShrub).toEqual({
+      bedSqFt: 2400, palmCount: 8, treeCount: null, shrubDensity: 'heavy', access: 'easy', bedSqFtDeltaPct: 20,
+    });
+    // The scalar columns stay lawn/pest-shaped — the bed delta lives only
+    // inside the block (this estimate carries no turf profile at all).
+    expect(row.turf_delta_pct).toBeNull();
+  });
+
+  it('non-T&S rows are byte-identical to the pre-lane shape (no empty blocks)', () => {
+    const row = buildActualsRow(baseInputs);
+    expect(JSON.parse(row.estimated).treeShrub).toBeUndefined();
+    expect(JSON.parse(row.actual).treeShrub).toBeUndefined();
+  });
+});
+
+describe('extractTreeShrubEstimate', () => {
+  it('reads the full engine quote from agent/IB drafts (engineResult.lineItems)', () => {
+    expect(extractTreeShrubEstimate({
+      engineResult: {
+        lineItems: [{ service: 'tree_shrub', bedArea: 1209, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 }],
+      },
+    })).toEqual({ bedSqFt: 1209, bedAreaSource: 'lot_based', treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27 });
+  });
+
+  it('falls back to the lossy admin mapping (tsMeta + selected tier + replay profile access)', () => {
+    expect(extractTreeShrubEstimate({
+      result: {
+        results: {
+          tsMeta: { eb: 2000, et: 4, bedAreaIsEstimated: true },
+          ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }],
+        },
+      },
+      engineRequest: { profile: { access: 'Moderate' } },
+    })).toEqual({
+      bedSqFt: 2000, bedAreaSource: 'estimated', treeCount: 4,
+      access: 'moderate', tier: 'enhanced', onSiteMin: null,
+    });
+  });
+
+  it('null when the estimate priced no T&S line', () => {
+    expect(extractTreeShrubEstimate(null)).toBeNull();
+    expect(extractTreeShrubEstimate({})).toBeNull();
+    expect(extractTreeShrubEstimate({ engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
+    // Quote-wizard/lead drafts whitelist away every T&S field — no block,
+    // not a block of nulls.
+    expect(extractTreeShrubEstimate({ engineResult: { lineItems: [{ service: 'tree_shrub', monthly: 49 }] } })).toBeNull();
+  });
+});
+
+describe('extractTreeShrubActuals', () => {
+  it('reads internal calibration fields from the primary typed snapshot (string or object jsonb)', () => {
+    const data = {
+      typedReportSnapshot: {
+        type: 'tree_shrub',
+        values: {
+          plant_groups: 'Palms,Shrubs',
+          bed_sqft_serviced: '2400',
+          palm_count_total: '12',
+          tree_count_total: '2',
+          shrub_density: 'Moderate',
+          access_difficulty: 'Difficult',
+        },
+      },
+    };
+    const expected = { bedSqFt: 2400, palmCount: 12, treeCount: 2, shrubDensity: 'moderate', access: 'difficult' };
+    expect(extractTreeShrubActuals(data)).toEqual(expected);
+    expect(extractTreeShrubActuals(JSON.stringify(data))).toEqual(expected);
+  });
+
+  it('companion T&S sections fill gaps (combined visits store T&S as a companion; palms_serviced is its palm count)', () => {
+    expect(extractTreeShrubActuals({
+      typedReportSnapshot: { type: 'one_time_lawn_treatment', values: {} },
+      companionReportSnapshots: [
+        { type: 'tree_shrub', values: { palms_serviced: '6', shrub_density: 'Light' } },
+      ],
+    })).toEqual({ bedSqFt: null, palmCount: 6, treeCount: null, shrubDensity: 'light', access: null });
+  });
+
+  it('null when there is no T&S section or nothing was recorded', () => {
+    expect(extractTreeShrubActuals(null)).toBeNull();
+    expect(extractTreeShrubActuals('not json')).toBeNull();
+    expect(extractTreeShrubActuals({ typedReportSnapshot: { type: 'pest_inspection', values: {} } })).toBeNull();
+    expect(extractTreeShrubActuals({
+      typedReportSnapshot: { type: 'tree_shrub', values: { plant_groups: 'Shrubs' } },
+    })).toBeNull();
   });
 });
 

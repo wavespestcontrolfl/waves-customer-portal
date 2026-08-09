@@ -80,10 +80,22 @@ describe('tree & shrub schema', () => {
     for (const key of COMPANION_ONLY_FIELD_KEYS) {
       expect({ key, present: key in byKey }).toEqual({ key, present: false });
     }
-    // Core scope fields stay primary (no expander left to hide behind).
+    // Core scope fields stay primary.
     expect(byKey.plant_groups.detail).toBe(false);
     expect(byKey.landscape_condition.detail).toBe(false);
-    expect(schema.fields.some((f) => f.detail)).toBe(false);
+    // The primary expander carries EXACTLY the pricing-calibration capture
+    // (owner-approved 2026-08-08, T&S reprice lane) — optional + internal,
+    // so the required simplified closeout is untouched and none of it can
+    // reach the customer report. Any other detail field on the primary
+    // slice is a regression against the 2026-07-21 simplification.
+    expect(schema.fields.filter((f) => f.detail).map((f) => f.key).sort()).toEqual([
+      'access_difficulty', 'bed_sqft_serviced', 'palm_count_total',
+      'shrub_density', 'tree_count_total',
+    ]);
+    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty']) {
+      expect({ key, internal: byKey[key].internal, required: byKey[key].required })
+        .toEqual({ key, internal: true, required: false });
+    }
     // Compliance renders only once a pesticide product is on the visit.
     expect(byKey.pollinator_status.pesticideOnly).toBe(true);
     expect(byKey.irac_frac_logged.pesticideOnly).toBe(true);
