@@ -139,11 +139,12 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('a FRESH delivery claim defers invalidation and fails CLOSED to the error outcome', async () => {
+  test('a FRESH delivery claim defers invalidation: durable PENDING marker, no archive, error outcome', async () => {
     // sendEstimateNow stamped delivering_at under this same row lock and is
-    // between its verdict read and the provider handoff — committing a
-    // marker now would land after the verdict while the delivery still runs
-    // on the former lead's content.
+    // between its verdict read and the provider handoff — committing the
+    // archive now would land after the verdict while the delivery still
+    // runs. The due invalidation is recorded as a pending marker the send's
+    // claim release consumes; the row itself stays the send flow's.
     const existing = {
       id: 'est-1',
       estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
@@ -165,7 +166,19 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
     const outcome = await _reconcileExistingDraftLinks(existing, context);
 
     expect(outcome).toBe('error');
-    expect(mockUpdates).toHaveLength(0);
+    expect(mockUpdates).toHaveLength(1);
+    const write = mockUpdates[0];
+    expect(write.table).toBe('estimates');
+    // estimate_data only — no archive, no status change, claim untouched.
+    expect(write.row.archived_at).toBeUndefined();
+    expect(write.row.status).toBeUndefined();
+    const written = JSON.parse(write.row.estimate_data);
+    expect(written.estimatorEngine.invalidation_pending_at).toBeTruthy();
+    expect(written.estimatorEngine.invalidation_pending_from).toBe('lead-B');
+    expect(written.estimatorEngine.invalidation_pending_to).toBe('lead-C');
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(written.estimatorEngine.delivering_token).toBe('tok-1');
+    expect(written.lead_id).toBe('lead-B');
   });
 
   test('a STALE delivery claim (crashed send, past TTL) does not block invalidation', async () => {

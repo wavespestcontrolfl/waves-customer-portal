@@ -140,17 +140,6 @@ async function reconcileExistingDraftLinks(existing, context) {
         // skipping it would leave it revivable via /unarchive with its
         // stale links intact — it still gets the full invalidation.
         if (freshData.estimatorEngine?.linkage_invalidated_at) return;
-        // A FRESH delivery claim means sendEstimateNow read its final
-        // verdict under this same row lock and is mid-provider-handoff
-        // (codex P0, PR #3304 r20): a marker committed now would land
-        // AFTER that verdict but the delivery would still run on the
-        // former lead's content. Fail CLOSED — throw to the 'error'
-        // outcome so the caller surfaces a review bell instead of
-        // reusing the draft; a crashed send's claim ages out by TTL and
-        // the next reconcile proceeds.
-        if (deliveryClaimFresh(freshData.estimatorEngine)) {
-          throw new Error(`draft ${existing.id} has a live delivery claim — invalidation deferred`);
-        }
         // Everything below keys off the LOCKED row's linkage, never the
         // snapshot: a peer reconcile may have already moved it.
         const freshLeadId = freshData.lead_id ? String(freshData.lead_id) : null;
@@ -197,6 +186,31 @@ async function reconcileExistingDraftLinks(existing, context) {
             if (sidLinked) return;
           }
         }
+        // A FRESH delivery claim means sendEstimateNow read its final
+        // verdict under this same row lock and is mid-provider-handoff
+        // (codex P0, PR #3304 r20/r22): a marker committed now would land
+        // AFTER that verdict while the delivery still runs. The
+        // invalidation is DUE (every decision check above passed), so it
+        // must not be lost either — record a durable PENDING marker
+        // (estimate_data only; status/archive untouched, the send owns
+        // the row) that the send's claim release consumes into the full
+        // invalidation. The caller still gets the fail-closed 'error'
+        // outcome, and sendEstimateNow treats a pending marker as
+        // invalidated, so the row can never be resent in the interim.
+        if (deliveryClaimFresh(freshData.estimatorEngine)) {
+          if (!freshData.estimatorEngine?.invalidation_pending_at) {
+            freshData.estimatorEngine = {
+              ...(freshData.estimatorEngine && typeof freshData.estimatorEngine === 'object' ? freshData.estimatorEngine : {}),
+              invalidation_pending_at: new Date().toISOString(),
+              invalidation_pending_from: freshLeadId || null,
+              invalidation_pending_to: currentLeadId || null,
+            };
+            await trx('estimates').where({ id: existing.id })
+              .update({ estimate_data: JSON.stringify(freshData), updated_at: new Date() });
+          }
+          relinked = { deferred: true, from: freshLeadId || 'none', to: currentLeadId || 'none' };
+          return;
+        }
         // NO durable linkage change ever reuses the draft (codex P0, PR
         // #3304 r8/r10): its composed content — recipient, address,
         // engine inputs, totals — was built from the FORMER lead, and
@@ -237,6 +251,10 @@ async function reconcileExistingDraftLinks(existing, context) {
         }
         relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none', invalidated: true };
       });
+      if (relinked?.deferred) {
+        logger.info(`[estimator-engine] invalidation of draft ${existing.id} DEFERRED behind a live delivery claim (${relinked.from} → ${relinked.to}) — pending marker recorded`);
+        return 'error';
+      }
       if (relinked) {
         logger.info(`[estimator-engine] ${relinked.invalidated ? 'invalidated' : 'unlinked'} existing draft ${existing.id} after call linkage change (${relinked.from} → ${relinked.to})`);
         return relinked.invalidated ? 'invalidated' : 'unlinked';
@@ -559,10 +577,22 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
               // a customer-facing record this pass must never rewrite.
               const freshQStatus = String(fresh.status || '').toLowerCase();
               if (!['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
-              // And the same delivery-claim fence: never commit a marker
-              // inside a live send's verdict-to-handoff window.
+              // And the same delivery-claim fence (codex P0 r22): never
+              // commit an archive inside a live send's verdict-to-handoff
+              // window — record a durable PENDING marker the send's claim
+              // release consumes instead, so the quarantine is never lost.
               if (deliveryClaimFresh(data.estimatorEngine)) {
-                throw new Error(`draft ${conflicted.id} has a live delivery claim — quarantine deferred`);
+                if (!data.estimatorEngine?.invalidation_pending_at) {
+                  data.estimatorEngine = {
+                    ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+                    invalidation_pending_at: new Date().toISOString(),
+                    invalidation_pending_conflict: context.error,
+                  };
+                  await trx('estimates').where({ id: conflicted.id })
+                    .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
+                }
+                logger.info(`[estimator-engine] quarantine of draft ${conflicted.id} DEFERRED behind a live delivery claim (${context.error}) — pending marker recorded`);
+                return;
               }
               data.estimatorEngine = {
                 ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),

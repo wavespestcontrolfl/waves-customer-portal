@@ -916,16 +916,21 @@ async function releaseGroupSiblingClaims(claimedSiblings = []) {
   }
 }
 
-// Best-effort claim release (see the delivery-claim protocol note in
-// admin-estimate-persistence.js). Token-fenced: only THIS send's claim is
-// cleared, so a rare back-to-back send on the same row never loses its own
-// fresh claim to a predecessor's cleanup. Failure is non-fatal — an
-// uncleared claim ages out by TTL.
+// Claim release + deferred-invalidation finalizer (see the delivery-claim
+// protocol note in admin-estimate-persistence.js). Token-fenced: only THIS
+// send's claim is cleared, so a rare back-to-back send on the same row never
+// loses its own fresh claim to a predecessor's cleanup. If the reconciler
+// recorded a PENDING invalidation while this send's claim was live (codex
+// P0 r22 — deferrals must never be lost), the release COMPLETES it here:
+// full marker, linkage keys removed, old-lead unlink, row archived. Failure
+// is non-fatal — an uncleared claim ages out by TTL, the pending marker
+// already blocks any resend, and the next reconcile (claim now stale)
+// applies the full invalidation itself.
 async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   if (!estimateId || !deliveryClaimToken) return;
   try {
     await db.transaction(async (trx) => {
-      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('estimate_data');
+      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('status', 'archived_at', 'estimate_data');
       if (!row) return;
       let data;
       try {
@@ -933,9 +938,45 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
           ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
       } catch { return; }
       if (!data || typeof data !== 'object') return;
-      if (data.estimatorEngine?.delivering_token !== deliveryClaimToken) return;
-      delete data.estimatorEngine.delivering_at;
-      delete data.estimatorEngine.delivering_token;
+      const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : null;
+      if (!eng || eng.delivering_token !== deliveryClaimToken) return;
+      delete eng.delivering_at;
+      delete eng.delivering_token;
+      const pendingAt = eng.invalidation_pending_at;
+      const pendingFrom = eng.invalidation_pending_from || null;
+      const pendingTo = eng.invalidation_pending_to || null;
+      const pendingConflict = eng.invalidation_pending_conflict || null;
+      delete eng.invalidation_pending_at;
+      delete eng.invalidation_pending_from;
+      delete eng.invalidation_pending_to;
+      delete eng.invalidation_pending_conflict;
+      if (pendingAt && !eng.linkage_invalidated_at) {
+        // Complete the deferred invalidation with the reconciler's own
+        // shape — the delivery is over, so the mid-send status exemption
+        // no longer applies (sent/failed rows invalidate; they resend
+        // from a rebuilt draft).
+        delete data.lead_id;
+        delete data.lead_linkage;
+        eng.linkage_invalidated_at = new Date().toISOString();
+        eng.linkage_invalidated_from = pendingFrom;
+        eng.linkage_invalidated_to = pendingTo;
+        if (pendingConflict) eng.identity_conflict = pendingConflict;
+        await trx('estimates').where({ id: estimateId })
+          .update({
+            estimate_data: JSON.stringify(data),
+            archived_at: row.archived_at || new Date(),
+            status: 'draft',
+            scheduled_at: null,
+            updated_at: trx.fn.now(),
+          });
+        if (pendingFrom) {
+          // Only if the OLD lead still points at this draft — a lead
+          // relinked elsewhere is not ours to touch.
+          await trx('leads').where({ id: pendingFrom, estimate_id: estimateId }).update({ estimate_id: null });
+        }
+        logger.info(`[admin-estimates] completed deferred invalidation of estimate ${estimateId} at delivery-claim release (${pendingFrom || pendingConflict || 'unlink'} → ${pendingTo || 'none'})`);
+        return;
+      }
       await trx('estimates').where({ id: estimateId })
         .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
     });
@@ -1015,6 +1056,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           ? JSON.parse(verdictRow.estimate_data) : (verdictRow.estimate_data || {});
       } catch { data = null; }
       if (data?.estimatorEngine?.linkage_invalidated_at) return 'invalidated_before_delivery';
+      // A PENDING invalidation (recorded by the reconciler while an
+      // earlier send's claim was live, codex P0 r22) is as final as the
+      // full marker for send purposes — the archive just hasn't landed
+      // yet. Never re-send, and never stamp a new claim over it.
+      if (data?.estimatorEngine?.invalidation_pending_at) return 'invalidated_before_delivery';
       // LIVE call-linkage revalidation for engine-drafted rows (codex P0,
       // PR #3304 r21): the call processor can commit a corrected stamp
       // BEFORE its reconcile archives this draft — the marker check alone
