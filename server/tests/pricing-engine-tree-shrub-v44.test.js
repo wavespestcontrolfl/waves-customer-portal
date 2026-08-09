@@ -1416,23 +1416,42 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     });
   });
 
-  test('the server-authoritative recompute replays the saved knobs (membership-lapse reconcile, GH P1)', async () => {
+  test('the server-authoritative recompute replays saved knobs ONLY for declared replays — never from client-posted data (GH P1 + pre-push P0)', async () => {
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    let seenInput = null;
-    await serverRecomputeFromEstimateData(
-      {
-        engineInputs: { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, services: { treeShrub: { tier: 'standard' } } },
-        result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
-      },
-      {
+    const STAMPED = { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 };
+    const estData = () => ({
+      engineInputs: { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000, services: { treeShrub: { tier: 'standard' } } },
+      result: { results: { tsMeta: { pricingKnobs: STAMPED } } },
+    });
+    const run = async (deps) => {
+      let seenInput = null;
+      await serverRecomputeFromEstimateData(deps.data || estData(), {
         translateV2CallToV1Input: null,
         needsSync: () => false,
         generateEstimate: (input) => { seenInput = input; return { lineItems: [], totals: {} }; },
         mapV1ToLegacyShape: () => ({ results: {} }),
-      },
-    );
-    expect(seenInput?.treeShrubPricingKnobs).toEqual({
-      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
-    });
+        ...(deps.replay ? { replaySavedPricingKnobs: true } : {}),
+      });
+      return seenInput;
+    };
+
+    // Membership-lapse reconcile: a DECLARED replay of a persisted row.
+    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual(STAMPED);
+
+    // Create/revision save: estimateData is browser-controlled, so a posted
+    // snapshot must NOT override the admin-only live pricing_config.
+    expect((await run({}))?.treeShrubPricingKnobs).toBeUndefined();
+
+    // Even on a declared replay, a client-CLAIMED value on the inputs is
+    // stripped — only the server-derived snapshot may win.
+    const forged = estData();
+    forged.engineInputs.treeShrubPricingKnobs = {
+      densityFactor: 0.5, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+    };
+    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual(STAMPED);
+    // …and with no replay declared, the forged value is simply gone.
+    const forgedNoReplay = estData();
+    forgedNoReplay.engineInputs.treeShrubPricingKnobs = { densityFactor: 0.5 };
+    expect((await run({ data: forgedNoReplay }))?.treeShrubPricingKnobs).toBeUndefined();
   });
 });

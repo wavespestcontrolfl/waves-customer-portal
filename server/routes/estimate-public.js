@@ -7960,7 +7960,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       delete estData.pricingContext.tierDiscounts;
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    // Replay of an ALREADY-PERSISTED estimate (this row was loaded from the
+    // DB, not posted by a browser), so its quote-time T&S knob snapshot is
+    // trustworthy and must be reused — a membership lapse must not also
+    // re-price the T&S line off knobs flipped after the quote was sent.
+    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed
