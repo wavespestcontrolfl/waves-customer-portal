@@ -373,6 +373,24 @@ async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid })
     // mint a NULL-provenance row nothing could retire.
     return { refusedReason: candidateArm === 'sid' ? 'call_rejected' : 'call_unsettled' };
   }
+  if (candidateArm === 'sid') {
+    // A SETTLED stamp on the sid candidate pointing at a DIFFERENT lead
+    // is the processor's current verdict (GH P1 r6, same authority rule
+    // as the bridge dedupe): a force-reprocess repointed this call away
+    // from its sid lead, so the OLD lead's claim to this call — and to a
+    // funnel row derived from it — is gone. Attaching the call id here
+    // would let provenance recovery transfer the history-bearing row
+    // back to the obsolete lead, undoing the reconciliation.
+    const lockedStamp = (() => {
+      try {
+        const md = typeof locked.metadata === 'string' ? JSON.parse(locked.metadata) : (locked.metadata || {});
+        return md?.lead_id ? String(md.lead_id) : null;
+      } catch { return null; }
+    })();
+    if (lockedStamp && lockedStamp !== String(leadId)) {
+      return { refusedReason: 'call_repointed' };
+    }
+  }
   return { sourceCallId: locked.id };
 }
 

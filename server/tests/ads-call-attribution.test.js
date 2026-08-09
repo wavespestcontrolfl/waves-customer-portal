@@ -507,3 +507,47 @@ describe('backfillCallLeadAttribution — provenance resolved and written under 
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
   });
 });
+
+describe('resolveSourceCallProvenanceLocked — settled dissenting stamp (GH P1 r6)', () => {
+  const LEAD2 = {
+    id: 'lead-old',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: 'CAy',
+  };
+
+  test('a sid candidate whose SETTLED stamp points at a DIFFERENT lead refuses — the repoint is authoritative', async () => {
+    firstByTable.leads = { ...LEAD2 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-new' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a sid candidate whose settled stamp AGREES with the lead still becomes provenance', async () => {
+    firstByTable.leads = { ...LEAD2 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-old' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('call-9');
+  });
+});

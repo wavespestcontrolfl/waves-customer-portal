@@ -8077,8 +8077,17 @@ const CallRecordingProcessor = {
                 // (pre-push P1 r8) — the funnel insert's FK takes KEY
                 // SHARE on this lead anyway, and acquiring the call row
                 // first inverted the order against a stamp writer
-                // holding the lead and waiting on this call.
-                await trx('leads').where({ id: leadId }).forUpdate().first('id');
+                // holding the lead and waiting on this call. The LOCKED
+                // row's eligibility and owner are authoritative (GH P1
+                // r6): a lead soft-deleted or reassigned after the
+                // enrichment write must not receive attribution keyed to
+                // the stale snapshot's customer.
+                const lockedLead = await trx('leads')
+                  .where({ id: leadId })
+                  .whereNull('deleted_at')
+                  .forUpdate()
+                  .first('id', 'customer_id');
+                if (!lockedLead) return;
                 const owned = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
@@ -8086,7 +8095,11 @@ const CallRecordingProcessor = {
                   .first('id');
                 if (!owned) return;
                 const attrRes = await require('./ads/call-attribution').recordCallPpcAttribution({
-                customerId,
+                // The locked owner EXACTLY (GH P1 r6) — an unassigned
+                // lead's live owner is NULL and recordCallPpcAttribution
+                // refuses it, instead of pairing the row with the
+                // pre-lock snapshot's customer.
+                customerId: lockedLead.customer_id || null,
                 leadId,
                 leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
                 isPaid: callAttr.isPaid,
@@ -8121,14 +8134,25 @@ const CallRecordingProcessor = {
                   throw new Error(attrRes.error || 'attribution_write_failed');
                 }
               }).catch((txnErr) => {
-                // Never silent (pre-push P1 r8): dedicated/organic calls
-                // have no bridge scan to re-heal a dropped attribution —
-                // the warn is the operator's only signal.
-                logger.warn(`[call-proc] PPC attribution transaction failed for ${callSid} (may need manual re-attribution): ${txnErr.code || txnErr.name || 'error'}`);
+                // Never silent, and never final (pre-push P1 r8, GH P1
+                // r6): dedicated/organic calls have no bridge scan to
+                // re-heal a dropped attribution, so a failed transaction
+                // (deadlocked transfer, aborted insert) must RETHROW
+                // after logging — the outer processing failure path then
+                // marks the call retryable instead of finalizing it as
+                // processed with permanently wrong funnel state.
+                logger.warn(`[call-proc] PPC attribution transaction failed for ${callSid}: ${txnErr.code || txnErr.name || 'error'}`);
+                const wrapped = new Error(`PPC attribution transaction failed: ${txnErr.code || txnErr.name || 'error'}`);
+                wrapped.attributionTxnFailure = true;
+                throw wrapped;
               });
               await pending;
             }
           } catch (attrErr) {
+            // Only the dispatch scaffolding (source lookups, gating) is
+            // swallowed here — a failed attribution TRANSACTION
+            // propagates so the run retries (GH P1 r6).
+            if (attrErr.attributionTxnFailure) throw attrErr;
             logger.warn(`[call-proc] PPC attribution dispatch failed: ${attrErr.code || attrErr.name || 'error'}`);
           }
         };
