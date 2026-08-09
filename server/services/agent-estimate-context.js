@@ -185,11 +185,6 @@ async function loadCalls(lead, phoneKey) {
       return true;
     });
     uniqueRows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    // __rawExtraction carries the possibly-V1 blob for customer IDENTITY
-    // matching only — a different use with a different risk profile: a
-    // name selects among EXISTING customer rows, it never feeds composed
-    // pricing or service selection. sanitizePackCall strips it before the
-    // pack leaves this module (codex P1, PR #3304 GH r8).
     const calls = uniqueRows.map((call) => {
       const { extraction, source } = extractionFromCall(call);
       return {
@@ -216,7 +211,15 @@ async function loadCalls(lead, phoneKey) {
         // identity probe below already applies.
         extraction: source === 'enriched' ? compactJson(extraction) : null,
         extraction_source: source === 'enriched' ? source : 'transcript_only',
-        __rawExtraction: extraction || null,
+        // ENRICHED only, here too (codex P1, PR #3304 GH r8b + AGENTS.md
+        // L357-362: downstream composers read enriched/v2 + raw
+        // transcript, NEVER v1). Customer selection is downstream — a
+        // stale or hallucinated V1 name on a stamped or shared-phone call
+        // would inject the wrong customer's profile, services, tier, and
+        // spend into the session. The uncompacted enriched object is kept
+        // so identity matching sees full names even when the pack copy is
+        // truncated; sanitizePackCall strips it from the payload.
+        __rawExtraction: source === 'enriched' ? extraction : null,
       };
     });
     const leadSummary = clampText(lead.transcript_summary, 4000);
@@ -297,10 +300,9 @@ async function loadCalls(lead, phoneKey) {
   }
 }
 
-// Strip the internal raw-extraction carrier before the pack leaves this
-// module: it exists only so customer IDENTITY matching can still read a V1
-// blob, and must never reach the composer as evidence (codex P1, PR #3304
-// GH r8).
+// Strip the internal extraction carrier before the pack leaves this module:
+// it exists only so identity matching can read the UNCOMPACTED enriched
+// object (the pack copy may be truncated), and is never part of the payload.
 function sanitizePackCall(call) {
   if (!call || typeof call !== 'object') return call;
   const { __rawExtraction, ...rest } = call;
@@ -480,7 +482,9 @@ async function buildAgentEstimateContext(leadId) {
   const leadCall = identityCall || ownedCalls[0] || null;
   // Nothing in the capped pack carries enriched identity — look past the cap
   // before settling for an identity-less row (codex P2 r19).
-  const rawOf = (call) => (call ? (call.__rawExtraction || call.extraction || null) : null);
+  // Enriched extraction ONLY (AGENTS.md L357-362) — an identity-less pack
+  // resolves the customer by phone alone rather than by a V1 name.
+  const rawOf = (call) => (call?.__rawExtraction || null);
   const identityExtraction = identityCall
     ? rawOf(identityCall)
     : ((await loadIdentityCandidate(lead)) || rawOf(leadCall) || null);

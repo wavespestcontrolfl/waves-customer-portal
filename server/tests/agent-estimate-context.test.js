@@ -564,7 +564,11 @@ describe('owned-call extraction shape handling (PR #3275)', () => {
     expect(extractionPassed?.caller).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
   });
 
-  test('no enriched identity anywhere falls back to the newest owned call', async () => {
+  test('a V1-only pack never names an identity — customer matching falls back to phone alone (GH r8)', async () => {
+    // AGENTS.md L357-362: downstream composers read enriched/V2 + the raw
+    // transcript, NEVER V1. Customer selection is downstream — a stale or
+    // hallucinated V1 name on a stamped or shared-phone call would inject
+    // the wrong customer's profile, services, tier, and spend.
     mockContextStampedCallRows = [{
       id: 'call-only-v1', twilio_call_sid: 'CA-only', direction: 'inbound',
       duration_seconds: 60, transcription: 'v1 only', created_at: '2026-07-05',
@@ -574,10 +578,16 @@ describe('owned-call extraction shape handling (PR #3275)', () => {
       extraction: { first_name: 'Pat', last_name: 'Prospect' },
     };
 
-    await buildAgentEstimateContext('lead-1');
+    const ctx = await buildAgentEstimateContext('lead-1');
 
     const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
-    expect(extractionPassed).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
+    expect(extractionPassed).toBeNull();
+    // The transcript still reaches the composer; only the V1 blob doesn't.
+    const v1Call = ctx.calls.find((c) => c.id === 'call-only-v1');
+    expect(v1Call.transcript).toBe('v1 only');
+    expect(v1Call.extraction).toBeNull();
+    expect(v1Call.extraction_source).toBe('transcript_only');
+    expect(v1Call.__rawExtraction).toBeUndefined();
   });
 });
 

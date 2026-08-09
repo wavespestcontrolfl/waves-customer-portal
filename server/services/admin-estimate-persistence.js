@@ -78,14 +78,21 @@ function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
 async function completePendingInvalidation(trx, estimateId, { row, data, pending }) {
   const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
   data.estimatorEngine = eng;
-  // The pending verdict can be OBSOLETE by the time it is finalized (codex
-  // P2, PR #3304 GH r8): linkage moved A→B during the claim, a second
-  // retry moved it back to A, and that later reconcile saw the draft
-  // already on its current lead and left the first marker in place.
+  // A LINKAGE-REPOINT verdict can be OBSOLETE by the time it is finalized
+  // (codex P2, PR #3304 GH r8): linkage moved A→B during the claim, a
+  // second retry moved it back to A, and that later reconcile saw the
+  // draft already on its current lead and left the first marker in place.
   // Finalizing then kills a VALID linkage. Re-resolve the call's live
   // linkage against the draft's own: still a match ⇒ the verdict is
   // stale, so drop the marker and keep the row.
-  if (data.lead_id && !(await staleCallLinkageReason(trx, data))) {
+  //
+  // A FORCED quarantine is never obsolete this way (codex P0, PR #3304 GH
+  // r8b): an identity conflict or a spam/voicemail rejection is a verdict
+  // about the CALL, not about which lead it points at — linkage legitimately
+  // stays unchanged, and treating that as "nothing to do" would leave the
+  // wrong or rejected draft public and sendable.
+  const forcedQuarantine = !!(pending.conflict || pending.reason);
+  if (!forcedQuarantine && data.lead_id && !(await staleCallLinkageReason(trx, data))) {
     await trx('estimates').where({ id: estimateId })
       .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
     return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
@@ -98,6 +105,7 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
   eng.linkage_invalidated_from = pending.from || null;
   eng.linkage_invalidated_to = pending.to || null;
   if (pending.conflict) eng.identity_conflict = pending.conflict;
+  if (pending.reason) eng.invalidation_reason = pending.reason;
   await trx('estimates').where({ id: estimateId })
     .update({
       estimate_data: JSON.stringify(data),
@@ -126,11 +134,17 @@ function takePendingInvalidation(data) {
     from: eng.invalidation_pending_from || null,
     to: eng.invalidation_pending_to || null,
     conflict: eng.invalidation_pending_conflict || null,
+    // Forced-quarantine reason (spam/voicemail rejection and any future
+    // non-identity force) — dropping it lost both the audit trail and the
+    // signal that this verdict is not a linkage repoint (codex P0, PR
+    // #3304 GH r8b).
+    reason: eng.invalidation_pending_reason || null,
   };
   delete eng.invalidation_pending_at;
   delete eng.invalidation_pending_from;
   delete eng.invalidation_pending_to;
   delete eng.invalidation_pending_conflict;
+  delete eng.invalidation_pending_reason;
   return pending;
 }
 

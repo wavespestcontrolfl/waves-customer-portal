@@ -10,6 +10,9 @@
 
 let candidateRows = [];
 let lockedRow = null;
+// Per-table .first() overrides for the linkage-obsolescence re-resolution
+// (call_log + leads); estimates always answers with lockedRow.
+let firstByTable = {};
 const estimateUpdates = [];
 const leadUpdates = [];
 
@@ -18,7 +21,10 @@ const mockDb = jest.fn((table) => {
   for (const m of ['where', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'limit']) {
     b[m] = jest.fn(() => b);
   }
-  b.first = jest.fn(async () => (table === 'estimates' ? lockedRow : null));
+  b.first = jest.fn(async () => {
+    if (table === 'estimates') return lockedRow;
+    return firstByTable[table] !== undefined ? firstByTable[table] : null;
+  });
   b.update = jest.fn(async (row) => {
     (table === 'leads' ? leadUpdates : estimateUpdates).push(row);
     return 1;
@@ -63,6 +69,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   candidateRows = [{ id: 'est-1' }];
   lockedRow = pendingRow();
+  firstByTable = {};
   estimateUpdates.length = 0;
   leadUpdates.length = 0;
 });
@@ -115,5 +122,79 @@ describe('sweepWedgedPendingInvalidations', () => {
 
     expect(finalized).toBe(0);
     expect(estimateUpdates).toHaveLength(0);
+  });
+});
+
+describe('forced quarantines are never discarded as obsolete (codex P0, PR #3304 GH r8b)', () => {
+  function forcedRow(engineExtra) {
+    return {
+      id: 'est-1',
+      status: 'sent',
+      archived_at: null,
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-A',
+        lead_linkage: 'stamp',
+        estimatorEngine: {
+          callLogId: 'call-1',
+          delivering_at: STALE_CLAIM,
+          delivering_token: 'tok-dead',
+          invalidation_pending_at: '2026-08-09T03:40:00.000Z',
+          ...engineExtra,
+        },
+      }),
+    };
+  }
+
+  test('a spam/voicemail rejection finalizes even though the linkage never moved', async () => {
+    // The verdict is about the CALL, not about which lead it points at —
+    // an unchanged linkage must not read as "nothing to do", or the
+    // rejected draft stays public and sendable.
+    lockedRow = forcedRow({ invalidation_pending_reason: 'call_rejected_spam' });
+
+    const finalized = await sweepWedgedPendingInvalidations(NOW);
+
+    expect(finalized).toBe(1);
+    const write = estimateUpdates[estimateUpdates.length - 1];
+    const data = JSON.parse(write.estimate_data);
+    expect(data.estimatorEngine.linkage_invalidated_at).toBeTruthy();
+    expect(data.estimatorEngine.invalidation_reason).toBe('call_rejected_spam');
+    expect(write.archived_at).toBeTruthy();
+  });
+
+  test('an identity conflict finalizes with its audit reason intact', async () => {
+    lockedRow = forcedRow({ invalidation_pending_conflict: 'email_identity_conflict' });
+
+    const finalized = await sweepWedgedPendingInvalidations(NOW);
+
+    expect(finalized).toBe(1);
+    const data = JSON.parse(estimateUpdates[estimateUpdates.length - 1].estimate_data);
+    expect(data.estimatorEngine.linkage_invalidated_at).toBeTruthy();
+    expect(data.estimatorEngine.identity_conflict).toBe('email_identity_conflict');
+  });
+
+  test('a pure linkage repoint whose target came back IS discarded as obsolete', async () => {
+    lockedRow = forcedRow({
+      invalidation_pending_from: 'lead-A',
+      invalidation_pending_to: 'lead-C',
+    });
+    // The live call linkage still names lead-A (a later retry restored it).
+    firstByTable.call_log = {
+      twilio_call_sid: null,
+      metadata: JSON.stringify({ lead_id: 'lead-A' }),
+      processing_token: null,
+      processing_status: 'processed',
+      extraction_attempts: 0,
+    };
+    firstByTable.leads = { id: 'lead-A' };
+
+    const finalized = await sweepWedgedPendingInvalidations(NOW);
+
+    expect(finalized).toBe(0);
+    const write = estimateUpdates[estimateUpdates.length - 1];
+    const data = JSON.parse(write.estimate_data);
+    expect(data.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(data.estimatorEngine.invalidation_pending_at).toBeUndefined();
+    expect(data.lead_id).toBe('lead-A');
+    expect(write.archived_at).toBeUndefined();
   });
 });
