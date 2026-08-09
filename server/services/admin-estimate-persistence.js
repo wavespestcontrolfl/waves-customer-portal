@@ -42,6 +42,24 @@ function estimateViewUrl(token) {
 // apart from the stamp every normal send writes.
 const ESTIMATE_SEND_EXPIRY_DAYS = 7;
 
+// Delivery-claim protocol (codex P0, PR #3304 r20). sendEstimateNow stamps
+// `estimatorEngine.delivering_at` (+ a per-send `delivering_token`) in the
+// SAME locked transaction as its final pre-delivery verdict read, and clears
+// it when the send finishes. The linkage reconciler and the identity-conflict
+// quarantine refuse to commit an invalidation while a claim is FRESH — that
+// closes the window where a marker could commit between the verdict and the
+// provider handoff while the delivery still runs on the former lead's
+// content. A send that crashes without clearing leaves a claim that simply
+// ages out; the TTL bounds how long a crash can defer a correction.
+const ESTIMATE_DELIVERY_CLAIM_TTL_MS = 10 * 60 * 1000;
+
+function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
+  const at = estimatorEngine?.delivering_at;
+  if (!at) return false;
+  const t = Date.parse(at);
+  return Number.isFinite(t) && (nowMs - t) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
+}
+
 function estimateExpiresAt(now = () => new Date()) {
   const expiresAt = new Date(now().getTime());
   expiresAt.setDate(expiresAt.getDate() + ESTIMATE_SEND_EXPIRY_DAYS);
@@ -1804,6 +1822,8 @@ module.exports = {
   resolveEstimatePropertyLinkage,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
+  ESTIMATE_DELIVERY_CLAIM_TTL_MS,
+  deliveryClaimFresh,
   estimateViewUrl,
   estimateReviseBlock,
   normalizeClientPestFloorMetadata,

@@ -22,6 +22,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const { buildCallContext, existingDraftForCall } = require('./context-builder');
 const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
 const { composeIntent } = require('./intent-composer');
@@ -119,9 +120,10 @@ async function reconcileExistingDraftLinks(existing, context) {
         // verdict check serializes against this transaction and aborts
         // when the marker committed first. Only money-bearing terminals
         // (accepted/declined/expired) are exempt.
+        if (!fresh) return;
         const freshStatus = String(fresh.status || '').toLowerCase();
         const midSend = freshStatus === 'sending';
-        if (!fresh || !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshStatus)) return;
+        if (!['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshStatus)) return;
         const freshData = (() => {
           try {
             const data = typeof fresh.estimate_data === 'string'
@@ -138,6 +140,17 @@ async function reconcileExistingDraftLinks(existing, context) {
         // skipping it would leave it revivable via /unarchive with its
         // stale links intact — it still gets the full invalidation.
         if (freshData.estimatorEngine?.linkage_invalidated_at) return;
+        // A FRESH delivery claim means sendEstimateNow read its final
+        // verdict under this same row lock and is mid-provider-handoff
+        // (codex P0, PR #3304 r20): a marker committed now would land
+        // AFTER that verdict but the delivery would still run on the
+        // former lead's content. Fail CLOSED — throw to the 'error'
+        // outcome so the caller surfaces a review bell instead of
+        // reusing the draft; a crashed send's claim ages out by TTL and
+        // the next reconcile proceeds.
+        if (deliveryClaimFresh(freshData.estimatorEngine)) {
+          throw new Error(`draft ${existing.id} has a live delivery claim — invalidation deferred`);
+        }
         // Everything below keys off the LOCKED row's linkage, never the
         // snapshot: a peer reconcile may have already moved it.
         const freshLeadId = freshData.lead_id ? String(freshData.lead_id) : null;
@@ -540,12 +553,23 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
                 } catch { return null; }
               })();
               if (!data || data.estimatorEngine?.linkage_invalidated_at) return;
+              // Same scope rule as the linkage reconcile (codex P0, PR
+              // #3304 r20): only sendable/resendable rows are quarantined
+              // — a money-bearing terminal (accepted/declined/expired) is
+              // a customer-facing record this pass must never rewrite.
+              const freshQStatus = String(fresh.status || '').toLowerCase();
+              if (!['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
+              // And the same delivery-claim fence: never commit a marker
+              // inside a live send's verdict-to-handoff window.
+              if (deliveryClaimFresh(data.estimatorEngine)) {
+                throw new Error(`draft ${conflicted.id} has a live delivery claim — quarantine deferred`);
+              }
               data.estimatorEngine = {
                 ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
                 linkage_invalidated_at: new Date().toISOString(),
                 identity_conflict: context.error,
               };
-              const midSend = String(fresh.status || '').toLowerCase() === 'sending';
+              const midSend = freshQStatus === 'sending';
               await trx('estimates').where({ id: conflicted.id }).update({
                 estimate_data: JSON.stringify(data),
                 archived_at: fresh.archived_at || new Date(),

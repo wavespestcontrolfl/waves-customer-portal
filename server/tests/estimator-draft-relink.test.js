@@ -138,4 +138,61 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
 
     expect(mockUpdates).toHaveLength(0);
   });
+
+  test('a FRESH delivery claim defers invalidation and fails CLOSED to the error outcome', async () => {
+    // sendEstimateNow stamped delivering_at under this same row lock and is
+    // between its verdict read and the provider handoff — committing a
+    // marker now would land after the verdict while the delivery still runs
+    // on the former lead's content.
+    const existing = {
+      id: 'est-1',
+      estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
+    };
+    mockFreshEstimate = {
+      id: 'est-1',
+      status: 'sending',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-B',
+        lead_linkage: 'stamp',
+        estimatorEngine: { delivering_at: new Date().toISOString(), delivering_token: 'tok-1' },
+      }),
+    };
+    const context = {
+      lead: { id: 'lead-C' }, leadIsForThisCall: true, leadLinkage: 'stamp',
+      call: { id: 'call-1', metadata: {} },
+    };
+
+    const outcome = await _reconcileExistingDraftLinks(existing, context);
+
+    expect(outcome).toBe('error');
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('a STALE delivery claim (crashed send, past TTL) does not block invalidation', async () => {
+    const staleAt = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+    const existing = {
+      id: 'est-1',
+      estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
+    };
+    mockFreshEstimate = {
+      id: 'est-1',
+      status: 'send_failed',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-B',
+        lead_linkage: 'stamp',
+        estimatorEngine: { delivering_at: staleAt, delivering_token: 'tok-dead' },
+      }),
+    };
+    const context = {
+      lead: { id: 'lead-C' }, leadIsForThisCall: true, leadLinkage: 'stamp',
+      call: { id: 'call-1', metadata: {} },
+    };
+
+    const outcome = await _reconcileExistingDraftLinks(existing, context);
+
+    expect(outcome).toBe('invalidated');
+    const estimateWrite = mockUpdates.find((u) => u.table === 'estimates');
+    const written = JSON.parse(estimateWrite.row.estimate_data);
+    expect(written.estimatorEngine.linkage_invalidated_from).toBe('lead-B');
+  });
 });

@@ -916,7 +916,47 @@ async function releaseGroupSiblingClaims(claimedSiblings = []) {
   }
 }
 
+// Best-effort claim release (see the delivery-claim protocol note in
+// admin-estimate-persistence.js). Token-fenced: only THIS send's claim is
+// cleared, so a rare back-to-back send on the same row never loses its own
+// fresh claim to a predecessor's cleanup. Failure is non-fatal — an
+// uncleared claim ages out by TTL.
+async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
+  if (!estimateId || !deliveryClaimToken) return;
+  try {
+    await db.transaction(async (trx) => {
+      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('estimate_data');
+      if (!row) return;
+      let data;
+      try {
+        data = typeof row.estimate_data === 'string'
+          ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+      } catch { return; }
+      if (!data || typeof data !== 'object') return;
+      if (data.estimatorEngine?.delivering_token !== deliveryClaimToken) return;
+      delete data.estimatorEngine.delivering_at;
+      delete data.estimatorEngine.delivering_token;
+      await trx('estimates').where({ id: estimateId })
+        .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    });
+  } catch (e) {
+    logger.warn(`[admin-estimates] delivery-claim clear failed for estimate ${estimateId}: ${e.message}`);
+  }
+}
+
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
+  // The claim is stamped inside the verdict transaction (see below) and
+  // MUST be released on every exit — success, partial failure, or throw —
+  // or legitimate linkage corrections stay blocked until the TTL expires.
+  const deliveryClaimToken = crypto.randomUUID();
+  try {
+    return await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
+  } finally {
+    await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
+  }
+}
+
+async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
     err.statusCode = 400;
@@ -954,24 +994,41 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // archived (or marked invalidated) since the claim releases back to
   // send_failed and aborts before any provider call.
   {
-    // FOR UPDATE inside a short transaction (codex P0, PR #3304 r19):
-    // this serializes against the reconciler's marking transaction — a
-    // marker committed first is always seen; a marker committing after
-    // this lock releases is a correction genuinely concurrent with
-    // delivery. The lock is NOT held across provider calls.
-    const verdictRow = await db.transaction((trx) => trx('estimates')
-      .where({ id: estimate.id })
-      .forUpdate()
-      .first('archived_at', 'estimate_data'));
-    const invalidatedNow = (() => {
+    // FOR UPDATE inside a short transaction (codex P0, PR #3304 r19/r20):
+    // the same locked transaction that reads the verdict also STAMPS the
+    // delivery claim (estimatorEngine.delivering_at + delivering_token),
+    // making verdict-and-claim atomic. The reconciler and the identity
+    // quarantine refuse to commit an invalidation while the claim is fresh
+    // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
+    // can slip in between this lock releasing and the provider handoff —
+    // the lock itself is never held across provider calls.
+    const invalidatedNow = await db.transaction(async (trx) => {
+      const verdictRow = await trx('estimates')
+        .where({ id: estimate.id })
+        .forUpdate()
+        .first('archived_at', 'estimate_data');
       if (!verdictRow) return true;
       if (verdictRow.archived_at) return true;
+      let data;
       try {
-        const data = typeof verdictRow.estimate_data === 'string'
+        data = typeof verdictRow.estimate_data === 'string'
           ? JSON.parse(verdictRow.estimate_data) : (verdictRow.estimate_data || {});
-        return !!data?.estimatorEngine?.linkage_invalidated_at;
-      } catch { return false; }
-    })();
+      } catch { data = null; }
+      if (data?.estimatorEngine?.linkage_invalidated_at) return true;
+      // Unparseable estimate_data: verdict passes (matches the prior
+      // read-only behavior) but no claim is stamped — a blind rewrite
+      // would clobber whatever is in the column.
+      if (data && typeof data === 'object') {
+        data.estimatorEngine = {
+          ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+          delivering_at: new Date().toISOString(),
+          delivering_token: deliveryClaimToken,
+        };
+        await trx('estimates').where({ id: estimate.id })
+          .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+      }
+      return false;
+    });
     if (invalidatedNow) {
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
