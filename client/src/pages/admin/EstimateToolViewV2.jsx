@@ -3941,6 +3941,20 @@ export default function EstimateToolViewV2({
       const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
       const palmTreatmentCount = parsePositiveInteger(form.palmTreatmentCount)
         ?? (palmTreatmentCountBlank ? propertyPalmCount : undefined);
+      // Tree & Shrub prices the PROPERTY palm count too (routine palm-care
+      // reserve). A malformed entry is silently dropped by
+      // parsePositiveInteger and an oversized one is clamped to 200 by the
+      // pricer — either way the estimate would quote the wrong palm count
+      // with no error and no review marker. Checked INDEPENDENTLY of the
+      // injection branch: with both services selected the injection line can
+      // legitimately use its own treatment count while the recurring line
+      // silently clamps. Same 1–200 contract as the public route and the
+      // intent schema.
+      if (form.svcTs && String(form.palmCount || "").trim() !== ""
+        && !(propertyPalmCount && propertyPalmCount <= 200)) {
+        alert("Palm count must be a whole number between 1 and 200.");
+        return null;
+      }
       if (form.svcInjection) {
         if (hasInvalidPositiveInteger(form.palmCount) || hasInvalidPositiveInteger(form.palmTreatmentCount)) {
           alert("Palm count must be a positive whole number.");

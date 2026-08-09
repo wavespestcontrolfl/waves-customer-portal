@@ -82,7 +82,13 @@ const SERVICE_OPTION_SCHEMAS = {
       // gate — blocking it here made every engine treeShrub draft price
       // zero trees and skip that gate. Absent count → the pricer's
       // treeCountSource marks the line for review (draft-builder).
+      // v4.7: treeCount is NON-palm trees; stated palms go to palmCount
+      // (routine palm-care reserve). One plant must never land in both.
       treeCount: { type: 'integer', minimum: 1, maximum: 200 },
+      // Caller-stated palms on the property — feeds the recurring
+      // program's routine palm-care reserve (NOT palm_injection's
+      // treated-palm count). Never guessed.
+      palmCount: { type: 'integer', minimum: 1, maximum: 200 },
     },
     additionalProperties: false,
   },

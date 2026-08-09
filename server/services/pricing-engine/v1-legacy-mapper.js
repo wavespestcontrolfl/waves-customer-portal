@@ -79,16 +79,46 @@ function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
       // No synthetic 0 (v4.6): when no count exists anywhere, leave it
       // undefined so priceTreeShrub can run its treeDensity fallback instead
       // of pricing the per-tree material term as zero trees.
-      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount,
+      // v4.7: an INFERRED count must not be replayed as if the caller had
+      // stated it — priceTreeShrub suppresses density-inferred trees when
+      // palms are priced (they may be the same plants), and passing the
+      // resolved number here would defeat that de-duplication and charge
+      // the trees alongside the palm reserve. Omit it so the pricer
+      // re-infers from treeDensity and de-dups exactly as it did for the
+      // selected tier.
+      treeCount: treeShrubTreeCountIsInferred(tsLI)
+        ? undefined
+        : (tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount),
+      // The palm count the selected-tier quote priced must reach the
+      // alternate-tier rows too — those rows drive displayed, accepted, and
+      // billed cadence changes, so a zero-palm recalculation would quote a
+      // different job than the one selected.
+      palmCount: tsLI.palmCount ?? property.features?.palmCount ?? property.palmCount,
     },
+    palmCount: tsLI.palmCount ?? property.palmCount ?? property.palmInventory?.palmCount,
   };
+}
+
+// A density-derived count is a pricer INFERENCE, not caller-stated signal.
+function treeShrubTreeCountIsInferred(tsLI = {}) {
+  return tsLI.treeCountSource === 'density_estimate';
 }
 
 function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') {
   const quote = priceTreeShrub(treeShrubQuoteInput(v1Result, tsLI), {
     tier,
     access: tsLI.access || 'easy',
-    treeCount: tsLI.treeCount,
+    // Inferred counts stay inferred (see treeShrubQuoteInput) so the
+    // pricer's palm/tree de-duplication behaves identically here.
+    treeCount: treeShrubTreeCountIsInferred(tsLI) ? undefined : tsLI.treeCount,
+    // Preserve the service-line palm source: palmCountSource decides
+    // whether palms fold into the legacy tree terms, so passing them as a
+    // property-level value instead would silently reprice the row.
+    palmCount: tsLI.palmCountSource === 'service_line' ? tsLI.palmCount : undefined,
+    // The selected line's quote-time knob snapshot governs every alternate
+    // cadence row too — otherwise a post-send admin flip would reprice the
+    // rows the customer can still switch to.
+    knobs: tsLI.pricingKnobs,
   });
   const annual = Math.round(quote.annual);
   const monthly = roundMoney(annual / 12);
@@ -540,6 +570,17 @@ function mapV1ToLegacyShape(v1Result) {
       belowMarginFloor: tsLI.belowMarginFloor === true,
       belowProgramFloor: tsLI.belowProgramFloor === true,
       finalMargin: tsLI.finalMargin ?? null,
+      // v4.7 quote-time knob snapshot. Admin V2 persists ONLY this mapped
+      // envelope (no raw lineItems), so without carrying the stamp here a
+      // public view/accept replay would re-price an already-sent admin
+      // quote off whatever the knobs say today
+      // (estimate-public#estimateTreeShrubKnobSignal reads it back).
+      pricingKnobs: tsLI.pricingKnobs || null,
+      // Palm inputs the replay needs to reprice the SAME job (eb/et cover
+      // beds and trees only).
+      palmCount: tsLI.palmCount ?? 0,
+      palmCountSource: tsLI.palmCountSource || 'none',
+      treeCountSource: tsLI.treeCountSource || null,
     };
   }
 
