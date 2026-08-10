@@ -252,6 +252,20 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
     if (byId) return byId;
   }
 
+  // DURABLE ROW EVIDENCE, ahead of any label matching (codex #3334 r2 P1).
+  // `service_key_snapshot` names the exact catalog key the row was stamped
+  // with, so it settles the identity outright — including the legitimate
+  // `lawn_care_one_time` / `mosquito_one_time` visits whose LABEL is the
+  // ambiguous abbreviation and which would otherwise fail closed below and
+  // lose their one-time invoice and typed form. Present on ~38% of visits.
+  const snapshotKey = String(scheduledService.service_key_snapshot || '').trim();
+  if (snapshotKey) {
+    const bySnapshot = await knex('services')
+      .where({ service_key: snapshotKey })
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (bySnapshot) return bySnapshot;
+  }
+
   const serviceType = String(scheduledService.service_type || scheduledService.serviceType || '').trim();
   if (!serviceType) return null;
   const serviceTypeCandidates = serviceNameCandidates(serviceType);
@@ -289,14 +303,30 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // on the fail-closed side instead of reading `.length` off whatever came back.
   let shortNameMatches = [];
   try {
+    // Bounded, but wide enough to see the WHOLE collision set — the narrowing
+    // below filters candidates, and it cannot filter rows it never fetched.
+    // Largest real collision today is 5 ("Lawn Care").
     shortNameMatches = await knex('services')
       .whereRaw('lower(short_name) = lower(?)', [serviceType])
-      .limit(2)
+      .limit(10)
       .select('service_key', 'name', 'category', 'billing_type');
   } catch (err) {
     shortNameMatches = [];
   }
   if (!Array.isArray(shortNameMatches)) shortNameMatches = [];
+  // One-directional narrowing (codex #3334 r2 P1). `is_recurring === true` is a
+  // POSITIVE assertion the recurring seeder always writes (222/222 lawn visits
+  // with a recurring_parent_id carry it), so it safely eliminates the one_time
+  // candidate — which is the row that would auto-invoice a plan-covered
+  // customer. The FALSE direction is deliberately NOT trusted: the column is
+  // nullable with DEFAULT false, so `false` is indistinguishable from "never
+  // set", and treating it as evidence of a one-time visit would re-open exactly
+  // the auto-invoice hazard this change exists to close. Narrowing only ever
+  // REMOVES candidates, so it can never invent an identity.
+  if (shortNameMatches.length > 1 && scheduledService.is_recurring === true) {
+    const recurringOnly = shortNameMatches.filter((r) => r.billing_type === 'recurring');
+    if (recurringOnly.length) shortNameMatches = recurringOnly;
+  }
   if (shortNameMatches.length === 1) return shortNameMatches[0];
   if (shortNameMatches.length > 1) {
     logger.warn(`[completion-profiles] short name "${serviceType}" is shared by multiple catalog services — refusing to guess an identity (give the rows distinct short names)`);
