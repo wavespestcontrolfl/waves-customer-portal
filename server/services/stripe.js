@@ -1321,29 +1321,6 @@ const StripeService = {
       }
     }
     try {
-      // The call-side verdict re-checked at the LAST moment before money
-      // moves (local audit P0, PR #3304): the route's guard ran before the
-      // Stripe round-trips above, and a quarantine or linkage repoint
-      // landing in that window would take a deposit against a wrong-lead
-      // or rejected-call estimate. The plain throw routes to the generic
-      // 400 and the failure-path reset below restores the intent to face.
-      {
-        const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-        const freshRow = await db('estimates').where({ id: estimateId }).first('estimate_data');
-        const freshData = (() => {
-          if (!freshRow) return null;
-          try {
-            const d = typeof freshRow.estimate_data === 'string'
-              ? JSON.parse(freshRow.estimate_data) : (freshRow.estimate_data || {});
-            return d && typeof d === 'object' ? d : null;
-          } catch { return null; }
-        })();
-        // A missing/unparseable row fails closed — money never moves on an
-        // estimate whose provenance can't be re-verified.
-        if (!freshData || await callSideBlockForEstimateData(db, freshData)) {
-          throw new Error('This estimate is temporarily unavailable — please contact our office.');
-        }
-      }
       // Verify our update is still what the PI carries before charging —
       // a concurrent (pre-stamp) reset could have stripped the amount back
       // to face; confirming then would charge the attached credit card
@@ -1352,6 +1329,35 @@ const StripeService = {
       const preConfirm = await stripe.paymentIntents.retrieve(quote.paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
       if (Number(preConfirm.amount) !== totalCents) {
         throw new Error('Deposit amount changed during payment — please try again.');
+      }
+      // The estimate's verdict re-checked AFTER the last Stripe round-trip,
+      // immediately before confirm (pre-push P0, PR #3304 — checking it
+      // before the retrieve reopened the quarantine-to-charge race for the
+      // duration of that network call): estimate-side archive/full/pending
+      // gates plus the call-side fallback verdict. A missing/unparseable
+      // row fails closed — money never moves on an estimate whose
+      // provenance can't be re-verified. The plain throw routes to the
+      // generic 400 and the failure-path reset below restores the intent
+      // to face.
+      {
+        const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+        const unavailable = new Error('This estimate is temporarily unavailable — please contact our office.');
+        const freshRow = await db('estimates').where({ id: estimateId }).first('estimate_data', 'archived_at');
+        const freshData = (() => {
+          if (!freshRow) return null;
+          try {
+            const d = typeof freshRow.estimate_data === 'string'
+              ? JSON.parse(freshRow.estimate_data) : (freshRow.estimate_data || {});
+            return d && typeof d === 'object' ? d : null;
+          } catch { return null; }
+        })();
+        if (!freshData) throw unavailable;
+        const eng = freshData.estimatorEngine;
+        if (eng?.callLogId
+          && (freshRow.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
+          throw unavailable;
+        }
+        if (await callSideBlockForEstimateData(db, freshData)) throw unavailable;
       }
       const confirmed = await stripe.paymentIntents.confirm(
         quote.paymentIntentId,

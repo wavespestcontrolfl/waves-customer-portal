@@ -372,26 +372,47 @@ async function markEstimateManuallyAccepted({
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }
 
-    // The call-side verdict re-checked INSIDE the money-bearing
-    // transaction, on the row this transaction claimed (local audit P0,
-    // PR #3304): the admin route's guard runs before this transaction
-    // opens, and a quarantine or linkage repoint landing in that window
-    // would accept — and bill/convert — a wrong-lead or rejected-call
-    // estimate. Same 409 the route returns.
+    // SERIALIZED with call-linkage corrections, mirroring the public
+    // accept protocol (pre-push P0, PR #3304 — an unlocked read here let
+    // a correction commit after the check and wait behind the money
+    // UPDATE while acceptance converted the wrong lead). One lock order
+    // everywhere: estimates → leads → call_log. The estimate row is
+    // locked FOR UPDATE and re-read fresh; estimate-side full/pending
+    // markers refuse; then the linked lead and (via lockCallRow) the call
+    // row are locked and HELD through the acceptance write below, so a
+    // concurrent correction either committed first (seen here) or waits
+    // for this transaction's terminal write and its reconcile applies the
+    // marker-only terminal invalidation.
     {
+      const freshLinkRow = await trx('estimates').where({ id: estimateId })
+        .forUpdate().first('estimate_data', 'archived_at');
       const manualAcceptData = (() => {
-        const raw = estimate.estimate_data || estimate.estimateData;
+        const raw = freshLinkRow?.estimate_data;
         if (!raw) return null;
         try {
           const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
           return d && typeof d === 'object' ? d : null;
         } catch { return null; }
       })();
-      if (manualAcceptData?.estimatorEngine?.callLogId) {
+      const eng = manualAcceptData?.estimatorEngine;
+      if (eng?.callLogId) {
+        const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
+        // An engine draft that is archived or marker-bearing was pulled by
+        // an invalidation (terminal rows get the marker only) — money must
+        // not move on it.
+        if (freshLinkRow?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) {
+          throw quarantined;
+        }
+        if (manualAcceptData?.lead_id && ['sid', 'stamp'].includes(manualAcceptData?.lead_linkage)) {
+          await trx('leads').where({ id: String(manualAcceptData.lead_id) }).forUpdate().first('id');
+        }
+        const { staleCallLinkageReason } = require('./admin-estimate-persistence');
+        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true })) {
+          throw quarantined;
+        }
         const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-        const blocked = await callSideBlockForEstimateData(trx, manualAcceptData);
-        if (blocked) {
-          throw httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
+        if (await callSideBlockForEstimateData(trx, manualAcceptData)) {
+          throw quarantined;
         }
       }
     }
@@ -483,6 +504,19 @@ async function markEstimateManuallyAccepted({
       // invoicing.
       .whereNull('price_locked_at')
       .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
+      // Marker/archive predicates on the money write itself (pre-push P0,
+      // PR #3304): the locked revalidation above serializes the engine-
+      // drafted path, and these make the UPDATE refuse outright if any
+      // invalidation state is on the row it claims. Scoped to engine
+      // drafts — non-engine estimates keep their existing semantics.
+      .where(function engineDraftNotQuarantined() {
+        this.whereRaw("COALESCE(estimate_data #>> '{estimatorEngine,callLogId}', '') = ''")
+          .orWhere(function notQuarantined() {
+            this.whereNull('archived_at')
+              .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+              .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
+          });
+      })
       .update(updates)
       .returning('*');
 

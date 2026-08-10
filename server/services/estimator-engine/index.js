@@ -1158,6 +1158,19 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
             : null,
         });
       }
+      // A context failure means NO reconciliation ran for whatever draft
+      // this call already has (pre-push P0, PR #3304): on a quote-flavored
+      // retry, returning RED here left the FORMER lead's draft and its
+      // public token live indefinitely — the processor's fallback pass only
+      // fires on the non-drafting branch. Queue the durable reconcile
+      // retry: the sweep's reconcileDraftLinksForCall degrades to the
+      // linkage-only fallback context when the full context still fails,
+      // so the stale draft is corrected even if this error never clears.
+      // Identity conflicts are excluded — their quarantine above IS the
+      // (stronger) reconciliation.
+      if (!dryRun && !['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
+        await markReconcilePending(callLogId);
+      }
       if (!dryRun && context.call && quotePromised) {
         await notify({
           call: context.call,

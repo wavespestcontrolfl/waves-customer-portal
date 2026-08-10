@@ -76,6 +76,10 @@ function makeDb(estimate, claimedOverrides = null) {
       statusList: null,
       rawClause: null,
       where(clause) {
+        // Grouped predicates (function form — e.g. the engine-draft
+        // quarantine guard) are not tracked; the pins assert the object
+        // clause that names the row.
+        if (typeof clause === 'function') return this;
         this.clause = clause;
         return this;
       },
@@ -89,6 +93,9 @@ function makeDb(estimate, claimedOverrides = null) {
       },
       whereRaw(clause) {
         this.rawClause = clause;
+        return this;
+      },
+      forUpdate() {
         return this;
       },
       first: async () => {
