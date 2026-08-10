@@ -232,11 +232,6 @@ function shapeCallLog(row) {
     customerId: row.customer_id || null,
     customerName: [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ') || null,
     leadId: row.lead_id || null,
-    leadCustomerId: row.lead_customer_id || null,
-    // Set by dedupeCrmCallRows when a SETTLED stamp names a lead the join
-    // could not return (soft-deleted or gone). Carried through the shape so
-    // consumers can refuse to treat the leftover sid row as authoritative.
-    stampTargetMissing: row.stamp_target_missing === true,
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
@@ -449,8 +444,14 @@ function dedupeCrmCallRows(rows) {
     const target = stampTargetOf(group[0]);
     if (!target || !callSettled(group[0])) return null;
     if (group.some((r) => r.lead_id != null && String(r.lead_id) === target)) return null;
+    // Clearing the lead columns IS the protection available here: callLog
+    // .leadId then reads null, so the claim-time backfill and the PPC write
+    // (the two consumers of the joined lead on this branch) cannot use the
+    // obsolete sid lead. The richer "attribute nothing and never fall back
+    // to the plan" behaviour needs attributeResolvedLead, which lands with
+    // the attribution protocol — no flag is shaped here that nothing reads.
     return {
-      ...group[0], lead_id: null, lead_customer_id: null, lead_call_sid: null, stamp_target_missing: true,
+      ...group[0], lead_id: null, lead_customer_id: null, lead_call_sid: null,
     };
   };
   const deduped = [];

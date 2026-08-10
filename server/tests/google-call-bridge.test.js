@@ -396,8 +396,9 @@ describe('soft-deleted stamp target (codex P1, PR #3303 r7)', () => {
     };
     const [deduped] = dedupeCrmCallRows([row]);
     expect(deduped.lead_id).toBeNull();
-    expect(deduped.stamp_target_missing).toBe(true);
-    expect(shapeCallLog(deduped).stampTargetMissing).toBe(true);
+    // Clearing the lead columns is the protection: the shaped leadId — the
+    // field the backfill and the PPC write actually read — goes null, so the
+    // obsolete sid lead cannot be used.
     expect(shapeCallLog(deduped).leadId).toBeNull();
   });
 
