@@ -481,6 +481,32 @@ function traceEligibilityGateOn() {
 }
 
 /**
+ * The `{ traceEligible, traceVariant }` pair the schedule/dispatch feeds hand
+ * to the field UI, where traceEligible means "offer the SATELLITE tracer".
+ *
+ * A 'photo' lane is eligible for a marked-photo card and never for the tracer,
+ * so it must report traceEligible:false — otherwise the tech is shown a
+ * workflow whose save the capture block then rejects with trace_photo_lane, a
+ * dead end discoverable only by doing the work twice (codex P2).
+ *
+ * Gate-aware on purpose: with GATE_TRACE_ELIGIBILITY off, ONLY a photo lane
+ * may suppress the button. Every other lane keeps pre-gate behavior, so
+ * turning on marks cannot start hiding tracers across unrelated services.
+ */
+function traceFeedFields(verdict) {
+  if (verdict?.eligible && verdict.variant === 'photo') {
+    return { traceEligible: false, traceVariant: 'photo' };
+  }
+  if (!traceEligibilityGateOn() || !verdict) {
+    return { traceEligible: true, traceVariant: null };
+  }
+  return {
+    traceEligible: verdict.eligible,
+    traceVariant: verdict.eligible ? verdict.variant : null,
+  };
+}
+
+/**
  * Capture-side block payload for the tech write routes (403), or null.
  * Gate-off keeps today's behavior; resolver errors FAIL OPEN — capture is
  * an internal tool and the render-side suppression is the customer-facing
@@ -916,6 +942,7 @@ module.exports = {
   pointerRequiredForKey,
   primaryIdentityFreezable,
   traceEligibilityGateOn,
+  traceFeedFields,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
 };

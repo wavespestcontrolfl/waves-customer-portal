@@ -1950,7 +1950,13 @@ router.get('/', async (req, res, next) => {
       resolveTraceEligibility: rowTraceEligibility,
       combineLineVerdicts: combineRowVerdicts,
       traceEligibilityGateOn,
+      traceFeedFields,
     } = require('../services/service-report/trace-eligibility');
+    const { photoMarksGateOn } = require('../services/service-report/photo-marks');
+    // The verdict is also needed when ONLY the marks gate is on, so a photo
+    // lane can hide the satellite tracer (codex P2). traceFeedFields keeps
+    // every other lane's pre-gate behavior in that configuration.
+    const rowTraceNeeded = traceEligibilityGateOn() || photoMarksGateOn();
     let serviceKeyByServiceId = new Map();
     let dayPointerByKey = new Map();
     // Pointer OUTAGE ≠ no pointer rows (codex P2 r27): on failure the
@@ -2144,7 +2150,7 @@ router.get('/', async (req, res, next) => {
         }),
       };
 
-      const rowTraceVerdict = traceEligibilityGateOn()
+      const rowTraceVerdict = rowTraceNeeded
         && !dayPointerLookupFailed
         && !projectCompletionContext?.completionProfileLookupFailed
         ? combineRowVerdicts(
@@ -2181,8 +2187,10 @@ router.get('/', async (req, res, next) => {
         // Unlinked rows (null service_id) fall back to the profile's
         // resolved key (codex P2 r2), and typed keys classify by their
         // findings pointer (codex P2 r1).
-        traceEligible: !rowTraceVerdict || rowTraceVerdict.eligible,
-        traceVariant: rowTraceVerdict?.eligible ? rowTraceVerdict.variant : null,
+        // traceEligible means "offer the SATELLITE tracer"; a photo lane is
+        // mapped by marking a photo instead, so the helper reports false
+        // (codex P2).
+        ...traceFeedFields(rowTraceVerdict),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -2460,8 +2468,12 @@ router.get('/week', async (req, res, next) => {
       const {
         resolveTraceEligibility: weekTraceEligibility,
         combineLineVerdicts: weekCombineVerdicts,
-        traceEligibilityGateOn: weekTraceGateOn,
+        traceEligibilityGateOn: weekTraceGateOnRaw,
+        traceFeedFields,
       } = require('../services/service-report/trace-eligibility');
+      const { photoMarksGateOn: weekPhotoMarksGateOn } = require('../services/service-report/photo-marks');
+      // Same reason as the day feed (codex P2).
+      const weekTraceGateOn = () => weekTraceGateOnRaw() || weekPhotoMarksGateOn();
       // Add-on lines resolve by CATALOG KEY + typed pointer, like the day
       // feed — name-only classification gave fire_ant/flea_tick add-ons
       // the fallback spray variant when their rules require lawn outline
@@ -2638,10 +2650,7 @@ router.get('/week', async (req, res, next) => {
                 }),
               )
               : null;
-            return {
-              traceEligible: !v || v.eligible,
-              traceVariant: v?.eligible ? v.variant : null,
-            };
+            return traceFeedFields(v);
           })(),
           status: s.status,
           techName: s.tech_name, zone: s.zone,

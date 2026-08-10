@@ -34,6 +34,9 @@ const DARK = {
 
 const API = import.meta.env.VITE_API_URL || '';
 const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
+// Mirrors MARKABLE_PHOTO_TYPES in tech-track.js. 'before' is definitionally
+// pre-treatment, so it can never carry treated-point marks.
+const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
   const [photos, setPhotos] = useState([]);
@@ -293,8 +296,13 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
                 )}
                 {/* Treated-point marking (GATE_PHOTO_MARKS). Only offered on
                     lanes that support marks — markLanes is empty otherwise, so
-                    this affordance is absent rather than disabled. */}
-                {marksSupported && (
+                    this affordance is absent rather than disabled.
+                    'before' photos are excluded: they document the state
+                    BEFORE treatment, so marks on one would publish a
+                    pre-treatment image as the treated area (codex P1). The
+                    PUT route rejects them too — this only saves the tech a
+                    pointless round trip. */}
+                {marksSupported && MARKABLE_PHOTO_TYPES.has(p.photo_type) && (
                   <button
                     type="button"
                     onClick={(e) => { e.preventDefault(); setMarkTarget(p); }}

@@ -1168,13 +1168,26 @@ export default function ServiceReportDocument({ data, token }) {
             <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
               {MARKED_PHOTO_INTRO}
             </p>
-            <div style={{ position: 'relative', lineHeight: 0 }}>
+            {/* The wrapper SHRINK-WRAPS the image (inline-block + auto size),
+                which is what keeps the pins aligned once a height cap binds:
+                pins are percentages of this box, so a box larger than the
+                rendered image would offset every one of them. A full-width
+                portrait phone photo is ~10in tall at the document's 7.5in
+                printable width and could not fit the page beside its heading
+                and legend, so the image is capped at 6.4in and allowed to
+                shrink its own width to match (codex P1). */}
+            <div style={{
+              position: 'relative', lineHeight: 0, display: 'inline-block', maxWidth: '100%',
+            }}>
               <img
                 src={marked.url}
                 alt={marked.caption || 'Photograph of the treated area with the treated points marked'}
                 onError={() => markImageFailed(marked.url)}
                 style={{
-                  display: 'block', width: '100%', borderRadius: 4, border: `1px solid ${HAIR}`,
+                  display: 'block',
+                  width: 'auto', height: 'auto',
+                  maxWidth: '100%', maxHeight: '6.4in',
+                  borderRadius: 4, border: `1px solid ${HAIR}`,
                 }}
               />
               {(marked.marks || []).map((mark) => (

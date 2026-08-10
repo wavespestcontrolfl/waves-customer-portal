@@ -588,6 +588,11 @@ router.get('/:id/photos', async (req, res, next) => {
 //
 // Marks are OPTIONAL by owner ruling: a visit with none is complete, so these
 // endpoints exist to be skipped without consequence.
+// 'before' is definitionally pre-treatment, so it can never carry treated
+// points. The rest ('after', 'progress', 'issue') depict the visit's own work
+// or findings and can legitimately show where treatment was applied.
+const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
+
 async function markLaneForService(svc) {
   const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
   const profile = await resolveCompletionProfileForScheduledService(svc, db);
@@ -640,8 +645,18 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     // The posted key must belong to THIS visit — either a staged photo or a
     // promoted one. Without this check a caller could attach marks to another
     // customer's photo by guessing its key.
-    const ownsKey = await photoKeyBelongsToService(svc.id, s3Key);
-    if (!ownsKey) return res.status(404).json({ error: 'Photo not found on this service' });
+    const visitPhoto = await findVisitPhotoByKey(svc.id, s3Key);
+    if (!visitPhoto) return res.status(404).json({ error: 'Photo not found on this service' });
+    // A 'before' photo documents the state BEFORE any treatment, so marks on
+    // it would publish a pre-treatment image under copy calling it the treated
+    // area (codex P1). Rejected server-side, not merely hidden in the UI —
+    // the render is the customer-facing guarantee.
+    if (!MARKABLE_PHOTO_TYPES.has(String(visitPhoto.photo_type || ''))) {
+      return res.status(400).json({
+        error: 'Treated-point marks can only go on a photo taken during or after treatment.',
+        code: 'photo_not_markable',
+      });
+    }
 
     const serviceKey = await markLaneForService(svc).catch(() => null);
     const validation = validateMarks(req.body?.marks, { serviceKey });
@@ -656,6 +671,24 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     logger.info(
       `[tech-track] photo marks saved service=${svc.id} tech=${req.technicianId} count=${saved.length}`
     );
+
+    // Marks render on the report, so a completed visit's cached PDF is stale
+    // the moment they are saved, edited, or cleared — and the cache key is
+    // content-insensitive, so without this the customer keeps downloading a
+    // PDF with the old pins (or no card at all) indefinitely (codex P1).
+    // Same best-effort contract as the treatment-zone write below.
+    try {
+      const completedRecord = await db('service_records')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'desc')
+        .first('id');
+      if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
+    } catch (err) {
+      // Never fail the save on a cache-invalidation hiccup; the marks are
+      // written and the live report is already correct.
+      logger.warn(`[tech-track] pdf cache invalidation after marks failed: ${err.message}`);
+    }
+
     res.json({ marks: validation.marks });
   } catch (err) {
     logger.error(`[tech-track] photo-marks save failed: ${err.message}`);
@@ -664,24 +697,25 @@ router.put('/:id/photo-marks', async (req, res, next) => {
 });
 
 // A photo belongs to the visit if it is still staged against the scheduled
-// service, or was promoted onto that visit's service_record.
-async function photoKeyBelongsToService(scheduledServiceId, s3Key) {
+// service, or was promoted onto that visit's service_record. Returns the
+// photo_type too — the card publishes the image as the TREATED area, so the
+// type is a correctness input, not metadata.
+async function findVisitPhotoByKey(scheduledServiceId, s3Key) {
   const staged = await db('scheduled_service_photo_staging')
     .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
-    .first('id')
+    .first('id', 'photo_type')
     .catch(() => null);
-  if (staged) return true;
+  if (staged) return staged;
   const record = await db('service_records')
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy('created_at', 'desc')
     .first('id')
     .catch(() => null);
-  if (!record) return false;
-  const promoted = await db('service_photos')
+  if (!record) return null;
+  return db('service_photos')
     .where({ service_record_id: record.id, s3_key: s3Key })
-    .first('id')
+    .first('id', 'photo_type')
     .catch(() => null);
-  return !!promoted;
 }
 
 // ── Recap clip capture DURING the visit (pest-recap lane, P4b) ──────────────────

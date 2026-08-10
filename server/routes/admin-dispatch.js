@@ -2292,14 +2292,20 @@ router.get('/:date?', async (req, res, next) => {
       // validator. Same shared helpers as the schedule feeds; fail-soft
       // (absent flags = eligible; capture stays the fail-open surface).
       let dispatchTraceVerdict = null;
+      // Required at THIS scope, not inside the try below: the feed fields are
+      // spread into the row far outside that block.
+      const { traceFeedFields } = require('../services/service-report/trace-eligibility');
       try {
         const {
           resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
         } = require('../services/service-report/trace-eligibility');
+        const { photoMarksGateOn } = require('../services/service-report/photo-marks');
         // A profile OUTAGE omits the verdict (fail open, codex P2 r28)
         // instead of classifying a typed primary from its editable label
         // — the save route catches the same outage and fails open.
-        if (traceEligibilityGateOn() && !dispatchProfileLookupFailed) {
+        // Also needed with only the marks gate on, so a photo lane hides the
+        // satellite tracer (codex P2).
+        if ((traceEligibilityGateOn() || photoMarksGateOn()) && !dispatchProfileLookupFailed) {
           dispatchTraceVerdict = combineLineVerdicts(
             resolveTraceEligibility({
               serviceKey: completionProfile?.serviceKey || null,
@@ -2371,8 +2377,8 @@ router.get('/:date?', async (req, res, next) => {
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        traceEligible: !dispatchTraceVerdict || dispatchTraceVerdict.eligible,
-        traceVariant: dispatchTraceVerdict?.eligible ? dispatchTraceVerdict.variant : null,
+        // A photo lane must not offer the satellite tracer (codex P2).
+        ...traceFeedFields(dispatchTraceVerdict),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,

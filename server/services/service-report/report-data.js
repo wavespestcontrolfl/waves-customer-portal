@@ -2659,9 +2659,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // that order an eligibility-gated clause is inert — a foam visit would
   // publish a saved trace under legacy perimeter copy right beside its
   // marked photo, which is the exact false claim this change exists to stop.
+  // Hoisted so BOTH consumers below can honour it. Setting traceSuppressed
+  // alone was not enough (codex P1 r2): the map loader and the re-entry
+  // resolver each branch on traceEligibilityGateOn() and fall back to the
+  // legacy lane booleans when it is off, so with only GATE_PHOTO_MARKS on
+  // they never read traceSuppressed at all and a pre-existing foam trace
+  // still published as a perimeter map with an exterior advisory.
+  const photoLaneSuppressed = photoMarksGateOn() && traceEligibility.variant === 'photo';
   const traceSuppressed = (traceEligibilityGateOn()
     && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
-    || (photoMarksGateOn() && traceEligibility.variant === 'photo');
+    || photoLaneSuppressed;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -3215,10 +3222,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the MUTABLE row/label and would both hide a frozen-eligible map
     // after a repoint and override an add-on rescue (codex P2 r16). Gate
     // OFF: the legacy belts, bit-for-bit.
+    // photoLaneSuppressed rides the LEGACY belt too: it hangs off
+    // GATE_PHOTO_MARKS, so a foam lane's saved trace stays suppressed even
+    // when the eligibility gate is off (codex P1 r2).
     if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
       && (traceEligibilityGateOn()
         ? !traceSuppressed
-        : (!interiorOnlyLane && !trapLaneNoSprayMap))) {
+        : (!interiorOnlyLane && !trapLaneNoSprayMap && !photoLaneSuppressed))) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3517,9 +3527,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // An ineligible lane's trace must not assert an exterior re-entry window
   // either — a trace on an inspection would otherwise emit a false
   // advisory (scope RC3).
+  // Same gate-off gap as the map loader (codex P1 r2): a foam trace must not
+  // contribute an exterior re-entry advisory beside the marked photo just
+  // because the eligibility gate has not been flipped yet.
   const payloadTracedExteriorZone = (traceEligibilityGateOn()
     ? traceSuppressed
-    : interiorOnlyLane)
+    : (interiorOnlyLane || photoLaneSuppressed))
     ? false
     : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex, {
       // Reuse the payload's combined verdict — ONE verdict per report

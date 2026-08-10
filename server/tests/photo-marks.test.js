@@ -245,6 +245,49 @@ describe('photo-lane capture block is independent of GATE_TRACE_ELIGIBILITY', ()
   });
 });
 
+describe('traceFeedFields — the schedule/dispatch tracer affordance', () => {
+  // traceEligible means "offer the SATELLITE tracer". A photo lane is mapped
+  // by marking a photo, so offering the tracer is a dead end: the capture
+  // block rejects the eventual save with trace_photo_lane (codex P2).
+  const { traceFeedFields } = require('../services/service-report/trace-eligibility');
+  const withEligibilityGate = (value, fn) => {
+    const prev = process.env.GATE_TRACE_ELIGIBILITY;
+    if (value === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = value;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prev;
+    }
+  };
+  const photo = { eligible: true, variant: 'photo', captionKey: 'foamPoints' };
+  const spray = { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' };
+  const ineligible = { eligible: false, reason: 'trap_lane' };
+
+  test('a photo lane never offers the tracer, under either gate', () => {
+    for (const gate of [undefined, 'true']) {
+      withEligibilityGate(gate, () => {
+        expect(traceFeedFields(photo)).toEqual({ traceEligible: false, traceVariant: 'photo' });
+      });
+    }
+  });
+
+  test('satellite lanes are unchanged with the eligibility gate on', () => {
+    withEligibilityGate('true', () => {
+      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: 'spray' });
+      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: false, traceVariant: null });
+    });
+  });
+
+  test('with the eligibility gate off, only a photo lane may hide the tracer', () => {
+    withEligibilityGate(undefined, () => {
+      // Enabling marks must not start hiding tracers across unrelated lanes.
+      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: true, traceVariant: null });
+      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: null });
+      expect(traceFeedFields(null)).toEqual({ traceEligible: true, traceVariant: null });
+    });
+  });
+});
+
 describe('foam routes to the photo variant', () => {
   test('the catalog key wins over the shared termite_treatment pointer', () => {
     // Foam completes as termite_treatment, which it shares with liquid
