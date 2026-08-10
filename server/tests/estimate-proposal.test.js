@@ -307,6 +307,22 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(t.firstYearTotal).toBe(878);
   });
 
+  it('program tax rounds per application × cadence, matching what invoices collect (r15b)', () => {
+    // $100.07 × 4 at 7%: annual-bucket rounding would display $28.02, but
+    // each application invoice collects round(100.07 × .07) = $7.00 — the
+    // agreement must show the $28.00 billing actually charges.
+    const t = computeProposalTotals(normalizeProposal(authored({
+      buildings: [],
+      taxRate: 0.07,
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100.07, taxable: true },
+      ],
+    })));
+    expect(t.annualRecurring).toBe(400.28);
+    expect(t.recurringTax).toBe(28);
+    expect(t.totalTax).toBe(28);
+  });
+
   it('never authors structured sections onto a synthesized fallback', () => {
     const p = normalizeProposal({ customer_name: 'Y', monthly_total: 120, estimate_data: {} });
     expect(p.synthesized).toBe(true);

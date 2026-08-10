@@ -119,16 +119,21 @@ function computeTotals(buildings, taxRate, correctiveWork = [], programs = []) {
     if (w.taxable) taxableOneTime += amount;
   }
   // Service programs (slice 1A-ii): annual = per-application × frequency,
-  // derived exactly like normalizeProgram.
+  // derived exactly like normalizeProgram. Program tax rounds PER
+  // APPLICATION × cadence, mirroring computeProposalTotals — billing
+  // invoices each application and rounds its tax there, so an annual-bucket
+  // preview could show cents the invoices never collect (codex 1A-ii r15b).
+  const rate = Number(taxRate) || 0;
+  let programTax = 0;
   for (const p of programs.filter(programRowIsPriced)) {
-    const annual = roundMoney(roundMoney(p.pricePerApplication) * Math.round(Number(p.frequencyPerYear)));
-    annualRecurring += annual;
-    if (p.taxable) taxableAnnual += annual;
+    const perApp = roundMoney(p.pricePerApplication);
+    const freq = Math.round(Number(p.frequencyPerYear));
+    annualRecurring += roundMoney(perApp * freq);
+    if (p.taxable) programTax += roundMoney(perApp * rate) * freq;
   }
   // Per-bucket cent rounding, mirroring computeProposalTotals — a merged
   // bucket can drift a cent from the saved proposal/PDF (codex 1A-i r3).
-  const rate = Number(taxRate) || 0;
-  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate));
+  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate) + programTax);
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   return {
@@ -378,7 +383,11 @@ export default function CommercialProposalPage() {
       // justify clearing the synthesized building pricing (codex 1A-ii r2h).
       let monetaryFilled = 0;
       let programsInstalled = false;
-      if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim())) {
+      // Section-content predicates consider EVERY editable field — the form
+      // stays editable during the fetch, so a value/amount typed before its
+      // label must not be silently replaced (codex 1A-ii r15b, same rule as
+      // programRowHasContent).
+      if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim() || i.value.trim())) {
         setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
         filled += 1;
       }
@@ -407,7 +416,9 @@ export default function CommercialProposalPage() {
         monetaryFilled += 1;
         programsInstalled = true;
       }
-      if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())
+      if (draft?.correctiveWork?.length
+        && !live.correctiveWork.some((w) => String(w.label || '').trim()
+          || String(w.includesText || '').trim() || Number(w.amount) > 0 || w.taxable === true)
         && !hasAuthoredBuildingLines) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
           label: w.label,

@@ -122,6 +122,24 @@ describe('buildProposalFirstInvoice', () => {
     expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
   });
 
+  test('program tax rounds per application, matching ongoing invoices and the displayed annual (r15b)', () => {
+    // $100.07 at 7% → each application collects $7.00; two such programs on
+    // ONE acceptance invoice must collect $14.00 (per-line rounding), never
+    // a bucket-rounded $14.01 the agreement and later invoices don't show.
+    const built = buildProposalFirstInvoice({
+      taxRate: 0.07,
+      buildings: [],
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100.07, annual: 400.28, taxable: true },
+        { service: 'mosquito', label: 'Mosquito', frequencyPerYear: 9, pricePerApplication: 100.07, annual: 900.63, taxable: true },
+      ],
+    });
+    expect(built.subtotal).toBe(200.14);
+    expect(built.taxAmount).toBe(14);
+    expect(built.total).toBe(214.14);
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
   test('rounds recurring and one-time tax buckets separately, matching computeProposalTotals (codex 1A-i r3 P0)', () => {
     // Two $100.07 taxable amounts at 7%: each bucket's tax is $7.0049 →
     // $7.00 rounded per bucket = $14.00 total. A merged bucket would round

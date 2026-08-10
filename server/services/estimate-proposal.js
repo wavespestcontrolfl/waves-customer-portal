@@ -663,6 +663,7 @@ function computeProposalTotals(proposal) {
   let annualRecurring = 0;
   let oneTime = 0;
   let taxableAnnualRecurring = 0;
+  let taxableBuildingsAnnual = 0;
   let taxableOneTime = 0;
 
   for (const building of proposal.buildings || []) {
@@ -673,7 +674,10 @@ function computeProposalTotals(proposal) {
       } else {
         const annual = annualizedAmount(item);
         annualRecurring += annual;
-        if (item.taxable) taxableAnnualRecurring += annual;
+        if (item.taxable) {
+          taxableAnnualRecurring += annual;
+          taxableBuildingsAnnual += annual;
+        }
       }
     }
   }
@@ -690,15 +694,26 @@ function computeProposalTotals(proposal) {
   // Service programs (slice 1A-ii) are the recurring itemization when
   // authored — the PUT route rejects top-level building line items beside
   // them, so this never double-counts a legacy buildings list.
+  // Program tax rounds PER APPLICATION × cadence, exactly how billing
+  // collects it (proposal-win's acceptance invoice and every ongoing
+  // per-application invoice each round that application's tax) — an
+  // annual-bucket rounding can display tax the invoices never collect
+  // ($100.07 × 4 at 7%: bucket says $28.02, four invoices collect $28.00)
+  // (pre-push codex r15b P0). Buildings keep the bucket (their invoices
+  // bill periods, and programs never coexist with them).
+  let programTax = 0;
   for (const program of proposal.programs || []) {
     annualRecurring += program.annual;
-    if (program.taxable) taxableAnnualRecurring += program.annual;
+    if (program.taxable) {
+      taxableAnnualRecurring += program.annual;
+      programTax += roundMoney(program.pricePerApplication * taxRate) * program.frequencyPerYear;
+    }
   }
 
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   const monthlyEquivalent = roundMoney(annualRecurring / 12);
-  const recurringTax = roundMoney(taxableAnnualRecurring * taxRate);
+  const recurringTax = roundMoney(roundMoney(taxableBuildingsAnnual * taxRate) + programTax);
   const oneTimeTax = roundMoney(taxableOneTime * taxRate);
   const totalTax = roundMoney(recurringTax + oneTimeTax);
 

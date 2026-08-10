@@ -387,8 +387,45 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // v1-legacy-mapper) — surface it as a row so it can never be silently
   // omitted; cadence is unproven, so it flows into the all-or-nothing
   // warning and the operator authors it manually (codex 1A-ii r5).
-  const palmAnn = num(engineResult.recurring?.palmInjectionAnn);
-  const palmMo = num(engineResult.recurring?.palmInjectionMo);
+  // Supplement scalars ride MULTIPLE supported containers — root
+  // estimateData.recurring beside a result, each engine result's own
+  // recurring block, and the results-stats aliases (injection.*, rodBaitMo)
+  // that estimate-public's recurringServicesWithSupplements reads. Reading
+  // only the SELECTED engineResult silently omitted a priced supplement,
+  // and with null stored totals the save would rewrite the authoritative
+  // totals without it (pre-push codex r15b P0). Detection stays
+  // fail-with-direction: any hit still routes into the all-or-nothing
+  // warning below.
+  const supplementRecurringContainers = [
+    engineResult.recurring,
+    estimateData.recurring,
+    estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? estimateData.engineResult.recurring : null,
+  ].filter((r) => r && typeof r === 'object');
+  const supplementStats = [
+    estimateData.results,
+    engineResult.results,
+    estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? estimateData.engineResult.results : null,
+  ].filter((s) => s && typeof s === 'object');
+  const supplementScalar = (key) => {
+    for (const container of supplementRecurringContainers) {
+      const v = num(container[key]);
+      if (v > 0) return v;
+    }
+    return 0;
+  };
+  const supplementStat = (read) => {
+    for (const stats of supplementStats) {
+      const v = num(read(stats));
+      if (v > 0) return v;
+    }
+    return 0;
+  };
+  const palmAnn = supplementScalar('palmInjectionAnn')
+    || supplementStat((s) => s.injection?.annualAfterCredits);
+  const palmMo = supplementScalar('palmInjectionMo')
+    || supplementStat((s) => s.injection?.monthlyAfterCredits ?? s.injection?.mo);
   const palmRows = (palmAnn > 0 || palmMo > 0)
     && !canonicalKeys.has('palm_injection')
     ? [{ service: 'palm_injection', name: 'Palm Injection', annualAfterDiscount: palmAnn || undefined, mo: palmMo || undefined }]
@@ -397,8 +434,9 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // (result.recurring.rodentBaitMo — monthly-billed, so the rodent
   // ambiguity guard fails the draft with direction rather than omitting
   // it — codex 1A-ii r6).
-  const rodentMo = num(engineResult.recurring?.rodentBaitMo);
-  const rodentAnn = num(engineResult.recurring?.rodentBaitAnn);
+  const rodentMo = supplementScalar('rodentBaitMo')
+    || supplementStat((s) => s.rodBaitMo);
+  const rodentAnn = supplementScalar('rodentBaitAnn');
   const rodentRows = (rodentMo > 0 || rodentAnn > 0)
     && !canonicalKeys.has('rodent_bait')
     ? [{ service: 'rodent_bait', name: 'Rodent Bait Service', annualAfterDiscount: rodentAnn || undefined, mo: rodentMo || undefined }]

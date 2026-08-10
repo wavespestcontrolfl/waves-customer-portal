@@ -777,6 +777,30 @@ describe('deriveProposalDraft', () => {
     expect(draft.propertyScope.items[0]).toEqual({ label: 'Building', value: '12,000 sq ft' });
   });
 
+  test('r15b: supplement scalars in ANY supported container fail the draft with direction — never silent omission', async () => {
+    // Root recurring beside a result: the selected engineResult has no
+    // scalar, but the root container carries a priced rodent supplement.
+    const rootScalar = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        recurring: { rodentBaitMo: 15 },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(rootScalar.programs).toBeNull();
+    expect(rootScalar.warnings.join(' ')).toMatch(/rodent/i);
+
+    // results-stats alias (rodBaitMo) — the same field estimate-public's
+    // supplements reader consumes.
+    const statAlias = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        results: { rodBaitMo: 15 },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(statAlias.programs).toBeNull();
+    expect(statAlias.warnings.join(' ')).toMatch(/rodent/i);
+  });
+
   test('r15: a non-green estimatorEngine lane fails the whole draft — estimate-level review evidence gates generation', async () => {
     // Yellow-lane reasons (fallback sqft, comps drift, existing-customer)
     // are estimate-level — no line marker carries them, and a sent
