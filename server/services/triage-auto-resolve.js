@@ -353,11 +353,12 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 // (additional_properties) is never auto-resolved either: one validated unit
 // cannot prove which of a landlord's several units in the SAME building it
 // answers (pre-push audit P1). Fail closed: missing/unparseable streets keep
-// the card. Residual limit, accepted: repeat unit-less calls about ONE
-// property are indistinguishable from separate unit-less calls about two
-// units in one building when neither call mentioned other properties — the
-// caller guard requires an affirmative SUB_PREMISE acceptance, so at least
-// one exact door was validated for the building being cleared.
+// the card. And when MORE THAN ONE open card matches the accepted building,
+// none resolve: separate unit-less calls can be two different units in the
+// same building (unit 202 validating must not close unit 101's outstanding
+// ask), and nothing in the data can attribute the single validated door to
+// one card over another — fail closed and leave them for human review
+// (pre-push audit P1 r3; the pre-PR status quo for those cards anyway).
 
 // Pure per-card predicate, exported for tests. `row` carries the card's
 // call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1).
@@ -399,6 +400,14 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
   return !!authoritative && authoritative === acceptedKey;
 }
 
+// Pure selection over the loaded candidate rows, exported for tests: the
+// street-matched cards, EMPTY when more than one matches (ambiguous
+// attribution — see the fail-closed rules above).
+function selectUnitCardsToResolve(candidates, acceptedStreetLine) {
+  const answered = (candidates || []).filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine));
+  return answered.length === 1 ? answered : [];
+}
+
 // Never throws on a no-op; returns the number of cards resolved. Shares the
 // per-call lock contract (utils/triage-locks.js) and the review_status
 // re-sync with the sweep, admin-triage, and the email resolver.
@@ -415,7 +424,7 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedStreetLine, sour
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
     );
-  const answered = candidates.filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine));
+  const answered = selectUnitCardsToResolve(candidates, acceptedStreetLine);
   if (!answered.length) return 0;
   const resolveCards = async (trx) => {
     const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
@@ -614,6 +623,7 @@ module.exports = {
   runTriageAutoResolve,
   resolveOpenUnitNumberCards,
   unitCardAnsweredByAcceptedStreet,
+  selectUnitCardsToResolve,
   classifyTriageItem,
   hasNewAddressEvidence,
   callSuppliedAddress,

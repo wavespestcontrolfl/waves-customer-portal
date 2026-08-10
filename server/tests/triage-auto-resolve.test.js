@@ -11,6 +11,7 @@ const {
   runTriageAutoResolve,
   classifyTriageItem,
   unitCardAnsweredByAcceptedStreet,
+  selectUnitCardsToResolve,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
@@ -353,6 +354,16 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: v1('100 Example Condo Ct') }, '100 Example Condo Ct')).toBe(false);
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: '{not json' }, '100 Example Condo Ct')).toBe(false);
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, '')).toBe(false);
+  });
+
+  test('more than one same-building card → ambiguous attribution, NONE resolve (unit 202 must not close unit 101\'s ask)', () => {
+    const cardA = { id: 'a', call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
+    const cardB = { id: 'b', call_extraction: v2('100 Example Condo Court'), call_extraction_v1: null };
+    const other = { id: 'c', call_extraction: v2('4200 Other Sample Blvd'), call_extraction_v1: null };
+    expect(selectUnitCardsToResolve([cardA, cardB, other], '100 Example Condo Ct')).toEqual([]);
+    // A single matching card resolves; non-matching cards never count against it.
+    expect(selectUnitCardsToResolve([cardA, other], '100 Example Condo Ct')).toEqual([cardA]);
+    expect(selectUnitCardsToResolve([], '100 Example Condo Ct')).toEqual([]);
   });
 
   test('multi-property call → ambiguous which unit was answered; card kept', () => {
