@@ -45,6 +45,16 @@
  * service" button sends only `{is_archived: false, is_active: true}` — it
  * cannot fix the cadence, so the restore has to happen here to land both.
  *
+ * PROD STATE AT WRITING. The owner confirmed the archive and hit "Restore
+ * service" by hand on 2026-08-10, so prod is already is_archived=false /
+ * is_active=true and this migration lands ONLY the cadence fix there — the
+ * un-archive and activation branches are recordless no-ops. They stay in
+ * the migration for the environments that never got the hand-restore
+ * (fresh/preview databases replay the 20260507000002 seed and every
+ * migration since, so they reach this one still carrying the archive) and
+ * so the rollback record stays honest about what was actually changed
+ * where. Reviewers: one changed field in prod is the expected outcome.
+ *
  * Ownership is RECORDED, not inferred (20260805000010 / 20260730160000
  * pattern): up() persists the RAW prior value of exactly the fields it
  * changed as a system_settings row; down() restores only what that record
