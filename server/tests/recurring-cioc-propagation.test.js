@@ -73,12 +73,15 @@ describe('extension call sites apply the resolved flag (source guards)', () => {
     expect(fnBlock).toContain('nextData.create_invoice_on_complete = seriesCioc;');
   });
 
-  test('recurring-alert extend AND convert_ongoing both stamp the resolved flag', () => {
-    // Resolved once inside the locked alert-action transaction, applied in
-    // both insert loops. (Was `db` before the actions joined the maintenance
-    // lock's transaction.)
+  test('every trx-scoped extension loop stamps the resolved flag', () => {
+    // Resolved once inside the locked transaction, applied in each insert
+    // loop. (Was `db` before the actions joined the maintenance lock's
+    // transaction.) Three loops today: the alert route's extend and
+    // convert_ongoing, plus the Edit-appointment visit-count top-up — a plan
+    // topped up to a new count must bill on completion like every other visit
+    // in the series.
     expect(src).toContain('await resolveSeriesCreateInvoiceOnComplete(trx, parentId, parent)');
     const stamps = src.match(/if \(cols\.create_invoice_on_complete && seriesCioc !== undefined\) data\.create_invoice_on_complete = seriesCioc;/g) || [];
-    expect(stamps.length).toBe(2);
+    expect(stamps.length).toBe(3);
   });
 });

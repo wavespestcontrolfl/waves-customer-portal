@@ -79,6 +79,15 @@ const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time T
 // visits include whichever add-on service lines are due on that date.
 const CADENCE_OPTIONS = [
   { value: 'one_time', label: 'One-time' },
+  // Sub-monthly cadences: the server has always understood these (and the
+  // Edit appointment panel has always offered them) — booking an every-2-weeks
+  // program here used to mean reaching for Custom/14, which stores a different
+  // pattern for the same real schedule. None of the three maps to an
+  // annual-prepay coverage cadence, so prepay-on-book downgrades to a standard
+  // accept for them, exactly as it already does for monthly_nth_weekday.
+  { value: 'daily', label: 'Every day' },
+  { value: 'weekly', label: 'Every week' },
+  { value: 'biweekly', label: 'Every 2 weeks' },
   { value: 'monthly', label: 'Monthly' },
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
@@ -1161,6 +1170,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const cadence = svc?.cadence || 'one_time';
     if (cadence === 'one_time') return Number.POSITIVE_INFINITY;
     if (cadence === 'custom') return Math.max(1, parseInt(svc.intervalDays) || 30);
+    // Every selectable cadence needs a rank here: the FASTEST line in a
+    // booking becomes the series parent and the rest ride it as add-ons, so a
+    // cadence missing from this map falls through to the 91-day default and
+    // loses that contest — a daily line would silently be serviced on a
+    // weekly or monthly visit (Codex #3337 P1).
+    if (cadence === 'daily') return 1;
     if (cadence === 'weekly') return 7;
     if (cadence === 'biweekly') return 14;
     const months = {
