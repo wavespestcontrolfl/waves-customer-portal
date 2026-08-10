@@ -8550,8 +8550,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* Treated-point marks on the tech's own photo (GATE_PHOTO_MARKS,
             dark — the server sends an empty list when off, so this renders
-            nothing today). Unlike the station map this DOES render in PDFs:
-            it pins against our photo, not a satellite basemap. */}
+            nothing today). This is the LIVE mount only: `mode === 'pdf'`
+            returns ServiceReportDocument before this tree ever renders, and
+            that document draws its own marked-photo block. Both read their
+            wording from components/report/markedPhotoCopy.js. */}
         {(data.markedPhotos || []).map((marked) => (
           <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
         ))}
