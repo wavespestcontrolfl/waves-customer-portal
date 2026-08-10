@@ -1811,6 +1811,15 @@ async function resolveEstimateWritePayload({
       membershipSnapshot = await computeMembershipContext(database, {
         customerId: body.customerId,
         estData: trustedEstimateData,
+        // The snapshot sees exactly the rows the priors lookup above priced
+        // with (codex #3338 r22): grouped estimates scope to the quoted
+        // street; a grouped estimate whose street could not be parsed
+        // priced with NO priors, so the snapshot sees none either.
+        ...(groupedEstimate
+          ? (perPropertyStreetScope
+            ? { streetScope: perPropertyStreetScope }
+            : { excludeExistingRows: true })
+          : {}),
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;

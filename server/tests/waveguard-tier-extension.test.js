@@ -259,11 +259,14 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(summary.repricedRowCount).toBe(1);
   });
 
-  test('prepaid family credits the difference instead of repricing', async () => {
+  test('prepaid family credits the tier pct of the PAID allocation, never the list price', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [
-      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1' }),
-      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1' }),
+      // prepaid_amount is the DISCOUNTED splitCoverageAmount slice (codex
+      // #3338 r21): $49 paid on a $55 list row — the credit is 10% of $49,
+      // not 10% of $55.
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
@@ -271,16 +274,35 @@ describe('applyFrozenExistingServiceExtension', () => {
     });
     expect(updates).toEqual([]);
     expect(summary.applied).toBe(true);
-    expect(summary.creditAmount).toBe(11);
+    expect(summary.creditAmount).toBe(9.8);
+    expect(summary.creditLines).toEqual([
+      'Pest Control $9.80 (2 prepaid applications × 10% of the paid allocation)',
+    ]);
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
     const [payload, trx] = mockPostCreditMovement.mock.calls[0];
     expect(payload).toMatchObject({
       customerId: 'c1',
-      delta: 11,
+      delta: 9.8,
       source: 'adjustment',
       createdBy: 'system:waveguard_tier_extension',
     });
     expect(trx).toBe(database);
+  });
+
+  test('a prepaid visit without a usable paid allocation parks instead of a guessed credit', async () => {
+    const { database } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: null }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ prepaid: true, rowIds: ['pre-1', 'pre-2'] }), activatedTier: 'Silver',
+    });
+    expect(summary.creditAmount).toBe(4.9);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 prepaid visit without a usable paid allocation — credit manually)',
+    ]);
   });
 
   test('a stale snapshot whose tier disagrees with the activated tier applies nothing', async () => {

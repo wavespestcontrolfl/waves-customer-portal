@@ -993,6 +993,41 @@ describe('existing-service tier extension snapshot', () => {
     expect(committedLegacy.existingServices).toEqual([]);
   });
 
+  test('per-property scope: excluded existing rows price the estimate as standalone (grouped street unparsable)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+      excludeExistingRows: true,
+    });
+    // Mirrors the reprice branch that priced with no priors (codex #3338
+    // r22): the snapshot must not advertise another property's plans.
+    expect(ctx.isExistingCustomer).toBe(false);
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('per-property scope: a street scope matching no rows freezes no extension', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+      // Unstamped rows resolve via the customer's primary street; an empty
+      // primary street can never match the quoted street, so every account
+      // row is excluded from this property's snapshot.
+      streetScope: { estimateStreet: '999 elsewhere ave, venice, 34285', customerPrimaryStreet: '' },
+    });
+    expect(ctx.isExistingCustomer).toBe(false);
+    expect(ctx.existingServices).toEqual([]);
+  });
+
   test('gate on: a mixed-price contract freezes only the appointments sharing the displayed basis', async () => {
     mockExtendExistingGate = true;
     const database = fakeDb({

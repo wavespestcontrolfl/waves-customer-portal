@@ -44,6 +44,7 @@ const {
   qualifyingKeysForRow,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
+  filterRowsToStreet,
 } = require('./waveguard-existing-services');
 
 const TIER_LABEL = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
@@ -615,7 +616,9 @@ function appliedRateForService(estData, key, blendedRate, tierRate) {
   return blendedRate;
 }
 
-async function computeMembershipContext(database, { customerId, estData } = {}) {
+async function computeMembershipContext(database, {
+  customerId, estData, streetScope = null, excludeExistingRows = false,
+} = {}) {
   try {
     if (!customerId) return null;
 
@@ -624,8 +627,21 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 
     // ── Existing active recurring services on the account ──────
     // Shared loader — same source admin-estimate-persistence.js uses to reprice
-    // the estimate, so the displayed tier matches the charged tier.
-    const existingRows = await loadExistingRecurringQualifyingRows(database, customerId);
+    // the estimate, so the displayed tier matches the charged tier. The SAME
+    // per-property scope the reprice used must bound the snapshot too (codex
+    // #3338 r22): a grouped/secondary-property estimate whose pricing scoped
+    // priors to the quoted street must not advertise (or later apply) an
+    // extension built from another property's plans — per-property tier rule
+    // (#3244). excludeExistingRows mirrors the reprice branch whose street
+    // could not be parsed: priors were empty there, so the snapshot sees no
+    // existing rows either.
+    const existingRows = excludeExistingRows
+      ? []
+      : await filterRowsToStreet(
+        database,
+        await loadExistingRecurringQualifyingRows(database, customerId),
+        streetScope,
+      );
 
     const existingByKey = new Map();
     for (const row of existingRows) {

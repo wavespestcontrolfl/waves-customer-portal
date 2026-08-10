@@ -735,11 +735,34 @@ async function applyFrozenExistingServiceExtension({
       );
     }
     if (prepaidRows.length > 0) {
-      const credit = Math.round(prepaidRows.length * Number(svc.perVisitSavings) * 100) / 100;
-      if (credit > 0) {
-        creditTotal = Math.round((creditTotal + credit) * 100) / 100;
+      // The credit derives from the PAID allocation, never the list row
+      // price (codex #3338 r21): a prepaid visit's prepaid_amount is the
+      // DISCOUNTED splitCoverageAmount slice, so pct × estimated_price
+      // would stack the tier delta on top of the prepay incentive and
+      // overcredit every covered application. A covered row without a
+      // usable allocation parks — never a guessed credit.
+      const pct = Number(svc.extraDiscountPct || 0) / 100;
+      let familyCredit = 0;
+      let creditedRows = 0;
+      let allocationGaps = 0;
+      for (const row of prepaidRows) {
+        const allocation = Number(row.prepaid_amount);
+        if (!(pct > 0) || !(allocation > 0)) {
+          allocationGaps += 1;
+          continue;
+        }
+        familyCredit = Math.round((familyCredit + allocation * pct) * 100) / 100;
+        creditedRows += 1;
+      }
+      if (allocationGaps > 0) {
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${allocationGaps} prepaid visit${allocationGaps === 1 ? '' : 's'} without a usable paid allocation — credit manually)`,
+        );
+      }
+      if (familyCredit > 0) {
+        creditTotal = Math.round((creditTotal + familyCredit) * 100) / 100;
         summary.creditLines.push(
-          `${svc.label || svc.key} $${credit.toFixed(2)} (${prepaidRows.length} prepaid application${prepaidRows.length === 1 ? '' : 's'} × $${Number(svc.perVisitSavings).toFixed(2)})`,
+          `${svc.label || svc.key} $${familyCredit.toFixed(2)} (${creditedRows} prepaid application${creditedRows === 1 ? '' : 's'} × ${Math.round(pct * 100)}% of the paid allocation)`,
         );
         svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
       }
