@@ -254,7 +254,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
       // estimate linkage for this call. Fail closed instead: `unavailable`
       // keeps reconcilers from reading the miss as an established
       // absence — the stamp says linkage exists; the target's state is
-      // indeterminate, not absent (codex P1, this PR).
+      // indeterminate, not absent (codex P1, PR #3318).
       return { lead: null, forThisCall: false, unavailable: true };
     }
     const digits = last10(phone);
@@ -421,6 +421,11 @@ async function existingDraftForCall(callLogId) {
   try {
     return await db('estimates')
       .whereRaw("estimate_data->'estimatorEngine'->>'callLogId' = ?", [String(callLogId)])
+      // A draft INVALIDATED by a durable linkage repoint (its content was
+      // composed from the old lead) no longer represents this call — the
+      // engine rebuilds from the corrected context instead of returning
+      // it (codex P0, PR #3304 r8).
+      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .first();
   } catch (err) {
     logger.warn(`[estimator-engine] existing-draft check failed: ${err.message}`);

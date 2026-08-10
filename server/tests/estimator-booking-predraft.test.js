@@ -183,17 +183,35 @@ describe('maybePreDraftForBooking — filters', () => {
 });
 
 describe('maybePreDraftForBooking — call delegation', () => {
+  // A settled call row for the detached entry points' pass-identity adopt
+  // (token clear, terminal status, current generation stamped).
+  const SETTLED_CALL = (generation = 3) => ({
+    processing_token: null,
+    processing_status: 'processed',
+    extraction_attempts: 0,
+    created_at: '2026-08-01T00:00:00.000Z',
+    processing_generation: generation,
+  });
+
   test('a phone-booked assessment rides the FULL engine call context and gets the booking linkage merged ATOMICALLY', async () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      SETTLED_CALL(3), // pass-identity adopt: the call's CURRENT generation
       BOOKING({ source_call_log_id: 'call-7' }), // linkage-trx FOR UPDATE revalidation
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
+    // A detached entry point (no supplied identity) adopts the SETTLED
+    // call's live generation — without it the delegated pass-start clear
+    // cannot retire a generation-stamped draft block and the replacement
+    // draft bounces off callRejectedForDrafting forever (codex P1, PR
+    // #3304 — generation-rework GH round).
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
       callLogId: 'call-7',
       quotePromised: true,
+      ownerProcToken: null,
+      ownerProcGeneration: 3,
     });
     expect(result).toEqual({ drafted: true, delegated: 'call_engine', lane: 'green', estimateId: 'est-5' });
     expect(mockState.inserts).toHaveLength(0); // the engine owns the insert
@@ -221,10 +239,45 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
   });
 
+  test('the PROCESSOR\'s own claim identity is forwarded verbatim — no adopt read', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      BOOKING({ source_call_log_id: 'call-7' }), // linkage-trx FOR UPDATE revalidation
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
+    const result = await maybePreDraftForBooking('svc-1', { ownerProcToken: 'tok-p', ownerProcGeneration: 9 });
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
+      callLogId: 'call-7',
+      quotePromised: true,
+      ownerProcToken: 'tok-p',
+      ownerProcGeneration: 9,
+    });
+    expect(result.drafted).toBe(true);
+  });
+
+  test('an IN-FLIGHT call adopts nothing — the live pass owns the identity', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      { ...SETTLED_CALL(4), processing_token: 'tok-live' }, // adopt read: in flight
+      BOOKING({ source_call_log_id: 'call-7' }), // linkage-trx FOR UPDATE revalidation
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
+    await maybePreDraftForBooking('svc-1');
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
+      callLogId: 'call-7',
+      quotePromised: true,
+      ownerProcToken: null,
+      ownerProcGeneration: null,
+    });
+  });
+
   test('a booking that dies DURING the engine run keeps the draft but never links the dead visit', async () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation re-read: alive
+      SETTLED_CALL(3), // pass-identity adopt
       BOOKING({ source_call_log_id: 'call-7', status: 'cancelled' }), // linkage-trx re-read: dead
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });

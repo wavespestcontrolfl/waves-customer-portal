@@ -19,6 +19,7 @@
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import TechPhotoMarksModal from './TechPhotoMarksModal';
 
 const DARK = {
   bg: '#0f1923',
@@ -33,6 +34,9 @@ const DARK = {
 
 const API = import.meta.env.VITE_API_URL || '';
 const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
+// Mirrors MARKABLE_PHOTO_TYPES in tech-track.js. 'before' is definitionally
+// pre-treatment, so it can never carry treated-point marks.
+const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
   const [photos, setPhotos] = useState([]);
@@ -42,6 +46,11 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [uploading, setUploading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
+  // Treated-point marking (GATE_PHOTO_MARKS, dark). The probe 404s when the
+  // gate is off, which leaves marksSupported false and the affordance absent —
+  // no separate client-side flag to keep in sync.
+  const [marksSupported, setMarksSupported] = useState(false);
+  const [markTarget, setMarkTarget] = useState(null);
   const fileInputRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -65,6 +74,25 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   }, [serviceId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Probe whether this lane takes treated-point marks. Fail-soft in both
+  // directions: gate off returns 404 and any error leaves the affordance
+  // hidden, so a marks outage never blocks ordinary photo capture.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = getAdminAuthToken();
+        const res = await fetch(`${API}/api/tech/services/${serviceId}/photo-marks`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setMarksSupported(Boolean(data.supported));
+      } catch { /* affordance stays hidden */ }
+    })();
+    return () => { cancelled = true; };
+  }, [serviceId]);
 
   const handlePickFile = () => {
     if (uploading) return;
@@ -266,11 +294,40 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
                     {p.caption}
                   </div>
                 )}
+                {/* Treated-point marking (GATE_PHOTO_MARKS). Only offered on
+                    lanes that support marks — markLanes is empty otherwise, so
+                    this affordance is absent rather than disabled.
+                    'before' photos are excluded: they document the state
+                    BEFORE treatment, so marks on one would publish a
+                    pre-treatment image as the treated area (codex P1). The
+                    PUT route rejects them too — this only saves the tech a
+                    pointless round trip. */}
+                {marksSupported && MARKABLE_PHOTO_TYPES.has(p.photo_type) && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); setMarkTarget(p); }}
+                    style={{
+                      position: 'absolute', right: 4, bottom: 4,
+                      background: 'rgba(0,0,0,0.72)', color: '#fff',
+                      border: `1px solid ${DARK.border}`, borderRadius: 6,
+                      fontSize: 10.5, fontWeight: 600, padding: '4px 8px', cursor: 'pointer',
+                    }}
+                  >
+                    Mark spots
+                  </button>
+                )}
               </a>
             ))}
           </div>
         )}
       </div>
+      {markTarget && (
+        <TechPhotoMarksModal
+          serviceId={serviceId}
+          photo={markTarget}
+          onClose={() => setMarkTarget(null)}
+        />
+      )}
     </div>
   );
 }

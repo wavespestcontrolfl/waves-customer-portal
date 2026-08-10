@@ -542,7 +542,14 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
   // codex P2 r16). Fail-soft: helper errors fall through to the lookup.
   try {
     const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
-    if (traceEligibilityGateOn()) {
+    const { photoMarksGateOn: exteriorPhotoMarksGateOn } = require('./photo-marks');
+    // EITHER gate (codex P1 r7). The shared verdict learned to suppress a
+    // photo-only visit, but this choke point only called it under the
+    // eligibility gate — so in the marks-first rollout a foam-only visit with
+    // a legacy trace still handed an exterior ready-at target to reentry.js,
+    // dynamic context, and email delivery. Fixing the callee was not enough;
+    // the caller had to stop gating the call.
+    if (traceEligibilityGateOn() || exteriorPhotoMarksGateOn()) {
       // The report-payload caller passes its ALREADY-COMBINED verdict
       // (codex P2 r24): recomputing here meant a transient failure in
       // the second add-on pass could strip exterior re-entry guidance
@@ -2604,6 +2611,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
     addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
+  const { loadMarksByS3Key, buildMarkedPhotoContext, photoMarksGateOn } = require('./photo-marks');
   // Completion-frozen primary identity wins over the live profile —
   // update-details can repoint the schedule row after completion (codex
   // P2 r15); legacy records (field absent) keep the live resolution.
@@ -2644,7 +2652,94 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       );
     } catch { /* primary verdict stands */ }
   }
-  const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
+  // The 'photo' variant is eligible for a MARKED-PHOTO card, never for the
+  // satellite trace: foam is a point application into wall voids with no
+  // perimeter and no area. A trace row saved on such a visit (captured before
+  // the lane was classified, or through the admin capture path) must not
+  // publish a spray band — the client's traced map treats anything that is
+  // not 'outline' as spray, so an unsuppressed 'photo' would render as a
+  // perimeter claim. Suppress the trace for every non-satellite variant.
+  //
+  // The photo-lane clause hangs off THIS feature's own gate, not the
+  // eligibility gate (codex P1): the rollout explicitly allows
+  // GATE_PHOTO_MARKS on while GATE_TRACE_ELIGIBILITY is still off, and in
+  // that order an eligibility-gated clause is inert — a foam visit would
+  // publish a saved trace under legacy perimeter copy right beside its
+  // marked photo, which is the exact false claim this change exists to stop.
+  // Hoisted so BOTH consumers below can honour it. Setting traceSuppressed
+  // alone was not enough (codex P1 r2): the map loader and the re-entry
+  // resolver each branch on traceEligibilityGateOn() and fall back to the
+  // legacy lane booleans when it is off, so with only GATE_PHOTO_MARKS on
+  // they never read traceSuppressed at all and a pre-existing foam trace
+  // still published as a perimeter map with an exterior advisory.
+  // Photo decisions must consider EVERY line, not just the primary (codex
+  // P1 r3). The add-on combine above is gated on traceEligibilityGateOn(), so
+  // with only GATE_PHOTO_MARKS on a foam ADD-ON on an ineligible primary
+  // (termite bait + foam) never reached the verdict — and its saved trace
+  // published with legacy perimeter copy. Resolved separately rather than by
+  // widening the combine above, so a spray/outline add-on cannot start
+  // rescuing primaries in a configuration where the registry is otherwise
+  // dark; only a PHOTO verdict is adopted here.
+  // Scans EVERY line independently rather than reusing combineLineVerdicts
+  // (codex P1 r4): that helper returns the primary when it is eligible, or
+  // the FIRST eligible add-on, so a foam line sitting behind an eligible
+  // trenching primary — or behind an earlier spray/outline add-on — was never
+  // seen. markLaneForService meanwhile offered marks for that same line, so a
+  // technician could place points the report then silently dropped.
+  //
+  // Runs under BOTH gate configurations: the combined verdict can be 'spray'
+  // from an eligible primary even with the eligibility gate on, so gating this
+  // scan on the gate state would leave the same hole. Only the marks gate
+  // guards it, and only a 'photo' verdict is ever adopted — the satellite
+  // lane's combined verdict above is left untouched.
+  let photoLaneVerdict = traceEligibility.variant === 'photo' ? traceEligibility : null;
+  // Tracked alongside, because a photo lane must NOT suppress a satellite
+  // trace some OTHER line legitimately earned (codex P1 r5). On a mixed
+  // trenching+foam visit the tech can save a trenching trace — the capture
+  // path and the field feed both use the combined satellite verdict — so
+  // suppressing on "a photo lane exists" silently dropped a trace the tech
+  // had successfully recorded. The two artifacts coexist: the marked photo
+  // shows the drill points, the trace shows the trenched perimeter.
+  // The VERDICT, not a boolean (codex P1 r11): the artifact's variant and
+  // caption are read off the satellite line, so reducing it to "some line
+  // qualifies" left the serializer below with nothing to describe the trace
+  // and it fell back to the primary — which on a mixed visit is the FOAM
+  // verdict. That published variant:'photo' on a satellite bitmap, a value
+  // the client has no branch for, so an outline lane's legacy perimeter
+  // capture wore full spray copy instead of the neutral mismatch wording.
+  let satelliteVerdict = (traceEligibility.eligible && traceEligibility.variant !== 'photo')
+    ? traceEligibility
+    : null;
+  if ((photoMarksGateOn() || traceEligibilityGateOn())
+    && (!photoLaneVerdict || !satelliteVerdict)) {
+    try {
+      const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
+      const lineVerdicts = Array.isArray(frozenPhotoLines)
+        ? await addonVerdictsFromLines(frozenPhotoLines, knex, { renderSide: true })
+        : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true });
+      if (!photoLaneVerdict) {
+        photoLaneVerdict = (lineVerdicts || [])
+          .find((v) => v?.eligible && v.variant === 'photo') || null;
+      }
+      if (!satelliteVerdict) {
+        satelliteVerdict = (lineVerdicts || [])
+          .find((v) => v?.eligible && v.variant !== 'photo') || null;
+      }
+    } catch { /* fail-soft: no photo lane found, the satellite verdict stands */ }
+  }
+  const satelliteLineEligible = Boolean(satelliteVerdict);
+  // Suppress the satellite trace only when the visit has NO satellite-capable
+  // line — i.e. the foam IS the treatment, not one line among several.
+  const photoLaneSuppressed = photoMarksGateOn()
+    && Boolean(photoLaneVerdict)
+    && !satelliteLineEligible;
+  // Gate-on suppression keys on the independently resolved SATELLITE
+  // capability (codex P1 r7): keying it on the primary verdict's variant
+  // meant a foam primary suppressed a trace that a satellite-capable add-on
+  // legitimately earned — the mixed-visit bug fixed for the marks gate in r6
+  // but left standing on this branch.
+  const traceSuppressed = (traceEligibilityGateOn() && !satelliteLineEligible)
+    || photoLaneSuppressed;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -3198,10 +3293,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the MUTABLE row/label and would both hide a frozen-eligible map
     // after a repoint and override an add-on rescue (codex P2 r16). Gate
     // OFF: the legacy belts, bit-for-bit.
+    // photoLaneSuppressed rides the LEGACY belt too: it hangs off
+    // GATE_PHOTO_MARKS, so a foam lane's saved trace stays suppressed even
+    // when the eligibility gate is off (codex P1 r2).
     if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
       && (traceEligibilityGateOn()
         ? !traceSuppressed
-        : (!interiorOnlyLane && !trapLaneNoSprayMap))) {
+        : (!interiorOnlyLane && !trapLaneNoSprayMap && !photoLaneSuppressed))) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3259,13 +3357,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             // r18): a lawn-family capture renders as outline even when the
             // winning verdict came from a spray add-on line — the saved
             // lawn geometry cannot honestly wear spray copy/animation.
-            variant: (traceEligibilityGateOn() && traceEligibility.eligible)
+            // Read off the SATELLITE line (codex P1 r11), never the primary:
+            // on a foam-primary visit whose add-on earned the trace, the
+            // primary verdict is 'photo' — not a value this field can carry,
+            // and the client falls through it to the spray heading and blue
+            // band. The satellite verdict is the one that describes this
+            // bitmap's lane.
+            variant: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'outline' : traceEligibility.variant)
+                ? 'outline' : satelliteVerdict.variant)
               : null,
-            captionKey: (traceEligibilityGateOn() && traceEligibility.eligible)
+            captionKey: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'lawnCoverage' : traceEligibility.captionKey)
+                ? 'lawnCoverage' : satelliteVerdict.captionKey)
               : null,
           };
         }
@@ -3419,6 +3523,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // surfaced it in the mowing module — so a failed/absent V2 build (legacy path,
   // flag off, no assessment, or a build error) keeps the photo in the gallery instead
   // of losing it (Codex P1).
+  // Treated-point marks (GATE_PHOTO_MARKS, dark). Keyed on the photo's S3 key
+  // rather than its id because marks placed before completion belong to a
+  // staging row that promotion deletes and re-inserts under a new id; the S3
+  // key survives that verbatim. Fail-soft to an empty map.
+  const photoMarksByKey = await loadMarksByS3Key({
+    scheduledServiceId: service.scheduled_service_id,
+    knex,
+  }).catch(() => new Map());
   const photoPayload = await Promise.all(photos
     .map(async (photo) => ({
       id: photo.id,
@@ -3430,6 +3542,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       hashSha256: photo.hash_sha256 || null,
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
+      marks: photoMarksByKey.get(photo.s3_key) || [],
     })));
   // Photos that EXIST on the record but whose URL would not resolve are
   // silent omissions the page's onError counter can never see (codex P2
@@ -3491,15 +3604,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // An ineligible lane's trace must not assert an exterior re-entry window
   // either — a trace on an inspection would otherwise emit a false
   // advisory (scope RC3).
+  // Same gate-off gap as the map loader (codex P1 r2): a foam trace must not
+  // contribute an exterior re-entry advisory beside the marked photo just
+  // because the eligibility gate has not been flipped yet.
   const payloadTracedExteriorZone = (traceEligibilityGateOn()
     ? traceSuppressed
-    : interiorOnlyLane)
+    : (interiorOnlyLane || photoLaneSuppressed))
     ? false
     : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex, {
       // Reuse the payload's combined verdict — ONE verdict per report
       // (codex P2 r24); the resolver only re-checks the zone row.
       ...(traceEligibilityGateOn()
-        ? { precomputedTraceVerdict: { suppressed: traceSuppressed, eligibility: traceEligibility } }
+        // The SATELLITE verdict, matching what resolveTraceRenderVerdict
+        // itself returns (`renderCapabilities.satellite || eligibility`) —
+        // the re-entry scope hangs off the traced exterior artifact, so
+        // handing it a foam primary would scope the advisory off the wrong
+        // lane on exactly the mixed visits this branch exists for.
+        ? {
+          precomputedTraceVerdict: {
+            suppressed: traceSuppressed,
+            eligibility: satelliteVerdict || traceEligibility,
+          },
+        }
         : {}),
     });
   const advisory = normalizeAdvisoryForTreatmentScope({
@@ -4406,6 +4532,31 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     photos: (gaugePhotoId && reportV2 && mowingHeight && mowingHeight.photoUrl)
       ? photoPayload.filter((p) => String(p.id) !== String(gaugePhotoId))
       : photoPayload,
+    // Marked-photo cards (GATE_PHOTO_MARKS, dark) — one per photo carrying
+    // treated-point marks. Empty on every other visit, which is the whole
+    // "marks are optional" ruling: no marks means no card, not an empty state.
+    // Deliberately carries NO count/total (see photo-marks.js ruling 3).
+    markedPhotos: photoPayload
+      .map((photo) => {
+        const context = buildMarkedPhotoContext({
+          marks: photo.marks,
+          // photoLaneVerdict, not the primary: a foam ADD-ON makes the visit
+          // a photo lane and must be able to publish the card (codex P1 r3).
+          // Null when no line is a photo lane — the context then declines on
+          // lane_not_eligible, which is the correct answer.
+          eligibility: photoLaneVerdict || traceEligibility,
+        });
+        if (!context.available || !photo.url) return null;
+        return {
+          photoId: photo.id,
+          url: photo.url,
+          caption: photo.caption || '',
+          marks: context.marks,
+          legend: context.legend,
+          captionKey: context.captionKey,
+        };
+      })
+      .filter(Boolean),
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     // Canonical PUBLIC origin for links baked into the permanent PDF, and ''

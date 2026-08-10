@@ -348,3 +348,351 @@ describe('buildEnrichedProfile end-to-end', () => {
     expect(profile.isCommercial).toBe(true);
   });
 });
+
+// Condo/townhome resident misclassification: county rolls file these
+// communities as building-level "Multifamily" master parcels, so a unit-less
+// address resolves to the association's whole building and a resident's
+// lookup prices commercial. The guidance flag names the fix without touching
+// the classification itself. Fixture address is synthetic.
+describe('multifamily master-parcel guidance flag', () => {
+  const { buildFieldVerifyFlags } = routePrivate;
+
+  function countyMultifamilyBuilding(overrides = {}) {
+    return {
+      formattedAddress: '1 Example Building Way, Testville, FL 00000',
+      propertyType: 'Multifamily',
+      unitCount: 8,
+      squareFootage: 63096,
+      lotSize: 93940,
+      stories: 2,
+      _source: 'county',
+      ...overrides,
+    };
+  }
+
+  test('county Multifamily building parcel → HIGH guidance naming the unit count and the resident path', () => {
+    const flags = buildFieldVerifyFlags(countyMultifamilyBuilding(), null, null);
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/8-unit/);
+    expect(flag.reason).toMatch(/master parcel/i);
+    expect(flag.reason).toMatch(/unit number/i);
+    expect(flag.reason).toMatch(/association, complex owner, or property manager/i);
+  });
+
+  test('HOA common-area parcel subtype gets the same guidance (no unit-count prefix at 1)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'HOA Common Area', unitCount: 1 }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/\d-unit/);
+  });
+
+  test('true commercial (office) → no master-parcel guidance even with unitCount > 4', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Office Building' }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('residential single-family → no guidance', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Single Family', unitCount: 1, squareFootage: 1200 }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('untrusted AI-only Multifamily (Gateway Ave shape) classifies residential → no guidance either', () => {
+    const flags = buildFieldVerifyFlags(untrustedAiRecord(), null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('legacy AI record without field evidence classifies commercial but gets no county-master copy (codex P1)', () => {
+    // No _fieldEvidence → recordCommercialSignalTrusted trusts it for
+    // CLASSIFICATION (legacy-cache compatibility), but the guidance asserts
+    // county-roll provenance the record does not have.
+    const legacy = { formattedAddress: '2 Example Building Way, Testville, FL 00000', propertyType: 'Multifamily', unitCount: 8, _source: 'ai' };
+    expect(detectCategory(legacy, {})).toBe('COMMERCIAL');
+    const flags = buildFieldVerifyFlags(legacy, null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('hybrid whose Multifamily type came from an unverified web hit → no county-master copy (codex P1)', () => {
+    // County evidence exists on OTHER fields, but the type field itself is
+    // web-sourced (and not fieldVerify-flagged, so classification trusts it).
+    const hybrid = countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _parcel: undefined,
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'listing', fieldVerify: false, score: 40 },
+        lotSize: { value: 93940, sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    });
+    expect(detectCategory(hybrid, {})).toBe('COMMERCIAL');
+    const flags = buildFieldVerifyFlags(hybrid, null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('verified/permit/builder type sources do not pass the county-roll gate (codex P1)', () => {
+    // Authoritative for classification, but not the county roll — the copy
+    // claims county provenance, so only county/cadastral evidence earns it.
+    for (const sourceType of ['verified', 'permit', 'builder']) {
+      const flags = buildFieldVerifyFlags(countyMultifamilyBuilding({
+        _source: 'hybrid',
+        _fieldEvidence: { propertyType: { value: 'Multifamily', sourceType, fieldVerify: false, score: 90 } },
+      }), null, null);
+      expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+    }
+  });
+
+  test('per-field dimension provenance: verified sqft is excluded from the building-wide claim (codex P1)', () => {
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+      _fieldEvidence: {
+        squareFootage: { value: 1200, sourceType: 'verified', fieldVerify: false, score: 100 },
+      },
+    }), null, null).find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/lot, stories are the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/sq ft, lot, stories/);
+  });
+
+  test('all dimensions tech-verified → no building-wide dimension claim, exit steps remain', () => {
+    const verified = (value) => ({ value, sourceType: 'verified', fieldVerify: false, score: 100 });
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+      _fieldEvidence: {
+        squareFootage: verified(1200), lotSize: verified(500), stories: verified(2),
+      },
+    }), null, null).find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/set Commercial to No/i);
+  });
+
+  test('hybrid whose type evidence IS county-sourced → guidance fires', () => {
+    const hybrid = countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    });
+    expect(buildFieldVerifyFlags(hybrid, null, null).find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+
+  test('untrusted web-sourced unit count neither proves a master parcel nor gets echoed (trustedUnitCount)', () => {
+    const withUntrustedCount = (overrides = {}) => countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
+        unitCount: { value: 8, sourceType: 'listing', fieldVerify: true, score: 30 },
+      },
+      ...overrides,
+    });
+    // Without other master-parcel evidence the untrusted count proves nothing.
+    expect(buildFieldVerifyFlags(withUntrustedCount(), null, null)
+      .find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+    // With aggregation evidence the flag fires but never echoes the web count.
+    const flag = buildFieldVerifyFlags(withUntrustedCount({ _parcel: { aggregated: true } }), null, null)
+      .find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/8-unit/);
+  });
+
+  test('satellite-AI multifamily signal on a county single-family record → no master-parcel guidance (codex P1)', () => {
+    // The AI signal may legitimately flip the CATEGORY, but the guidance copy
+    // asserts county master-parcel provenance — it must only fire when the
+    // trusted RECORD itself carries the multifamily/HOA evidence.
+    const ai = { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' };
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Single Family', unitCount: 1, squareFootage: 1400 }), ai, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('guidance instructs the full commercial exit, not just a type override (codex P1)', () => {
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding(), null, null)
+      .find((f) => f.field === 'commercialSubtype');
+    expect(flag.reason).toMatch(/set Property Type to the actual unit type/i);
+    expect(flag.reason).toMatch(/set Commercial to No/i);
+    expect(flag.reason).toMatch(/clear the Commercial Subtype/i);
+    // The prefilled dimensions are the building's — the copy must demand
+    // unit-specific dimensions before the resident path is priced (codex P0).
+    expect(flag.reason).toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/sq ft and stories from the customer|replace home\/lot/i);
+    // The flag renders directly above the "Save … as field-verified" button
+    // (EstimateToolViewV2) — the copy must defuse that footgun explicitly
+    // (codex P1): saving would pin the building's dimensions to the address.
+    expect(flag.reason).toMatch(/Do NOT save these as field-verified/);
+  });
+
+  test('generic Multifamily and apartment records → customer-supplied unit dimensions, no re-lookup recommendation (codex P1)', () => {
+    // Generic "Multifamily" covers rental buildings whose units have no
+    // separate parcels — only positive condo/townhome or aggregation
+    // evidence earns the re-lookup recommendation.
+    for (const propertyType of ['Multifamily', 'Apartments']) {
+      const flags = buildFieldVerifyFlags(
+        countyMultifamilyBuilding({ propertyType, unitCount: 24 }), null, null
+      );
+      const flag = flags.find((f) => f.field === 'commercialSubtype');
+      expect(flag).toBeDefined();
+      expect(flag.reason).toMatch(/from the customer/i);
+      expect(flag.reason).not.toMatch(/re-run the lookup/i);
+    }
+  });
+
+  test('condo/townhome record text → re-lookup path (unit parcels exist)', () => {
+    for (const propertyType of ['Multifamily Condominium', 'Multifamily Townhouse']) {
+      const flag = buildFieldVerifyFlags(
+        countyMultifamilyBuilding({ propertyType }), null, null
+      ).find((f) => f.field === 'commercialSubtype');
+      expect(flag).toBeDefined();
+      expect(flag.reason).toMatch(/re-run the lookup/i);
+    }
+  });
+
+  test('county match for ONE condo unit (own parcel, unitCount 1) → no master-parcel copy (codex P1)', () => {
+    // A unit-specific lookup that matched the unit's own parcel has CORRECT
+    // dimensions — it must not be told they belong to the whole building.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Multifamily Condominium', unitCount: 1, squareFootage: 1200 }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('real aggregate shape (unitCount 1, _parcel.residentialUnits 48) → flag fires with the aggregate count', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { aggregated: true, residentialUnits: 48 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/48-unit/);
+  });
+
+  test('a MISSING dimension is not claimed as prefilled — Sarasota null stories (codex P2)', () => {
+    // county-parcel-gis's Sarasota parser always sets stories null, so every
+    // Sarasota master parcel warned about a story count that was never there.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ stories: null }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    // Scoped to the DIMENSION-WARNING clause — "stories" still belongs in
+    // the exit step ("get the unit's own sq ft and stories from the
+    // customer"), which is about what to collect, not what was prefilled.
+    expect(flag.reason).toMatch(/the prefilled sq ft, lot are the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/prefilled[^.]*stories/);
+  });
+
+  test('a ZERO dimension counts as absent too', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ lotSize: 0, stories: 0 }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/the prefilled sq ft is the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/\blot\b/);
+  });
+
+  test('no county dimensions present at all → no building-wide claim, exit steps remain', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ squareFootage: 0, lotSize: 0, stories: null }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/association, complex owner, or property manager/);
+  });
+
+  test('NON-STACKED county master polygon (unitCount 1, _parcel.residentialUnits 48, no aggregated) → flag fires (codex P1)', () => {
+    // The commonest master shape: county GIS returns ONE multifamily master
+    // parcel rather than stacked unit parcels, so attachParcelMeta records the
+    // assessed unit total but leaves `aggregated` unset and unitCount at 1.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { residentialUnits: 48 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/48-unit/);
+  });
+
+  test('a single condo unit parcel (residentialUnits 1) still gets no master-parcel copy', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        propertyType: 'Multifamily Condominium', unitCount: 1, squareFootage: 1200,
+        _parcel: { residentialUnits: 1 },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('a runaway parcel unit count is bounded, not echoed verbatim', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { residentialUnits: 999999 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/2000-unit/);
+    expect(flag.reason).not.toMatch(/999999/);
+  });
+
+  test('a TECH-VERIFIED propertyType override on a county record gets no county-roll copy (codex P2)', () => {
+    // applyVerifiedOverrides rewrites the field evidence to 'verified' but
+    // leaves _source at 'county' — the copy must not credit the roll.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        _fieldEvidence: { propertyType: { sourceType: 'verified', value: 'Multifamily' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('a verified override cannot ride the AGGREGATED arm into county-roll copy either (codex P2)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        propertyType: 'HOA Common Area',
+        _parcel: { aggregated: true, residentialUnits: 30 },
+        _fieldEvidence: { propertyType: { sourceType: 'verified', value: 'HOA Common Area' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('county field evidence on a NON-county _source record still passes the gate', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        _source: 'hybrid',
+        _fieldEvidence: { propertyType: { sourceType: 'county', value: 'Multifamily' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+
+  test('aggregated parcel labeled Apartment still gets the re-lookup path (aggregation is built from unit parcels)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Apartment', _parcel: { aggregated: true } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/re-run the lookup/i);
+  });
+
+  test('the instructed exit actually leaves commercial pricing per the real classifier (codex P1)', () => {
+    // Property Type left at Commercial defeats the Commercial=No override —
+    // exactly the trap the copy warns about.
+    expect(isCommercialProfile({ propertyType: 'Commercial', isCommercial: 'no', commercialSubtype: null })).toBe(true);
+    // The instructed exit: concrete residential unit type + Commercial=No.
+    // Even a stale category/subtype no longer holds it commercial.
+    expect(isCommercialProfile({
+      propertyType: 'condo_upper', isCommercial: 'no', commercialSubtype: null, category: 'COMMERCIAL',
+    })).toBe(false);
+  });
+
+  test('guidance rides the enriched profile without changing the commercial verdict', () => {
+    const profile = buildEnrichedProfile(countyMultifamilyBuilding(), {}, 27.5, -82.45);
+    expect(profile.category).toBe('COMMERCIAL');
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('multifamily_common_area_residential');
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+});

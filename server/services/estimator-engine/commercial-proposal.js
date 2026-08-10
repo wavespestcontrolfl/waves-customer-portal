@@ -388,6 +388,9 @@ async function maybeBuildCommercialProposalDraft({
           .select('id')
           .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
           .whereNull('archived_at')
+          // Marker-only invalidated terminals are not live drafts
+          // (codex P1, PR #3304 GH r6).
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         return callback(trx);
@@ -395,6 +398,66 @@ async function maybeBuildCommercialProposalDraft({
     };
 
     const creation = await runSerialized(async (trx) => {
+      // Call-scoped in-lock recheck on EVERY serialization path (codex
+      // P1, PR #3304 r4 — mirrors the residential fix): the phone-lock
+      // path serialized only by phone, and two composers with DIFFERENT
+      // corrected lead addresses could both pass conflictingOpenEstimate
+      // and insert two scaffolds for one call.
+      if (call?.id) {
+        const existingForCall = await trx('estimates')
+          .select('id')
+          .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
+          .whereNull('archived_at')
+          // Marker-only invalidated terminals are not live drafts
+          // (codex P1, PR #3304 GH r6).
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          .first();
+        if (existingForCall) return { duplicate: existingForCall };
+        // LIVE call-linkage fence, same as the residential creator (codex
+        // P1, PR #3304 GH r8): an older commercial composer could still
+        // be running when a corrected retry finalizes — its reconcile-only
+        // pass finds no draft — and would then insert a scaffold carrying
+        // the FORMER lead's identity and address. The call row is locked
+        // and held through the insert, so the processor's stamp writers
+        // either commit first (seen here) or wait and their own reconcile
+        // invalidates what lands.
+        {
+          // A REJECTED call never receives a new scaffold either (codex
+          // P0, PR #3304 GH r8e).
+          const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+          const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
+          if (rejected) return { staleLinkage: rejected };
+        }
+        // GENERATION fence for EVERY call-origin insert — commercial
+        // scaffolds included (codex P1, PR #3304 — generation-rework GH
+        // round, mirrors the residential creator): lead-less and
+        // phone_touched contexts never reach the sid/stamp comparison
+        // below, so an older detached composer resuming after a newer
+        // pass finalized could insert a stale scaffold that pass's
+        // reconcile-only sweep had already found nothing to fix. The
+        // call row is locked above and held through the insert.
+        {
+          const { callPassStillOwned } = require('../../utils/estimate-claim-sql');
+          const stillOwned = await callPassStillOwned(trx, call.id, {
+            ownerProcToken: context?.ownerProcToken || null,
+            ownerProcGeneration: context?.ownerProcGeneration ?? null,
+          });
+          if (!stillOwned) return { staleLinkage: 'stale_processing_generation' };
+        }
+        if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
+          const { staleCallLinkageReason } = require('../admin-estimate-persistence');
+          const staleReason = await staleCallLinkageReason(trx, {
+            lead_id: context.lead.id,
+            lead_linkage: context.leadLinkage,
+            estimatorEngine: { callLogId: call.id },
+          }, {
+            lockCallRow: true,
+            ownerProcToken: context.ownerProcToken || null,
+            ownerProcGeneration: context.ownerProcGeneration ?? null,
+          });
+          if (staleReason) return { staleLinkage: staleReason };
+        }
+      }
       const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
       const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
       if (conflicting) return { duplicate: conflicting };
@@ -408,12 +471,19 @@ async function maybeBuildCommercialProposalDraft({
           ...(brief ? { commercialProspect: { ...brief, researchedAt: new Date().toISOString() } } : {}),
           proposal: scaffold,
           // Same lead-mirror rule as the residential drafts: only a lead
-          // this call created or touched may be linked.
-          ...(context?.lead?.id && context?.leadIsForThisCall ? { lead_id: context.lead.id } : {}),
+          // this call created or touched may be linked — and the linkage
+          // CLASS rides along so the existing-draft reconciliation can
+          // judge durability (codex P1, PR #3304 r5).
+          ...(context?.lead?.id && context?.leadIsForThisCall ? {
+            lead_id: context.lead.id,
+            lead_linkage: context.leadLinkage || null,
+          } : {}),
           estimatorEngine: {
             version: 1,
             callLogId: call?.id || null,
             callSid: call?.twilio_call_sid || null,
+            // Same provenance stamp as the standard draft path (PR #3304).
+            ...(context?.ownerProcGeneration != null ? { composedGeneration: context.ownerProcGeneration } : {}),
             ...(origin?.channel && origin.channel !== 'call'
               ? { origin: origin.channel, ...(origin.threadKey ? { smsThreadKey: origin.threadKey } : {}) }
               : {}),
@@ -455,6 +525,11 @@ async function maybeBuildCommercialProposalDraft({
       return { estimate };
     });
 
+    if (creation.staleLinkage) {
+      logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);
+      return { created: false, blocked: true, reason: 'stale_call_linkage' };
+    }
+
     if (creation.duplicate) {
       logger.info('[commercial-proposal] scaffold suppressed by existing open estimate', {
         existingEstimateId: creation.duplicate.id,
@@ -467,7 +542,8 @@ async function maybeBuildCommercialProposalDraft({
     // residential draft path).
     if (context?.lead?.id && context?.leadIsForThisCall) {
       try {
-        await db('leads').where({ id: context.lead.id }).update({ estimate_id: creation.estimate.id });
+        const { writeGuardedLeadEstimateLink } = require('./draft-builder');
+        await writeGuardedLeadEstimateLink(context, creation.estimate.id);
       } catch (linkErr) {
         logger.warn(`[commercial-proposal] lead link update failed (non-blocking): ${linkErr.message}`);
       }
