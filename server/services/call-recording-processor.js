@@ -2456,7 +2456,7 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, unitAskAnswered = false } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -2496,11 +2496,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(
-        lockedPriorNeedsConfirmation,
-        bridgeNeedsConfirmation,
-        { unitAskAnswered },
-      );
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation);
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -6879,6 +6875,30 @@ const CallRecordingProcessor = {
               // candidate list and the exact question to ask, instead of a
               // bare "could not be verified".
               const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
+              // Shadow mode: the LEGACY V1 record is the source of truth for
+              // the address, so the unit ask is about the building V1 heard.
+              // Stamp it onto the card (overriding buildTriageItem's V2
+              // stamp) — the card, not the rolling extraction, is the
+              // building ledger the resolver matches on.
+              if (flag === 'missing_unit_number') {
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag,
+                    extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                    severity: 'advisory',
+                    extraPayload: {
+                      unit_ask_building: {
+                        street_line_1: rawStreetBeforeAdopt || extracted.address_line1 || null,
+                        city: extracted.city || null,
+                        postal_code: extracted.zip || null,
+                      },
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore();
+                continue;
+              }
               const isEmailFlag = flag === 'email_unverified' || flag === 'email_invalid';
               // Email cards are minted in the FENCED transaction below
               // (Codex #3084 r54) — their insert must be atomic with the
@@ -7386,56 +7406,6 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
-
-    // An AV acceptance that AFFIRMATIVELY validated down to the unit
-    // (SUB_PREMISE granularity — Google confirmed the exact door) answers a
-    // standing unit-number ask an earlier call filed for the same building —
-    // mirror of the email fanout's later-call resolution above; the nightly
-    // sweep deliberately never moots missing_unit_number, so this is the only
-    // path that closes the card once the unit is finally supplied. A
-    // PREMISE-level accept proves only the building and resolves nothing
-    // (pre-push audit P1) — which also excludes every recovery-produced
-    // accept, PREMISE-level by construction. Same-building corroboration +
-    // fail-closed matching (incl. the multi-property guard) live in the
-    // resolver.
-    // Did THIS call affirmatively validate a unit (SUB_PREMISE accept behind
-    // the shadow-trust gate)? A stable property of the call, so a reprocess
-    // re-derives it identically.
-    const unitAcceptanceThisCall = !!(customerId
-      && v2AddressTrustedForUnitAsk
-      && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
-      && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
-      && effectiveAddressValidation?.normalized?.street_line_1);
-    if (unitAcceptanceThisCall) {
-      try {
-        await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
-          customerId,
-          acceptedAddress: effectiveAddressValidation.normalized,
-          // Chronology bound: a reprocess of an OLDER call must not erase a
-          // unit ask a LATER call raised (its acceptance predates that work).
-          acceptingCallId: call.id,
-          acceptingCallAt: call.created_at,
-        });
-      } catch (e) {
-        logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
-      }
-    }
-    // Licenses the lead-merge sites below to drop the rolled-up
-    // missing_unit_number reason. The card ledger — never the lead's
-    // fill-only current address (codex r6 P1) — is the per-building source
-    // of truth, and it is read LIVE at each merge site rather than snapshot
-    // here (codex r8 P1): a snapshot both misses a card filed concurrently
-    // and strands the reason forever on a retry whose card this run already
-    // resolved. Fails closed on a read error.
-    const unitAskAnsweredNow = async (conn) => {
-      if (!unitAcceptanceThisCall) return false;
-      try {
-        return !(await require('./triage-auto-resolve').hasOpenUnitNumberCards(customerId, conn));
-      } catch (e) {
-        logger.warn(`[call-proc] unit-card ledger read failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
-        return false;
-      }
-    };
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
@@ -8337,15 +8307,7 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // Provisional license (this write is re-decided under the lead
-            // lock below, where the ledger is re-read inside that
-            // transaction): drop the rolled-up unit reason only if this
-            // call validated a unit AND no unit card is outstanding now.
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(
-              priorNeedsConfirmation,
-              bridgeNeedsConfirmation,
-              { unitAskAnswered: await unitAskAnsweredNow(db) },
-            );
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,
@@ -8622,17 +8584,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  {
-                    bridgeNeedsConfirmation,
-                    leadQuality: extracted.lead_quality,
-                    // AUTHORITATIVE license: the ledger is re-read inside
-                    // THIS transaction, after the lead row lock — so a
-                    // concurrent call that filed a unit card either
-                    // committed before our lock (we see it and keep the
-                    // reason) or serializes behind us and unions the reason
-                    // back on its own lead write.
-                    unitAskAnswered: await unitAskAnsweredNow(trx),
-                  },
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;

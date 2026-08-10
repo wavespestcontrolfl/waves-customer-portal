@@ -45,7 +45,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { lockTriageCall, lockTriageCustomer } = require('../utils/triage-locks');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -60,9 +60,16 @@ const ADDRESS_MOOT_CODES = new Set([
 ]);
 // missing_unit_number is deliberately NOT address-moot: the moot rule fires on
 // street + zip existing on file, and a multi-unit building address has both
-// while the unit is still uncollected — the ask stands until performed. It is
-// closed event-driven instead (resolveOpenUnitNumberCards below) when a later
-// call's AV accepts a subpremise-complete address for the same building.
+// while the unit is still uncollected — the ask stands until performed.
+//
+// It gets NO event-driven auto-resolution either (unlike the email cards). A
+// later call validating some unit at the same building does not answer THIS
+// call's ask: a landlord whose first call was about unit A without naming it,
+// followed by a call about unit B, would have A's task closed by B's
+// acceptance. Nothing in the data ties an accepted unit to a specific earlier
+// unit-less ask — the earlier extraction has no unit by definition. So the
+// card is a human verdict, exactly like its siblings in the owed-confirmation
+// list below.
 
 // Mirror of FAIL_OPEN_CUSTOMER_STAGES in call-recording-processor.js: only
 // these pipeline stages carry a trustworthy on-file address. Terminal and
@@ -336,299 +343,6 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   return null;
 }
 
-// ── Event-driven unit-number resolution ─────────────────────────────────
-//
-// Mirror of customer-email-fanout's resolveOpenEmailReviewCards, for the one
-// address ask the nightly moot rules above deliberately never touch: a LATER
-// call whose Address Validation accepted a subpremise-complete address (the
-// caller finally supplied the unit and it validated) answers the standing
-// missing_unit_number card. Without this the card outlives the very
-// acceptance that collected the unit (codex #3324 r1 P2).
-//
-// Same-building corroboration: only cards whose call heard the SAME street
-// (V1 address_line1 or V2 street_line_1, unit designators stripped, compared
-// suffix-insensitively) as the accepted verdict resolve — a multi-property
-// customer's acceptance for a different address must not clear the condo's
-// unit ask. A card whose call carried multi-property evidence
-// (additional_properties) is never auto-resolved either: one validated unit
-// cannot prove which of a landlord's several units in the SAME building it
-// answers (pre-push audit P1). Fail closed: missing/unparseable streets keep
-// the card. And when MORE THAN ONE open card matches the accepted building,
-// none resolve: separate unit-less calls can be two different units in the
-// same building (unit 202 validating must not close unit 101's outstanding
-// ask), and nothing in the data can attribute the single validated door to
-// one card over another — fail closed and leave them for human review
-// (pre-push audit P1 r3; the pre-PR status quo for those cards anyway).
-
-// Pure per-card predicate, exported for tests. `row` carries the card's
-// call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1);
-// `acceptedAddress` is the AV normalized shape ({street_line_1, city,
-// postal_code}). The V2 street is AUTHORITATIVE when present — the
-// missing-unit verdict was produced by Address Validation run on the
-// V2-heard address — and V1 is consulted only when V2 heard no street. Fail
-// closed on an unparseable extraction (either side) and on a V1/V2 street
-// disagreement: a card whose two extractions name different buildings cannot
-// be attributed to either. Building identity is street + PLACE: ZIP is the
-// strong discriminator when both sides have one; the city comparison applies
-// only when no ZIP pair exists (postal-city aliases — the same rule
-// customer-address-fanout documents); NO corroborating pair at all fails
-// closed, so an identically-numbered street in another city/ZIP never
-// resolves this building's card (pre-push audit P1 r4).
-const streetLineKey = (line) => {
-  const { streetCompareKey } = require('./call-triage-flags');
-  const { splitStreetLineUnit } = require('../utils/address-normalizer');
-  const street = splitStreetLineUnit(line).street;
-  return street ? streetCompareKey(street) : '';
-};
-const placeNameKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-const zip5Of = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
-
-// Building identity of a card, from its call's extractions:
-//   { key, zip, city }     — the extractions unambiguously name ONE building
-//   { multiProperty: true } — the call mentioned additional properties, so it
-//                             could concern ANY building (incl. the accepted)
-//   null                    — identity cannot be established (unparseable
-//                             extraction, no street, V1/V2 disagreement)
-function unitCardBuildingIdentity(row) {
-  const parse = (raw) => {
-    if (raw == null) return null;
-    if (typeof raw !== 'string') return raw;
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return undefined; // unparseable — distinct from absent
-    }
-  };
-  const v2 = parse(row.call_extraction);
-  if (v2 === undefined) return null;
-  const v1 = parse(row.call_extraction_v1);
-  if (v1 === undefined) return null;
-  // Multi-property evidence from EITHER extraction shape — the pipeline
-  // prefers legacy V1 additional_properties when present, so V1-only
-  // evidence is just as disqualifying (pre-push audit P1 r6).
-  if ((Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0)
-      || (Array.isArray(v1?.additional_properties) && v1.additional_properties.length > 0)) {
-    return { multiProperty: true };
-  }
-  const v2Addr = v2?.property?.service_address || {};
-  const v2Key = streetLineKey(String(v2Addr.street_line_1 || '').trim());
-  const v1Key = streetLineKey(String(v1?.address_line1 || '').trim());
-  if (v2Key && v1Key && v2Key !== v1Key) return null;
-  const key = v2Key || v1Key; // V2 (AV's input) outranks; V1 only when V2 silent
-  if (!key) return null;
-  return {
-    key,
-    zip: v2Key ? zip5Of(v2Addr.postal_code || v2Addr.zip) : zip5Of(v1?.zip),
-    city: v2Key ? placeNameKey(v2Addr.city) : placeNameKey(v1?.city),
-  };
-}
-
-// Does an identified card name the accepted building? Street key equality +
-// place corroboration: ZIP when both sides carry one (strong discriminator),
-// else city (postal-city aliases); no corroborating pair fails closed.
-function identityMatchesAcceptedAddress(identity, acceptedAddress) {
-  const accepted = (acceptedAddress && typeof acceptedAddress === 'object') ? acceptedAddress : {};
-  const acceptedKey = streetLineKey(accepted.street_line_1);
-  if (!acceptedKey || !identity?.key || identity.key !== acceptedKey) return false;
-  const acceptedZip = zip5Of(accepted.postal_code);
-  if (acceptedZip && identity.zip) return acceptedZip === identity.zip;
-  const acceptedCity = placeNameKey(accepted.city);
-  return !!acceptedCity && !!identity.city && acceptedCity === identity.city;
-}
-
-// Pure per-card predicate, kept exported for tests: identified,
-// single-property, and naming the accepted building.
-function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
-  const identity = unitCardBuildingIdentity(row);
-  return !!identity && !identity.multiProperty && identityMatchesAcceptedAddress(identity, acceptedAddress);
-}
-
-// Can this call's acceptance speak for a card at all? Only for work that
-// already existed when the call came in: a REPROCESS of an older call must
-// not erase a unit ask a LATER call raised, since its evidence predates that
-// work (codex r9 P1). The accepting call's own cards are always eligible
-// (same-call reprocess). Mirrors the SQL bound exactly: no accepting-call
-// identity at all = no bound requested (the call processor always supplies
-// both); an id without a timestamp admits only that call's own cards; a
-// card with an unusable timestamp fails closed.
-function unitCardWithinAcceptanceChronology(row, { acceptingCallId = null, acceptingCallAt = null } = {}) {
-  if (!acceptingCallId && !acceptingCallAt) return true;
-  if (acceptingCallId && row?.call_log_id && String(row.call_log_id) === String(acceptingCallId)) return true;
-  if (!acceptingCallAt) return false;
-  const created = row?.created_at ? new Date(row.created_at) : null;
-  const accepted = new Date(acceptingCallAt);
-  if (!created || Number.isNaN(created.getTime()) || Number.isNaN(accepted.getTime())) return false;
-  return created <= accepted;
-}
-
-// Pure selection over the loaded candidate rows, exported for tests.
-// Building matching is separate from resolution eligibility (pre-push audit
-// P1 r5): EVERY candidate must be positively attributable before anything
-// resolves. A card whose building cannot be established, or a multi-property
-// call that could concern the accepted building, makes the attribution
-// ambiguous and blocks ALL resolution — a lone "ordinary" match next to a
-// multi-property sibling must not resolve. Among identified cards, exactly
-// one may name the accepted building. Chronology-ineligible cards are not
-// candidates at all (the SQL applies the same bound; this is the tested
-// statement of the rule and a safety net if the query ever loosens).
-function selectUnitCardsToResolve(candidates, acceptedAddress, chronology = {}) {
-  let match = null;
-  for (const row of candidates || []) {
-    if (!unitCardWithinAcceptanceChronology(row, chronology)) continue;
-    const identity = unitCardBuildingIdentity(row);
-    if (!identity || identity.multiProperty) return [];
-    if (identityMatchesAcceptedAddress(identity, acceptedAddress)) {
-      if (match) return []; // two same-building asks — cannot attribute the one validated door
-      match = row;
-    }
-  }
-  return match ? [match] : [];
-}
-
-// Is ANY missing_unit_number card still outstanding for this customer? The
-// lead's rolled-up needs_confirmation reason is a single string that can
-// stand for asks about SEVERAL buildings at once, so the cards are its
-// per-building ledger: the reason may only be cleared while this returns
-// false. Read it LIVE at the moment of the lead write — never from an
-// earlier snapshot — and pass the lead-write transaction as `conn` so the
-// read serializes with concurrent writers on the same lead (codex r8 P1).
-async function hasOpenUnitNumberCards(customerId, conn = db) {
-  if (!customerId) return true; // fail closed — cannot prove the ledger is empty
-  const row = await conn('triage_items as t')
-    .join('call_log as cl', 'cl.id', 't.call_log_id')
-    .where('t.reason_code', 'missing_unit_number')
-    .whereIn('t.status', ['open', 'in_progress'])
-    .where('cl.customer_id', customerId)
-    .count('* as n')
-    .first();
-  return parseInt(row?.n || 0, 10) > 0;
-}
-
-// Never throws on a no-op. Returns { resolved, remainingOpen }: how many
-// cards this call resolved, and how many missing_unit_number cards were
-// still open/in_progress for the customer at commit time (null when nothing
-// ran). NOTE both are point-in-time reporting values for logs and tests —
-// the lead-reason decision reads hasOpenUnitNumberCards live under the lead
-// lock instead, so a retry that already resolved its card (resolved: 0 the
-// second time) still clears the reason, and a card filed concurrently still
-// holds it. Shares the per-call lock contract (utils/triage-locks.js) and
-// the review_status re-sync with the sweep, admin-triage, and the email
-// resolver.
-async function resolveOpenUnitNumberCards({
-  customerId, acceptedAddress, acceptingCallId = null, acceptingCallAt = null,
-  source = 'later call validated the full unit address',
-}, conn = db) {
-  const none = { resolved: 0, remainingOpen: null };
-  if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return none;
-  const now = new Date();
-  const resolveCards = async (trx) => {
-    // Customer-scoped lock FIRST (global order, see utils/triage-locks.js):
-    // candidate selection and the update must see the SAME card set, or a
-    // concurrent resolver's phantom insert breaks the "two same-building
-    // asks resolve none" rule (codex r9 P1). Selection therefore happens
-    // INSIDE this transaction, under this lock.
-    await lockTriageCustomer(trx, customerId);
-    const candidateQuery = trx('triage_items as t')
-      .join('call_log as cl', 'cl.id', 't.call_log_id')
-      .where('t.reason_code', 'missing_unit_number')
-      .whereIn('t.status', ['open', 'in_progress'])
-      .where('cl.customer_id', customerId);
-    // Chronology bound (codex r9 P1): a REPROCESS of an older call must not
-    // erase owed work a LATER call filed — its acceptance is stale evidence
-    // for anything raised after it. Cards from the accepting call itself are
-    // always eligible (the same-call reprocess case). Fail closed: with no
-    // accepting-call timestamp, only that call's own cards are eligible.
-    if (acceptingCallAt) {
-      candidateQuery.where((qb) => {
-        qb.where('t.created_at', '<=', acceptingCallAt);
-        if (acceptingCallId) qb.orWhere('t.call_log_id', acceptingCallId);
-      });
-    } else if (acceptingCallId) {
-      candidateQuery.where('t.call_log_id', acceptingCallId);
-    }
-    const candidates = await candidateQuery.select(
-      't.id', 't.call_log_id', 't.created_at',
-      'cl.ai_extraction_enriched as call_extraction',
-      'cl.ai_extraction as call_extraction_v1',
-    );
-    const answered = selectUnitCardsToResolve(candidates, acceptedAddress, { acceptingCallId, acceptingCallAt });
-    if (!answered.length) {
-      const remainingNoop = await trx('triage_items as t')
-        .join('call_log as cl', 'cl.id', 't.call_log_id')
-        .where('t.reason_code', 'missing_unit_number')
-        .whereIn('t.status', ['open', 'in_progress'])
-        .where('cl.customer_id', customerId)
-        .count('* as n')
-        .first();
-      return { resolved: 0, remainingOpen: parseInt(remainingNoop?.n || 0, 10) };
-    }
-    const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
-    for (const callId of callIds) await lockTriageCall(trx, callId);
-    // Re-verify the selection against a FRESH read before writing (codex r10
-    // P1): the customer lock serializes resolvers, but card INSERTS take no
-    // such lock, so a sibling same-building ask can land between the select
-    // above and this write — and the rule is that two same-building asks
-    // resolve none. Under READ COMMITTED this second statement sees anything
-    // committed since, so the phantom window shrinks to inserts committing
-    // after this read; such a card stays OPEN regardless (we only ever
-    // update the ids we selected) and its own call re-unions the lead
-    // reason, so no owed work is lost either way.
-    const recheck = await trx('triage_items as t')
-      .join('call_log as cl', 'cl.id', 't.call_log_id')
-      .where('t.reason_code', 'missing_unit_number')
-      .whereIn('t.status', ['open', 'in_progress'])
-      .where('cl.customer_id', customerId)
-      .select(
-        't.id', 't.call_log_id', 't.created_at',
-        'cl.ai_extraction_enriched as call_extraction',
-        'cl.ai_extraction as call_extraction_v1',
-      );
-    const stillAnswered = selectUnitCardsToResolve(recheck, acceptedAddress, { acceptingCallId, acceptingCallAt });
-    const answeredIds = new Set(answered.map((i) => i.id));
-    if (stillAnswered.length !== answered.length || !stillAnswered.every((i) => answeredIds.has(i.id))) {
-      const remainingRaced = await trx('triage_items as t')
-        .join('call_log as cl', 'cl.id', 't.call_log_id')
-        .where('t.reason_code', 'missing_unit_number')
-        .whereIn('t.status', ['open', 'in_progress'])
-        .where('cl.customer_id', customerId)
-        .count('* as n')
-        .first();
-      logger.info(`[unit-card-resolve] selection changed under the lock for customer ${customerId} — resolving nothing`);
-      return { resolved: 0, remainingOpen: parseInt(remainingRaced?.n || 0, 10) };
-    }
-    const updated = await trx('triage_items')
-      .whereIn('id', answered.map((i) => i.id))
-      .whereIn('status', ['open', 'in_progress'])
-      .update({
-        status: 'resolved',
-        resolution_note: `Auto-resolved: ${String(source).slice(0, 150)} (Address Validation confirmed the exact unit — SUB_PREMISE accept).`,
-        resolved_at: now,
-        updated_at: now,
-      });
-    for (const callId of callIds) {
-      const stillOpen = await trx('triage_items')
-        .where({ call_log_id: callId })
-        .whereIn('status', ['open', 'in_progress'])
-        .count('* as n')
-        .first();
-      await trx('call_log')
-        .where({ id: callId })
-        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
-    }
-    // Point-in-time report of what is still outstanding (logs/tests only —
-    // the lead-reason license re-reads the ledger live at the lead write).
-    const remaining = await trx('triage_items as t')
-      .join('call_log as cl', 'cl.id', 't.call_log_id')
-      .where('t.reason_code', 'missing_unit_number')
-      .whereIn('t.status', ['open', 'in_progress'])
-      .where('cl.customer_id', customerId)
-      .count('* as n')
-      .first();
-    return { resolved: updated, remainingOpen: parseInt(remaining?.n || 0, 10) };
-  };
-  return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
-}
-
 async function runTriageAutoResolve({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('triageAutoResolve')) {
@@ -797,11 +511,6 @@ async function sweep({ now = new Date() } = {}) {
 
 module.exports = {
   runTriageAutoResolve,
-  resolveOpenUnitNumberCards,
-  hasOpenUnitNumberCards,
-  unitCardAnsweredByAcceptedStreet,
-  selectUnitCardsToResolve,
-  unitCardWithinAcceptanceChronology,
   classifyTriageItem,
   hasNewAddressEvidence,
   callSuppliedAddress,

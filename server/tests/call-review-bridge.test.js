@@ -340,33 +340,18 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
   });
 
-  // The unit ask clears ONLY on an explicit caller license — the processor
-  // grants it when a trusted SUB_PREMISE acceptance emptied the customer's
-  // unit-card ledger (the per-building source of truth). This function
-  // deliberately re-judges no address evidence: the rolled-up string can
-  // stand for asks about several buildings at once.
-  test('the unitAskAnswered license drops the rolled-up unit ask, leaving other reasons alone', () => {
-    const merged = mergeNeedsConfirmation(
-      ['missing_unit_number', 'email_unverified'], [], { unitAskAnswered: true },
-    );
-    expect(merged).not.toContain('missing_unit_number');
-    expect(merged).toContain('email_unverified');
-  });
-
-  test('without the license the unit ask persists across calls (default, explicit false, unrelated opts)', () => {
+  // The unit ask is owed until the office performs it — no supersede rule.
+  // A later call validating SOME unit at the building does not answer THIS
+  // ask (landlord's unnamed unit A, then a call about unit B), and the
+  // earlier extraction carries no unit to tie an acceptance to.
+  test('the unit ask persists across calls, including through a street recovery', () => {
     expect(mergeNeedsConfirmation(['missing_unit_number'], [])).toContain('missing_unit_number');
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], {})).toContain('missing_unit_number');
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], { unitAskAnswered: false })).toContain('missing_unit_number');
+    expect(mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], ['caller_not_authorized']))
+      .toEqual(expect.arrayContaining(['missing_unit_number', 'email_unverified', 'caller_not_authorized']));
     // A recovered street answers the street question, never the unit one.
-    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'])).toContain('missing_unit_number');
-  });
-
-  test('the license does not disturb the address_recovered supersede rule', () => {
-    const merged = mergeNeedsConfirmation(
-      ['address_unverified', 'missing_unit_number'], ['address_recovered'], { unitAskAnswered: true },
-    );
-    expect(merged).toContain('address_recovered');
-    expect(merged).not.toContain('address_unverified');
-    expect(merged).not.toContain('missing_unit_number');
+    const recovered = mergeNeedsConfirmation(['address_unverified', 'missing_unit_number'], ['address_recovered']);
+    expect(recovered).toContain('address_recovered');
+    expect(recovered).not.toContain('address_unverified');
+    expect(recovered).toContain('missing_unit_number');
   });
 });

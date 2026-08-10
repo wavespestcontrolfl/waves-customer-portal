@@ -372,16 +372,14 @@ finding and warns on P1. Reviewers must return JSON matching
     can only confirm a DIFFERENT real address and turn the caller's
     ambiguous hold into an accepted wrong-parcel booking. It holds for
     review with `missing_unit_number` naming the ask.
-  - An owed address ask only clears on evidence that answers THAT ask:
-    a unit ask needs an affirmative `SUB_PREMISE` acceptance (a
-    `PREMISE` accept proves the building only), for the same building
-    (street AND place — ZIP, else city), from a trusted address
-    (enforce mode or a shadow-bridge adoption), with unambiguous
-    attribution (multi-property or unidentifiable sibling cards block
-    it) and no later-raised ask erased by an older call's reprocess.
-    The `triage_items` cards are the per-building ledger; a lead's
-    rolled-up `needs_confirmation` string is not, so clear it only from
-    a LIVE ledger read taken under the lead lock — never a snapshot.
+  - An owed ask is auto-closed only by evidence that answers THAT ask,
+    not merely evidence of the same KIND. `missing_unit_number` gets no
+    auto-resolution for exactly this reason: a later call validating
+    some unit at the building cannot be attributed to an earlier
+    unit-less ask (a landlord's unnamed unit A, then a call about unit
+    B), because the earlier extraction has no unit to tie it to. It
+    joins the owed-confirmation family in `triage-auto-resolve.js` —
+    resolved by a human verdict, never aged out, never mooted.
   - Auto-routing stays confidence-gated (auto-create only when confidence
     ≥ threshold AND the address validates AND the service maps AND no
     HOA/commercial flag — else triage), appointment inserts keep their

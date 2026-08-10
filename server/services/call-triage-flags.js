@@ -408,7 +408,12 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
 function isMissingUnitNumber(av) {
   return !!(av && av.granularity === 'PREMISE'
     && Array.isArray(av.missingComponents)
-    && av.missingComponents.includes('subpremise'));
+    // The unit must be the ONLY thing missing (codex r11 P1). With another
+    // component missing too, the address is not merely unit-less — the
+    // street itself is incompletely resolved, which IS recoverable input,
+    // so this must not claim it as a unit-only ask and skip recovery.
+    && av.missingComponents.length === 1
+    && av.missingComponents[0] === 'subpremise');
 }
 
 function suppressAddressFlagsForAV(flags, addressValidation) {
@@ -1388,28 +1393,21 @@ function deriveEmailReview(extracted = {}) {
  * snapshot, so a quick follow-up call was wiping address_unverified /
  * email_unverified off the lead). Union of both, with two supersede rules: an
  * address recovered-and-validated on the newer call replaces the stale
- * address_unverified, and `opts.unitAskAnswered` — an explicit license from
- * the caller — drops the rolled-up missing_unit_number. The license is
- * deliberately a boolean, not address evidence to re-judge here: the string
- * reason can stand for asks about SEVERAL buildings at once, so the only
- * thing that proves it fully answered is the customer's call-scoped unit-card
- * ledger going to zero via a trusted SUB_PREMISE acceptance — which is
- * exactly what the call processor verifies (resolveOpenUnitNumberCards:
- * resolved > 0 && remainingOpen === 0, behind the shadow-trust and
- * granularity gates) before passing true. Re-checking the lead's fill-only
- * current address here would strand the reason forever once the cards are
- * terminal (pre-push audit P1 r7).
+ * address_unverified.
+ *
+ * missing_unit_number gets NO supersede rule and is owed until the office
+ * performs it, like every other read-back reason here: a later call that
+ * validates SOME unit at the building does not answer THIS ask (a landlord's
+ * unnamed unit A followed by a call about unit B), and the earlier
+ * extraction has no unit to tie the acceptance to. See the owed-confirmation
+ * doctrine in triage-auto-resolve.js.
  */
-function mergeNeedsConfirmation(prior, next, { unitAskAnswered = false } = {}) {
+function mergeNeedsConfirmation(prior, next) {
   const nextArr = Array.isArray(next) ? next : [];
-  let merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
-  if (nextArr.includes('address_recovered')) {
-    merged = merged.filter((r) => r !== 'address_unverified');
-  }
-  if (unitAskAnswered) {
-    merged = merged.filter((r) => r !== 'missing_unit_number');
-  }
-  return merged;
+  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
+  return nextArr.includes('address_recovered')
+    ? merged.filter((r) => r !== 'address_unverified')
+    : merged;
 }
 
 /**
