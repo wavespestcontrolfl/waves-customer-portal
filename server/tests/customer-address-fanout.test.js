@@ -487,11 +487,18 @@ describe('propagateCustomerAddressChange', () => {
 
     await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
-    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
+    const patch = estUpdate.patch;
     expect(patch.estimate_data.__raw).toContain("'{proposal,programs}'");
     const patchedPrograms = JSON.parse(patch.estimate_data.bindings[patch.estimate_data.bindings.length - 1]);
     expect(patchedPrograms[0].buildings[0].name).toBe('4857 Tobermory Way, Bradenton, FL 34211');
     expect(patchedPrograms[0].buildings[1].name).toBe('Clubhouse');
+    // Concurrency guard: the update re-asserts the SELECTed programs array
+    // so a racing proposal save (pricing/tax/scope edits without an address
+    // move) is never overwritten from the stale read (codex 1A-ii r21).
+    const guard = estUpdate.whereRaw.find((w) => w.sql.includes("#> '{proposal,programs}'"));
+    expect(guard).toBeTruthy();
+    expect(JSON.parse(guard.bindings[0])[0].pricePerApplication).toBe(120);
   });
 
   test('punctuated unit designators (Apt. 2 / Ste. 200) are distinct units too', () => {

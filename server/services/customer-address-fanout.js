@@ -389,6 +389,14 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           // property address must not have its fresh array overwritten.
           guarded = guarded.whereRaw("estimate_data #> '{proposal,buildings}' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(buildings)]);
         }
+        if (patchPrograms) {
+          // Same stale-read rule for the programs array — a concurrent save
+          // changing program pricing/taxability/scope without moving the
+          // address must not be rewritten from this SELECT; losing the race
+          // falls back to the address-column-only update below (codex 1A-ii
+          // r21).
+          guarded = guarded.whereRaw("estimate_data #> '{proposal,programs}' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(programs)]);
+        }
         const n = await guarded.update(patch);
         counts.estimates += n;
         if (n) continue;
