@@ -2,8 +2,12 @@
 
 **Date:** 2026-08-08, revised 2026-08-09 · **Status:** scope for owner sign-off. No code changes in this doc.
 
-**Visual mock:** https://claude.ai/code/artifact/f8082d1d-2044-4c32-94cd-20a10cabddc6 — the two
-satellite-based options, superseded but kept for reference (§6).
+**Visual mock — the build:** https://claude.ai/code/artifact/042796a8-3fdd-43e4-8ae6-ab65e467c0d3
+— the marked-photo card as the customer sees it, the count rule shown side by side, the
+no-marks state, and the tech marking screen.
+
+**Visual mock — superseded:** https://claude.ai/code/artifact/f8082d1d-2044-4c32-94cd-20a10cabddc6
+— the two satellite-based options, kept for reference (§6).
 
 **Direction (owner, 2026-08-09):** photograph the area actually spot-treated and mark the
 treated locations on that photo, the way bait station pins are marked today. Scope is
