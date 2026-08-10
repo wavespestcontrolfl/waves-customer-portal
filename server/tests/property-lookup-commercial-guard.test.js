@@ -445,14 +445,21 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(buildFieldVerifyFlags(hybrid, null, null).find((f) => f.field === 'commercialSubtype')).toBeDefined();
   });
 
-  test('untrusted web-sourced unit count is not echoed in the copy (trustedUnitCount)', () => {
-    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+  test('untrusted web-sourced unit count neither proves a master parcel nor gets echoed (trustedUnitCount)', () => {
+    const withUntrustedCount = (overrides = {}) => countyMultifamilyBuilding({
       _source: 'hybrid',
       _fieldEvidence: {
         propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
         unitCount: { value: 8, sourceType: 'listing', fieldVerify: true, score: 30 },
       },
-    }), null, null).find((f) => f.field === 'commercialSubtype');
+      ...overrides,
+    });
+    // Without other master-parcel evidence the untrusted count proves nothing.
+    expect(buildFieldVerifyFlags(withUntrustedCount(), null, null)
+      .find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+    // With aggregation evidence the flag fires but never echoes the web count.
+    const flag = buildFieldVerifyFlags(withUntrustedCount({ _parcel: { aggregated: true } }), null, null)
+      .find((f) => f.field === 'commercialSubtype');
     expect(flag).toBeDefined();
     expect(flag.reason).not.toMatch(/8-unit/);
   });
@@ -507,6 +514,24 @@ describe('multifamily master-parcel guidance flag', () => {
       expect(flag).toBeDefined();
       expect(flag.reason).toMatch(/re-run the lookup/i);
     }
+  });
+
+  test('county match for ONE condo unit (own parcel, unitCount 1) → no master-parcel copy (codex P1)', () => {
+    // A unit-specific lookup that matched the unit's own parcel has CORRECT
+    // dimensions — it must not be told they belong to the whole building.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Multifamily Condominium', unitCount: 1, squareFootage: 1200 }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('real aggregate shape (unitCount 1, _parcel.residentialUnits 48) → flag fires with the aggregate count', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { aggregated: true, residentialUnits: 48 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/48-unit/);
   });
 
   test('aggregated parcel labeled Apartment still gets the re-lookup path (aggregation is built from unit parcels)', () => {

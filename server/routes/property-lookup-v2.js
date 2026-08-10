@@ -2956,9 +2956,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   if (rc && countyBackedType
       && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
     const masterParcelSubtype = resolveCommercialSubtype(rc, {});
-    if (masterParcelSubtype === 'multifamily_common_area_residential'
-        || masterParcelSubtype === 'hoa_common_area_residential') {
-      const unitCount = Number(trustedUnitCount(rc)) || 0;
+    // Positive master-parcel evidence, so a county match for ONE condo unit
+    // ("Multifamily Condominium", unitCount 1, its own parcel) is never told
+    // its correct unit dimensions are the building's (codex P1). Aggregates
+    // count via residentialUnits — the real Manatee condo-building records
+    // carry unitCount 1 with _parcel.residentialUnits 30–48. The HOA
+    // common-area subtype needs no unit count: that parcel is association
+    // property (a clubhouse/greenbelt), never a resident's own home.
+    const masterUnitCount = rc._parcel?.aggregated
+      ? Math.max(Number(trustedUnitCount(rc)) || 0, Number(rc._parcel.residentialUnits) || 0)
+      : Number(trustedUnitCount(rc)) || 0;
+    const masterParcelEvidence = masterUnitCount > 1 || Boolean(rc._parcel?.aggregated);
+    if (masterParcelSubtype === 'hoa_common_area_residential'
+        || (masterParcelSubtype === 'multifamily_common_area_residential' && masterParcelEvidence)) {
+      const unitCount = masterUnitCount;
       // The unit re-lookup is only recommended on POSITIVE evidence the
       // community parcels each unit: condo/townhome text on the trusted
       // record, or the stacked-parcel aggregation (which is built from
