@@ -44,6 +44,23 @@ describe('recoverStreetAddress — guards', () => {
     }
   });
 
+  // A PREMISE verdict listing only the subpremise as missing means Google
+  // matched the building exactly as spoken — there is no mis-heard street to
+  // recover, and searching anyway could only confirm a DIFFERENT real
+  // address and turn the caller's hold into an accepted wrong-parcel verdict.
+  test('not attempted when the verdict is a resolved building missing only its unit', async () => {
+    for (const avStatus of ['missing_component', 'ambiguous', 'confirm_needed']) {
+      const out = await recoverStreetAddress({
+        extracted: GARBLED,
+        avStatus,
+        avMissingUnitOnly: true,
+        deps: deps({ autocomplete: async () => ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'] }),
+      });
+      expect(out.attempted).toBe(false);
+      expect(out.recovered).toBeNull();
+    }
+  });
+
   test('not attempted without a house number to anchor on', async () => {
     const out = await recoverStreetAddress({
       extracted: { ...GARBLED, address_line1: 'C Phone Trl' },

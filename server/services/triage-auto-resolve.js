@@ -58,6 +58,18 @@ const ADDRESS_MOOT_CODES = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
   'address_unverified', 'address_validation_unavailable',
 ]);
+// missing_unit_number is deliberately NOT address-moot: the moot rule fires on
+// street + zip existing on file, and a multi-unit building address has both
+// while the unit is still uncollected — the ask stands until performed.
+//
+// It gets NO event-driven auto-resolution either (unlike the email cards). A
+// later call validating some unit at the same building does not answer THIS
+// call's ask: a landlord whose first call was about unit A without naming it,
+// followed by a call about unit B, would have A's task closed by B's
+// acceptance. Nothing in the data ties an accepted unit to a specific earlier
+// unit-less ask — the earlier extraction has no unit by definition. So the
+// card is a human verdict, exactly like its siblings in the owed-confirmation
+// list below.
 
 // Mirror of FAIL_OPEN_CUSTOMER_STAGES in call-recording-processor.js: only
 // these pipeline stages carry a trustworthy on-file address. Terminal and
@@ -88,7 +100,9 @@ const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // property confirmation), second_service_address and
 // secondary_contact_captured (captured data awaiting application),
 // missing_last_name (owed full-name capture — the name_moot rule closes it
-// on independent surname evidence), and the fail-open confirmation pair
+// on independent surname evidence), missing_unit_number (owed unit capture
+// for a multi-unit building — street+zip on file does NOT answer it), and
+// the fail-open confirmation pair
 // low_extraction_confidence / name_email_mismatch (the office owes
 // confirming the doubted fields; analogous to email_unverified).
 //

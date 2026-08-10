@@ -118,6 +118,127 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     }
   );
 
+  // Synthetic fixture addresses throughout — never a real caller's
+  // (AGENTS.md: no customer PII on the repo surface).
+  //
+  // Shadow mode: the AV verdict describes what V2 sent, the record holds what
+  // V1 heard. The unit ask files only when AV's resolved building corroborates
+  // the legacy street — a task naming a building the record doesn't hold is
+  // human-only work pointed at the wrong address.
+  const UNIT_AV = (street = '100 Example Condo Ct') => ({
+    status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'],
+    normalized: { street_line_1: street, city: 'Bradenton', postal_code: '34212' },
+  });
+
+  test('ambiguous PREMISE missing its subpremise, corroborated by the legacy street → ask rides with address_unverified', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Court', city: 'Bradenton', lead_quality: 'warm' },
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).toContain('missing_unit_number');
+  });
+
+  test('ambiguous without a missing subpremise → no unit-number ask', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [], normalized: { street_line_1: '100 Example Condo Ct' } },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('V1/V2 building disagreement → NO unit ask (the verdict is about a different address than the record holds)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV('4200 Other Sample Blvd'),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('suffix aliases outside the narrow strip list still corroborate (Loop vs Lp)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV('100 Example Lp'),
+      extracted: { address_line1: '100 Example Loop', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).toContain('missing_unit_number');
+    // A genuinely different street still fails, alias table or not.
+    const different = deriveCallReviewBridge({
+      addressValidation: UNIT_AV('100 Example Lp'),
+      extracted: { address_line1: '100 Sample Loop', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(different.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('same street name in a different city/ZIP is a different building → no unit ask', () => {
+    const differentZip = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', zip: '34209', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(differentZip.needsConfirmation).not.toContain('missing_unit_number');
+    const differentCity = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Sarasota', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(differentCity.needsConfirmation).not.toContain('missing_unit_number');
+    // Aliased postal city under one agreeing ZIP still corroborates.
+    const aliasCity = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Lakewood Ranch', zip: '34212', lead_quality: 'warm' },
+    });
+    expect(aliasCity.needsConfirmation).toContain('missing_unit_number');
+  });
+
+  test('the canonical record already HAS the unit (V2 dropped it) → no ask', () => {
+    // Dedicated legacy line 2.
+    const line2 = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', address_line2: 'Unit 104', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(line2.needsConfirmation).not.toContain('missing_unit_number');
+    // Unit inline on the street line.
+    const inline = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct Apt 104', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(inline.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('V1 heard no street → NO unit ask even when the V2 pass flagged it (nothing on the record to attach it to)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['address_unverified', 'missing_unit_number'],
+    });
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('an AV result with no normalized street cannot corroborate → no unit ask', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('the corroborated ask is filed once, whether the branch or the V2 flag supplies it', () => {
+    const both = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(both.needsConfirmation.filter((r) => r === 'missing_unit_number')).toHaveLength(1);
+  });
+
   test('out_of_service_area with a street → out_of_service_area reason', () => {
     const out = deriveCallReviewBridge({
       addressValidation: { status: 'out_of_service_area' },
@@ -223,6 +344,10 @@ describe('deriveCallReviewBridge — garbled-street recovery (addressRecovery)',
     expect(out.needsConfirmation).not.toContain('address_unverified');
   });
 
+  // No recovery-plus-missing-unit case is asserted here: recovery.js refuses
+  // that verdict outright (a resolved building is not a garbled street), so
+  // the pairing cannot arise — see address-recovery.test.js for the refusal.
+
   test('recovery attempted but nothing confirmed → address_unverified unchanged', () => {
     const out = deriveCallReviewBridge({
       addressValidation: unverifiable,
@@ -288,5 +413,20 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
   test('handles empty/garbage input', () => {
     expect(mergeNeedsConfirmation(null, undefined)).toEqual([]);
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
+  });
+
+  // The unit ask is owed until the office performs it — no supersede rule.
+  // A later call validating SOME unit at the building does not answer THIS
+  // ask (landlord's unnamed unit A, then a call about unit B), and the
+  // earlier extraction carries no unit to tie an acceptance to.
+  test('the unit ask persists across calls, including through a street recovery', () => {
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [])).toContain('missing_unit_number');
+    expect(mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], ['caller_not_authorized']))
+      .toEqual(expect.arrayContaining(['missing_unit_number', 'email_unverified', 'caller_not_authorized']));
+    // A recovered street answers the street question, never the unit one.
+    const recovered = mergeNeedsConfirmation(['address_unverified', 'missing_unit_number'], ['address_recovered']);
+    expect(recovered).toContain('address_recovered');
+    expect(recovered).not.toContain('address_unverified');
+    expect(recovered).toContain('missing_unit_number');
   });
 });

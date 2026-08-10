@@ -170,6 +170,35 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // validated_accept / corrected → clean, no blocking address flag (the
     // whole point: a corrected bad zip clears triage instead of holding the
     // call).
+
+    // AV resolved the BUILDING but Google reports the unit designator
+    // missing (condo/townhome address given without a unit). Advisory by
+    // construction — deliberately NOT in BLOCKING_TRIAGE_FLAGS — because it
+    // never stands alone: this shape always carries the unresolved status
+    // above, whose address_unverified hold is what keeps the call in
+    // review. (The call processor also refuses street recovery on this
+    // shape, so the hold can never be swapped for an accepted wrong-parcel
+    // verdict.) This flag only NAMES the specific ask behind that hold:
+    // "which unit?" instead of "could not be verified".
+    //
+    // opts.canonicalRecord is the MERGED flat record the pipeline will
+    // actually dispatch against. It must be consulted, not the extraction:
+    // adoptV2PrimaryFields retains a V1 unit that V2 dropped for the same
+    // address, so the AV verdict can report a missing subpremise the
+    // canonical record already supplies (codex r16 P1). Omitting the opt
+    // preserves the old behavior for callers with no merged record.
+    // `inServiceArea === false` is checked as well as the status, not instead
+    // of it: deriveStatus tests completeness BEFORE service area, so a
+    // resolved PREMISE in an unsupported county returns `ambiguous` and never
+    // reaches the out_of_service_area branch (codex r17 P2). Collecting a
+    // unit cannot make an out-of-area building serviceable, so that ask is
+    // busywork the office can never usefully perform.
+    if (avStatus !== 'out_of_service_area'
+        && av?.inServiceArea !== false
+        && isMissingUnitNumber(av)
+        && !(opts.canonicalRecord && recordCarriesUnit(opts.canonicalRecord))) {
+      flags.push('missing_unit_number');
+    }
   } else {
     if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
       flags.push('missing_service_address');
@@ -297,6 +326,11 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // (possible valid-but-wrong-street mishear) — read the street back on the
   // confirmation call; never blocks the AV-approved routing.
   'address_readback',
+  // AV resolved a multi-unit building given without its unit (missing
+  // subpremise) — names the specific ask for the callback. The call is
+  // already held by the address_unverified hard flag; this must not add a
+  // second block.
+  'missing_unit_number',
   // Caller discussed more than one property — the extra addresses are recorded
   // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
   'multi_property_call',
@@ -379,12 +413,104 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
   'address_validation_unavailable',  // deterministic (AV api error)
   'out_of_service_area',             // model + deterministic
   'address_unverifiable',            // MODEL flag (schema enum / prompt). The model marks nearly every call address_unverifiable; AV accept/correct authoritatively resolves the address, so this must clear too or clean addresses never auto-route.
+  'missing_unit_number',             // deterministic (AV premise w/ missing subpremise) — clears ONLY on a SUB_PREMISE-granularity accept (exact door validated); see the filter's granularity exception below.
 ]);
+
+// AV resolved a real building (PREMISE) but Google lists the unit designator
+// (subpremise) as the missing input — a multi-unit condo/townhome building
+// address given without the unit number. County rolls model these communities
+// as building-level master parcels, so without the unit nothing downstream
+// (parcel match, dispatch, interior treatment) can target the right home.
+/**
+ * SHADOW-MODE guard for the unit ask (codex r12 P1). The AV verdict describes
+ * the address V2 sent; in shadow mode the LEGACY V1 record is what the lead
+ * and the review card actually hold. "Ask which unit" is only useful — and
+ * only true — when those are the same building, so the ask is filed just when
+ * AV's resolved building corroborates the legacy street (suffix-insensitive,
+ * unit designators irrelevant here since the whole point is that there is no
+ * unit) AND the place agrees where both sides state one — the same rule the
+ * adoption path's sameLocation uses, because "100 Main St" exists in several
+ * cities (codex r13 P1). Fails closed: a V1/V2 street or place disagreement, a
+ * legacy record with no street, or an AV result with no normalized street
+ * files nothing — the generic address_unverified hold already covers the call,
+ * and a unit task pointing at a building the record does not hold is worse
+ * than none (it is human-only work, never auto-resolved).
+ *
+ * The enforce lane does NOT use this street/place corroboration — there V2 IS
+ * the record — but it DOES share recordCarriesUnit below.
+ */
+/**
+ * Does this flat record already state a unit? Both shapes count: a dedicated
+ * line 2, and a unit peeled out of the street line ("100 Example Ct Apt 4").
+ *
+ * Shared by BOTH lanes on purpose. The unit ask is never auto-resolved, so
+ * filing one for a unit the record already holds creates a permanent,
+ * unanswerable task — and each lane reaches that state by its own route:
+ * shadow mode via the legacy V1 record (codex r14 P1), enforce mode via
+ * adoptV2PrimaryFields, which deliberately RETAINS a V1 address_line2 that V2
+ * omitted for the same address (extraction-compat.js; codex r16 P1) — so the
+ * canonical record can carry a unit that V2's extraction, and therefore the
+ * AV verdict built from it, never saw.
+ */
+function recordCarriesUnit(flatRecord = {}) {
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  if (String(flatRecord.address_line2 || '').trim()) return true;
+  return !!splitStreetLineUnit(flatRecord.address_line1).unit;
+}
+
+function unitAskCorroborated(av, extracted = {}) {
+  if (!isMissingUnitNumber(av)) return false;
+  // Out-of-area buildings get no unit ask — same reasoning as the enforce
+  // lane: the status is `ambiguous` because completeness outranks the
+  // service-area test, and a unit cannot make the address serviceable.
+  if (av?.inServiceArea === false) return false;
+  const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
+  if (recordCarriesUnit(extracted)) return false;
+  // Compare through the CANONICAL suffix table, not streetCompareKey's
+  // hand-written strip list (codex r15 P1): that list omits pairs the
+  // normalizer already aliases — "100 Example Loop" vs Google's "100 Example
+  // Lp" — and a false mismatch here silently suppresses the ask, leaving the
+  // office with the generic hold and no instruction to collect the unit.
+  // streetCompareKey itself is deliberately left alone: the adoption rule and
+  // the second-address check are calibrated to its narrower matching.
+  const buildingKey = (line) => normalizeStreetLine(splitStreetLineUnit(line).street)
+    .toLowerCase().replace(/[^a-z0-9]/g, '');
+  const avKey = buildingKey(av?.normalized?.street_line_1);
+  const legacyKey = buildingKey(extracted.address_line1);
+  if (!avKey || !legacyKey || avKey !== legacyKey) return false;
+  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
+  const avZip = zip5(av?.normalized?.postal_code);
+  const legacyZip = zip5(extracted.zip);
+  if (avZip && legacyZip && avZip !== legacyZip) return false;
+  const avCity = placeKey(av?.normalized?.city);
+  const legacyCity = placeKey(extracted.city);
+  // Postal-city names alias (Bradenton / Lakewood Ranch share 34211), so a
+  // city mismatch only disqualifies when no ZIP pair already agreed.
+  if (!(avZip && legacyZip) && avCity && legacyCity && avCity !== legacyCity) return false;
+  return true;
+}
+
+function isMissingUnitNumber(av) {
+  return !!(av && av.granularity === 'PREMISE'
+    && Array.isArray(av.missingComponents)
+    // The unit must be the ONLY thing missing (codex r11 P1). With another
+    // component missing too, the address is not merely unit-less — the
+    // street itself is incompletely resolved, which IS recoverable input,
+    // so this must not claim it as a unit-only ask and skip recovery.
+    && av.missingComponents.length === 1
+    && av.missingComponents[0] === 'subpremise');
+}
 
 function suppressAddressFlagsForAV(flags, addressValidation) {
   const s = addressValidation?.status;
   if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
-  return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f));
+  // The unit ask only clears on AFFIRMATIVE unit validation: an accept at
+  // SUB_PREMISE granularity means Google confirmed the exact door. A
+  // PREMISE-level accept proves the building only — it says nothing about
+  // which unit, so a stale unit ask survives it (pre-push audit P1).
+  return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f)
+    || (f === 'missing_unit_number' && addressValidation?.granularity !== 'SUB_PREMISE'));
 }
 
 function mergeTriageFlags(modelFlags, deterministicFlags) {
@@ -1258,12 +1384,25 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     } else {
       needsConfirmation.push('address_unverified');
     }
+    // Building resolved but the unit designator is the missing piece — the
+    // ask survives recovery too (recovery fixes a garbled street, not a
+    // missing unit) and persists until the office collects it. Corroboration
+    // rule below.
+    if (unitAskCorroborated(av, extracted)) needsConfirmation.push('missing_unit_number');
   } else if (hadStreet && status === 'out_of_service_area') {
     needsConfirmation.push('out_of_service_area');
   }
 
   const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
   if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+  // The V2 deterministic pass (fed the same AV verdict) may also flag the
+  // missing unit — consume it under the SAME corroboration rule, deduped
+  // against the branch's own push.
+  if (flags.includes('missing_unit_number')
+      && unitAskCorroborated(av, extracted)
+      && !needsConfirmation.includes('missing_unit_number')) {
+    needsConfirmation.push('missing_unit_number');
+  }
 
   if (extracted.first_name && !String(extracted.last_name || '').trim()
       && (extracted.lead_quality === 'hot' || extracted.lead_quality === 'warm')) {
@@ -1339,9 +1478,16 @@ function deriveEmailReview(extracted = {}) {
  * call that never restates the address/email must not erase the earlier call's
  * warnings (the lead's extracted_data is otherwise a rolling latest-call
  * snapshot, so a quick follow-up call was wiping address_unverified /
- * email_unverified off the lead). Union of both, with one supersede rule: an
+ * email_unverified off the lead). Union of both, with two supersede rules: an
  * address recovered-and-validated on the newer call replaces the stale
  * address_unverified.
+ *
+ * missing_unit_number gets NO supersede rule and is owed until the office
+ * performs it, like every other read-back reason here: a later call that
+ * validates SOME unit at the building does not answer THIS ask (a landlord's
+ * unnamed unit A followed by a call about unit B), and the earlier
+ * extraction has no unit to tie the acceptance to. See the owed-confirmation
+ * doctrine in triage-auto-resolve.js.
  */
 function mergeNeedsConfirmation(prior, next) {
   const nextArr = Array.isArray(next) ? next : [];
@@ -1407,6 +1553,9 @@ module.exports = {
   dispatchesToOnFileAddress,
   mergeTriageFlags,
   suppressAddressFlagsForAV,
+  isMissingUnitNumber,
+  unitAskCorroborated,
+  recordCarriesUnit,
   deriveCallReviewBridge,
   deriveEmailReview,
   mergeNeedsConfirmation,

@@ -9,6 +9,8 @@ const {
   hasCanonicalWriteBlock,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasNameEmailMismatch,
+  ADVISORY_TRIAGE_FLAGS,
+  BLOCKING_TRIAGE_FLAGS,
 } = require('../services/call-triage-flags');
 
 // Auto-routing requires a positively validated address (AGENTS.md: "auto-create
@@ -201,6 +203,84 @@ describe('computeDeterministicTriageFlags', () => {
         const flags = computeDeterministicTriageFlags(e, { addressValidation: { status } });
         expect(flags).toContain('address_unverified');
       }
+    });
+
+    test('ambiguous PREMISE with missing subpremise → missing_unit_number alongside address_unverified', () => {
+      const e = validV2Extraction();
+      const av = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: av });
+      expect(flags).toContain('address_unverified');
+      expect(flags).toContain('missing_unit_number');
+    });
+
+    test('ambiguous without a missing subpremise → no missing_unit_number', () => {
+      const e = validV2Extraction();
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [] } });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('missing_unit_number');
+    });
+
+    test('missing subpremise below premise granularity → no unit flag (street itself unresolved)', () => {
+      const e = validV2Extraction();
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'missing_component', granularity: 'ROUTE', missingComponents: ['subpremise'] } });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('missing_unit_number');
+    });
+
+    test('canonical record already carries the unit → no ask (adoptV2PrimaryFields retains a V1 unit V2 dropped)', () => {
+      const e = validV2Extraction();
+      const av = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      // Dedicated line 2 on the merged record.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct', address_line2: 'Unit 104' } }))
+        .not.toContain('missing_unit_number');
+      // Unit inline on the merged street line.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct Apt 104' } }))
+        .not.toContain('missing_unit_number');
+      // A merged record with NO unit still files the ask.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct' } }))
+        .toContain('missing_unit_number');
+      // Callers passing no canonical record keep the prior behavior.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av })).toContain('missing_unit_number');
+    });
+
+    test('a resolved building OUTSIDE the service area gets no unit ask', () => {
+      const e = validV2Extraction();
+      // deriveStatus tests completeness before service area, so this shape
+      // arrives as `ambiguous` with inServiceArea false — collecting a unit
+      // cannot make it serviceable.
+      const outOfArea = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'], inServiceArea: false };
+      expect(computeDeterministicTriageFlags(e, { addressValidation: outOfArea })).not.toContain('missing_unit_number');
+      // In-area and unknown-area still file it.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: { ...outOfArea, inServiceArea: true } })).toContain('missing_unit_number');
+      expect(computeDeterministicTriageFlags(e, { addressValidation: { ...outOfArea, inServiceArea: null } })).toContain('missing_unit_number');
+    });
+
+    test('missing_unit_number is advisory-only: files a card, never holds the appointment', () => {
+      expect(ADVISORY_TRIAGE_FLAGS.has('missing_unit_number')).toBe(true);
+      expect(BLOCKING_TRIAGE_FLAGS.has('missing_unit_number')).toBe(false);
+    });
+
+    test('recovery-produced accept carrying the original missing-subpremise evidence keeps the unit ask (survives AV suppression)', () => {
+      const e = validV2Extraction();
+      // The processor merges the original verdict's missingComponents onto the
+      // effective recovery accept — the ask must survive both the accepted
+      // status chain and suppressAddressFlagsForAV.
+      const carried = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: carried });
+      expect(flags).toContain('missing_unit_number');
+      expect(flags).not.toContain('address_unverified');
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], carried)).toContain('missing_unit_number');
+    });
+
+    test('a true accept (no missing components) emits no unit flag; only a SUB_PREMISE accept supersedes a stale one', () => {
+      const e = validV2Extraction();
+      const buildingAccept = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: [] };
+      expect(computeDeterministicTriageFlags(e, { addressValidation: buildingAccept })).not.toContain('missing_unit_number');
+      // A PREMISE-level accept proves only the building — a stale unit flag
+      // survives; the exact-door SUB_PREMISE accept is what clears it.
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], buildingAccept)).toContain('missing_unit_number');
+      const unitAccept = { ...buildingAccept, granularity: 'SUB_PREMISE' };
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], unitAccept)).not.toContain('missing_unit_number');
     });
 
     test('api_unavailable holds for review (address_validation_unavailable) and still applies model signals', () => {

@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -577,6 +577,7 @@ const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRA
 // silently-unverified address or an incomplete account holder.
 const CONFIRM_REASON_TEXT = {
   address_unverified: 'service address could not be verified — read it back to the caller',
+  missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
@@ -6473,6 +6474,12 @@ const CallRecordingProcessor = {
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
         extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // "Building resolved, unit missing" is not a garbled street — the
+        // recovery module refuses it outright (codex r10 P1), so the
+        // ambiguous hold stands and missing_unit_number names the ask
+        // instead of an accepted wrong-parcel verdict auto-routing a
+        // unit-less condo booking.
+        avMissingUnitOnly: isMissingUnitNumber(v2AddressValidation),
       }).catch(() => null);
     }
     // The winning recovery candidate passed Address Validation itself, so the
@@ -6590,7 +6597,11 @@ const CallRecordingProcessor = {
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
+          // `extracted` is post-adoptV2PrimaryFields here — the MERGED
+          // canonical record. It must be consulted for the unit ask: the
+          // adoption retains a V1 unit V2 dropped, so the AV verdict can
+          // report a missing subpremise the record already has.
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
@@ -6630,7 +6641,7 @@ const CallRecordingProcessor = {
           // against the blocked-branch inserts below.
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
             await db('triage_items')
-              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
+              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
           }
@@ -6720,7 +6731,7 @@ const CallRecordingProcessor = {
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
@@ -6733,7 +6744,7 @@ const CallRecordingProcessor = {
             for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
               try {
                 await db('triage_items')
-                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
               } catch (fe) {
                 logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -6754,7 +6765,7 @@ const CallRecordingProcessor = {
               for (const f of routingResult.failedOpenFlags) {
                 try {
                   await db('triage_items')
-                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
                     .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
                 } catch (fe) {
                   logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -6942,6 +6953,36 @@ const CallRecordingProcessor = {
               // candidate list and the exact question to ask, instead of a
               // bare "could not be verified".
               const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
+              // Name the building the ask is about ON the card. "Ask which
+              // unit" is useless without saying which address, and
+              // call_log.ai_extraction* is a rolling latest-pass snapshot a
+              // reprocess overwrites — so the address is captured here, at
+              // filing time. Shadow mode: the legacy V1 record is the source
+              // of truth for the address, and the bridge only files this ask
+              // when AV's building corroborates it.
+              if (flag === 'missing_unit_number') {
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag,
+                    extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                    severity: 'advisory',
+                    // Google's resolved building when it has one (a corrected
+                    // street/ZIP rides on this verdict shape), else what the
+                    // legacy record holds.
+                    addressValidation: v2AddressValidation,
+                    extraPayload: v2AddressValidation?.normalized?.street_line_1 ? null : {
+                      unit_ask_building: {
+                        street_line_1: rawStreetBeforeAdopt || extracted.address_line1 || null,
+                        city: extracted.city || null,
+                        postal_code: extracted.zip || null,
+                      },
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore();
+                continue;
+              }
               const isEmailFlag = flag === 'email_unverified' || flag === 'email_invalid';
               // Email cards are minted in the FENCED transaction below
               // (Codex #3084 r54) — their insert must be atomic with the
@@ -7449,6 +7490,23 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
+
+    // NOTE — no same-call auto-reconciliation of the unit ask. It was built
+    // (codex asked for it: evidence re-extracted from THIS call IS
+    // attributable to THIS call's ask, unlike a later call's) and then
+    // removed, because every version of it closed an owed task on evidence
+    // that was not yet durable: the reconciliation runs here, while the
+    // customer/lead writes and the final call persistence happen later and
+    // can still fail — leaving the task closed against a dispatch record
+    // that is still unit-less. Reconciling only after those writes would
+    // mean re-reading persisted state and clearing the lead's rolled-up
+    // reason in the same breath, which is a lot of machinery for the narrow
+    // case of an operator force-reprocessing one call.
+    //
+    // The doctrine holds instead: this ask is closed by a human verdict
+    // (AGENTS.md call-pipeline rules). A reprocess that captures the unit
+    // leaves a stale card the office dismisses in one click — the same
+    // flow every other owed-confirmation card already uses.
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
@@ -12082,6 +12140,10 @@ const CallRecordingProcessor = {
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          // Same merged record the live lane consulted — the reconstruction
+          // must agree with it, or the shadow metrics count a unit ask the
+          // live pass suppressed.
+          canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
         routingResult = canAutoRoute(v2ExtractionForAudit, {

@@ -145,14 +145,21 @@ async function confirmPrediction(prediction, { houseNumber, callerZip, callerCit
  * @param {string[]} [opts.extraStreetCandidates]  street-name re-hearings an
  *   upstream pass already produced (contact-dictation decoder) — tried before
  *   this module spends its own phonetic model call.
+ * @param {boolean} [opts.avMissingUnitOnly]  the verdict resolved a PREMISE and
+ *   lists only the subpremise as missing — a multi-unit building given without
+ *   its unit. NOT a garbled street: Google matched the building exactly as
+ *   spoken, so there is no mis-hearing to recover. Searching anyway can only
+ *   confirm a DIFFERENT real address and would swap the caller's ambiguous
+ *   hold for an accepted wrong-parcel verdict that auto-routes a unit-less
+ *   booking. Hard guard, same class as the resolved-status guard below.
  * @param {object} [opts.deps]     injectable { autocomplete, phonetic, validate } for tests
  * @returns {{ attempted: boolean, recovered: object|null, candidates: string[], method: string|null }}
  *   recovered = { address_line1, city, state, zip } — set only on exactly ONE confirmed premise.
  *   candidates = distinct house-number-matching prediction strings (for the review payload).
  */
-async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandidates = [], deps = {} } = {}) {
+async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandidates = [], avMissingUnitOnly = false, deps = {} } = {}) {
   const none = { attempted: false, recovered: null, candidates: [], method: null };
-  if (!ENABLED() || !RECOVERABLE_STATUSES.has(avStatus)) return none;
+  if (!ENABLED() || !RECOVERABLE_STATUSES.has(avStatus) || avMissingUnitOnly) return none;
 
   const street = String(extracted.address_line1 || '').trim();
   const houseNumber = houseNumberOf(street);

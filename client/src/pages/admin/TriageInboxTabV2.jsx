@@ -148,6 +148,17 @@ export function ConfirmEvidence({ payload }) {
         return `not sent (${outcome.replace(/_/g, " ")}${code ? `: ${code}` : ""}) — call them back`;
       })(),
     },
+    // The unit ask is meaningless without the building it is about — a
+    // condo/townhome address that validated as a real premise but with no
+    // unit designator.
+    p.unit_ask_building?.street_line_1 && {
+      label: "Unit needed for",
+      value: [
+        p.unit_ask_building.street_line_1,
+        p.unit_ask_building.city,
+        p.unit_ask_building.postal_code,
+      ].filter(Boolean).join(", "),
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
