@@ -595,8 +595,24 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
 
   // A satellite-capable line wins: the visit may trace, and the posted mode
   // must match THAT line's geometry. The photo card rides alongside.
-  if (capabilities.satellite) return modeMismatchBlock(capabilities.satellite.variant);
-  // Photo-only: nothing on this visit supports a trace.
+  if (capabilities.satellite) {
+    // ...but geometry validation is the WIDER REGISTRY's rule, so it waits for
+    // the registry's own gate (codex P1 r10). Running it under GATE_PHOTO_MARKS
+    // alone broke capture for typed lawn visits in exactly the rollout order
+    // this feature ships in (marks first, eligibility later): with the
+    // eligibility gate off traceFeedFields reports traceVariant:null, and
+    // SchedulePage then falls back to `isLawn`, which isTypedFindings forces
+    // FALSE for aeration/fungicide/insect-control. The modal posts 'perimeter',
+    // the registry says 'outline', and the save died on
+    // trace_capture_mode_mismatch — a 400 that could not happen before the
+    // marks gate was flipped. The feed (traceFeedFields) and render
+    // (resolveTraceRenderVerdict) surfaces already hold this line; capture was
+    // the one that leaked.
+    if (!traceEligibilityGateOn()) return null;
+    return modeMismatchBlock(capabilities.satellite.variant);
+  }
+  // Photo-only: nothing on this visit supports a trace. This block is what the
+  // marks gate legitimately introduces, so it stands on the photo gate alone.
   if (capabilities.photo) return photoLaneBlock('photo');
 
   // Photo gate on, eligibility gate off: nothing else is in force, so every

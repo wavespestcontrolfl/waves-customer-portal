@@ -1000,6 +1000,15 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(pin).toBeTruthy();
     expect(pin.style.left).toBe('25%');
     expect(pin.style.top).toBe('50%');
+    // ...and those percentages resolve against the WRAPPER, so the image must
+    // not outgrow it. Tailwind preflight is disabled, so without border-box
+    // the 1px border lands outside the 100% width and a landscape photo (every
+    // phone photo — max-width binds for anything wider than the printable
+    // area) renders 2px wider than the box the pins are measured against.
+    // Measured in the PDF's own Chromium: 722px image inside a 720px wrapper,
+    // ~1px of pin drift. jsdom can't lay this out, so assert the property.
+    const img = container.querySelector('img[src="https://cdn.example.com/wall.jpg"]');
+    expect(img.style.boxSizing).toBe('border-box');
   });
 
   it('states no count on the PDF marked-photo block', () => {

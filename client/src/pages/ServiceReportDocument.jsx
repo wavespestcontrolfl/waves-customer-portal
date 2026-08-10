@@ -1193,6 +1193,17 @@ export default function ServiceReportDocument({ data, token }) {
                   display: 'block',
                   width: 'auto', height: 'auto',
                   maxWidth: '100%', maxHeight: '6.4in',
+                  // border-box or the 1px border lands OUTSIDE the 100% width
+                  // (Tailwind preflight is disabled, so this img is content-box
+                  // and the only box-sizing rule in index.css is scoped to
+                  // admin form controls). Measured in the PDF's own engine: a
+                  // landscape photo — every phone photo, since max-width binds
+                  // for anything wider than the printable area — rendered a
+                  // 722px image inside the wrapper's 720px cap, drifting the
+                  // percentage-positioned pins ~1px off their points. The
+                  // height-capped portrait case codex flagged measured exact
+                  // either way; this is the case that actually moved.
+                  boxSizing: 'border-box',
                   borderRadius: 4, border: `1px solid ${HAIR}`,
                 }}
               />

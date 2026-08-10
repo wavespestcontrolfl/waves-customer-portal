@@ -243,6 +243,48 @@ describe('photo-lane capture block is independent of GATE_TRACE_ELIGIBILITY', ()
     jest.dontMock('../services/service-completion-profiles');
     jest.resetModules();
   });
+
+  test('the photo gate alone does not enforce satellite geometry (codex P1 r10)', async () => {
+    // The leak the ineligible-lane test above could not see. A typed lawn
+    // visit IS satellite-eligible ('outline'), so it reached modeMismatchBlock
+    // while the registry's own gate was still off — and the client posts
+    // 'perimeter' in exactly that configuration, because traceFeedFields
+    // reports traceVariant:null with the eligibility gate off and SchedulePage
+    // then falls back to `isLawn`, which isTypedFindings forces FALSE for
+    // aeration/fungicide/insect-control. Result: flipping GATE_PHOTO_MARKS
+    // alone killed treatment-zone capture with a 400 on lawn visits that have
+    // nothing to do with marks.
+    jest.resetModules();
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: async () => ({
+        serviceKey: 'lawn_care_recurring', findingsType: 'one_time_lawn_treatment',
+      }),
+    }));
+    const fresh = require('../services/service-report/trace-eligibility');
+    const lawnService = { id: 'ss-lawn', service_type: 'Lawn Insect Control' };
+
+    const marksOnly = await withBothGates({ eligibility: undefined, marks: 'true' },
+      () => fresh.traceCaptureBlockPayload(lawnService, null, { captureMode: 'perimeter' }));
+    expect(marksOnly).toBeNull();
+
+    // ...and the check is still in force once its OWN gate is on, so this
+    // defers the validation rather than deleting it.
+    const bothOn = await withBothGates({ eligibility: 'true', marks: 'true' },
+      () => fresh.traceCaptureBlockPayload(lawnService, null, { captureMode: 'perimeter' }));
+    expect(bothOn).toMatchObject({
+      status: 400,
+      payload: { code: 'trace_capture_mode_mismatch', reason: 'outline' },
+    });
+
+    // The matching mode passes under both gates — the block is about geometry
+    // disagreement, not about lawn visits.
+    const matched = await withBothGates({ eligibility: 'true', marks: 'true' },
+      () => fresh.traceCaptureBlockPayload(lawnService, null, { captureMode: 'lawn' }));
+    expect(matched).toBeNull();
+
+    jest.dontMock('../services/service-completion-profiles');
+    jest.resetModules();
+  });
 });
 
 describe('a foam ADD-ON makes the visit a photo lane', () => {
