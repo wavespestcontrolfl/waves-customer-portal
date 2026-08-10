@@ -303,7 +303,7 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ig
   return null;
 }
 
-async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerProcToken = null } = {}) {
+async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
   // The CALL-SIDE verdict applies to EVERY engine draft (codex P0, PR
@@ -323,7 +323,7 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
   const callQuery = dbc('call_log').where({ id: draftCallLogId });
   if (lockCallRow) callQuery.forUpdate();
   const callRow = await callQuery
-    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at');
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
   if (!callRow) return 'invalidated_before_delivery';
   // A reprocess IN FLIGHT means the linkage verdict is about to change —
   // abort; the row is sendable again once the call settles. In-flight is a
@@ -357,7 +357,14 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
   // send while a retry is actively clearing or repointing its call — the
   // retry has not published its block marker yet, so nothing else would
   // stop it.
-  const ownedByCaller = !!ownerProcToken && callRow.processing_token === ownerProcToken;
+  // Owned = the caller's claim token is still live, OR the call is still
+  // on the caller's GENERATION — the detached composer's pass finalizes
+  // (token cleared) before the composition lands, and the generation is
+  // what proves no newer pass has claimed since (PR #3304 — replaces
+  // token-NULL interpretation).
+  const ownedByCaller = (!!ownerProcToken && callRow.processing_token === ownerProcToken)
+    || (ownerProcGeneration != null && callRow.processing_generation != null
+      && Number(callRow.processing_generation) === Number(ownerProcGeneration));
   if (!ownedByCaller && callReprocessInFlight(callRow)) {
     return 'call_reprocessing_before_delivery';
   }

@@ -40,7 +40,8 @@ async function callSideBlockForEstimateData(dbc, data) {
   const callLogId = data?.estimatorEngine?.callLogId || null;
   if (!callLogId) return null;
   try {
-    const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
+    const row = await dbc('call_log').where({ id: callLogId })
+      .first('metadata', 'processing_token', 'twilio_call_sid');
     // A MISSING call row fails closed (codex P1, PR #3304 GH r10) — the
     // same verdict staleCallLinkageReason gives it: an engine draft whose
     // call is gone has no provenance left to validate.
@@ -48,6 +49,39 @@ async function callSideBlockForEstimateData(dbc, data) {
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
     if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    // A LIVE claim token means a pass is actively re-deciding this call's
+    // verdict RIGHT NOW — its block marker may be milliseconds away, and
+    // the marker read above ran before that write. The public surfaces
+    // this guard protects must fail closed until the pass settles (local
+    // audit P0, PR #3304): the two markers alone cover only verdicts that
+    // already persisted.
+    if (row.processing_token != null) return 'call_reprocessing';
+    // Live-linkage comparison for durably linked drafts (same P0): a
+    // repoint whose estimate-side marker AND call-side marker both failed
+    // to persist leaves only the linkage itself as evidence. Mirrors
+    // staleCallLinkageReason's resolution order exactly — sid-owned lead
+    // (created_at DESC) first, then the metadata stamp — so the two
+    // guards can never disagree about the call's live owner.
+    const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
+    if (linkedLeadId && ['sid', 'stamp'].includes(data?.lead_linkage)) {
+      let resolvedLeadId = null;
+      if (row.twilio_call_sid) {
+        const sidLead = await dbc('leads')
+          .where({ twilio_call_sid: row.twilio_call_sid })
+          .whereNull('deleted_at')
+          .orderBy('created_at', 'desc')
+          .first('id');
+        if (sidLead) resolvedLeadId = String(sidLead.id);
+      }
+      if (!resolvedLeadId && md?.lead_id) {
+        const stampLead = await dbc('leads')
+          .where({ id: String(md.lead_id) })
+          .whereNull('deleted_at')
+          .first('id');
+        if (stampLead) resolvedLeadId = String(stampLead.id);
+      }
+      if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed';
+    }
     return null;
   } catch {
     // FAIL CLOSED (codex P1, PR #3304 GH r10): this lookup IS the fallback

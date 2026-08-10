@@ -135,6 +135,30 @@ describe('estimate manual acceptance', () => {
     AccountMembershipEmail.sendMembershipStarted.mockClear();
   });
 
+  test('the call-side verdict is re-checked INSIDE the money-bearing transaction (PR #3304)', async () => {
+    // Engine-drafted estimate whose call row cannot be re-verified: the
+    // in-transaction guard fails closed with the same 409 the admin route
+    // uses. The route-level check never ran in this direct service call —
+    // proving the guard lives inside markEstimateManuallyAccepted itself,
+    // where a verdict landing after the route's pre-check is still caught.
+    const estimate = {
+      id: 'estimate-1',
+      status: 'viewed',
+      customer_id: null,
+      sent_at: '2026-05-10T12:00:00.000Z',
+      monthly_total: '125.00',
+      estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }),
+    };
+    const { database } = makeDb(estimate);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: 'estimate-1',
+      adminUserId: 'admin-1',
+      source: 'verbal_yes',
+      database,
+    })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
   test('stamps accepted_at, clears lost metadata, and runs won hooks', async () => {
     const estimate = {
       id: 'estimate-1',

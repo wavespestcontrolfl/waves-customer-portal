@@ -327,8 +327,11 @@ async function recoverStaleScheduledEstimateClaims(now) {
   // processor stamps the call and this drains the queue until the marker
   // lands. Without it the unmarked draft keeps a live public token.
   try {
-    const { sweepPendingQuarantines } = require('./estimator-engine');
+    const { sweepPendingQuarantines, sweepPendingReconciles } = require('./estimator-engine');
     await sweepPendingQuarantines();
+    // Reconcile-retry queue (local audit P0, PR #3304): reconcile-only
+    // failures on settled calls have no other retry path.
+    await sweepPendingReconciles();
   } catch (err) {
     logger.warn(`[scheduled-estimates] pending-quarantine sweep failed: ${err.message}`);
   }

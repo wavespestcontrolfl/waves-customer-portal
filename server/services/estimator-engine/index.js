@@ -585,7 +585,10 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     // unmarked wrong-identity (or rejected-call) draft that stays
     // sendable. The creators' in-lock fence and the send/accept/decline
     // revalidation both read this marker.
-    await markDraftBlockOnCall(callLogId, reason, { procToken: ownershipFence?.procToken || null });
+    await markDraftBlockOnCall(callLogId, reason, {
+      procToken: ownershipFence?.procToken || null,
+      procGeneration: ownershipFence?.procGeneration ?? null,
+    });
     // STRICT lookup: existingDraftForCall converts DB errors to null,
     // which would read here as "no draft to invalidate". EVERY
     // uninvalidated row for this call is quarantined, not just the newest
@@ -660,8 +663,19 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           if (ownershipFence?.procToken) {
             const stillOwned = await trx('call_log')
               .where({ id: ownershipFence.callLogId || callLogId })
-              .where(function ownedOrUnclaimed() {
-                this.where('processing_token', ownershipFence.procToken).orWhereNull('processing_token');
+              // Generation arm (PR #3304): "same generation" means no newer
+              // pass has claimed the call since ours — true across our own
+              // finalization, false forever after a reclaim, even once the
+              // reclaiming pass finalizes and clears its token. The bare
+              // token-NULL arm remains only for legacy fences without a
+              // generation (a pass claimed before the column deployed).
+              .where(function ownedOrCurrentGeneration() {
+                this.where('processing_token', ownershipFence.procToken);
+                if (ownershipFence.procGeneration != null) {
+                  this.orWhere('processing_generation', ownershipFence.procGeneration);
+                } else {
+                  this.orWhereNull('processing_token');
+                }
               })
               .forUpdate()
               .first('id');
@@ -703,16 +717,23 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         if (ownershipFence?.procToken) {
           const owned = await trx('call_log')
             .where({ id: ownershipFence.callLogId || callLogId })
-            // Owned-or-UNCLAIMED, matching markDraftBlockOnCall (codex P0,
-            // PR #3304 GH r10b): the estimator runs DETACHED while normal
+            // Owned-or-CURRENT-GENERATION, matching markDraftBlockOnCall
+            // (codex P0, PR #3304 GH r10b; generation arm replaces the
+            // token-NULL arm): the estimator runs DETACHED while normal
             // processing clears the token, so an identity conflict
-            // detected after finalization is not an ownership loss — the
-            // strict predicate rolled the whole invalidation back and
-            // reported success with the wrong-identity draft still live.
-            // A peer that reclaims writes a NEW non-null token, which
-            // still fails this predicate.
-            .where(function ownedOrUnclaimed() {
-              this.where('processing_token', ownershipFence.procToken).orWhereNull('processing_token');
+            // detected after finalization is not an ownership loss — but
+            // the bare token-NULL arm ALSO admitted a stale worker after
+            // a RECLAIMING pass finalized, letting it invalidate the
+            // replacement's valid draft. The generation distinguishes the
+            // two: our own finalization leaves it unchanged; any reclaim
+            // bumps it, and it never comes back down.
+            .where(function ownedOrCurrentGeneration() {
+              this.where('processing_token', ownershipFence.procToken);
+              if (ownershipFence.procGeneration != null) {
+                this.orWhere('processing_generation', ownershipFence.procGeneration);
+              } else {
+                this.orWhereNull('processing_token');
+              }
             })
             .forUpdate()
             .first('id');
@@ -743,7 +764,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
 // composer can slip a draft in behind it; read by the creators' in-lock
 // fence (callRejectedForDrafting) and by send/accept/decline
 // revalidation (staleCallLinkageReason).
-async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}) {
+async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procGeneration = null } = {}) {
   // THROWS on failure (codex P0, PR #3304 GH r8h): this marker is the only
   // thing standing between a detached composer and an unmarked
   // wrong-identity or rejected-call draft with a permanent public token.
@@ -764,16 +785,25 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}
       // (codex P1, PR #3304 GH r10). The estimator is launched
       // un-awaited, so its context builder routinely reports a conflict
       // after finalization; treating that as ownershipLost reported
-      // success while nothing was invalidated.
+      // success while nothing was invalidated. The generation arm closes
+      // the other direction: after a RECLAIMING pass finalizes (token
+      // null again), a stale worker's late block no longer lands — the
+      // bumped generation fails both arms.
       if (procToken) {
-        q.where(function ownedOrUnclaimed() {
-          this.where('processing_token', procToken).orWhereNull('processing_token');
+        q.where(function ownedOrCurrentGeneration() {
+          this.where('processing_token', procToken);
+          if (procGeneration != null) this.orWhere('processing_generation', procGeneration);
+          else this.orWhereNull('processing_token');
         });
       }
       const wrote = await q.update({
         metadata: db.raw(
           "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
-          [JSON.stringify({ reason, at: new Date().toISOString() })],
+          // The marker records its writer's generation so a later pass's
+          // clear can distinguish "older verdict, mine to retire" from "a
+          // concurrent NEWER verdict I must not delete" without trusting
+          // wall clocks (PR #3304 — same doctrine as leads.lead_stamp_seq).
+          [JSON.stringify({ reason, at: new Date().toISOString(), ...(procGeneration != null ? { generation: procGeneration } : {}) })],
         ),
         updated_at: new Date(),
       });
@@ -805,14 +835,25 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}
 // blocks the valid replacement draft just as hard as the verdict itself.
 // A clear that will not land THROWS: the pass fails and retries, which
 // defers the draft rather than losing it to a permanent block.
-async function clearDraftBlockOnCall(callLogId, { notNewerThan } = {}) {
-  // GENERATION FENCE (codex P0, PR #3304 GH r8h): only markers that
-  // already existed when this pass began are cleared. A concurrent pass
-  // can write a NEWER conflict or rejection between our unlocked read and
-  // this update, and a blind clear would delete the only durable guard
-  // for it. `notNewerThan` is the ISO instant this pass started; a marker
-  // stamped after it survives untouched.
+async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = null } = {}) {
+  // GENERATION FENCE (codex P0, PR #3304 GH r8h; hardened with the real
+  // processing_generation, PR #3304): only markers this pass may retire
+  // are cleared. A concurrent pass can write a NEWER conflict or
+  // rejection between our unlocked read and this update, and a blind
+  // clear would delete the only durable guard for it. A marker that
+  // recorded its writer's generation is cleared only by a pass of the
+  // same or later generation — monotonic, wall-clock-free. Markers
+  // without one (written pre-column, or by generation-less maintenance)
+  // keep the original timestamp fence: `notNewerThan` is the ISO instant
+  // this pass started, and a marker stamped after it survives untouched.
   const fenceAt = notNewerThan || new Date().toISOString();
+  const markerClearable = (key) => `(
+    CASE WHEN (metadata->'${key}'->>'generation') ~ '^[0-9]+$'
+         THEN ${generation != null ? `(metadata->'${key}'->>'generation')::int <= ?` : 'FALSE'}
+         ELSE COALESCE(metadata->'${key}'->>'at', '') <= ?
+    END
+  )`;
+  const markerBindings = generation != null ? [generation, fenceAt] : [fenceAt];
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -821,8 +862,8 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan } = {}) {
           this.whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
             .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''");
         })
-        .whereRaw("COALESCE(metadata->'estimator_draft_block'->>'at', '') <= ?", [fenceAt])
-        .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'at', '') <= ?", [fenceAt])
+        .whereRaw(markerClearable('estimator_draft_block'), markerBindings)
+        .whereRaw(markerClearable('estimator_quarantine_pending'), markerBindings)
         .update({
           metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block') - 'estimator_quarantine_pending'"),
           updated_at: new Date(),
@@ -856,6 +897,81 @@ async function markQuarantinePending(callLogId, reason) {
     logger.error(`[estimator-engine] could not queue the quarantine retry for call ${callLogId}: ${markErr.message}`);
     return false;
   }
+}
+
+// DURABLE retry queue for a reconcile-only pass that failed (local audit
+// P0, PR #3304): reconcileDraftLinksForCall runs post-finalization and
+// non-blocking, so a transient failure left stale draft links — possibly
+// pointing at the WRONG lead after a repoint — with nothing scheduled to
+// try again; the call is 'processed' and never re-enters the pipeline on
+// its own. The scheduler sweep below re-runs the reconcile until it lands.
+async function markReconcilePending(callLogId) {
+  try {
+    await db('call_log').where({ id: callLogId }).update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_reconcile_pending}', ?::jsonb, true)",
+        [JSON.stringify({ at: new Date().toISOString() })],
+      ),
+      updated_at: new Date(),
+    });
+    logger.warn(`[estimator-engine] queued a DURABLE reconcile retry for call ${callLogId}`);
+    return true;
+  } catch (markErr) {
+    logger.error(`[estimator-engine] could not queue the reconcile retry for call ${callLogId}: ${markErr.message}`);
+    return false;
+  }
+}
+
+// Drains the reconcile-retry queue. Each row re-runs the SAME reconcile
+// the failed pass attempted — reconcileDraftLinksForCall re-derives the
+// verdict from live state, so a marker replayed after the call was
+// legitimately re-qualified simply reconciles to the current truth. An
+// in-flight pass defers (its own finalization reconciles); only a
+// non-'error' outcome clears the marker (CAS on the stamped instant).
+async function sweepPendingReconciles({ limit = 50 } = {}) {
+  let rows = [];
+  try {
+    rows = await db('call_log')
+      .whereRaw("COALESCE(metadata->'estimator_reconcile_pending'->>'at', '') <> ''")
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id', 'metadata');
+  } catch (err) {
+    logger.warn(`[estimator-engine] pending-reconcile scan failed: ${err.message}`);
+    return 0;
+  }
+  let cleared = 0;
+  for (const row of rows) {
+    const pending = (() => {
+      try {
+        const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+        return md?.estimator_reconcile_pending || null;
+      } catch { return null; }
+    })();
+    if (!pending?.at) continue;
+    try {
+      const live = await db('call_log').where({ id: row.id })
+        .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at');
+      if (!live) continue;
+      {
+        const { callReprocessInFlight } = require('../admin-estimate-persistence');
+        if (callReprocessInFlight(live)) continue;
+      }
+      const outcome = await reconcileDraftLinksForCall(row.id);
+      if (outcome === 'error') continue; // keep the marker — retried next sweep
+      await db('call_log').where({ id: row.id })
+        .whereRaw("metadata->'estimator_reconcile_pending'->>'at' = ?", [String(pending.at)])
+        .update({
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_reconcile_pending'"),
+          updated_at: new Date(),
+        });
+      cleared += 1;
+      logger.info(`[estimator-engine] drained a queued reconcile retry for call ${row.id} (${outcome || 'no_draft'})`);
+    } catch (sweepErr) {
+      logger.warn(`[estimator-engine] reconcile retry failed for call ${row.id}: ${sweepErr.message}`);
+    }
+  }
+  return cleared;
 }
 
 // CAS clear of the EXACT marker processed (codex P0, PR #3304 GH r8e): a
@@ -902,7 +1018,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     // require the call to still be rejected; for an identity conflict,
     // require the context to still report one.
     const live = await db('call_log').where({ id: row.id })
-      .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at');
+      .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at', 'processing_generation');
     if (!live) continue;
     // EVERY unsettled status defers, not just a live token or literal
     // 'processing' (codex P1, PR #3304 GH r10): the failed spam/voicemail
@@ -935,7 +1051,15 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       // cleared" and discard the only durable retry for a conflict that
       // was never disproved.
       if (freshContext && !freshContext.error) {
-        await clearDraftBlockOnCall(row.id, { notNewerThan: String(pending.at || new Date().toISOString()) });
+        // The call is SETTLED (the in-flight check above deferred
+        // otherwise) and the verdict re-verified clean — clearing with the
+        // call's LIVE generation retires every marker (marker generations
+        // never exceed the call's), while the timestamp still fences any
+        // generation-less legacy marker.
+        await clearDraftBlockOnCall(row.id, {
+          notNewerThan: String(pending.at || new Date().toISOString()),
+          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
+        });
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
         continue;
@@ -992,19 +1116,25 @@ async function strictExistingDraftForCall(callLogId) {
     .select('id', 'status', 'estimate_data');
 }
 
-async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null }) {
+async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
-  // This pass's generation stamp: markers written after it began belong to
-  // a newer verdict and are never cleared by it.
+  // This pass's ordering stamp: markers written after it began belong to
+  // a newer verdict and are never cleared by it. The wall-clock instant
+  // fences generation-less legacy markers; ownerProcGeneration (the claim
+  // that launched this composer) fences generation-stamped ones.
   const passStartedAt = new Date().toISOString();
   try {
     context = await buildCallContext(callLogId);
     // The caller's own processing claim rides the context so the creators'
-    // in-lock fences can tell it apart from a competing reprocess.
+    // in-lock fences can tell it apart from a competing reprocess — the
+    // generation is the arm that stays valid after that claim finalizes.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
+    if (context && ownerProcGeneration != null) context.ownerProcGeneration = ownerProcGeneration;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
-    if (!dryRun && context && !context.error) await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt });
+    if (!dryRun && context && !context.error) {
+      await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
+    }
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
@@ -1020,8 +1150,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           reason: context.error,
           identityConflict: true,
           // A stale run must not stamp a block or archive the drafts of
-          // the pass that RECLAIMED this call (codex P0, PR #3304 GH r8h).
-          ownershipFence: ownerProcToken ? { callLogId, procToken: ownerProcToken } : null,
+          // the pass that RECLAIMED this call (codex P0, PR #3304 GH r8h);
+          // the generation arm keeps this fence valid after our own pass
+          // finalizes (the composer runs detached).
+          ownershipFence: ownerProcToken
+            ? { callLogId, procToken: ownerProcToken, procGeneration: ownerProcGeneration }
+            : null,
         });
       }
       if (!dryRun && context.call && quotePromised) {
@@ -1756,6 +1890,8 @@ module.exports = {
   invalidateDraftForCall: invalidateDraftForCallWithRetry,
   markQuarantinePending,
   sweepPendingQuarantines,
+  markReconcilePending,
+  sweepPendingReconciles,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,

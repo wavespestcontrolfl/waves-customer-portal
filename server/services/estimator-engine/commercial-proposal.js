@@ -434,7 +434,11 @@ async function maybeBuildCommercialProposalDraft({
             lead_id: context.lead.id,
             lead_linkage: context.leadLinkage,
             estimatorEngine: { callLogId: call.id },
-          }, { lockCallRow: true, ownerProcToken: context.ownerProcToken || null });
+          }, {
+            lockCallRow: true,
+            ownerProcToken: context.ownerProcToken || null,
+            ownerProcGeneration: context.ownerProcGeneration ?? null,
+          });
           if (staleReason) return { staleLinkage: staleReason };
         }
       }
@@ -462,6 +466,8 @@ async function maybeBuildCommercialProposalDraft({
             version: 1,
             callLogId: call?.id || null,
             callSid: call?.twilio_call_sid || null,
+            // Same provenance stamp as the standard draft path (PR #3304).
+            ...(context?.ownerProcGeneration != null ? { composedGeneration: context.ownerProcGeneration } : {}),
             ...(origin?.channel && origin.channel !== 'call'
               ? { origin: origin.channel, ...(origin.threadKey ? { smsThreadKey: origin.threadKey } : {}) }
               : {}),

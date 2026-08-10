@@ -5392,6 +5392,14 @@ const CallRecordingProcessor = {
     // hands the lock to a peer, the peer's claim overwrites the token and
     // our catch-block UPDATE matches 0 rows — we leave the peer alone.
     const procToken = crypto.randomBytes(16).toString('hex');
+    // This pass's MONOTONIC generation — assigned by the claim write below
+    // (processing_generation + 1). The token is the claim MUTEX; the
+    // generation is the pass IDENTITY that survives finalization: a cleared
+    // token cannot distinguish "my pass finalized normally" from "a newer
+    // pass ran since", so every post-finalization ownership fence (the
+    // detached estimator's block/quarantine writes) compares generations
+    // instead (PR #3304 — replaces the token-NULL predicates).
+    let procGeneration = null;
     if (!opts.force) {
       // Reclaim stale 'processing' rows older than 10 min — server crash or
       // Gemini hang between claim (this UPDATE) and terminal status write
@@ -5424,11 +5432,22 @@ const CallRecordingProcessor = {
                 .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
             });
         })
-        .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
-      if (claimed === 0) {
+        .update({
+          processing_status: 'processing',
+          processing_token: procToken,
+          processing_generation: db.raw('processing_generation + 1'),
+          processing_started_at: new Date(),
+          updated_at: new Date(),
+        }, ['processing_generation']);
+      // PG returns the updated rows ([] = claim lost); count-shaped results
+      // (0/1) come from environments without RETURNING — accept both.
+      const claimedRows = Array.isArray(claimed) ? claimed : null;
+      if (claimedRows ? !claimedRows.length : !claimed) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
       }
+      procGeneration = claimedRows?.[0]?.processing_generation != null
+        ? Number(claimedRows[0].processing_generation) : null;
     } else {
       // force=true bypasses the early-exit on 'processed' rows so admin
       // Reprocess can re-run extraction. It must NOT bypass an actively-
@@ -5450,11 +5469,21 @@ const CallRecordingProcessor = {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         })
-        .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
-      if (claimed === 0) {
+        .update({
+          processing_status: 'processing',
+          processing_token: procToken,
+          processing_generation: db.raw('processing_generation + 1'),
+          processing_started_at: new Date(),
+          updated_at: new Date(),
+        }, ['processing_generation']);
+      // Same both-shapes tolerance as the non-force claim above.
+      const claimedRows = Array.isArray(claimed) ? claimed : null;
+      if (claimedRows ? !claimedRows.length : !claimed) {
         logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
       }
+      procGeneration = claimedRows?.[0]?.processing_generation != null
+        ? Number(claimedRows[0].processing_generation) : null;
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
@@ -6135,8 +6164,10 @@ const CallRecordingProcessor = {
         const invalidation = await invalidateDraftForCall(call.id, {
           reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
           // Fenced on THIS pass's claim: a worker that lost its token must
-          // not invalidate a draft the replacement worker owns.
-          ownershipFence: { callLogId: call.id, procToken },
+          // not invalidate a draft the replacement worker owns. The
+          // generation arm keeps the fence valid after our own
+          // finalization without re-opening the stale-worker hole.
+          ownershipFence: { callLogId: call.id, procToken, procGeneration },
         });
         if (!invalidation.ok) {
           // Queue the durable retry BEFORE failing the pass: the throw
@@ -9242,8 +9273,13 @@ const CallRecordingProcessor = {
         quotePromised: callQuotePromised === true,
         // THIS pass owns the claim while the engine composes — the
         // creator's linkage fence must not read our own token as a
-        // competing reprocess (codex P1, PR #3304 GH r8e).
+        // competing reprocess (codex P1, PR #3304 GH r8e). The generation
+        // is the pass identity that SURVIVES finalization: the detached
+        // composer routinely finishes after the token clears, and its
+        // late writes are legitimate exactly while no newer pass has
+        // claimed the call since (same generation).
         ownerProcToken: procToken,
+        ownerProcGeneration: procGeneration,
       })
         .then((engineOutcome) => {
           logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
@@ -12126,11 +12162,21 @@ const CallRecordingProcessor = {
     // reclaimed the call owns the reconcile too. Never blocks the result.
     if (finalized > 0 && reconcileOnlyDraftLinksPending) {
       try {
-        const { reconcileDraftLinksForCall } = require('./estimator-engine');
+        const { reconcileDraftLinksForCall, markReconcilePending } = require('./estimator-engine');
         const outcome = await reconcileDraftLinksForCall(call.id);
         if (outcome) logger.info(`[call-proc] reconcile-only draft-linkage pass for ${callSid}: ${outcome}`);
+        // 'error' means the reconcile did NOT persist — and this call is
+        // finalized, so nothing re-enters the pipeline on its own. Queue
+        // the durable retry the scheduler sweep drains (local audit P0,
+        // PR #3304); a queue write that itself fails is caught below and
+        // logged — the pass stays non-blocking by contract.
+        if (outcome === 'error') await markReconcilePending(call.id);
       } catch (recErr) {
         logger.warn(`[call-proc] reconcile-only draft-linkage pass failed (non-blocking): ${recErr.message}`);
+        try {
+          const { markReconcilePending } = require('./estimator-engine');
+          await markReconcilePending(call.id);
+        } catch { /* markReconcilePending never throws; belt-and-braces */ }
       }
     }
 

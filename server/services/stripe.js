@@ -1321,6 +1321,29 @@ const StripeService = {
       }
     }
     try {
+      // The call-side verdict re-checked at the LAST moment before money
+      // moves (local audit P0, PR #3304): the route's guard ran before the
+      // Stripe round-trips above, and a quarantine or linkage repoint
+      // landing in that window would take a deposit against a wrong-lead
+      // or rejected-call estimate. The plain throw routes to the generic
+      // 400 and the failure-path reset below restores the intent to face.
+      {
+        const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+        const freshRow = await db('estimates').where({ id: estimateId }).first('estimate_data');
+        const freshData = (() => {
+          if (!freshRow) return null;
+          try {
+            const d = typeof freshRow.estimate_data === 'string'
+              ? JSON.parse(freshRow.estimate_data) : (freshRow.estimate_data || {});
+            return d && typeof d === 'object' ? d : null;
+          } catch { return null; }
+        })();
+        // A missing/unparseable row fails closed — money never moves on an
+        // estimate whose provenance can't be re-verified.
+        if (!freshData || await callSideBlockForEstimateData(db, freshData)) {
+          throw new Error('This estimate is temporarily unavailable — please contact our office.');
+        }
+      }
       // Verify our update is still what the PI carries before charging —
       // a concurrent (pre-stamp) reset could have stripped the amount back
       // to face; confirming then would charge the attached credit card

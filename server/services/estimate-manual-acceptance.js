@@ -372,6 +372,30 @@ async function markEstimateManuallyAccepted({
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }
 
+    // The call-side verdict re-checked INSIDE the money-bearing
+    // transaction, on the row this transaction claimed (local audit P0,
+    // PR #3304): the admin route's guard runs before this transaction
+    // opens, and a quarantine or linkage repoint landing in that window
+    // would accept — and bill/convert — a wrong-lead or rejected-call
+    // estimate. Same 409 the route returns.
+    {
+      const manualAcceptData = (() => {
+        const raw = estimate.estimate_data || estimate.estimateData;
+        if (!raw) return null;
+        try {
+          const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          return d && typeof d === 'object' ? d : null;
+        } catch { return null; }
+      })();
+      if (manualAcceptData?.estimatorEngine?.callLogId) {
+        const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+        const blocked = await callSideBlockForEstimateData(trx, manualAcceptData);
+        if (blocked) {
+          throw httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
+        }
+      }
+    }
+
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
 
     // Invoice-mode: a normal estimate's due-immediately invoice is built by

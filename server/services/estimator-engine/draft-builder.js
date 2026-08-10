@@ -912,7 +912,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           lead_id: context.lead.id,
           lead_linkage: context.leadLinkage,
           estimatorEngine: { callLogId: call.id },
-        }, { lockCallRow: true, ownerProcToken: context.ownerProcToken || null });
+        }, {
+          lockCallRow: true,
+          ownerProcToken: context.ownerProcToken || null,
+          ownerProcGeneration: context.ownerProcGeneration ?? null,
+        });
         if (staleReason) {
           return {
             duplicateBlock: {
@@ -1003,6 +1007,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           version: 1,
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
+          // The processing generation whose claim composed this draft —
+          // lets any later reconciler prove the draft predates (or
+          // matches) the call's current pass without wall clocks or
+          // token-state guessing (PR #3304).
+          ...(context?.ownerProcGeneration != null ? { composedGeneration: context.ownerProcGeneration } : {}),
           // Channel provenance: absent = the original call pipeline. The
           // SMS entry stamps its phone-scoped thread key so thread-level
           // dedupe and reporting can distinguish text-drafted quotes.

@@ -18,6 +18,7 @@ const crypto = require('crypto');
 
 describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
   let stripeClient;
+  let mockDbRows;
 
   beforeEach(() => {
     jest.resetModules();
@@ -54,7 +55,23 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
       warn: jest.fn(),
       error: jest.fn(),
     }));
-    jest.doMock('../models/db', () => jest.fn());
+    // The finalize path re-checks the call-side verdict on the estimate row
+    // at the last moment before confirm (PR #3304) — default to a clean row
+    // with no engine call linkage so the surcharge pins stay focused on
+    // money; the verdict pin below swaps in a quarantined shape.
+    mockDbRows = {
+      estimates: { estimate_data: JSON.stringify({}) },
+      call_log: null,
+    };
+    jest.doMock('../models/db', () => {
+      const db = jest.fn((table) => ({
+        where: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        first: jest.fn(async () => mockDbRows[table] ?? null),
+      }));
+      return db;
+    });
   });
 
   const depositPi = (overrides = {}) => ({
@@ -173,6 +190,30 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
       });
       return { StripeService, quote };
     };
+
+    test('a call-side verdict landing after the route guard refuses BEFORE confirm (PR #3304)', async () => {
+      const { StripeService, quote } = await mintQuote();
+      // The estimate is engine-drafted and its call now carries a durable
+      // block marker — the last-moment re-check must throw before any
+      // confirm, and the failure-path reset restores the intent to face.
+      mockDbRows.estimates = {
+        estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }),
+      };
+      mockDbRows.call_log = {
+        metadata: { estimator_draft_block: { reason: 'email_identity_conflict' } },
+        processing_token: null,
+        twilio_call_sid: null,
+      };
+      stripeClient.paymentIntents.retrieve
+        .mockResolvedValueOnce(depositPi())
+        .mockResolvedValue(depositPi({ amount: 5042 }));
+
+      await expect(StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: quote.quoteToken,
+      })).rejects.toThrow(/temporarily unavailable/);
+      expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+    });
 
     test('re-derives the surcharge, updates the PI to the total, and confirms server-side', async () => {
       const { StripeService, quote } = await mintQuote();
