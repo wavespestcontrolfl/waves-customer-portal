@@ -103,56 +103,20 @@ async function phoneIsShared(lead) {
 async function loadCalls(lead, phoneKey) {
   try {
     const digits = last10(phoneKey);
-    // No early return on missing sid/digits: a sid-less lead (web form) can
-    // still own metadata-STAMPED calls — the stamp fetch below must run.
+    if (!lead.twilio_call_sid && !digits) return [];
     const CALL_COLS = ['id', 'twilio_call_sid', 'direction', 'duration_seconds', 'transcription',
       'transcription_status', 'recording_url', 'ai_extraction', 'ai_extraction_enriched',
       'v2_extraction_status', 'created_at'];
-    // The lead's OWN calls (sid- or stamp-linked, marked __forThisLead) are
-    // the anchor evidence — fetch them first so three newer phone-matched
-    // calls can never crowd their transcript/extraction out of the pack;
-    // the remaining slots fill with recent phone history.
+    // The lead's OWN call is the anchor evidence — fetch it first so three
+    // newer phone-matched calls can never crowd its transcript/extraction
+    // out of the pack; the remaining slots fill with recent phone history.
     const rows = [];
     if (lead.twilio_call_sid) {
       const sidRow = await db('call_log')
         .where('twilio_call_sid', lead.twilio_call_sid)
         .orderBy('created_at', 'desc')
         .first(...CALL_COLS);
-      if (sidRow) rows.push(Object.assign(sidRow, { __forThisLead: true }));
-    }
-    // Phone-less reuse linkage: a later call that reused this lead carries a
-    // DIFFERENT sid and no matchable phone — the processor stamps
-    // call_log.metadata.lead_id instead of restamping the lead's sid (codex
-    // P1, PR #3275). Without this fetch the assistant would read the
-    // ORIGINAL call's raw transcript while transcript_summary reflects the
-    // newer call. Stamped rows rank after the anchor, before phone history.
-    if (rows.length < 3) {
-      const stampedRows = await db('call_log')
-        .whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-        // SETTLED stamps only — same rule as every stamp consumer (#3303),
-        // and the FULL settled test, not just a cleared token (codex P1,
-        // PR #3304 GH r9): the failure path clears processing_token while
-        // leaving the call in the retryable extraction_failed lane, and
-        // 'pending' / 'no_transcription' rows are queued with no token
-        // either. Those retries can still clear or repoint the stamp, so
-        // treating them as final could attach ANOTHER caller's transcript
-        // and identity to this lead. Settled = token NULL and a durable
-        // successful pass ('processed', or legacy NULL).
-        .whereNull('processing_token')
-        .where(function settledPass() {
-          this.whereNull('processing_status').orWhere('processing_status', 'processed');
-        })
-        .modify((q) => {
-          if (lead.twilio_call_sid) {
-            q.where(function notAnchor() {
-              this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
-            });
-          }
-        })
-        .orderBy('created_at', 'desc')
-        .limit(3 - rows.length)
-        .select(...CALL_COLS);
-      rows.push(...stampedRows.map((r) => Object.assign(r, { __forThisLead: true })));
+      if (sidRow) rows.push(sidRow);
     }
     if (digits && rows.length < 3) {
       const phoneRows = await db('call_log')
@@ -161,47 +125,25 @@ async function loadCalls(lead, phoneKey) {
             .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
         })
         // NULL-safe exclusion of the already-fetched anchor row — a bare
-        // whereNot would also drop rows whose sid is NULL. Applied only
-        // when the lead HAS a sid: with a NULL lead sid the <> arm never
-        // matches under SQL NULL semantics and every normal phone-history
-        // row was dropped whenever stamped rows made rows nonempty (codex
-        // P1 r13). Already-fetched rows are excluded BY ID too (codex P2,
-        // PR #3304 r3): a stamped call that also matches by phone would
-        // otherwise re-consume limit slots before the id-dedup, shrinking
-        // the pack below three even when more history exists.
+        // whereNot would also drop rows whose sid is NULL.
         .modify((q) => {
-          if (lead.twilio_call_sid && rows.length) {
+          if (rows.length) {
             q.where(function notAnchor() {
               this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
             });
           }
-          if (rows.length) q.whereNotIn('id', rows.map((r) => r.id));
         })
         .orderBy('created_at', 'desc')
         .limit(3 - rows.length)
         .select(...CALL_COLS);
       rows.push(...phoneRows);
     }
-    // The three fetches (sid anchor / metadata stamp / phone history) are
-    // disjoint by construction, but dedup by id anyway — one call appearing
-    // twice would double its transcript in the pack.
-    const seenCallIds = new Set();
-    const uniqueRows = rows.filter((r) => {
-      const key = String(r.id);
-      if (seenCallIds.has(key)) return false;
-      seenCallIds.add(key);
-      return true;
-    });
-    uniqueRows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const calls = uniqueRows.map((call) => {
+    rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const calls = rows.map((call) => {
       const { extraction, source } = extractionFromCall(call);
       return {
         id: call.id,
         call_sid: call.twilio_call_sid || null,
-        // Sid- or stamp-linked: this call is the LEAD'S OWN evidence, not
-        // phone-matched history — summary attach, shared-number filtering,
-        // and cap protection all key on it.
-        for_this_lead: !!call.__forThisLead,
         direction: call.direction || null,
         duration_seconds: call.duration_seconds || null,
         created_at: call.created_at,
@@ -210,56 +152,21 @@ async function loadCalls(lead, phoneKey) {
           : null,
         has_recording: !!call.recording_url,
         transcription_status: call.transcription_status || null,
-        // ENRICHED (V2, status 'valid') extraction only (codex P1, PR
-        // #3304 GH r8, AGENTS.md L357-362): extractionFromCall falls back
-        // to the legacy ai_extraction blob, and feeding that to the Agent
-        // Estimate composer lets a stale or never-validated V1 service,
-        // identity, or property value steer a NEW estimate. Without V2 the
-        // raw transcript above is the evidence — the same rule the
-        // identity probe below already applies.
-        extraction: source === 'enriched' ? compactJson(extraction) : null,
-        extraction_source: source === 'enriched' ? source : 'transcript_only',
-        // ENRICHED only, here too (codex P1, PR #3304 GH r8b + AGENTS.md
-        // L357-362: downstream composers read enriched/v2 + raw
-        // transcript, NEVER v1). Customer selection is downstream — a
-        // stale or hallucinated V1 name on a stamped or shared-phone call
-        // would inject the wrong customer's profile, services, tier, and
-        // spend into the session. The uncompacted enriched object is kept
-        // so identity matching sees full names even when the pack copy is
-        // truncated; sanitizePackCall strips it from the payload.
-        __rawExtraction: source === 'enriched' ? extraction : null,
+        extraction: compactJson(extraction),
+        extraction_source: source,
       };
     });
     const leadSummary = clampText(lead.transcript_summary, 4000);
     if (leadSummary) {
-      // transcript_summary is a ROLLING snapshot of the lead's LATEST
-      // summary-producing call — attach it to the owned call whose
-      // extraction actually SUPPLIED it (provenance match), not blindly to
-      // the newest owned row: a later stamped call that produced no
-      // call_summary leaves the lead's summary describing an OLDER call,
-      // and pinning it to the newest transcript would misrepresent what it
-      // summarizes (codex P2 r14). No provenance match → the summary rides
-      // the synthetic summary-only row below instead of claiming a
-      // transcript.
-      // The ENRICHED (V2) payload keeps its summary at meta.call_summary;
-      // only the V1 shape has it top-level. Reading the V1 paths alone made
-      // provenance fail for every valid V2 call, so the synthetic row below
-      // was always inserted — and being unshifted, it ate one of the three
-      // pack slots and could evict the real transcript carrying the identity
-      // or service evidence (codex P2 r18).
-      const suppliedSummary = (call) => {
-        const ex = call.extraction || {};
-        const s = String(ex.meta?.call_summary || ex.call_summary || ex.call_metadata?.call_summary || '').trim();
-        return s && clampText(s, 4000) === leadSummary;
-      };
-      const matchingCall = calls.find((call) => call.for_this_lead && suppliedSummary(call));
+      const matchingCall = calls.find((call) => (
+        lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid
+      ));
       if (matchingCall) {
         matchingCall.transcript_summary = leadSummary;
       } else {
         calls.unshift({
           id: `lead-summary:${lead.id}`,
           call_sid: lead.twilio_call_sid || null,
-          for_this_lead: true,
           direction: null,
           duration_seconds: lead.call_duration_seconds || null,
           created_at: lead.first_contact_at || lead.created_at || null,
@@ -272,102 +179,19 @@ async function loadCalls(lead, phoneKey) {
         });
       }
     }
-    // The cap must never evict the lead's own calls — an owned row can be
-    // the OLDEST (the quote call that created the lead, with newer unrelated
-    // calls on the same number since), and it is the whole point of the
-    // pack. Owned = sid- or stamp-linked (for_this_lead).
-    // Cap by PRIORITY CLASS, preserving presentation order (pre-push P1 r1
-    // + codex P2, PR #3304). Slot priority: REAL owned transcripts (sid- or
-    // stamp-linked — never more than three exist by construction, so the
-    // sid anchor is always kept and neither a stamped row nor the synthetic
-    // summary can substitute for it), then the synthetic summary row, then
-    // phone history. A naive slice let the synthetic row — unshifted to the
-    // front — evict the OLDEST real owned transcript whenever three owned
-    // rows loaded and the rolling summary provenance-matched none of them,
-    // silently dropping the lead's own service/identity evidence. Selection
-    // is by priority; ORDER stays exactly as assembled (summary row first,
-    // then newest-first), so the pack reads the same.
-    const isSyntheticRow = (call) => String(call.id).startsWith('lead-summary:');
-    const keep = new Set();
-    for (const call of calls) {
-      if (keep.size >= 3) break;
-      if (call.for_this_lead && !isSyntheticRow(call)) keep.add(call);
+    // The cap must never evict the lead's own call — it can be the OLDEST
+    // row (the quote call that created the lead, with newer unrelated calls
+    // on the same number since), and it is the whole point of the pack.
+    const capped = calls.slice(0, 3);
+    if (lead.twilio_call_sid && !capped.some((call) => call.call_sid === lead.twilio_call_sid)) {
+      const anchor = calls.find((call) => call.call_sid === lead.twilio_call_sid);
+      if (anchor) capped[capped.length - 1] = anchor;
     }
-    for (const call of calls) {
-      if (keep.size >= 3) break;
-      if (isSyntheticRow(call)) keep.add(call);
-    }
-    for (const call of calls) {
-      if (keep.size >= 3) break;
-      keep.add(call);
-    }
-    return calls.filter((call) => keep.has(call));
+    return capped;
   } catch (err) {
     logger.warn(`[agent-estimate] call load failed: ${err.message}`);
     return [];
   }
-}
-
-// Strip the internal extraction carrier before the pack leaves this module:
-// it exists only so identity matching can read the UNCOMPACTED enriched
-// object (the pack copy may be truncated), and is never part of the payload.
-function sanitizePackCall(call) {
-  if (!call || typeof call !== 'object') return call;
-  const { __rawExtraction, ...rest } = call;
-  return rest;
-}
-
-// How far back the identity probe looks. Bounded so a lead with a long call
-// history can't turn customer disambiguation into an unbounded scan; well
-// past the three-call evidence cap it exists to see around.
-const IDENTITY_PROBE_LIMIT = 10;
-
-// Customer disambiguation must not be bounded by the three-call EVIDENCE cap
-// (codex P2, PR #3275): when the newest owned rows carry no enriched caller
-// block, an OLDER stamp- or sid-linked call can still hold the name that
-// resolves a shared-phone customer — and loadCalls would never have loaded
-// it, so `ownedCalls.find(carriesCallerIdentity)` had nothing to select.
-// Identity-only by construction: the returned extraction never enters the
-// evidence pack, so the pack's cap and shared-number suppression are
-// unchanged. Best-effort — a failed probe just leaves disambiguation where
-// it was.
-async function loadIdentityCandidate(lead) {
-  try {
-    const rows = await db('call_log')
-      .where(function ownedByLead() {
-        // The stamp arm requires a SETTLED call — token NULL AND a
-        // durable successful pass (codex P1, PR #3304 GH r9: a cleared
-        // token alone still admits the retryable extraction_failed lane
-        // and queued pending / no_transcription rows, whose stamp a retry
-        // can still clear or repoint). The sid arm is stable linkage and
-        // carries no such condition.
-        this.where(function settledStampArm() {
-          this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-            .whereNull('processing_token')
-            .where(function settledPass() {
-              this.whereNull('processing_status').orWhere('processing_status', 'processed');
-            });
-        });
-        if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
-      })
-      .orderBy('created_at', 'desc')
-      .limit(IDENTITY_PROBE_LIMIT)
-      .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched',
-        'v2_extraction_status', 'created_at');
-    for (const row of rows) {
-      const { extraction, source } = extractionFromCall(row);
-      if (source !== 'enriched') continue;
-      const who = extraction?.caller || {};
-      // A nonblank LAST name is the matcher's contract (pre-push P1 r2):
-      // pickCustomerMatch's multi-row arm requires callerLast — a
-      // first-name-only extraction can never disambiguate, and returning
-      // it here would stop the scan before an older full-name call.
-      if (String(who.last_name || '').trim()) return extraction;
-    }
-  } catch (err) {
-    logger.warn(`[agent-estimate] identity probe failed: ${err.message}`);
-  }
-  return null;
 }
 
 async function resolveCustomer(lead, extraction, phoneKey) {
@@ -459,55 +283,20 @@ async function buildAgentEstimateContext(leadId) {
   const sharedPhone = externalPhone ? await phoneIsShared(lead) : false;
   const phoneKey = externalPhone && !sharedPhone ? externalPhone : null;
   const rawCalls = await loadCalls(lead, phoneKey);
-  // Disambiguate the customer match ONLY with the extraction from THIS
-  // lead's OWN call — the newest phone-matched call can belong to a
+  // Disambiguate the customer match ONLY with the extraction from THIS lead's
+  // own call (SID match) — the newest phone-matched call can belong to a
   // different person on a shared/family line, and its caller name would
-  // confidently select the wrong customer profile. Own = the SID-matched
-  // call, or (for a SID-less lead reused by an anonymous call) the newest
-  // metadata-STAMPED call — both carry for_this_lead, and a stamped call is
-  // exactly as much this lead's evidence as a SID one (codex P1 r14: with
-  // null here, a multi-customer phone stayed ambiguous and tier/dup-service
-  // context was skipped even though the stamped extraction could resolve
-  // it). Phone-matched rows never carry the marker, so a shared-line call
-  // still cannot steer the match. Among owned calls (newest first), prefer
-  // one whose extraction actually CARRIES caller identity — the newest
-  // owned call can be identity-less (V2 caller block omitted the name /
-  // V1 fallback shape) while an older owned call still holds the
-  // corroborating name; passing the empty one made loadCustomerByPhone
-  // ambiguous and suppressed tier/current-service context despite usable
-  // owned evidence (codex P2 r13).
-  const ownedCalls = rawCalls.filter((call) => call.for_this_lead && !String(call.id).startsWith('lead-summary:'));
-  // Only an ENRICHED (V2) caller block counts as usable identity here:
-  // pickCustomerMatch disambiguates exclusively through `extraction.caller`,
-  // so preferring a newer V1 call for its top-level names selected a row the
-  // matcher then ignores — leaving a shared-phone customer ambiguous while
-  // an older enriched call could have resolved it (codex P2 r18).
-  const carriesCallerIdentity = (call) => {
-    if (call.extraction_source !== 'enriched') return false;
-    const who = call.extraction?.caller || {};
-    // A nonblank LAST name, specifically — pickCustomerMatch's multi-row
-    // arm requires callerLast, so a first-name-only extraction cannot
-    // disambiguate and preferring a newer first-only stamped call over an
-    // older full-name call turned a resolvable shared-phone customer into
-    // an ambiguous prospect (pre-push P1 r2).
-    return !!String(who.last_name || '').trim();
-  };
-  const identityCall = ownedCalls.find(carriesCallerIdentity) || null;
-  const leadCall = identityCall || ownedCalls[0] || null;
-  // Nothing in the capped pack carries enriched identity — look past the cap
-  // before settling for an identity-less row (codex P2 r19).
-  // Enriched extraction ONLY (AGENTS.md L357-362) — an identity-less pack
-  // resolves the customer by phone alone rather than by a V1 name.
-  const rawOf = (call) => (call?.__rawExtraction || null);
-  const identityExtraction = identityCall
-    ? rawOf(identityCall)
-    : ((await loadIdentityCandidate(lead)) || rawOf(leadCall) || null);
+  // confidently select the wrong customer profile. With no SID-matched call,
+  // a multi-customer phone stays ambiguous and history stays suppressed.
+  const leadCall = lead.twilio_call_sid
+    ? rawCalls.find((call) => call.call_sid === lead.twilio_call_sid)
+    : null;
   const {
     customer,
     ambiguous: customerAmbiguous,
     unavailable: customerLookupUnavailable,
     phoneSharedWithOtherCustomer = false,
-  } = await resolveCustomer(lead, identityExtraction, phoneKey);
+  } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
   // Phone-scoped history fails closed on EVERY suppression signal: another
   // lead on the number (sharedPhone), multiple customer rows on the number
   // (customerAmbiguous), or a linked customer whose number another customer
@@ -516,15 +305,14 @@ async function buildAgentEstimateContext(leadId) {
   // this lead's evidence pack.
   const phoneHistorySuppressed = sharedPhone || customerAmbiguous || phoneSharedWithOtherCustomer;
   // Phone-matched call rows are equally cross-contaminated on an ambiguous
-  // or other-customer-shared number; keep only calls tied to THIS lead —
-  // sid- or metadata-stamp-linked (for_this_lead) or its own transcript
-  // summary. Stamped calls are the lead's own evidence and must survive
-  // this suppression (codex P1 r12).
-  const calls = ((customerAmbiguous || phoneSharedWithOtherCustomer)
+  // or other-customer-shared number; keep only calls tied to THIS lead (its
+  // twilio_call_sid or its own transcript summary).
+  const calls = (customerAmbiguous || phoneSharedWithOtherCustomer)
     ? rawCalls.filter((call) => (
-      call.for_this_lead || String(call.id).startsWith('lead-summary:')
+      (lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid)
+      || String(call.id).startsWith('lead-summary:')
     ))
-    : rawCalls).map(sanitizePackCall);
+    : rawCalls;
   const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadSmsThread(phoneKey, { limit: 60 }),
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadPriorEstimates(phoneKey, { limit: 8 }),
