@@ -892,60 +892,13 @@ router.get('/:id', async (req, res, next) => {
           .first('id');
         if (shared) ten = null;
       }
-      {
-        // No sid/phone guard around this query: a SID-less web lead without
-        // a phone can still own STAMPED calls (email reuse), and the
-        // metadata arm below is always present (codex P1 r13).
-        // The sid AND phone arms all YIELD to a settled dissenting stamp
-        // (codex P1 r14 sid + r15 phone, same precedence as the bridge and
-        // whereCallStillLinked): a successful force-reprocess that
-        // repointed this call to a DIFFERENT lead leaves the sid — and the
-        // caller's phone — matching the obsolete row, and the unconditional
-        // arms surfaced the same transcript on both cards, including the
-        // lead the processor rejected. Settled = the same predicate as the
-        // stamp inclusion arm; a mid-flight pass's provisional stamp does
-        // not suppress the match. Every leg NULL-proof: a NULL
-        // processing_status would make the NOT-group evaluate to SQL NULL
-        // and silently drop the row.
-        const settledDissentingStamp = function settledDissentingStamp() {
-          this.whereRaw("metadata->>'lead_id' IS NOT NULL")
-            .whereRaw("metadata->>'lead_id' != ?", [String(lead.id)])
-            .whereNull('processing_token')
-            .whereRaw("COALESCE(processing_status, '') = 'processed'");
-        };
+      if (lead.twilio_call_sid || ten) {
         const rows = await db('call_log')
           .where(function () {
-            if (lead.twilio_call_sid) {
-              this.orWhere(function sidArm() {
-                this.where('twilio_call_sid', lead.twilio_call_sid)
-                  .whereNot(settledDissentingStamp);
-              });
-            }
-            // Phone-less reuse: a later call that reused this lead carries a
-            // DIFFERENT sid and no matchable phone — the processor links it
-            // via the durable metadata stamp instead (the lead keeps its
-            // original call's sid; codex P1, PR #3275). SETTLED stamps only
-            // (processing_token IS NULL — same rule as the bridge): a
-            // mid-flight pass's provisional stamp can still be cleared or
-            // repointed, and surfacing it here could expose another
-            // caller's transcript on the wrong lead card (pre-push P1 r3).
-            this.orWhere(function stampArm() {
-              // Settled = token NULL AND a durable successful pass — the
-              // error path clears the token while the stamp stays pending
-              // the extraction_failed retry (pre-push P1 r8).
-              this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-                .whereNull('processing_token')
-                .where('processing_status', 'processed');
-            });
+            if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
             if (ten) {
-              this.orWhere(function phoneFromArm() {
-                this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
-                  .whereNot(settledDissentingStamp);
-              });
-              this.orWhere(function phoneToArm() {
-                this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
-                  .whereNot(settledDissentingStamp);
-              });
+              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
             }
           })
           .where(function () {

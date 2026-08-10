@@ -74,60 +74,6 @@ function makeLeadsTable({ lead = LEAD, sharedLead = undefined } = {}) {
   };
 }
 
-// Replay a grouped where-callback against a recorder that logs every
-// predicate call (nested groups stay as [method, fn] entries for the caller
-// to replay further).
-const makeGroupRecorder = (log) => {
-  const g = {};
-  ['where', 'whereNot', 'whereNull', 'whereRaw', 'whereNotNull',
-    'orWhere', 'orWhereRaw', 'orWhereNotNull'].forEach((m) => {
-    g[m] = (...args) => { log.push([m, ...args]); return g; };
-  });
-  return g;
-};
-
-// The sid arm (codex P1 r14) is an orWhere(function) group whose first
-// predicate is the sid match — find and replay it.
-const findSidArm = (recorded) => {
-  for (const c of recorded) {
-    if (c[0] === 'orWhere' && typeof c[1] === 'function') {
-      const sub = [];
-      c[1].call(makeGroupRecorder(sub));
-      if (sub.some((s) => s[0] === 'where' && s[1] === 'twilio_call_sid')) return sub;
-    }
-  }
-  return null;
-};
-
-// The phone arms (codex P1 r15) are orWhere(function) groups too — each a
-// RIGHT-10 phone leg plus the settled-dissent exclusion. Returns the
-// replayed groups whose whereRaw matches the given ten-digit value.
-const findPhoneArms = (recorded, ten) => {
-  const arms = [];
-  for (const c of recorded) {
-    if (c[0] === 'orWhere' && typeof c[1] === 'function') {
-      const sub = [];
-      c[1].call(makeGroupRecorder(sub));
-      if (sub.some((s) => s[0] === 'whereRaw' && /RIGHT\(regexp_replace\(COALESCE\((from|to)_phone/.test(String(s[1])) && String(s[2]) === ten)) {
-        arms.push(sub);
-      }
-    }
-  }
-  return arms;
-};
-
-// Replay a whereNot(fn) dissent group and assert the settled-dissent legs.
-const expectSettledDissent = (arm, leadId) => {
-  const notGroup = arm.find((s) => s[0] === 'whereNot' && typeof s[1] === 'function');
-  expect(notGroup).toBeTruthy();
-  const dissent = [];
-  notGroup[1].call(makeGroupRecorder(dissent));
-  expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' IS NOT NULL"]);
-  expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' != ?", [String(leadId)]]);
-  expect(dissent).toContainEqual(['whereNull', 'processing_token']);
-  expect(dissent).toContainEqual(['whereRaw', "COALESCE(processing_status, '') = 'processed'"]);
-};
-
 describe('GET /admin/leads/:id — call reference (recording + transcript)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -212,19 +158,11 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     };
     callLogWhereFns.forEach((fn) => fn.call(group));
 
-    // The sid arm is a GROUP since codex P1 r14: the sid match MINUS a
-    // settled dissenting stamp (a repointed call must not surface on the
-    // obsolete lead's card).
-    const sidArm = findSidArm(recorded);
-    expect(sidArm).toBeTruthy();
-    expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
-    expectSettledDissent(sidArm, LEAD.id);
-    // The phone legs are grouped arms too (codex P1 r15): each carries the
-    // same settled-dissent exclusion, so a repointed call no longer shows
-    // its transcript on the obsolete lead's card via the caller's number.
-    const phoneArms = findPhoneArms(recorded, '2155848892');
-    expect(phoneArms.length).toBe(2); // from_phone + to_phone legs
-    phoneArms.forEach((arm) => expectSettledDissent(arm, LEAD.id));
+    expect(recorded).toContainEqual(['orWhere', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    const rawMatches = recorded.filter(
+      (c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892',
+    );
+    expect(rawMatches.length).toBe(2); // from_phone + to_phone legs
     expect(recorded).toContainEqual(['whereNotNull', 'transcription']);
     expect(recorded).toContainEqual(['orWhereNotNull', 'recording_url']);
   });
@@ -262,63 +200,21 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     };
     callLogWhereFns.forEach((fn) => fn.call(group));
 
-    // The SID linkage stays (as the grouped arm); no phone-leg predicates
-    // were added — neither flat nor grouped (codex P1 r15 shape).
-    const sidArm = findSidArm(recorded);
-    expect(sidArm).toBeTruthy();
-    expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    // The SID linkage stays; no phone-leg predicates were added.
+    expect(recorded).toContainEqual(['orWhere', 'twilio_call_sid', LEAD.twilio_call_sid]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
-    expect(findPhoneArms(recorded, '2155848892')).toEqual([]);
   });
 
-  // Extract the where-group predicates the call_log query was built with.
-  const recordedCallLogPredicates = () => {
-    const callLogWhereFns = db.mock.calls
-      .map((_, i) => db.mock.results[i])
-      .filter((r) => r.type === 'return')
-      .flatMap((r) => (r.value?.where?.mock ? r.value.where.mock.calls : []))
-      .map((args) => args[0])
-      .filter((arg) => typeof arg === 'function');
-    const recorded = [];
-    const group = {
-      orWhere: (...args) => {
-        // A grouped arm (the settled-stamp arm wraps the metadata predicate
-        // with whereNull(processing_token)) — run the callback against a
-        // sub-recorder so its inner predicates are captured as
-        // 'orWhere>...' entries.
-        if (typeof args[0] === 'function') {
-          const sub = {
-            whereRaw: (...a) => { recorded.push(['orWhere>whereRaw', ...a]); return sub; },
-            whereNull: (...a) => { recorded.push(['orWhere>whereNull', ...a]); return sub; },
-            where: (...a) => { recorded.push(['orWhere>where', ...a]); return sub; },
-          };
-          args[0].call(sub);
-          return group;
-        }
-        recorded.push(['orWhere', ...args]);
-        return group;
-      },
-      orWhereRaw: (...args) => { recorded.push(['orWhereRaw', ...args]); return group; },
-      whereNotNull: (...args) => { recorded.push(['whereNotNull', ...args]); return group; },
-      orWhereNotNull: (...args) => { recorded.push(['orWhereNotNull', ...args]); return group; },
-    };
-    callLogWhereFns.forEach((fn) => fn.call(group));
-    return recorded;
-  };
-
-  test('shared line without a call SID: call_log still queries via the metadata stamp — no phone legs, no sid arm', async () => {
-    // A SID-less lead reused by a phone-less call links ONLY through
-    // call_log.metadata.lead_id — skipping the lookup hid its transcript
-    // and recording from the card (codex P1, PR #3275). The shared-line
-    // safety survives: no phone-leg predicates are added.
+  test('shared line without a call SID skips the call_log lookup entirely', async () => {
+    const tables = [];
     const leadsTable = makeLeadsTable({
       lead: { id: 'lead-1', phone: '+12155848892', twilio_call_sid: null },
       sharedLead: { id: 'lead-other' },
     });
     db.mockImplementation((table) => {
+      tables.push(table);
       if (table === 'leads') return leadsTable();
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
-      if (table === 'call_log') return makeBuilder({ rows: [] });
       throw new Error(`Unexpected table ${table}`);
     });
 
@@ -329,24 +225,17 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       expect(body.calls).toEqual([]);
     });
 
-    const recorded = recordedCallLogPredicates();
-    expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-1']]);
-    // SETTLED stamps only — the arm requires processing_token IS NULL so a
-    // mid-flight pass's provisional stamp never surfaces another caller's
-    // transcript on the wrong card (pre-push P1).
-    expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
-    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
-    expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
-    expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
+    expect(tables).not.toContain('call_log');
   });
 
-  test('lead with no phone and no call SID still queries stamped calls — metadata arm only', async () => {
+  test('lead with no phone and no call SID skips the call_log lookup', async () => {
+    const tables = [];
     db.mockImplementation((table) => {
+      tables.push(table);
       if (table === 'leads') {
         return makeBuilder({ firstResult: { id: 'lead-2', phone: null, twilio_call_sid: null } });
       }
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
-      if (table === 'call_log') return makeBuilder({ rows: [] });
       throw new Error(`Unexpected table ${table}`);
     });
 
@@ -357,11 +246,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       expect(body.calls).toEqual([]);
     });
 
-    const recorded = recordedCallLogPredicates();
-    expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
-    expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
-    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
-    expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
+    expect(tables).not.toContain('call_log');
   });
 
   test('call_log failure is non-blocking — lead + activities still return', async () => {
