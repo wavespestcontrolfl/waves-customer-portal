@@ -227,6 +227,22 @@ describe('computeDeterministicTriageFlags', () => {
       expect(flags).not.toContain('missing_unit_number');
     });
 
+    test('canonical record already carries the unit → no ask (adoptV2PrimaryFields retains a V1 unit V2 dropped)', () => {
+      const e = validV2Extraction();
+      const av = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      // Dedicated line 2 on the merged record.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct', address_line2: 'Unit 104' } }))
+        .not.toContain('missing_unit_number');
+      // Unit inline on the merged street line.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct Apt 104' } }))
+        .not.toContain('missing_unit_number');
+      // A merged record with NO unit still files the ask.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av, canonicalRecord: { address_line1: '100 Example Condo Ct' } }))
+        .toContain('missing_unit_number');
+      // Callers passing no canonical record keep the prior behavior.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: av })).toContain('missing_unit_number');
+    });
+
     test('missing_unit_number is advisory-only: files a card, never holds the appointment', () => {
       expect(ADVISORY_TRIAGE_FLAGS.has('missing_unit_number')).toBe(true);
       expect(BLOCKING_TRIAGE_FLAGS.has('missing_unit_number')).toBe(false);

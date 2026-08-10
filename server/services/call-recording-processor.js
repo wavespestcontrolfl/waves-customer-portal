@@ -6508,7 +6508,11 @@ const CallRecordingProcessor = {
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
+          // `extracted` is post-adoptV2PrimaryFields here — the MERGED
+          // canonical record. It must be consulted for the unit ask: the
+          // adoption retains a V1 unit V2 dropped, so the AV verdict can
+          // report a missing subpremise the record already has.
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
@@ -11952,6 +11956,10 @@ const CallRecordingProcessor = {
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          // Same merged record the live lane consulted — the reconstruction
+          // must agree with it, or the shadow metrics count a unit ask the
+          // live pass suppressed.
+          canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
         routingResult = canAutoRoute(v2ExtractionForAudit, {

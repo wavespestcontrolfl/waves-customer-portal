@@ -180,7 +180,16 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // shape, so the hold can never be swapped for an accepted wrong-parcel
     // verdict.) This flag only NAMES the specific ask behind that hold:
     // "which unit?" instead of "could not be verified".
-    if (avStatus !== 'out_of_service_area' && isMissingUnitNumber(av)) {
+    //
+    // opts.canonicalRecord is the MERGED flat record the pipeline will
+    // actually dispatch against. It must be consulted, not the extraction:
+    // adoptV2PrimaryFields retains a V1 unit that V2 dropped for the same
+    // address, so the AV verdict can report a missing subpremise the
+    // canonical record already supplies (codex r16 P1). Omitting the opt
+    // preserves the old behavior for callers with no merged record.
+    if (avStatus !== 'out_of_service_area'
+        && isMissingUnitNumber(av)
+        && !(opts.canonicalRecord && recordCarriesUnit(opts.canonicalRecord))) {
       flags.push('missing_unit_number');
     }
   } else {
@@ -420,19 +429,32 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
  * and a unit task pointing at a building the record does not hold is worse
  * than none (it is human-only work, never auto-resolved).
  *
- * The enforce lane does NOT use this: there V2 IS the record, so
- * computeDeterministicTriageFlags takes isMissingUnitNumber directly.
+ * The enforce lane does NOT use this street/place corroboration — there V2 IS
+ * the record — but it DOES share recordCarriesUnit below.
  */
+/**
+ * Does this flat record already state a unit? Both shapes count: a dedicated
+ * line 2, and a unit peeled out of the street line ("100 Example Ct Apt 4").
+ *
+ * Shared by BOTH lanes on purpose. The unit ask is never auto-resolved, so
+ * filing one for a unit the record already holds creates a permanent,
+ * unanswerable task — and each lane reaches that state by its own route:
+ * shadow mode via the legacy V1 record (codex r14 P1), enforce mode via
+ * adoptV2PrimaryFields, which deliberately RETAINS a V1 address_line2 that V2
+ * omitted for the same address (extraction-compat.js; codex r16 P1) — so the
+ * canonical record can carry a unit that V2's extraction, and therefore the
+ * AV verdict built from it, never saw.
+ */
+function recordCarriesUnit(flatRecord = {}) {
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  if (String(flatRecord.address_line2 || '').trim()) return true;
+  return !!splitStreetLineUnit(flatRecord.address_line1).unit;
+}
+
 function unitAskCorroborated(av, extracted = {}) {
   if (!isMissingUnitNumber(av)) return false;
-  // The canonical record may already HAVE the unit — V2 simply dropped it
-  // when it built the string AV validated (codex r14 P1). Asking the office
-  // to collect a unit already on the record files a permanent, unanswerable
-  // task. Covers both shapes: a dedicated legacy line 2 and a unit peeled
-  // out of the street line itself ("100 Example Condo Ct Apt 4").
   const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
-  if (String(extracted.address_line2 || '').trim()) return false;
-  if (splitStreetLineUnit(extracted.address_line1).unit) return false;
+  if (recordCarriesUnit(extracted)) return false;
   // Compare through the CANONICAL suffix table, not streetCompareKey's
   // hand-written strip list (codex r15 P1): that list omits pairs the
   // normalizer already aliases — "100 Example Loop" vs Google's "100 Example
@@ -1522,6 +1544,7 @@ module.exports = {
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
   unitAskCorroborated,
+  recordCarriesUnit,
   deriveCallReviewBridge,
   deriveEmailReview,
   mergeNeedsConfirmation,
