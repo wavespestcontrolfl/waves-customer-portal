@@ -25,6 +25,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       }
       return Object.entries(f).every(([k, v]) => r[k] === v);
     });
+    let limitN = null;
     const q = {
       where(cond) { filters.push(cond); return q; },
       whereIn(col, values) { filters.push({ in: { col, values } }); return q; },
@@ -38,6 +39,14 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       first: async () => {
         const hit = rowsNow().find(rowMatch);
         return hit ? { ...hit } : undefined;
+      },
+      // The catalog short-name fallback takes TWO rows and resolves only on
+      // exactly one, so an abbreviation shared by several services (live:
+      // "Lawn Care" x5, "Mosquito" x2) can never be guessed at.
+      limit(n) { limitN = n; return q; },
+      select: async () => {
+        const hits = rowsNow().filter(rowMatch).map((r) => ({ ...r }));
+        return limitN == null ? hits : hits.slice(0, limitN);
       },
       pluck: async (col) => rowsNow().filter(rowMatch).map((r) => r[col]),
       update: async (patch) => {
