@@ -3392,7 +3392,10 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
               <span style={{ fontSize: 20, fontWeight: 800, color: W.blueDeeper, lineHeight: 1 }}>
                 {fmtMoney(svc.newPerVisit)}
               </span>
-              <span style={{ fontSize: 14, color: ESTIMATE_MUTED }}>/ visit</span>
+              {/* "/ application" is the estimate surface's one billing unit
+                  (owner 2026-07-11) — PriceCard and the SSR membership block
+                  both say it; "visit" stays schedule language only. */}
+              <span style={{ fontSize: 14, color: ESTIMATE_MUTED }}>/ application</span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginTop: 4, fontSize: 14, lineHeight: 1.35 }}>
               <span style={{ color: W.textBody, fontWeight: 600 }}>WaveGuard {tierDisplay} Discount</span>

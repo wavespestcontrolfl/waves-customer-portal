@@ -40,6 +40,10 @@ describe('ExistingPlanUpgradeCard', () => {
     expect(screen.getByText(/Jan 27, 2027/)).toBeInTheDocument();
     expect(screen.getByText('$55.00')).toBeInTheDocument();
     expect(screen.getByText('$49.50')).toBeInTheDocument();
+    // "/ application" is the estimate surface's one billing unit (owner
+    // 2026-07-11) — "visit" is schedule language only (the dates line).
+    expect(screen.getByText('/ application')).toBeInTheDocument();
+    expect(screen.queryByText('/ visit')).not.toBeInTheDocument();
     expect(screen.getByText(/WaveGuard Silver Discount/)).toBeInTheDocument();
     expect(screen.getByText(/5\.50/)).toBeInTheDocument();
     // Live configurator: the apply-on-approve line shows.
