@@ -361,6 +361,11 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 
 // Pure per-card predicate, exported for tests. `row` carries the card's
 // call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1).
+// The V2 street is AUTHORITATIVE when present — the missing-unit verdict was
+// produced by Address Validation run on the V2-heard address — and V1 is
+// consulted only when V2 heard no street. Fail closed on an unparseable
+// extraction (either side) and on a V1/V2 street disagreement: a card whose
+// two extractions name different buildings cannot be attributed to either.
 function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
   const { streetCompareKey } = require('./call-triage-flags');
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
@@ -370,27 +375,28 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
   };
   const acceptedKey = key(acceptedStreetLine);
   if (!acceptedKey) return false;
-  const heard = [];
-  for (const [raw, pick, multiProp] of [
-    [row.call_extraction, (p) => p?.property?.service_address?.street_line_1,
-      (p) => Array.isArray(p?.property?.additional_properties) && p.property.additional_properties.length > 0],
-    [row.call_extraction_v1, (p) => p?.address_line1, () => false],
-  ]) {
-    if (raw == null) continue;
-    let parsed = raw;
-    if (typeof parsed === 'string') {
-      try {
-        parsed = JSON.parse(parsed);
-      } catch {
-        continue; // unparseable side contributes nothing; fail closed overall
-      }
+  const parse = (raw) => {
+    if (raw == null) return null;
+    if (typeof raw !== 'string') return raw;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined; // unparseable — distinct from absent
     }
-    // Multi-property call → ambiguous which unit the later acceptance answers.
-    if (multiProp(parsed)) return false;
-    const line = String(pick(parsed) || '').trim();
-    if (line) heard.push(key(line));
+  };
+  const v2 = parse(row.call_extraction);
+  if (v2 === undefined) return false;
+  const v1 = parse(row.call_extraction_v1);
+  if (v1 === undefined) return false;
+  // Multi-property call → ambiguous which unit the later acceptance answers.
+  if (Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0) {
+    return false;
   }
-  return heard.includes(acceptedKey);
+  const v2Key = key(String(v2?.property?.service_address?.street_line_1 || '').trim());
+  const v1Key = key(String(v1?.address_line1 || '').trim());
+  if (v2Key && v1Key && v2Key !== v1Key) return false;
+  const authoritative = v2Key || v1Key;
+  return !!authoritative && authoritative === acceptedKey;
 }
 
 // Never throws on a no-op; returns the number of cards resolved. Shares the

@@ -2496,7 +2496,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, addressValidation);
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, addressValidation, lockedLead.address);
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -8293,11 +8293,12 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // The effective AV verdict rides along so a call that finally
-            // supplied the unit (subpremise-complete accept) clears the prior
-            // call's standing missing_unit_number ask instead of unioning it
-            // back in forever.
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, effectiveAddressValidation);
+            // The effective AV verdict + the lead's PRIOR street ride along so
+            // a call that finally supplied the unit (SUB_PREMISE accept for
+            // the SAME building) clears the standing missing_unit_number ask
+            // instead of unioning it back in forever — `current` is the
+            // pre-write row, i.e. the building the ask was filed for.
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, effectiveAddressValidation, current?.address);
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,

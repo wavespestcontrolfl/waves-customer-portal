@@ -336,22 +336,50 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
   });
 
-  test('a SUB_PREMISE accept on the newer call (exact door validated) clears the standing unit ask', () => {
-    const accepted = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [] };
-    const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted);
+  test('a SUB_PREMISE accept for the SAME building (exact door validated) clears the standing unit ask', () => {
+    const accepted = {
+      status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
+      normalized: { street_line_1: '100 Example Condo Court Unit 104' },
+    };
+    const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted, '100 Example Condo Ct');
     expect(merged).not.toContain('missing_unit_number');
     expect(merged).toContain('email_unverified');
   });
 
+  test('a SUB_PREMISE accept for a DIFFERENT property never clears this building\'s ask', () => {
+    const otherProperty = {
+      status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
+      normalized: { street_line_1: '4200 Other Sample Blvd Apt 3' },
+    };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], otherProperty, '100 Example Condo Ct'))
+      .toContain('missing_unit_number');
+  });
+
+  test('fail closed: no prior lead street (or no accepted street) → nothing clears', () => {
+    const accepted = {
+      status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
+      normalized: { street_line_1: '100 Example Condo Ct Unit 104' },
+    };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], accepted, null)).toContain('missing_unit_number');
+    const noStreet = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [], normalized: {} };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], noStreet, '100 Example Condo Ct')).toContain('missing_unit_number');
+  });
+
   test('a PREMISE-level accept proves only the building and clears nothing', () => {
-    const buildingOnly = { status: 'validated_accept', granularity: 'PREMISE', missingComponents: [] };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], buildingOnly))
+    const buildingOnly = {
+      status: 'validated_accept', granularity: 'PREMISE', missingComponents: [],
+      normalized: { street_line_1: '100 Example Condo Ct' },
+    };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], buildingOnly, '100 Example Condo Ct'))
       .toContain('missing_unit_number');
   });
 
   test('a recovery-produced accept still carrying missing-subpremise evidence clears nothing', () => {
-    const carried = { status: 'validated_accept', granularity: 'PREMISE', missingComponents: ['subpremise'] };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'], carried))
+    const carried = {
+      status: 'validated_accept', granularity: 'PREMISE', missingComponents: ['subpremise'],
+      normalized: { street_line_1: '100 Example Condo Ct' },
+    };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'], carried, '100 Example Condo Ct'))
       .toContain('missing_unit_number');
   });
 

@@ -180,6 +180,18 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // and the processor carries the original missing-subpremise evidence
     // onto that effective result — the ask must survive the recovered
     // (accepted) status, not just the unresolved ones.
+    //
+    // Advisory even in that recovery shape — this is NOT a new unit-less
+    // auto-route: a recovery is returned only when its candidate ITSELF
+    // confirmed validated_accept/corrected through AV
+    // (address-validation/recovery.js confirmPrediction), so the booking
+    // address is Google-complete; the carried evidence describes the
+    // ORIGINAL (likely wrong-parcel) hit and rides the owed
+    // address_recovered read-back card every recovered booking already
+    // files (advisory-by-design, never aged out — triage-auto-resolve).
+    // Recovery auto-routing past the original ambiguity is that feature's
+    // pre-existing contract; this flag only names the extra read-back
+    // question.
     if (avStatus !== 'out_of_service_area' && isMissingUnitNumber(av)) {
       flags.push('missing_unit_number');
     }
@@ -1393,13 +1405,19 @@ function deriveEmailReview(extracted = {}) {
  * address_unverified, and a newer call whose AV verdict AFFIRMATIVELY
  * validated down to the unit (accept/corrected at SUB_PREMISE granularity —
  * the caller finally supplied the unit and Google confirmed that exact door)
- * answers the prior call's standing missing_unit_number ask. A PREMISE-level
- * accept proves only the building and clears nothing (pre-push audit P1), and
- * a recovery-produced accept that still carries the original
+ * IN THE SAME BUILDING the ask was filed for answers the prior call's
+ * standing missing_unit_number. Same-building corroboration compares the
+ * accepted street against `priorLeadStreet` (the lead's on-file address
+ * BEFORE this call's writes — the building the ask was standing for) with
+ * unit designators stripped, suffix-insensitively; fail closed when either
+ * side is missing, so a later SUB_PREMISE accept for a DIFFERENT property
+ * never clears this building's ask (pre-push audit P1 r2). A PREMISE-level
+ * accept proves only the building and clears nothing, and a
+ * recovery-produced accept that still carries the original
  * missing-subpremise evidence is PREMISE-level by construction — recovery
  * fixes a garbled street, not a missing unit.
  */
-function mergeNeedsConfirmation(prior, next, addressValidation = null) {
+function mergeNeedsConfirmation(prior, next, addressValidation = null, priorLeadStreet = null) {
   const nextArr = Array.isArray(next) ? next : [];
   let merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
   if (nextArr.includes('address_recovered')) {
@@ -1407,10 +1425,25 @@ function mergeNeedsConfirmation(prior, next, addressValidation = null) {
   }
   const avStatus = addressValidation?.status;
   if ((avStatus === 'validated_accept' || avStatus === 'corrected')
-      && addressValidation?.granularity === 'SUB_PREMISE') {
+      && addressValidation?.granularity === 'SUB_PREMISE'
+      && sameBuildingStreet(addressValidation?.normalized?.street_line_1, priorLeadStreet)) {
     merged = merged.filter((r) => r !== 'missing_unit_number');
   }
   return merged;
+}
+
+// Unit-designator-stripped, suffix-insensitive same-building comparison for
+// the unit-ask supersede above. Fail closed: a missing street on either side
+// proves nothing and must not clear the ask.
+function sameBuildingStreet(acceptedStreetLine, priorStreetLine) {
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const key = (line) => {
+    const street = splitStreetLineUnit(line).street;
+    return street ? streetCompareKey(street) : '';
+  };
+  const acceptedKey = key(acceptedStreetLine);
+  const priorKey = key(priorStreetLine);
+  return !!acceptedKey && !!priorKey && acceptedKey === priorKey;
 }
 
 /**

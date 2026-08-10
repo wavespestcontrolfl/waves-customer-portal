@@ -338,9 +338,20 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     expect(unitCardAnsweredByAcceptedStreet(row, '102 Example Condo Ct')).toBe(false);
   });
 
-  test('fail closed: missing or unparseable streets keep the card', () => {
+  test('V2 street is authoritative: an acceptance matching only V1 while V2 names another building resolves nothing', () => {
+    const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: v1('4200 Other Sample Blvd') };
+    // V1/V2 disagree → ambiguous attribution, keep the card for BOTH streets.
+    expect(unitCardAnsweredByAcceptedStreet(row, '4200 Other Sample Blvd')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct')).toBe(false);
+    // Agreeing extractions resolve normally.
+    const agree = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: v1('100 Example Condo Court') };
+    expect(unitCardAnsweredByAcceptedStreet(agree, '100 Example Condo Ct')).toBe(true);
+  });
+
+  test('fail closed: missing or unparseable extractions keep the card', () => {
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: null, call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: v1('100 Example Condo Ct') }, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: '{not json' }, '100 Example Condo Ct')).toBe(false);
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, '')).toBe(false);
   });
 
