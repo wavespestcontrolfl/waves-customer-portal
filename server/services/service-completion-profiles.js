@@ -263,11 +263,35 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
     if (exact) return exact;
   }
 
-  const shortName = await knex('services')
+  // short_name is a DISPLAY abbreviation with no uniqueness constraint, and the
+  // live catalog really does share it across services that behave differently:
+  // "Lawn Care" is carried by FIVE active rows (lawn_care_quarterly / _recurring
+  // / _6week / _monthly — all recurring — plus lawn_care_one_time), and
+  // "Mosquito" by two (mosquito_monthly recurring + mosquito_one_time).
+  //
+  // An unordered `.first()` therefore picked NONDETERMINISTICALLY among them.
+  // It happens to return a recurring row today only because of physical heap
+  // order — which an ordinary admin edit in the Service Library rewrites. If
+  // lawn_care_one_time ever surfaced first, every visit labelled "Lawn Care"
+  // would resolve billing_type 'one_time' ⇒ typedOneTimeBilling TRUE ⇒
+  // shouldAutoInvoiceCompletion mints a completion invoice for a RECURRING lawn
+  // customer whose plan already covers the visit (and swaps the visit onto the
+  // typed one_time_lawn_treatment form and token_only portal visibility).
+  //
+  // So an ambiguous abbreviation resolves NOTHING. The caller falls back to the
+  // generic service-report profile, which is what an unmatched label already
+  // does — never a coin flip between a recurring and a one-time identity, where
+  // one side bills the customer. Same fail-closed rule the accept-path catalog
+  // lookup uses for duplicate engine keys (#3328 r3).
+  const shortNameMatches = await knex('services')
     .whereRaw('lower(short_name) = lower(?)', [serviceType])
-    .first('service_key', 'name', 'category', 'billing_type')
-    .catch(() => null);
-  if (shortName) return shortName;
+    .limit(2)
+    .select('service_key', 'name', 'category', 'billing_type')
+    .catch(() => []);
+  if (shortNameMatches.length === 1) return shortNameMatches[0];
+  if (shortNameMatches.length > 1) {
+    logger.warn(`[completion-profiles] short name "${serviceType}" is shared by multiple catalog services — refusing to guess an identity (give the rows distinct short names)`);
+  }
   return null;
 }
 
