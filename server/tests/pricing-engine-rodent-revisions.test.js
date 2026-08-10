@@ -57,15 +57,22 @@ describe('revised rodent pricing rules', () => {
   });
 
   test('trap-only retainer plans, setup waiver, warranty, and callbacks', () => {
-    expect(priceTrapOnlyRetainer({ plan: 'standard', billing: 'annual' })).toMatchObject({
+    const annualRetainer = priceTrapOnlyRetainer({ plan: 'standard', billing: 'annual' });
+    expect(annualRetainer).toMatchObject({
       price: 495,
       trapOnlyRetainerAnnualPrice: 495,
       trapOnlySetupFee: 0,
       warrantyEligible: false,
+      // The discount-exclusion contract: coupon/bundle exclusion flags are
+      // read by isManualOneTimeDiscountEligible; WaveGuard exclusion rides
+      // discountEligible:false (the estimate-public line predicates) — the
+      // old excludedFromWaveGuardDiscounts field was write-only and was
+      // removed in the 2026-08-10 eligibility consolidation.
+      discountEligible: false,
       excludedFromCoupons: true,
-      excludedFromWaveGuardDiscounts: true,
       excludedFromBundleDiscounts: true,
     });
+    expect(annualRetainer).not.toHaveProperty('excludedFromWaveGuardDiscounts');
     expect(priceTrapOnlyRetainer({ plan: 'standard', billing: 'monthly' })).toMatchObject({
       price: 248,
       trapOnlyRetainerMonthlyPrice: 49,

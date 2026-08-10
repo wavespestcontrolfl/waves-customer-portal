@@ -104,10 +104,13 @@ function lineFlagsBlockPercentDiscount(svc = {}) {
 }
 
 // ── Determine WaveGuard tier from active services ─────────────
+// Filters through the canonical membership predicate (every caller passes
+// family keys — activeServiceKeys and the membership-context snapshots never
+// carry lawn variants — so the variant normalization inside the predicate is
+// inert here; it just keeps this function consistent with every other
+// membership read).
 function determineWaveGuardTier(activeServices = []) {
-  const qualifying = activeServices.filter(svc =>
-    WAVEGUARD.qualifyingServices.includes(svc)
-  );
+  const qualifying = activeServices.filter(svc => serviceCountsTowardWaveGuardTier(svc));
   const count = qualifying.length;
 
   if (count >= 4) return { tier: 'platinum', discount: WAVEGUARD.tiers.platinum.discount, qualifyingCount: count };
