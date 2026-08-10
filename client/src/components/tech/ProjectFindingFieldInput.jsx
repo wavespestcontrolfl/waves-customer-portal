@@ -958,26 +958,21 @@ export default function ProjectFindingFieldInput({
     );
   }
 
+  // Single-line fields carry no dictation mic — short, structured values
+  // (dates, EPA numbers, concentrations, square footage) are faster and more
+  // accurate on the keyboard than through speech. Dictation is reserved for
+  // the free-text notes areas above.
   const isDateOrTime = field.type === 'date' || field.type === 'time';
-  const noDictationProps = noDictationInputProps(field);
-  const suppressDictation = Boolean(noDictationProps['data-no-dictation']);
   return (
-    <div style={{ position: 'relative' }}>
-      <input
-        id={id}
-        name={name}
-        type={isDateOrTime ? field.type : 'text'}
-        value={value || ''}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={field.placeholder || ''}
-        {...noDictationProps}
-        style={{ ...inputStyle, ...themedInputStyle(T), ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }) }}
-      />
-      {!isDateOrTime && !suppressDictation && (
-        <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>
-          <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
-        </div>
-      )}
-    </div>
+    <input
+      id={id}
+      name={name}
+      type={isDateOrTime ? field.type : 'text'}
+      value={value || ''}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={field.placeholder || ''}
+      {...noDictationInputProps(field)}
+      style={{ ...inputStyle, ...themedInputStyle(T) }}
+    />
   );
 }
