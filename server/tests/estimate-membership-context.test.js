@@ -973,6 +973,34 @@ describe('existing-service tier extension snapshot', () => {
     expect(centCtx.existingServices[0]).toMatchObject({ rowIds: ['s1'], remainingVisits: 1 });
   });
 
+  test('gate on: the basis is the NEXT upcoming appointment price regardless of DB row order', async () => {
+    mockExtendExistingGate = true;
+    // Mixed-price family delivered in an order that puts the LATER $120
+    // cohort first: the basis must still be the earliest appointment's
+    // $135 (codex #3338 r10 — cohort selection must never follow DB row
+    // order, or the same unchanged estimate freezes a different plan per
+    // save).
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+        { id: 's3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120 },
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 135 },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices[0]).toMatchObject({
+      currentPerVisit: 135,
+      rowIds: ['s1'],
+      upcomingVisitDates: ['2099-01-05'],
+      remainingVisits: 1,
+    });
+  });
+
   test('gate on: a visit with add-ons is excluded from the frozen plan; probe failure parks the family', async () => {
     mockExtendExistingGate = true;
     const withAddon = fakeDb({

@@ -833,7 +833,22 @@ async function computeMembershipContext(database, {
           basis = firstAllocation;
           basisRows = simpleRows;
         } else {
-          const basisRow = simpleRows.find((row) => Number(row.estimated_price) > 0);
+          // Deterministic basis (codex #3338 r10): the loader carries no
+          // ORDER BY, so "first positive price" would follow DB row order —
+          // the same unchanged estimate could freeze a different price
+          // cohort per save. The basis is the price of the NEXT upcoming
+          // priced appointment (earliest scheduled date, row id as the
+          // tiebreak): the figure the customer would actually pay next.
+          // (The prepaid branch above needs no ordering — it is
+          // uniform-allocation-or-park, so every cohort choice ends the
+          // same way.)
+          const orderedRows = [...simpleRows].sort((a, b) => {
+            const dayA = visitDateKey(a.scheduled_date) || '';
+            const dayB = visitDateKey(b.scheduled_date) || '';
+            if (dayA !== dayB) return dayA.localeCompare(dayB);
+            return String(a.id).localeCompare(String(b.id));
+          });
+          const basisRow = orderedRows.find((row) => Number(row.estimated_price) > 0);
           basis = Number(basisRow?.estimated_price);
           if (!(basis > 0)) continue; // no billable basis to discount
           basisRows = simpleRows.filter((row) => sameCents(row.estimated_price, basis));
