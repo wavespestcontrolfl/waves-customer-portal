@@ -735,6 +735,28 @@ function sidJoinOwnerConflict(callLog, lockedLead) {
     && String(lockedLead.customer_id) !== String(callLog.customerId));
 }
 
+// The owner-conflict test's blind spot (codex P1, PR #3303 r15): an
+// ANONYMOUS call repointed from its sid lead to a phone-matched lead
+// leaves call_log.customer_id NULL and writes no stamp, so when the
+// obsolete sid lead is later claimed there is no owner to conflict with —
+// yet the provenanced funnel row on the NEW lead records the repoint.
+// Accepting the sid join would let source_call_id recovery transfer that
+// history-bearing row back to the obsolete lead. Defer whenever this
+// call's attribution already resides on a DIFFERENT lead than the one the
+// sid join proposes. Stamp-confirmed joins are exempt (the stamp IS the
+// processor's verdict); runs on the caller's transaction, next to
+// sidJoinOwnerConflict at both its call sites.
+async function sidJoinAttributionElsewhere(trx, callLog) {
+  if (!callLog?.id || !callLog?.leadId) return false;
+  const stampConfirmed = callLog.stampedLeadId
+    && String(callLog.stampedLeadId) === String(callLog.leadId);
+  if (stampConfirmed) return false;
+  const prov = await trx('ad_service_attribution')
+    .where({ source_call_id: callLog.id })
+    .first('id', 'lead_id');
+  return !!(prov && String(prov.lead_id) !== String(callLog.leadId));
+}
+
 async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {
   let joinedWentStale = false;
   let verdictChecked = false;
@@ -775,7 +797,10 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
       return { match: null, reason: 'call_rejected' };
     }
     verdictChecked = true;
-    if (lockedLead && sidJoinOwnerConflict(callLog, lockedLead)) {
+    if (lockedLead && (sidJoinOwnerConflict(callLog, lockedLead)
+      || await sidJoinAttributionElsewhere(trx, callLog))) {
+      // Both shapes report the non-retiring conflict reason — the caller
+      // touches nothing this scan (only 'linkage_cleared' retires).
       return { match: null, reason: 'lead_owner_conflict' };
     }
     if (lockedLead) {
@@ -1100,7 +1125,8 @@ async function applyBridge(options = {}) {
                   // backfill bypassed it, and source_call_id recovery
                   // would then hand the history-bearing funnel row to a
                   // foreign owner.
-                  if (sidJoinOwnerConflict(match.callLog, liveJoined)) return;
+                  if (sidJoinOwnerConflict(match.callLog, liveJoined)
+                    || await sidJoinAttributionElsewhere(trx, match.callLog)) return;
                   // The joined lead's CURRENT owner ONLY — an unclaimed
                   // lead stays customer-less and the funnel write
                   // declines (codex P1, PR #3303 r2); never the call's
@@ -1464,6 +1490,7 @@ module.exports = {
     shapeCallLog,
     shapeGoogleCall,
     shouldRetryLeadAttribution,
+    sidJoinAttributionElsewhere,
     summarize,
   },
 };

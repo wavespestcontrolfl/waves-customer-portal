@@ -3815,7 +3815,12 @@ function initScheduledJobs() {
         // exception from applyBridge or the organic candidate query used to
         // jump straight to the cron's outer catch and skip the transfer
         // sweep below — a persistent bridge-specific failure must not
-        // starve the retry lane for calls the bridge never scans.
+        // starve the retry lane for calls the bridge never scans. The
+        // error is CAPTURED, not swallowed (codex P2 r15): rethrown after
+        // the sweep so runExclusive's job-health record still counts the
+        // failed tick — a swallowed throw cleared last_error/
+        // consecutive_failures and made a persistent outage look healthy.
+        let bridgePairError = null;
         try {
           const googleAds = require('./ads/google-ads');
           // The fallback below may only run after a COMPLETE, HEALTHY bridge
@@ -3882,7 +3887,7 @@ function initScheduledJobs() {
             logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}`);
           }
         } catch (err) {
-          logger.error(`Google Ads call bridge / unclaimed-organic sweep failed: ${err.message}`);
+          bridgePairError = err;
         }
 
         // Retry lane for processor repoints blocked by a legacy
@@ -3899,6 +3904,10 @@ function initScheduledJobs() {
         } catch (err) {
           logger.warn(`[attribution-transfer-sweep] failed: ${err.message}`);
         }
+
+        // The sweep ran — now surface the captured bridge failure so the
+        // outer catch logs it and the lease records a failed tick.
+        if (bridgePairError) throw bridgePairError;
       });
     } catch (err) {
       logger.error(`Google Ads call bridge / unclaimed-organic sweep failed: ${err.message}`);

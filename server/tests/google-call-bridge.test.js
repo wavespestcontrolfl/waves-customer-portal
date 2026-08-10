@@ -588,3 +588,25 @@ describe('whereCallStillLinked — sid arm yields to a settled dissenting stamp 
     expect(methods).toContain('whereNull');
   });
 });
+
+describe('sidJoinAttributionElsewhere (codex P1, PR #3303 r15)', () => {
+  const { sidJoinAttributionElsewhere } = GoogleCallBridge._private;
+  // Minimal trx fake: the helper reads one provenanced row by source_call_id.
+  const trxWith = (row) => () => ({ where: () => ({ first: async () => row }) });
+
+  test("defers a stamp-less sid join when the call's provenanced row sits on ANOTHER lead", async () => {
+    // The anonymous-repoint blind spot: call_log.customer_id NULL makes the
+    // owner-conflict test unreachable, but the row on lead-B records the
+    // repoint — accepting lead-A would transfer B's history back.
+    const trx = trxWith({ id: 'row-1', lead_id: 'lead-B' });
+    await expect(sidJoinAttributionElsewhere(trx, { id: 'call-1', leadId: 'lead-A' })).resolves.toBe(true);
+  });
+
+  test('accepts when the row is on the proposed lead, absent, or the join is stamp-confirmed', async () => {
+    await expect(sidJoinAttributionElsewhere(trxWith({ id: 'row-1', lead_id: 'lead-A' }), { id: 'call-1', leadId: 'lead-A' })).resolves.toBe(false);
+    await expect(sidJoinAttributionElsewhere(trxWith(undefined), { id: 'call-1', leadId: 'lead-A' })).resolves.toBe(false);
+    // A stamp-confirmed join IS the processor's verdict — exempt even with
+    // a row elsewhere (mirror of sidJoinOwnerConflict's exemption).
+    await expect(sidJoinAttributionElsewhere(trxWith({ id: 'row-1', lead_id: 'lead-B' }), { id: 'call-1', leadId: 'lead-A', stampedLeadId: 'lead-A' })).resolves.toBe(false);
+  });
+});

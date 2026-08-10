@@ -99,6 +99,35 @@ const findSidArm = (recorded) => {
   return null;
 };
 
+// The phone arms (codex P1 r15) are orWhere(function) groups too — each a
+// RIGHT-10 phone leg plus the settled-dissent exclusion. Returns the
+// replayed groups whose whereRaw matches the given ten-digit value.
+const findPhoneArms = (recorded, ten) => {
+  const arms = [];
+  for (const c of recorded) {
+    if (c[0] === 'orWhere' && typeof c[1] === 'function') {
+      const sub = [];
+      c[1].call(makeGroupRecorder(sub));
+      if (sub.some((s) => s[0] === 'whereRaw' && /RIGHT\(regexp_replace\(COALESCE\((from|to)_phone/.test(String(s[1])) && String(s[2]) === ten)) {
+        arms.push(sub);
+      }
+    }
+  }
+  return arms;
+};
+
+// Replay a whereNot(fn) dissent group and assert the settled-dissent legs.
+const expectSettledDissent = (arm, leadId) => {
+  const notGroup = arm.find((s) => s[0] === 'whereNot' && typeof s[1] === 'function');
+  expect(notGroup).toBeTruthy();
+  const dissent = [];
+  notGroup[1].call(makeGroupRecorder(dissent));
+  expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' IS NOT NULL"]);
+  expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' != ?", [String(leadId)]]);
+  expect(dissent).toContainEqual(['whereNull', 'processing_token']);
+  expect(dissent).toContainEqual(['whereRaw', "COALESCE(processing_status, '') = 'processed'"]);
+};
+
 describe('GET /admin/leads/:id — call reference (recording + transcript)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -189,18 +218,13 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     const sidArm = findSidArm(recorded);
     expect(sidArm).toBeTruthy();
     expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
-    const notGroup = sidArm.find((s) => s[0] === 'whereNot' && typeof s[1] === 'function');
-    expect(notGroup).toBeTruthy();
-    const dissent = [];
-    notGroup[1].call(makeGroupRecorder(dissent));
-    expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' IS NOT NULL"]);
-    expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' != ?", [String(LEAD.id)]]);
-    expect(dissent).toContainEqual(['whereNull', 'processing_token']);
-    expect(dissent).toContainEqual(['whereRaw', "COALESCE(processing_status, '') = 'processed'"]);
-    const rawMatches = recorded.filter(
-      (c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892',
-    );
-    expect(rawMatches.length).toBe(2); // from_phone + to_phone legs
+    expectSettledDissent(sidArm, LEAD.id);
+    // The phone legs are grouped arms too (codex P1 r15): each carries the
+    // same settled-dissent exclusion, so a repointed call no longer shows
+    // its transcript on the obsolete lead's card via the caller's number.
+    const phoneArms = findPhoneArms(recorded, '2155848892');
+    expect(phoneArms.length).toBe(2); // from_phone + to_phone legs
+    phoneArms.forEach((arm) => expectSettledDissent(arm, LEAD.id));
     expect(recorded).toContainEqual(['whereNotNull', 'transcription']);
     expect(recorded).toContainEqual(['orWhereNotNull', 'recording_url']);
   });
@@ -239,11 +263,12 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     callLogWhereFns.forEach((fn) => fn.call(group));
 
     // The SID linkage stays (as the grouped arm); no phone-leg predicates
-    // were added.
+    // were added — neither flat nor grouped (codex P1 r15 shape).
     const sidArm = findSidArm(recorded);
     expect(sidArm).toBeTruthy();
     expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
+    expect(findPhoneArms(recorded, '2155848892')).toEqual([]);
   });
 
   // Extract the where-group predicates the call_log query was built with.

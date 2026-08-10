@@ -896,28 +896,29 @@ router.get('/:id', async (req, res, next) => {
         // No sid/phone guard around this query: a SID-less web lead without
         // a phone can still own STAMPED calls (email reuse), and the
         // metadata arm below is always present (codex P1 r13).
+        // The sid AND phone arms all YIELD to a settled dissenting stamp
+        // (codex P1 r14 sid + r15 phone, same precedence as the bridge and
+        // whereCallStillLinked): a successful force-reprocess that
+        // repointed this call to a DIFFERENT lead leaves the sid — and the
+        // caller's phone — matching the obsolete row, and the unconditional
+        // arms surfaced the same transcript on both cards, including the
+        // lead the processor rejected. Settled = the same predicate as the
+        // stamp inclusion arm; a mid-flight pass's provisional stamp does
+        // not suppress the match. Every leg NULL-proof: a NULL
+        // processing_status would make the NOT-group evaluate to SQL NULL
+        // and silently drop the row.
+        const settledDissentingStamp = function settledDissentingStamp() {
+          this.whereRaw("metadata->>'lead_id' IS NOT NULL")
+            .whereRaw("metadata->>'lead_id' != ?", [String(lead.id)])
+            .whereNull('processing_token')
+            .whereRaw("COALESCE(processing_status, '') = 'processed'");
+        };
         const rows = await db('call_log')
           .where(function () {
-            // The SID arm YIELDS to a settled dissenting stamp (codex P1
-            // r14, same precedence as the bridge and whereCallStillLinked):
-            // a successful force-reprocess that repointed this call to a
-            // DIFFERENT lead leaves the sid on the obsolete row, and the
-            // unconditional sid match surfaced the same transcript on both
-            // cards — including the lead the processor rejected. Settled =
-            // the same predicate as the inclusion arm below; a mid-flight
-            // pass's provisional stamp does not suppress the sid match.
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {
                 this.where('twilio_call_sid', lead.twilio_call_sid)
-                  .whereNot(function settledDissentingStamp() {
-                    // Every leg NULL-proof: a NULL processing_status would
-                    // make the NOT-group evaluate to SQL NULL and silently
-                    // drop the row from the sid arm.
-                    this.whereRaw("metadata->>'lead_id' IS NOT NULL")
-                      .whereRaw("metadata->>'lead_id' != ?", [String(lead.id)])
-                      .whereNull('processing_token')
-                      .whereRaw("COALESCE(processing_status, '') = 'processed'");
-                  });
+                  .whereNot(settledDissentingStamp);
               });
             }
             // Phone-less reuse: a later call that reused this lead carries a
@@ -937,8 +938,14 @@ router.get('/:id', async (req, res, next) => {
                 .where('processing_status', 'processed');
             });
             if (ten) {
-              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
-              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+              this.orWhere(function phoneFromArm() {
+                this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+                  .whereNot(settledDissentingStamp);
+              });
+              this.orWhere(function phoneToArm() {
+                this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+                  .whereNot(settledDissentingStamp);
+              });
             }
           })
           .where(function () {

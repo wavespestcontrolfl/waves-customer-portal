@@ -192,6 +192,15 @@ describe('scheduler wiring', () => {
     expect(block.indexOf('if (bridgeBlockedReason)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
   });
 
+  test('a bridge-pair failure is rethrown AFTER the transfer sweep (codex P2, PR #3303 r15)', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
+    // Captured, not swallowed: the sweep still runs, then the failure
+    // surfaces so the lease's job-health record counts the failed tick.
+    expect(block).toMatch(/bridgePairError = err/);
+    expect(block).toMatch(/if \(bridgePairError\) throw bridgePairError/);
+    expect(block.indexOf('sweepPendingAttributionTransfers')).toBeLessThan(block.indexOf('if (bridgePairError) throw bridgePairError'));
+  });
+
   test('selection excludes deleted and customer-less leads (codex P1+P2, PR #3303 r14)', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
