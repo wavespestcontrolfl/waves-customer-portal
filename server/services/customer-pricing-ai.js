@@ -348,7 +348,7 @@ function lookupEnabled() {
 const {
   lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
-  lookupTurfEstimateIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy, structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
@@ -498,13 +498,21 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // filled from vision when county data was absent, so it is adopted
       // only when the vision read is trusted.
       const visionFactsOk = lookupFeaturesAreTrustworthy(p);
-      const structuralFact = (recordValue, enrichedValue) => knownFact(recordValue)
-        || (visionFactsOk ? knownFact(enrichedValue) : null)
-        || null;
+      // A non-'UNKNOWN' record value is not proof of county evidence:
+      // structural facts get merged into the record from listings/AI, and
+      // those weak or conflicting merges carry fieldVerify markers. A
+      // flagged fact is withheld from BOTH legs — the modifier simply does
+      // not apply, same as the untrusted-vision default.
+      const structuralFact = (field, recordValue, enrichedValue) => {
+        if (!structuralFactIsTrustworthy({ record, enriched: p, field })) return null;
+        return knownFact(recordValue)
+          || (visionFactsOk ? knownFact(enrichedValue) : null)
+          || null;
+      };
       constructionMaterial = constructionMaterial
-        || structuralFact(record.constructionMaterial, p.constructionMaterial);
-      foundationType = foundationType || structuralFact(record.foundationType, p.foundationType);
-      roofType = roofType || structuralFact(record.roofType, p.roofType);
+        || structuralFact('constructionMaterial', record.constructionMaterial, p.constructionMaterial);
+      foundationType = foundationType || structuralFact('foundationType', record.foundationType, p.foundationType);
+      roofType = roofType || structuralFact('roofType', record.roofType, p.roofType);
       // p.estimatedPalmCount is deliberately NOT adopted. This is a
       // customer-facing quote route, and palmCount feeds palm-INJECTION
       // pricing through missingPropertyFor + resolvePalmCount — an AI count
@@ -564,6 +572,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     // a lawn the profile measured as absent.
     lawnSqFt: lawnExplicitZero ? 0 : (lawnSqFt || undefined),
     stories: stories || 1,
+    // Provenance rides with the count: a defaulted story count (no lookup,
+    // or a verify-flagged read discarded above) must say so, or the
+    // story-sensitive pricers (pest per-story minutes, termite bait
+    // footprint→perimeter) price a guessed one-story home with no
+    // stories_estimated review marker on the quote.
+    storiesSource: stories ? 'lookup' : 'default',
     propertyType,
     features,
     bedArea: bedArea || undefined,

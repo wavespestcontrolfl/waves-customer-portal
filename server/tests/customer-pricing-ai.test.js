@@ -1236,3 +1236,74 @@ describe('an untrusted satellite turf estimate never becomes a lawn price', () =
     expect(trusted.propertyInput.lawnSqFt).toBe(5200);
   });
 });
+
+describe('story provenance and record-backed structural facts (r6)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-stories-structural',
+    address_line1: '31 Perimeter Pl',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34293',
+  };
+
+  test('a defaulted story count carries storiesSource so the pricers emit stories_estimated', async () => {
+    if (!resolve) return;
+    // Flagged stories read is discarded — provenance must say 'default' so
+    // pest/termite add their review marker instead of silently pricing a
+    // guessed one-story footprint.
+    const flagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400,
+          stories: 2,
+          fieldVerifyFlags: [{ field: 'stories', reason: 'conflicting evidence', priority: 'HIGH' }],
+        },
+      }),
+    });
+    expect(flagged.propertyInput.stories).toBe(1);
+    expect(flagged.propertyInput.storiesSource).toBe('default');
+    const noLookup = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(noLookup.propertyInput.storiesSource).toBe('default');
+    const adopted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { stories: 2 } }),
+    });
+    expect(adopted.propertyInput.stories).toBe(2);
+    expect(adopted.propertyInput.storiesSource).toBe('lookup');
+  });
+
+  test('a verify-flagged structural fact is withheld even when the record value is non-UNKNOWN', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          fieldVerifyFlags: [
+            { field: 'constructionMaterial', reason: 'conflicting AI/source evidence', priority: 'MEDIUM' },
+          ],
+        },
+        propertyRecord: {
+          // Merged from a weak listing — non-UNKNOWN, but flagged.
+          constructionMaterial: 'WOOD_FRAME',
+          foundationType: 'SLAB',
+          _fieldEvidence: {
+            constructionMaterial: { fieldVerify: true },
+            roofType: { fieldVerify: true },
+          },
+          roofType: 'TILE',
+        },
+      }),
+    });
+    // Flagged via enriched flags AND via the record's own evidence.
+    expect(ctx.propertyInput.constructionMaterial).toBeNull();
+    expect(ctx.propertyInput.roofType).toBeNull();
+    // Unflagged record fact still applies.
+    expect(ctx.propertyInput.foundationType).toBe('SLAB');
+  });
+});

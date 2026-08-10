@@ -137,6 +137,21 @@ function recordPropertyTypeIsTrustworthy(record) {
   return true;
 }
 
+// Structural facts (constructionMaterial / foundationType / roofType) are
+// merged into the RECORD from listings and AI when county data is absent —
+// _fieldEvidence.<field>.fieldVerify marks those weak/conflicting merges,
+// and buildFieldVerifyFlags surfaces them on the enriched payload. So a
+// non-'UNKNOWN' record value is NOT proof of county evidence: a flagged
+// structural fact may not move a price from either leg. Checked on both the
+// record's own evidence and the enriched flags so an enrichment failure
+// cannot launder a disputed value.
+function structuralFactIsTrustworthy({ record, enriched, field }) {
+  if (record?._fieldEvidence?.[field]?.fieldVerify) return false;
+  const flat = String(field || '').toLowerCase();
+  const snake = String(field || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return !hasVerifyFlagMatching(enriched, (f) => f.includes(flat) || f.includes(snake));
+}
+
 // A satellite attachment reclassification deliberately ships with a
 // fieldVerifyFlags entry for propertyType whose own copy says to confirm
 // townhome vs single-family BEFORE pricing
@@ -178,4 +193,5 @@ module.exports = {
   lookupDimensionIsTrustworthy,
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
+  structuralFactIsTrustworthy,
 };

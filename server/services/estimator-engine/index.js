@@ -499,6 +499,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       parcelView: effectiveParcelOk ? effectiveSignals.parcelView : null,
       customer: profileDescribesQuotedProperty ? trustedCustomer : null,
       isCommercial: intent.is_commercial,
+      // Deliberately NOT stripped: the subdivision median is
+      // neighborhood-level (a snap lands on the same street), and facts
+      // sized from it carry a fallback source that already routes the
+      // draft to review.
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
     result.propertyFacts = propertyFacts;
@@ -624,8 +628,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           const proposalOutcome = await maybeBuildCommercialProposalDraft({
             intent,
             propertyFacts,
-            parcelView: effectiveSignals.parcelView,
-            propertyRecord: effectiveSignals.propertyRecord,
+            // Same wrong-premise strip as the arbitration passes above — the
+            // proposal brief and building-count scaffold must not be
+            // composed from a snapped neighboring parcel either.
+            parcelView: effectiveParcelOk ? effectiveSignals.parcelView : null,
+            propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
             context,
             origin,
             model,
