@@ -94,10 +94,27 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
   // stays unchanged, and treating that as "nothing to do" would leave the
   // wrong or rejected draft public and sendable.
   const forcedQuarantine = !!(pending.conflict || pending.reason);
-  if (!forcedQuarantine && data.lead_id && !(await staleCallLinkageReason(trx, data))) {
-    await trx('estimates').where({ id: estimateId })
-      .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
-    return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+  if (!forcedQuarantine && data.lead_id) {
+    // The obsolete-vs-apply decision is made against LOCKED state and the
+    // locks are HELD through whichever write follows (codex P1, GH round
+    // on a6c3a5c5c): a plain read could observe the call momentarily
+    // pointing back at A while another pass repoints it to B before our
+    // estimate update commits — discarding the only pending marker
+    // against a linkage that no longer holds (or, inverted, applying an
+    // invalidation to a re-validated draft). Lock order stays
+    // estimates (caller's FOR UPDATE row) → leads → call_log, matching
+    // accept/decline; both lead rows this transition can touch are locked
+    // up front, in sorted order, so concurrent finalizers can't deadlock
+    // each other.
+    const leadLockIds = [...new Set([data.lead_id, pending.from].filter(Boolean).map(String))].sort();
+    for (const leadLockId of leadLockIds) {
+      await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
+    }
+    if (!(await staleCallLinkageReason(trx, data, { lockCallRow: true }))) {
+      await trx('estimates').where({ id: estimateId })
+        .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+      return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+    }
   }
   const status = String(row.status || '').toLowerCase();
   const terminal = ['accepted', 'declined', 'expired'].includes(status);

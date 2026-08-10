@@ -141,6 +141,33 @@ describe('invalidateDraftForCall ownership fence (generation arm)', () => {
 
     expect(out).toMatchObject({ ok: true, invalidated: false, ownershipLost: true });
   });
+
+  test('a GENERATION-ONLY fence (settled replay — no claim token) rides the write predicate alone', async () => {
+    const out = await invalidateDraftForCall('call-1', {
+      reason: 'email_identity_conflict',
+      identityConflict: true,
+      ownershipFence: { callLogId: 'call-1', procGeneration: 7 },
+    });
+
+    expect(out.ok).toBe(true);
+    const blockWrite = fenceUpdateFor('estimator_draft_block');
+    expect(blockWrite).toBeTruthy();
+    const preds = fencePredicates(blockWrite);
+    expect(preds).toContainEqual(['where', 'processing_generation', 7]);
+    expect(preds.some(([m, col]) => col === 'processing_token')).toBe(false);
+  });
+
+  test('a generation-only fence MISS is ownershipLost, not success', async () => {
+    mockCallRow.__fenceMiss = true;
+
+    const out = await invalidateDraftForCall('call-1', {
+      reason: 'email_identity_conflict',
+      identityConflict: true,
+      ownershipFence: { callLogId: 'call-1', procGeneration: 6 },
+    });
+
+    expect(out).toMatchObject({ ok: true, invalidated: false, ownershipLost: true });
+  });
 });
 
 describe('sweepPendingReconciles', () => {
@@ -247,7 +274,7 @@ describe('sweepPendingQuarantines re-qualification clears the draft block too', 
     expect(mockUpdates.filter((u) => u.table === 'call_log')).toHaveLength(0);
   });
 
-  test('a RE-OBSERVED identity conflict still replays the forced invalidation and drains the queue', async () => {
+  test('a RE-OBSERVED identity conflict replays the forced invalidation FENCED to the observed generation', async () => {
     mockScanRows = [IDENTITY_PENDING_ROW()];
     mockCallRow = SETTLED_LIVE_ROW();
     const { buildCallContext } = require('../services/estimator-engine/context-builder');
@@ -256,10 +283,28 @@ describe('sweepPendingQuarantines re-qualification clears the draft block too', 
     const cleared = await sweepPendingQuarantines();
 
     expect(cleared).toBe(1);
-    expect(fenceUpdateFor('estimator_draft_block')).toBeTruthy();
+    const blockWrite = fenceUpdateFor('estimator_draft_block');
+    expect(blockWrite).toBeTruthy();
+    // The replay carries the OBSERVED settled generation as its fence — a
+    // reclaim between observation and write makes it 0-row.
+    expect(fencePredicates(blockWrite)).toContainEqual(['where', 'processing_generation', 9]);
     const queueClear = mockUpdates.find((u) => u.table === 'call_log'
       && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_quarantine_pending'"));
     expect(queueClear).toBeTruthy();
+  });
+
+  test('a replay whose fence MISSES (reclaim since observation) defers — the queue entry survives', async () => {
+    mockScanRows = [IDENTITY_PENDING_ROW()];
+    mockCallRow = { ...SETTLED_LIVE_ROW(), __fenceMiss: true };
+    const { buildCallContext } = require('../services/estimator-engine/context-builder');
+    buildCallContext.mockResolvedValue({ error: 'email_identity_conflict', call: { id: 'call-1' } });
+
+    const cleared = await sweepPendingQuarantines();
+
+    expect(cleared).toBe(0);
+    const queueClear = mockUpdates.find((u) => u.table === 'call_log'
+      && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_quarantine_pending'"));
+    expect(queueClear).toBeFalsy();
   });
 });
 
@@ -459,6 +504,29 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const hookAt = processor.indexOf('maybePreDraftForBooking(preDraftBookingId, {');
     expect(hookAt).toBeGreaterThan(-1);
     expect(processor.indexOf('ownerProcGeneration: procGeneration', hookAt)).toBeGreaterThan(hookAt);
+  });
+
+  test('the reconcile-only identity branch fences its quarantine to the observed generation', () => {
+    const source = src('../services/estimator-engine/index.js');
+    const entryAt = source.indexOf('async function reconcileDraftLinksForCall');
+    expect(entryAt).toBeGreaterThan(-1);
+    const observedAt = source.indexOf('const observedGeneration', entryAt);
+    expect(observedAt).toBeGreaterThan(entryAt);
+    const fenceAt = source.indexOf('procGeneration: observedGeneration', observedAt);
+    expect(fenceAt).toBeGreaterThan(observedAt);
+    // A fence miss keeps the durable retry marker ('error'), never reports
+    // the quarantine as applied.
+    expect(source.indexOf("if (quarantine.ownershipLost) return 'error';", fenceAt)).toBeGreaterThan(fenceAt);
+  });
+
+  test('completePendingInvalidation decides against LOCKED lead + call state (estimates → leads → call_log)', () => {
+    const source = src('../services/admin-estimate-persistence.js');
+    const fnAt = source.indexOf('async function completePendingInvalidation');
+    expect(fnAt).toBeGreaterThan(-1);
+    const leadLockAt = source.indexOf("await trx('leads').where({ id: leadLockId }).forUpdate()", fnAt);
+    expect(leadLockAt).toBeGreaterThan(fnAt);
+    const verdictAt = source.indexOf('staleCallLinkageReason(trx, data, { lockCallRow: true })', leadLockAt);
+    expect(verdictAt).toBeGreaterThan(leadLockAt);
   });
 });
 

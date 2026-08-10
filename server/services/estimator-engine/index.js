@@ -682,7 +682,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           // that lost its processing_token could queue a forced
           // quarantine whose claim-release later archived the REPLACEMENT
           // worker's valid draft. Throwing rolls the marker back.
-          if (ownershipFence?.procToken) {
+          if (ownershipFence?.procToken || ownershipFence?.procGeneration != null) {
             const stillOwned = await trx('call_log')
               .where({ id: ownershipFence.callLogId || callLogId })
               // Generation arm (PR #3304): "same generation" means no newer
@@ -691,7 +691,15 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
               // reclaiming pass finalizes and clears its token. The bare
               // token-NULL arm remains only for legacy fences without a
               // generation (a pass claimed before the column deployed).
+              // A GENERATION-ONLY fence (no token) is the settled-replay
+              // shape — the quarantine sweep and the reconcile-only
+              // identity branch observed a settled call at generation N
+              // and must not replay their verdict after a reclaim bumps it.
               .where(function ownedOrCurrentGeneration() {
+                if (!ownershipFence.procToken) {
+                  this.where('processing_generation', ownershipFence.procGeneration);
+                  return;
+                }
                 this.where('processing_token', ownershipFence.procToken);
                 if (ownershipFence.procGeneration != null) {
                   this.orWhere('processing_generation', ownershipFence.procGeneration);
@@ -736,7 +744,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         // stale worker must not invalidate a draft the REPLACEMENT worker
         // legitimately owns — that would delete a valid public draft with
         // no rebuild. Throwing rolls the whole invalidation back.
-        if (ownershipFence?.procToken) {
+        if (ownershipFence?.procToken || ownershipFence?.procGeneration != null) {
           const owned = await trx('call_log')
             .where({ id: ownershipFence.callLogId || callLogId })
             // Owned-or-CURRENT-GENERATION, matching markDraftBlockOnCall
@@ -748,8 +756,14 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
             // a RECLAIMING pass finalized, letting it invalidate the
             // replacement's valid draft. The generation distinguishes the
             // two: our own finalization leaves it unchanged; any reclaim
-            // bumps it, and it never comes back down.
+            // bumps it, and it never comes back down. A GENERATION-ONLY
+            // fence (settled replay — no claim token exists) tests the
+            // observed generation alone.
             .where(function ownedOrCurrentGeneration() {
+              if (!ownershipFence.procToken) {
+                this.where('processing_generation', ownershipFence.procGeneration);
+                return;
+              }
               this.where('processing_token', ownershipFence.procToken);
               if (ownershipFence.procGeneration != null) {
                 this.orWhere('processing_generation', ownershipFence.procGeneration);
@@ -817,6 +831,13 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
           if (procGeneration != null) this.orWhere('processing_generation', procGeneration);
           else this.orWhereNull('processing_token');
         });
+      } else if (procGeneration != null) {
+        // GENERATION-ONLY fence (settled replay — the quarantine sweep and
+        // the reconcile-only identity branch hold no claim token): the
+        // marker lands only while the call is still on the observed
+        // generation; a reclaim bumps it and this write goes 0-row, which
+        // the caller reads as ownership lost and defers.
+        q.where('processing_generation', procGeneration);
       }
       const wrote = await q.update({
         metadata: db.raw(
@@ -829,10 +850,11 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
         ),
         updated_at: new Date(),
       });
-      // 0 rows with a token means the claim moved on — the reclaiming
-      // pass owns the verdict; without one it means the call is gone, so
-      // there is nothing to draft against and nothing to block.
-      if (!wrote && procToken) {
+      // 0 rows with a fence (token OR observed generation) means the claim
+      // moved on — the reclaiming pass owns the verdict; without any fence
+      // it means the call is gone, so there is nothing to draft against
+      // and nothing to block.
+      if (!wrote && (procToken || procGeneration != null)) {
         const lost = new Error('processing claim lost before the draft-block stamp');
         lost.ownershipLost = true;
         throw lost;
@@ -1114,8 +1136,20 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     const outcome = await invalidateDraftForCall(row.id, {
       reason: pending.reason,
       identityConflict,
+      // Fence the REPLAY to the generation this sweep OBSERVED settled
+      // (codex P1, GH round on a6c3a5c5c): between the settled read /
+      // re-observation above and this write, a force-reprocess can claim
+      // generation N+1 and re-qualify the call — an unfenced replay would
+      // stamp the obsolete verdict and archive the newer pass's
+      // replacement drafts. A fence miss reports ownershipLost and the
+      // queue entry is KEPT: the next sweep re-verifies against the new
+      // generation (and its in-flight check defers while N+1 runs).
+      ownershipFence: live.processing_generation != null
+        ? { callLogId: row.id, procGeneration: Number(live.processing_generation) }
+        : null,
     });
     if (!outcome.ok) continue;
+    if (outcome.ownershipLost) continue;
     try {
       const clearedRows = await clearQuarantineMarker(row.id, pending);
       if (!clearedRows) continue;
@@ -1198,9 +1232,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           // A stale run must not stamp a block or archive the drafts of
           // the pass that RECLAIMED this call (codex P0, PR #3304 GH r8h);
           // the generation arm keeps this fence valid after our own pass
-          // finalizes (the composer runs detached).
-          ownershipFence: ownerProcToken
-            ? { callLogId, procToken: ownerProcToken, procGeneration: ownerProcGeneration }
+          // finalizes (the composer runs detached). A generation WITHOUT a
+          // token (booking pre-draft adopting a settled call's generation)
+          // fences the same way (codex P1, GH round on a6c3a5c5c).
+          ownershipFence: (ownerProcToken || ownerProcGeneration != null)
+            ? { callLogId, procToken: ownerProcToken || null, procGeneration: ownerProcGeneration ?? null }
             : null,
         });
       }
@@ -1886,10 +1922,30 @@ async function reconcileDraftLinksForCall(callLogId) {
     // retry marker.
     const existingRows = await strictExistingDraftForCall(callLogId);
     if (!existingRows.length) return null;
+    // The generation this reconcile OBSERVES before deciding (codex P1, GH
+    // round on a6c3a5c5c — same replay gap as the quarantine sweep): the
+    // identity quarantine below must be fenced to it, or a stale
+    // reconcile-only pass whose call was since reclaimed and re-qualified
+    // would archive the newer pass's valid replacement drafts.
+    const observedGeneration = await db('call_log').where({ id: callLogId })
+      .first('processing_generation')
+      .then((r) => (r?.processing_generation != null ? Number(r.processing_generation) : null))
+      .catch(() => null);
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        const quarantine = await invalidateDraftForCallWithRetry(callLogId, { reason: context.error, identityConflict: true });
+        const quarantine = await invalidateDraftForCallWithRetry(callLogId, {
+          reason: context.error,
+          identityConflict: true,
+          ownershipFence: observedGeneration != null
+            ? { callLogId, procGeneration: observedGeneration }
+            : null,
+        });
+        // A fence miss is a VERDICT, not success: a newer pass claimed the
+        // call after our observation — its own finalization reconciles.
+        // 'error' keeps the caller's durable retry marker, so the sweep
+        // re-verifies once the newer pass settles.
+        if (quarantine.ownershipLost) return 'error';
         // REPLACE the stale bell (codex P1, PR #3304 GH r8): the operator
         // is otherwise left with the prior ready-to-send notification and
         // a link to the draft this pass just archived, with no visible
