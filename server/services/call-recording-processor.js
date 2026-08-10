@@ -8092,8 +8092,25 @@ const CallRecordingProcessor = {
                   .where({ id: call.id })
                   .where('processing_token', procToken)
                   .forUpdate()
-                  .first('id');
+                  .first('id', 'metadata');
                 if (!owned) return;
+                // A LIVE pending-transfer marker DEFERS the funnel write to
+                // the daily sweep (codex P1 r13): a later pass revisiting
+                // the SAME stamped lead skips the moved-link branch
+                // (preSettleStampedLeadId === leadId), so
+                // attributionConflictRetired starts false again and this
+                // write would double-count the call against the former
+                // lead's still-unresolved legacy row. Read under the row
+                // lock — serialized with both the marker writer and the
+                // sweep — so the marker's presence is authoritative: while
+                // it stands, ONLY the sweep may complete the write.
+                let ownedMd = {};
+                try {
+                  ownedMd = typeof owned.metadata === 'string'
+                    ? (JSON.parse(owned.metadata) || {})
+                    : (owned.metadata || {});
+                } catch { ownedMd = {}; }
+                if (ownedMd.attribution_transfer_pending) return;
                 const attrRes = await require('./ads/call-attribution').recordCallPpcAttribution({
                 // The locked owner EXACTLY (GH P1 r6) — an unassigned
                 // lead's live owner is NULL and recordCallPpcAttribution

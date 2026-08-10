@@ -798,6 +798,13 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
       // as a binding placeholder.
       .whereRaw("metadata->'attribution_transfer_pending' IS NOT NULL")
       .whereNull('processing_token')
+      // FAIR ordering (codex P2 r13): a fixed created_at order plus the
+      // limit lets `limit` permanently-blocked markers starve every newer
+      // one. Blocked attempts stamp last_attempt_at (below); never-tried
+      // markers go first ('' sorts before any timestamp), then the
+      // longest-untouched — persistent blockers rotate to the back
+      // instead of pinning the window.
+      .orderByRaw("COALESCE(metadata->'attribution_transfer_pending'->>'last_attempt_at', '') ASC")
       .orderBy('created_at', 'asc')
       .limit(limit)
       .select('id', 'metadata', 'created_at');
@@ -824,12 +831,20 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         const lockedCall = await trx('call_log')
           .where({ id: row.id })
           .forUpdate()
-          .first('id', 'processing_token', 'metadata', 'created_at');
+          .first('id', 'processing_token', 'processing_status', 'metadata', 'created_at');
         if (!lockedCall) return 'skipped';
         const md = parseMd(lockedCall.metadata);
         const pending = md.attribution_transfer_pending;
         if (!pending) return 'skipped'; // resolved since the scan
         if (lockedCall.processing_token) return 'skipped'; // in-flight pass owns it
+        // SUCCESSFUL settled passes only — the same allowlist as
+        // callStillAttributable (codex P1 r13): extraction_failed also
+        // carries a NULL token, but it is a retryable FAILED attempt whose
+        // retry re-derives linkage; attributing (or clearing) from it
+        // would act on an unfinished verdict. '' covers the intentional
+        // legacy NULL status.
+        const status = String(lockedCall.processing_status || '').toLowerCase();
+        if (status !== 'processed' && status !== '') return 'skipped';
         const liveLeadId = md.lead_id ? String(md.lead_id) : null;
         const clearMarker = () => trx('call_log')
           .where({ id: row.id })
@@ -850,20 +865,56 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           await clearMarker();
           return 'cleared';
         }
+        // A blocked/unclaimed marker stamps last_attempt_at so the fair
+        // ordering rotates it behind never-tried markers (codex P2 r13).
+        const stampAttempt = () => trx('call_log')
+          .where({ id: row.id })
+          .whereNull('processing_token')
+          .update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending,last_attempt_at}', ?::jsonb, true)",
+              [JSON.stringify(new Date().toISOString())],
+            ),
+            updated_at: new Date(),
+          });
+        const blocked = async () => { await stampAttempt(); return 'blocked'; };
         const existing = await trx('ad_service_attribution')
           .where({ source_call_id: row.id })
-          .first('id');
+          .first('id', 'lead_id');
         if (existing) {
-          await clearMarker();
-          return 'cleared';
+          // Already on the LIVE lead — genuinely done. On any OTHER lead
+          // (codex P1 r13: the operator resolved the former lead's legacy
+          // row by assigning it THIS call's provenance), clearing here
+          // would strand the history on the obsolete lead while the stamp
+          // names the new one — TRANSFER it through the shared
+          // reconciliation instead. 'retired_conflict' is definitive (the
+          // live lead owns another row; this call's row retired); 'none'
+          // means ownership moved under us — retry next run.
+          if (String(existing.lead_id) === liveLeadId) {
+            await clearMarker();
+            return 'cleared';
+          }
+          const moved = await reconcileMovedCallAttributionRow(
+            trx, row.id, existing.lead_id, liveLeadId, new Date(),
+            { toCustomerId: lockedLead.customer_id || null },
+          );
+          if (moved === 'transferred') {
+            await clearMarker();
+            return 'recorded';
+          }
+          if (moved === 'retired_conflict') {
+            await clearMarker();
+            return 'cleared';
+          }
+          return blocked();
         }
         const legacy = await trx('ad_service_attribution')
           .where({ lead_id: pending.from_lead_id })
           .whereNull('source_call_id')
           .first('id');
-        if (legacy) return 'blocked'; // operator hasn't resolved it yet
+        if (legacy) return blocked(); // operator hasn't resolved it yet
         const owner = lockedLead.customer_id || null;
-        if (!owner) return 'blocked'; // unclaimed lead — retry once claimed
+        if (!owner) return blocked(); // unclaimed lead — retry once claimed
         const res = await recordCallPpcAttribution({
           customerId: owner,
           leadId: liveLeadId,
@@ -890,7 +941,7 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           await clearMarker();
           return 'cleared';
         }
-        return 'blocked';
+        return blocked();
       });
       summary[outcome] += 1;
     } catch (e) {

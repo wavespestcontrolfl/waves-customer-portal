@@ -16,7 +16,7 @@ const inserts = [];
 
 const mockDb = jest.fn((table) => {
   const b = { _wheres: [] };
-  ['where', 'whereNot', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'limit'].forEach((m) => {
+  ['where', 'whereNot', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'orderByRaw', 'limit'].forEach((m) => {
     b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
   });
   const whereObj = (key) => {
@@ -87,7 +87,7 @@ beforeEach(() => {
 });
 
 describe('sweepPendingAttributionTransfers', () => {
-  test('a still-present legacy row on the former lead keeps the marker — the retry lane', async () => {
+  test('a still-present legacy row on the former lead keeps the marker — the retry lane — and stamps last_attempt_at', async () => {
     legacyRowByLead['lead-A'] = { id: 'legacy-1' };
 
     const s = await sweepPendingAttributionTransfers();
@@ -95,6 +95,12 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(s.blocked).toBe(1);
     expect(inserts).toHaveLength(0);
     expect(markerClearUpdates()).toHaveLength(0);
+    // Fair-ordering stamp (codex P2 r13): blocked markers rotate behind
+    // never-tried ones instead of pinning the scan window.
+    const attemptStamps = updates.filter((u) => u.table === 'call_log'
+      && typeof u.patch.metadata === 'string'
+      && u.patch.metadata.includes('last_attempt_at'));
+    expect(attemptStamps).toHaveLength(1);
   });
 
   test('a resolved legacy row completes the deferred write against the LIVE stamped lead and clears the marker', async () => {
@@ -134,7 +140,7 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(markerClearUpdates()).toHaveLength(0);
   });
 
-  test('an already-provenanced row (a later pass or recovery beat us) clears the marker without a second write', async () => {
+  test('an already-provenanced row ON THE LIVE LEAD clears the marker without a second write', async () => {
     provenancedRow = { id: 'row-9', lead_id: 'lead-B' };
 
     const s = await sweepPendingAttributionTransfers();
@@ -142,6 +148,33 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(s.cleared).toBe(1);
     expect(inserts).toHaveLength(0);
     expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a provenanced row on the FORMER lead (operator assigned this call) is TRANSFERRED to the live lead, not abandoned', async () => {
+    // codex P1 r13: clearing here stranded funnel history on the obsolete
+    // lead while the durable stamp named the new one.
+    provenancedRow = { id: 'row-p', lead_id: 'lead-A' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.recorded).toBe(1);
+    expect(inserts).toHaveLength(0); // moved, never re-inserted
+    const transfer = updates.find((u) => u.table === 'ad_service_attribution' && u.patch.lead_id === 'lead-B');
+    expect(transfer).toBeTruthy();
+    expect(transfer.patch.customer_id).toBe('cust-1'); // the locked live owner
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('an extraction_failed call (NULL token but a FAILED retryable attempt) is skipped entirely', async () => {
+    // codex P1 r13: token-NULL alone is not settled-successful — the same
+    // allowlist as callStillAttributable (processed / legacy NULL only).
+    lockedCallRow.processing_status = 'extraction_failed';
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.skipped).toBe(1);
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0); // neither cleared nor attempt-stamped
   });
 
   test('a stamp repointed since the scan is skipped — the next run locks the right lead', async () => {
