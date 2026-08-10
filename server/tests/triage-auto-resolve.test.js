@@ -422,6 +422,33 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
   });
 });
 
+// The lead-reason license reads this LIVE (never a snapshot) at each merge
+// site, so a concurrently-filed card holds the reason and a retry whose card
+// this run already resolved still clears it.
+describe('hasOpenUnitNumberCards', () => {
+  const { hasOpenUnitNumberCards } = require('../services/triage-auto-resolve');
+  // Chainable knex-shaped stub resolving count().first() to `row`.
+  const connWithCount = (row) => {
+    const builder = {};
+    for (const m of ['join', 'where', 'whereIn', 'count']) builder[m] = () => builder;
+    builder.first = () => Promise.resolve(row);
+    return () => builder;
+  };
+
+  test('open cards outstanding → true (reason must stay)', async () => {
+    await expect(hasOpenUnitNumberCards('cust-1', connWithCount({ n: '2' }))).resolves.toBe(true);
+  });
+
+  test('empty ledger → false (reason may clear)', async () => {
+    await expect(hasOpenUnitNumberCards('cust-1', connWithCount({ n: '0' }))).resolves.toBe(false);
+    await expect(hasOpenUnitNumberCards('cust-1', connWithCount(undefined))).resolves.toBe(false);
+  });
+
+  test('fail closed without a customer — cannot prove the ledger is empty', async () => {
+    await expect(hasOpenUnitNumberCards(null, connWithCount({ n: '0' }))).resolves.toBe(true);
+  });
+});
+
 describe('runTriageAutoResolve — gate', () => {
   const OLD_GATE = process.env.GATE_TRIAGE_AUTO_RESOLVE;
   afterEach(() => {

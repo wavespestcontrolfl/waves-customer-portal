@@ -464,14 +464,35 @@ function selectUnitCardsToResolve(candidates, acceptedAddress) {
   return match ? [match] : [];
 }
 
+// Is ANY missing_unit_number card still outstanding for this customer? The
+// lead's rolled-up needs_confirmation reason is a single string that can
+// stand for asks about SEVERAL buildings at once, so the cards are its
+// per-building ledger: the reason may only be cleared while this returns
+// false. Read it LIVE at the moment of the lead write — never from an
+// earlier snapshot — and pass the lead-write transaction as `conn` so the
+// read serializes with concurrent writers on the same lead (codex r8 P1).
+async function hasOpenUnitNumberCards(customerId, conn = db) {
+  if (!customerId) return true; // fail closed — cannot prove the ledger is empty
+  const row = await conn('triage_items as t')
+    .join('call_log as cl', 'cl.id', 't.call_log_id')
+    .where('t.reason_code', 'missing_unit_number')
+    .whereIn('t.status', ['open', 'in_progress'])
+    .where('cl.customer_id', customerId)
+    .count('* as n')
+    .first();
+  return parseInt(row?.n || 0, 10) > 0;
+}
+
 // Never throws on a no-op. Returns { resolved, remainingOpen }: how many
-// cards this call resolved, and how many missing_unit_number cards are STILL
-// open/in_progress for the customer afterwards (null when nothing ran) — the
-// caller may clear the lead's rolled-up needs_confirmation reason only when
-// remainingOpen is 0, because that single string can stand for asks about
-// SEVERAL buildings at once and the cards are the per-building ledger.
-// Shares the per-call lock contract (utils/triage-locks.js) and the
-// review_status re-sync with the sweep, admin-triage, and the email resolver.
+// cards this call resolved, and how many missing_unit_number cards were
+// still open/in_progress for the customer at commit time (null when nothing
+// ran). NOTE both are point-in-time reporting values for logs and tests —
+// the lead-reason decision reads hasOpenUnitNumberCards live under the lead
+// lock instead, so a retry that already resolved its card (resolved: 0 the
+// second time) still clears the reason, and a card filed concurrently still
+// holds it. Shares the per-call lock contract (utils/triage-locks.js) and
+// the review_status re-sync with the sweep, admin-triage, and the email
+// resolver.
 async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source = 'later call validated the full unit address' }, conn = db) {
   const none = { resolved: 0, remainingOpen: null };
   if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return none;
@@ -693,6 +714,7 @@ async function sweep({ now = new Date() } = {}) {
 module.exports = {
   runTriageAutoResolve,
   resolveOpenUnitNumberCards,
+  hasOpenUnitNumberCards,
   unitCardAnsweredByAcceptedStreet,
   selectUnitCardsToResolve,
   classifyTriageItem,

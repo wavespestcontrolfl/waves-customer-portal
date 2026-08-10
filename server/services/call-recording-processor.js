@@ -7398,28 +7398,40 @@ const CallRecordingProcessor = {
     // accept, PREMISE-level by construction. Same-building corroboration +
     // fail-closed matching (incl. the multi-property guard) live in the
     // resolver.
-    // leadUnitAskAnswered licenses the lead-merge sites below to drop the
-    // rolled-up missing_unit_number reason. That single string can stand for
-    // asks about SEVERAL buildings at once (each call unions it in), so it
-    // only clears when the call-scoped cards — the per-building ledger —
-    // went to ZERO via this resolution (pre-push audit P1 r6: never key the
-    // clearing off the lead's current fill-only address).
-    let leadUnitAskAnswered = false;
-    if (customerId
-        && v2AddressTrustedForUnitAsk
-        && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
-        && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
-        && effectiveAddressValidation?.normalized?.street_line_1) {
+    // Did THIS call affirmatively validate a unit (SUB_PREMISE accept behind
+    // the shadow-trust gate)? A stable property of the call, so a reprocess
+    // re-derives it identically.
+    const unitAcceptanceThisCall = !!(customerId
+      && v2AddressTrustedForUnitAsk
+      && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
+      && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
+      && effectiveAddressValidation?.normalized?.street_line_1);
+    if (unitAcceptanceThisCall) {
       try {
-        const unitResolution = await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
+        await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
           customerId,
           acceptedAddress: effectiveAddressValidation.normalized,
         });
-        leadUnitAskAnswered = unitResolution.resolved > 0 && unitResolution.remainingOpen === 0;
       } catch (e) {
         logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
       }
     }
+    // Licenses the lead-merge sites below to drop the rolled-up
+    // missing_unit_number reason. The card ledger — never the lead's
+    // fill-only current address (codex r6 P1) — is the per-building source
+    // of truth, and it is read LIVE at each merge site rather than snapshot
+    // here (codex r8 P1): a snapshot both misses a card filed concurrently
+    // and strands the reason forever on a retry whose card this run already
+    // resolved. Fails closed on a read error.
+    const unitAskAnsweredNow = async (conn) => {
+      if (!unitAcceptanceThisCall) return false;
+      try {
+        return !(await require('./triage-auto-resolve').hasOpenUnitNumberCards(customerId, conn));
+      } catch (e) {
+        logger.warn(`[call-proc] unit-card ledger read failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
+        return false;
+      }
+    };
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
@@ -8321,16 +8333,14 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // The unit-ask license rides along ONLY when this call's
-            // SUB_PREMISE acceptance resolved the customer's LAST
-            // outstanding unit card (leadUnitAskAnswered): the rolled-up
-            // string reason can stand for several buildings, so the card
-            // ledger — never the lead's fill-only current address — is what
-            // proves the ask is fully answered.
+            // Provisional license (this write is re-decided under the lead
+            // lock below, where the ledger is re-read inside that
+            // transaction): drop the rolled-up unit reason only if this
+            // call validated a unit AND no unit card is outstanding now.
             const mergedNeedsConfirmation = mergeNeedsConfirmation(
               priorNeedsConfirmation,
               bridgeNeedsConfirmation,
-              { unitAskAnswered: leadUnitAskAnswered },
+              { unitAskAnswered: await unitAskAnsweredNow(db) },
             );
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
@@ -8611,10 +8621,13 @@ const CallRecordingProcessor = {
                   {
                     bridgeNeedsConfirmation,
                     leadQuality: extracted.lead_quality,
-                    // Same license as the pre-lock merge: the rolled-up unit
-                    // reason clears only when this call's resolution emptied
-                    // the customer's unit-card ledger.
-                    unitAskAnswered: leadUnitAskAnswered,
+                    // AUTHORITATIVE license: the ledger is re-read inside
+                    // THIS transaction, after the lead row lock — so a
+                    // concurrent call that filed a unit card either
+                    // committed before our lock (we see it and keep the
+                    // reason) or serializes behind us and unions the reason
+                    // back on its own lead write.
+                    unitAskAnswered: await unitAskAnsweredNow(trx),
                   },
                 );
                 if (reconciled.serviceInterestDropped) {
