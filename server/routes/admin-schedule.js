@@ -4914,6 +4914,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // instead of "restoring" a visit somebody else just removed
       // (Codex #3337 r3 P1).
       recurringPlannedCountBaseline,
+      // The ongoing flag the modal read on open — same staleness problem as
+      // the count. The modal posts recurringOngoing on every save, so without
+      // this a plan another operator flipped to fixed gets flipped back (and
+      // topped up) by an unrelated save (Codex #3337 r5 P1).
+      recurringOngoingBaseline,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
@@ -6130,12 +6135,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw movedErr;
         }
         const seriesCols = await trx('scheduled_services').columnInfo();
+        // Optimistic concurrency on the ongoing flag: the modal posts it on
+        // EVERY save of a recurring appointment, so a value that disagrees
+        // with the snapshot the modal loaded is stale, not an instruction —
+        // another operator changed the plan while this modal sat open. A
+        // stale value must not write at all, or an unrelated notes save
+        // silently reverses their change (Codex #3337 r5 P1). Older clients
+        // send no baseline; those fall back to the prior behavior.
+        const ongoingBaselineAgrees = typeof recurringOngoingBaseline === 'boolean'
+          ? recurringOngoingBaseline === wasOngoingBeforeSave
+          : true;
         // recurring_ongoing lives on every row of the series, and several
         // readers (cancellation eligibility, follow-up planning) scan children
         // rather than the parent — so a flip has to reach the whole series or
         // it leaves the plan in a half-ongoing state. Mirrors the let-lapse
         // and convert-ongoing flag writes.
-        if (parent?.is_recurring && seriesCols.recurring_ongoing && recurringOngoing !== undefined) {
+        if (parent?.is_recurring && seriesCols.recurring_ongoing
+          && recurringOngoing !== undefined && ongoingBaselineAgrees) {
           await trx('scheduled_services')
             .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
             .where('is_recurring', true)
@@ -6156,7 +6172,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // sitting below three visits — and did it with the gate OFF, which
         // broke the dark-ship guarantee outright.
         if (parent?.is_recurring && parent.recurring_pattern
-          && recurringOngoing === true && !wasOngoingBeforeSave
+          && recurringOngoing === true && !wasOngoingBeforeSave && ongoingBaselineAgrees
           && isEnabled('editApptVisitCount') && !wantsVisitCountReconcile) {
           const liveNow = await countUpcomingSeriesVisits(trx, parentId);
           if (liveNow < 3) {
@@ -6437,6 +6453,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       ...(visitCountResult ? {
         visitCount: {
           target: visitCountResult.target,
+          // What the plan actually has now — reported separately from the
+          // request, because the extend loop can run out of placeable cadence
+          // dates and the trim can stop short of an unreachable target.
+          achieved: visitCountResult.achieved,
+          shortfall: visitCountResult.shortfall || 0,
           before: visitCountResult.before,
           added: visitCountResult.added.length,
           cancelled: visitCountResult.cancelledIds.length,
@@ -7392,6 +7413,23 @@ async function findBillingCoveredVisits(conn, visits) {
       .select('scheduled_service_id');
     for (const h of holds) mark(h.scheduled_service_id, 'holding a card for a late-cancel fee');
   }
+  // The /secure rail is a SEPARATE fee lane from estimate_card_holds, and it
+  // is not merely bookkeeping: handleAppointmentCardCancellation CHARGES the
+  // saved card (appointment-card-request.js:1996) when the visit is inside the
+  // late-cancel window. The trim has no fee preview and no waiver control, so
+  // a visit whose fee is still undecided must be refused here rather than
+  // reaching the cancellation follow-through (Codex #3337 r5 P1).
+  //
+  // fee_status IS NULL is exactly "no terminal fee event yet" — the set that
+  // can still be charged or waived. A row already charged / waived / released
+  // is settled, and trimming it is safe.
+  if (ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
+    const requests = await conn('appointment_card_requests')
+      .whereIn('scheduled_service_id', ids)
+      .whereNull('fee_status')
+      .select('scheduled_service_id');
+    for (const r of requests) mark(r.scheduled_service_id, 'secured with a card whose late-cancel fee has not been settled');
+  }
   // An invoice already holding money for a future visit — the deposit and
   // pay-ahead shapes that stamp neither field above. Derived from the
   // canonical INVOICE_UNCOLLECTIBLE_STATUSES vocabulary rather than a
@@ -7482,7 +7520,11 @@ async function reconcileRecurringSeriesVisitCount(trx, {
 }) {
   const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
-  const result = { target, before: live.length, added: [], cancelledIds: [] };
+  // `achieved` is the plan length this call actually leaves behind — the
+  // number the operator must be shown. It is NOT always `target`: the extend
+  // loop can run out of placeable cadence dates, and the trim can stop short
+  // when a protected row blocks the cut.
+  const result = { target, before: live.length, added: [], cancelledIds: [], achieved: live.length };
   // Optimistic concurrency on the length the operator was looking at. Without
   // it, a plan that lost a visit between the modal's GET and this save reads
   // as "one short of target" and the reconcile helpfully books a replacement
@@ -7542,6 +7584,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       });
       result.cancelledIds.push(visit.id);
     }
+    result.achieved = live.length - result.cancelledIds.length;
     return result;
   }
 
@@ -7663,8 +7706,13 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     });
   }
   if (result.added.length < need) {
+    // The plan did NOT reach the requested length. Report what actually
+    // exists, not what was asked for (Codex #3337 r5 P1): telling the office
+    // "set to 24" when 22 were placed means missed service nobody can see.
+    result.shortfall = need - result.added.length;
     logger.warn(`[schedule/visit-count] parent=${parentId} wanted ${need} more visit(s), placed ${result.added.length} — every candidate within ${maxAttempts} cadence steps was already booked`);
   }
+  result.achieved = live.length + result.added.length;
   return result;
 }
 

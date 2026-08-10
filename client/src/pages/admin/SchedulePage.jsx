@@ -1875,6 +1875,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           recurringPlannedCountBaseline:
             canSetPlanLength && !recurringOngoing ? seriesSummary.upcomingCount : undefined,
           recurringOngoing: recurringControlsActive ? recurringOngoing : undefined,
+          // The ongoing flag the modal READ on open. Another operator can flip
+          // this plan to fixed while the modal sits there, and an untouched
+          // save would then post a stale `true` that the server reads as a
+          // genuine fixed→ongoing transition — flipping the plan back and
+          // topping it up, recreating visits the other operator just trimmed
+          // (Codex #3337 r5 P1). Same optimistic-concurrency contract as the
+          // count baseline.
+          recurringOngoingBaseline:
+            serviceIsRecurringTemplate && seriesSummary?.ongoing != null
+              ? seriesSummary.ongoing
+              : undefined,
           recurringNth:
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringNth
@@ -1916,12 +1927,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // itself may fall short of the target when the cadence has nowhere left
       // to place a visit, so report the real outcome, not the request.
       if (result?.visitCount && (result.visitCount.added || result.visitCount.cancelled)) {
-        const { added, cancelled, target } = result.visitCount;
+        const { added, cancelled, target, achieved, shortfall } = result.visitCount;
+        const now = achieved != null ? achieved : target;
         const moves = [
           added ? `${added} visit${added === 1 ? "" : "s"} added` : null,
           cancelled ? `${cancelled} visit${cancelled === 1 ? "" : "s"} cancelled` : null,
         ].filter(Boolean);
-        alert(`Plan set to ${target} visit${target === 1 ? "" : "s"} — ${moves.join(", ")}. The customer was not notified.`);
+        // Report what the plan HAS, not what was asked for — the server can
+        // place fewer than requested when the cadence runs out of open dates,
+        // and silently claiming the target hides missing service.
+        alert(
+          shortfall
+            ? `Plan now has ${now} visit${now === 1 ? "" : "s"}, not the ${target} requested — ${moves.join(", ")}. The cadence had no open date for the remaining ${shortfall}; add ${shortfall === 1 ? "it" : "them"} by hand. The customer was not notified.`
+            : `Plan now has ${now} visit${now === 1 ? "" : "s"} — ${moves.join(", ")}. The customer was not notified.`,
+        );
       }
       // Details are saved — now the duration correction, so its server-side
       // job-costing recalc prices against the values just persisted. A

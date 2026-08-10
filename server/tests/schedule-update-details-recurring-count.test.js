@@ -112,6 +112,7 @@ function scenario({
   cardHoldVisitIds = [],
   prepaidVisitIds = [],
   paidInvoiceVisitIds = [],
+  cardRequestVisitIds = [],
   invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
@@ -169,6 +170,10 @@ function scenario({
       if (op === 'await') {
         return cardHoldVisitIds.map((id) => ({ scheduled_service_id: id }));
       }
+      return [];
+    }
+    if (table === 'appointment_card_requests') {
+      if (op === 'await') return cardRequestVisitIds.map((id) => ({ scheduled_service_id: id }));
       return [];
     }
     if (table === 'invoices') {
@@ -362,6 +367,32 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     const { conn, parent, live } = scenario({ upcoming: 3, prepaidVisitIds: [], zeroPrepaidAll: true });
     const result = await reconcile(conn, parent, 2);
     expect(result.cancelledIds).toEqual([live[2].id]);
+  });
+
+  test('refuses a /secure visit whose late-cancel fee is unsettled — that path CHARGES (Codex #3337 r5 P1)', async () => {
+    // handleAppointmentCardCancellation does not merely close the request: at
+    // appointment-card-request.js:1996 it calls chargeAppointmentNoShowFee
+    // inside the cancel window. The trim has no fee preview and no waiver, so
+    // such a visit must never reach the follow-through.
+    const { conn, parent } = scenario({ upcoming: 4, cardRequestVisitIds: [103] });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('late-cancel fee has not been settled'),
+    });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a settled card-request fee does not block the trim', async () => {
+    // fee_status already charged/waived/released → nothing left to decide.
+    const { conn, parent, live } = scenario({ upcoming: 3, cardRequestVisitIds: [] });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
+  });
+
+  test('the guard queries only UNSETTLED card requests (fee_status IS NULL)', () => {
+    const guard = src.slice(src.indexOf('The /secure rail is a SEPARATE fee lane'), src.indexOf('return covered;'));
+    expect(guard).toContain("conn('appointment_card_requests')");
+    expect(guard).toContain(".whereNull('fee_status')");
   });
 
   test('a pre-migration env without the card-hold table still trims (prepay guard stands alone)', async () => {
