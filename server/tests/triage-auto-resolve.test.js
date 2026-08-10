@@ -313,3 +313,17 @@ describe('rule notes', () => {
     }
   });
 });
+
+describe('runTriageAutoResolve — gate', () => {
+  const OLD_GATE = process.env.GATE_TRIAGE_AUTO_RESOLVE;
+  afterEach(() => {
+    if (OLD_GATE === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE;
+    else process.env.GATE_TRIAGE_AUTO_RESOLVE = OLD_GATE;
+  });
+
+  test('gated off (default) → no-op, no DB access', async () => {
+    delete process.env.GATE_TRIAGE_AUTO_RESOLVE;
+    const result = await runTriageAutoResolve({ now: NOW });
+    expect(result).toEqual({ skipped: true, reason: 'gated_off' });
+  });
+});
