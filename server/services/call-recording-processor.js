@@ -8234,8 +8234,17 @@ const CallRecordingProcessor = {
                   // channel/service attribution once the blocker resolves.
                   // from_lead_id and last_attempt_at are preserved; only
                   // the funnel decision is re-supplied from THIS pass.
+                  // The TARGET refreshes with the decision (codex P1 r23).
+                  // A later force-reprocess can move the call again to a
+                  // phone- or sid-linked lead, and that relink is
+                  // deliberately stamp-less — so the sweep has no live
+                  // stamp to override a stale to_lead_id and would resolve
+                  // the marker against the obsolete lead once the legacy
+                  // blocker cleared. This pass holds the authoritative
+                  // answer in its own locked leadId.
                   const refreshed = {
                     ...ownedMd.attribution_transfer_pending,
+                    ...(leadId ? { to_lead_id: String(leadId) } : {}),
                     lead_source: callAttr.leadSource,
                     is_paid: callAttr.isPaid,
                     detail: leadSourceRow.name || 'inbound call',

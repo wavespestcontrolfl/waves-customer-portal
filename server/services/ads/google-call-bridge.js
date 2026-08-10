@@ -7,6 +7,10 @@ const GOOGLE_ADS_BRIDGE_SOURCE_NAME = 'Google Ads - Call Reporting Bridge';
 const GOOGLE_ADS_BRIDGE_LOCATION_ID = 'bradenton';
 const LEAD_MATCH_WINDOW_HOURS = 6;
 const MIN_AUTO_BRIDGE_CONFIDENCE = 70;
+// Score gap within which a runner-up is "equally plausible" — the ambiguity
+// test AND the organic sweep's exclusion set both read it (codex P1 r23),
+// so it is named once rather than repeated as a bare 10.
+const AMBIGUITY_SCORE_MARGIN = 10;
 const MAX_MATCH_WINDOW_MINUTES = 20;
 
 function getGoogleAds() {
@@ -400,7 +404,20 @@ function buildMatches(googleCalls, crmCalls, targetNumber = mainLine().number) {
     const best = scored[0] || null;
     const second = scored[1] || null;
     const alreadyBridged = !!(best?.call?.google_ads_call_resource_name);
-    const ambiguous = !!(best && second && best.score - second.score < 10 && second.score >= MIN_AUTO_BRIDGE_CONFIDENCE);
+    const ambiguous = !!(best && second && best.score - second.score < AMBIGUITY_SCORE_MARGIN && second.score >= MIN_AUTO_BRIDGE_CONFIDENCE);
+    // EVERY equally-plausible candidate, untruncated (codex P1 r23):
+    // `alternatives` below is a display preview capped at two, and the
+    // organic sweep built its exclusion set from it — so a fourth
+    // candidate inside the ambiguity margin was omitted and its lead took
+    // the irreversible organic fallback while the bridge still considered
+    // the match ambiguous. Correctness reads this list; the UI keeps the
+    // preview.
+    const ambiguousCandidates = ambiguous
+      ? scored
+        .filter((c) => c === best
+          || (c.score >= MIN_AUTO_BRIDGE_CONFIDENCE && best.score - c.score < AMBIGUITY_SCORE_MARGIN))
+        .map((c) => shapeCallLog(c.call))
+      : [];
     const ready = !!(best && best.score >= MIN_AUTO_BRIDGE_CONFIDENCE && !ambiguous && !usedCallIds.has(best.call.id));
 
     if (ready) usedCallIds.add(best.call.id);
@@ -418,6 +435,7 @@ function buildMatches(googleCalls, crmCalls, targetNumber = mainLine().number) {
         confidence: candidate.score,
         reasons: candidate.reasons,
       })),
+      ambiguousCandidates,
     });
   }
 
@@ -840,7 +858,7 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
     if (!(await callStillAttributable(trx, callLog.id))) {
       return { match: null, reason: 'call_rejected' };
     }
-    const liveCall = await trx('call_log').where({ id: callLog.id }).first('twilio_call_sid', 'metadata');
+    const liveCall = await trx('call_log').where({ id: callLog.id }).first('twilio_call_sid', 'metadata', 'from_phone');
     const liveStamp = (() => {
       try {
         const md = typeof liveCall?.metadata === 'string' ? JSON.parse(liveCall.metadata) : (liveCall?.metadata || {});
@@ -856,6 +874,36 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
         .whereNull('deleted_at')
         .first('id');
       if (sidLead) return { match: null, reason: 'lead_not_live' };
+    }
+    // STAMP-LESS PHONE LINKAGE (codex P1 r23) — the third durable mode the
+    // stamp and sid arms cannot see. When a force-reprocess moves an
+    // already-bridged call from stamped lead A onto phone-matched lead B,
+    // the processor clears A's stamp and writes NONE for B (stampThisPass
+    // requires !phone) and B keeps its own originating sid, so the two
+    // arms above both miss and this returned a CLEAR — tombstoning the
+    // joined match and permanently disabling the plan fallback while B was
+    // the current linked lead.
+    //   1. This call's own provenanced funnel row on a live lead is exact
+    //      proof the linkage survives.
+    //   2. Otherwise a live lead on the caller's number (RIGHT-10) is
+    //      treated as linkage, deliberately BROADER than the processor's
+    //      reuse decision: the only cost of a false positive here is
+    //      staying transient one more scan, while a false CLEAR deletes
+    //      the provenanced row and tombstones the match irreversibly.
+    //      Any-doubt-waits, the same ladder the ambiguity exclusion uses.
+    const provenancedLive = await trx('ad_service_attribution as a')
+      .join('leads as l', 'l.id', 'a.lead_id')
+      .where('a.source_call_id', callLog.id)
+      .whereNull('l.deleted_at')
+      .first('a.id');
+    if (provenancedLive) return { match: null, reason: 'lead_not_live' };
+    const callerTen = String(liveCall.from_phone || '').replace(/\D/g, '').slice(-10);
+    if (callerTen.length === 10) {
+      const phoneLead = await trx('leads')
+        .whereNull('deleted_at')
+        .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [callerTen])
+        .first('id');
+      if (phoneLead) return { match: null, reason: 'lead_not_live' };
     }
     return { match: null, reason: 'linkage_cleared' };
   }

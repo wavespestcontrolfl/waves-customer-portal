@@ -3855,11 +3855,18 @@ function initScheduledJobs() {
             // ambiguities indefinitely though, so blocking the WHOLE
             // fallback on one starved every unrelated organic lead.
             // Instead, only the leads linked to an ambiguous match's
-            // candidate calls (best + alternatives) are excluded; the
-            // exclusion lifts the day the ambiguity resolves.
+            // candidate calls are excluded; the exclusion lifts the day the
+            // ambiguity resolves. Read from `ambiguousCandidates` — the
+            // COMPLETE qualifying set (codex P1 r23): `alternatives` is a
+            // display preview capped at two, so with four-plus equally
+            // plausible candidates the extras were omitted and took the
+            // irreversible organic label. The preview stays the fallback
+            // for any match shape that predates the field.
             const ambiguousCalls = (r.skipped || [])
               .filter((m) => m?.skipReason === 'ambiguous')
-              .flatMap((m) => [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)])
+              .flatMap((m) => ((m.ambiguousCandidates || []).length
+                ? m.ambiguousCandidates
+                : [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)]))
               .filter(Boolean);
             const ambiguousExcludeSids = [...new Set(ambiguousCalls.map((c) => c.twilioCallSid).filter(Boolean))];
             const ambiguousExcludeCallIds = [...new Set(ambiguousCalls.map((c) => c.id).filter(Boolean))];

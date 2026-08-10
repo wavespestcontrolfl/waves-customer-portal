@@ -253,11 +253,25 @@ describe('scheduler wiring', () => {
     // Terminal-status exclusion under the lock: an admin marking the lead
     // duplicate/disqualified/spam mid-wait must not receive the row.
     expect(lockedRead).toMatch(/COALESCE\(l\.status,''\) NOT IN \('duplicate','disqualified','spam'\)/);
-    // Ambiguity exclusions re-applied under the lock too (codex P1 r19): a
-    // force-reprocess can link an ambiguous call to the selected lead while
-    // the transaction waits — the shared helper runs on both queries.
-    expect(lockedRead).toMatch(/\.modify\(applyAmbiguityExclusions\)/);
     expect(sweep).toMatch(/const applyAmbiguityExclusions = /);
+  });
+
+  test('ambiguity exclusions run in a SECOND statement AFTER the lock, never inside it (codex P1 r23)', () => {
+    // The arms are correlated call_log subqueries; under READ COMMITTED a
+    // single combined statement evaluates them against the snapshot taken
+    // before it blocked on the lead lock, so a force-reprocess that linked
+    // an ambiguous paid call could still be missed.
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
+    const lockStmt = sweep.split('const locked = await trx')[1].split(';')[0];
+    expect(lockStmt).toMatch(/forUpdate\(\)/);
+    expect(lockStmt).not.toMatch(/applyAmbiguityExclusions/);
+    // ...and the recheck follows, gated on its own miss.
+    const after = sweep.split('if (!locked) return')[1].slice(0, 1400);
+    expect(after).toMatch(/const stillUnambiguous = await trx\('leads as l'\)/);
+    expect(after).toMatch(/\.modify\(applyAmbiguityExclusions\)/);
+    expect(after).not.toMatch(/forUpdate\(\)/); // the lock is already held
+    expect(after).toMatch(/reason: 'ambiguous_matches'/);
   });
 
   test('successor discovery covers stamp, sid AND ownership-gated phone reuse (pre-push P0 r20)', () => {
@@ -307,5 +321,38 @@ describe('scheduler wiring', () => {
     expect(ca).toMatch(/whereRaw\('cl\.twilio_call_sid = l\.twilio_call_sid'\)/);
     expect(ca).not.toMatch(/cl\.lead_id/);
     expect(ca).toMatch(/whereNotNull\('cl\.google_ads_call_resource_name'\)/);
+  });
+});
+
+// Codex P1 r23 — the three fixes that live outside call-attribution.js.
+describe('r23 ambiguity + linkage completeness', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const bridge = fs.readFileSync(path.join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
+  const sched = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+
+  test('the exclusion set is built from EVERY qualifying candidate, not the two-item display preview', () => {
+    // buildMatches truncates `alternatives` to slice(1, 3) for the UI; a
+    // fourth equally plausible paid candidate must still be excluded.
+    expect(bridge).toMatch(/const ambiguousCandidates = ambiguous/);
+    expect(bridge).toMatch(/best\.score - c\.score < AMBIGUITY_SCORE_MARGIN/);
+    // The margin is named once and shared with the ambiguity test itself.
+    expect(bridge).toMatch(/const AMBIGUITY_SCORE_MARGIN = 10;/);
+    expect(bridge).not.toMatch(/best\.score - second\.score < 10\b/);
+    // The sweep reads the complete set, with the preview only as fallback.
+    expect(sched).toMatch(/\(m\.ambiguousCandidates \|\| \[\]\)\.length/);
+  });
+
+  test('the cleared-link proof also checks provenance and stamp-less phone linkage', () => {
+    const proof = bridge.split("return { match: null, reason: 'linkage_cleared' };")[0].slice(-2200);
+    // Exact proof first: this call's own funnel row on a live lead.
+    expect(proof).toMatch(/\.where\('a\.source_call_id', callLog\.id\)/);
+    expect(proof).toMatch(/whereNull\('l\.deleted_at'\)/);
+    // Then the deliberately broad caller-phone arm — any doubt WAITS.
+    expect(proof).toMatch(/callerTen/);
+    expect(proof).toMatch(/RIGHT\(regexp_replace\(COALESCE\(phone, ''\)/);
+    // Both report the TRANSIENT reason, never a clear.
+    const armReasons = proof.match(/reason: '(lead_not_live|linkage_cleared)'/g) || [];
+    expect(armReasons).toContain("reason: 'lead_not_live'");
   });
 });

@@ -745,15 +745,25 @@ async function attributeUnclaimedBridgeLeads({
           // transaction waited must not receive the irreversible organic
           // row off the stale candidate snapshot.
           .whereRaw("COALESCE(l.status,'') NOT IN ('duplicate','disqualified','spam')")
-          // Ambiguity exclusions re-applied too (codex P1 r19): a
-          // force-reprocess can link an ambiguous call to this lead while
-          // the transaction waits for the lock — the stale snapshot would
-          // then resolve that call as provenance and write the
-          // irreversible organic row the exclusion exists to prevent.
-          .modify(applyAmbiguityExclusions)
           .forUpdate()
           .first('l.id', 'l.customer_id', 'l.lead_source_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.twilio_call_sid');
         if (!locked) return { recorded: false, reason: 'lead_gone' };
+        // Ambiguity exclusions run in a SECOND statement, AFTER the lock
+        // (codex P1 r23 — the same rule joinedLeadLiveRow documents): the
+        // arms are correlated subqueries over call_log, and under READ
+        // COMMITTED a single combined statement evaluates them against the
+        // snapshot taken BEFORE it blocked on the lead lock. A
+        // force-reprocess holding that lock could link an ambiguous paid
+        // call and commit, and this statement would still return the lead
+        // and write the irreversible organic row. Row-local predicates
+        // above are safe in the locking statement (Postgres re-evaluates
+        // those against the updated row version); only the cross-table
+        // arms need the fresh snapshot the held lock gives us here.
+        const stillUnambiguous = await trx('leads as l')
+          .where('l.id', lead.id)
+          .modify(applyAmbiguityExclusions)
+          .first('l.id');
+        if (!stillUnambiguous) return { recorded: false, reason: 'ambiguous_matches' };
         const lockedSource = sourceById.get(locked.lead_source_id);
         const lockedChannel = attributionForSourceType(lockedSource?.source_type);
         if (!lockedChannel) return { recorded: false, reason: 'no_channel' };
