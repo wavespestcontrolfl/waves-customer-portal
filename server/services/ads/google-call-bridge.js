@@ -232,6 +232,11 @@ function shapeCallLog(row) {
     customerId: row.customer_id || null,
     customerName: [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ') || null,
     leadId: row.lead_id || null,
+    leadCustomerId: row.lead_customer_id || null,
+    // Set by dedupeCrmCallRows when a SETTLED stamp names a lead the join
+    // could not return (soft-deleted or gone). Carried through the shape so
+    // consumers can refuse to treat the leftover sid row as authoritative.
+    stampTargetMissing: row.stamp_target_missing === true,
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
@@ -339,24 +344,150 @@ async function fetchCrmCalls(days = 30) {
   const since = addETDays(new Date(), -safeDays);
   const target = mainLine();
 
+  // The 500-call bound stays INSIDE Postgres (codex P2, PR #3275). Capping
+  // in JS made the cron/admin bridge materialize every call in the window
+  // plus every OR-join duplicate before discarding the tail — memory and
+  // latency growing with 90 days of history to keep 500 rows. This subquery
+  // has no joins, so its LIMIT counts DISTINCT calls; the join below then
+  // adds at most the stale-stamp twin for each of them.
+  const newestCallIds = db('call_log')
+    .select('id')
+    .where('direction', 'inbound')
+    .whereIn('to_phone', phoneVariants(target.number))
+    .where('created_at', '>=', since)
+    .orderBy('created_at', 'desc')
+    .limit(500);
+
   return db('call_log as c')
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
-    .leftJoin('leads as l', 'c.twilio_call_sid', 'l.twilio_call_sid')
+    // The sid join misses a phone-less reused-lead call: the lead keeps its
+    // ORIGINAL call's sid and the later call links via the durable
+    // call_log.metadata.lead_id stamp instead (codex P1, PR #3275). A stale
+    // stamp CAN transiently coexist with a different sid-linked lead (a
+    // retry that minted before its cleanup ran), which would duplicate the
+    // call row through this OR join and make buildMatches read the twin as
+    // an equal-score second candidate → false ambiguity; dedupeCrmCallRows
+    // below collapses that shape, sid-linked lead winning. Two live leads
+    // genuinely sharing one sid stay multi-row, so their ambiguity — and
+    // the conservative no-bridge it triggers — survives.
+    .leftJoin('leads as l', function joinLeadForCall() {
+      this.on(function linkageArms() {
+        this.on('c.twilio_call_sid', 'l.twilio_call_sid')
+          .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
+      // A soft-deleted lead must never ride the join into attribution —
+      // findLeadForCall enforces whereNull(deleted_at), and the joined
+      // shortcut must match its eligibility (codex P2, PR #3275).
+      }).andOn(db.raw('l.deleted_at IS NULL'));
+    })
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
-    .where('c.direction', 'inbound')
-    .whereIn('c.to_phone', phoneVariants(target.number))
-    .where('c.created_at', '>=', since)
+    .whereIn('c.id', newestCallIds)
     .select(
       'c.*',
       'cu.first_name as customer_first_name',
       'cu.last_name as customer_last_name',
       'l.id as lead_id',
+      'l.customer_id as lead_customer_id',
+      'l.twilio_call_sid as lead_call_sid',
       'ls.name as lead_source_name',
     )
     .orderBy('c.created_at', 'desc')
-    .limit(500);
+    // No LIMIT here — it would count JOIN ROWS, so a call kept ambiguous
+    // below could push an older DISTINCT call out of the window and leave a
+    // paid call unbridged for the organic sweep. The distinct-call bound is
+    // the newestCallIds subquery above (codex P2, PR #3275).
+    .then(dedupeCrmCallRows);
 }
 
+// Collapse ONLY the stamp-plus-sid duplicate the OR join above can
+// transiently produce (a stale stamp coexisting with a different sid-linked
+// lead); the sid-linked lead is authoritative — same precedence
+// findReusableCallLead uses (codex P2, PR #3275).
+//
+// Genuine ambiguity is PRESERVED: leads.twilio_call_sid carries no unique
+// index, so two live leads can share one sid. Those rows made buildMatches
+// see an equal-score second candidate and mark the google call ambiguous —
+// a conservative no-bridge. Collapsing them to whichever row Postgres
+// returned first would let the bridge rewrite an arbitrary lead's source
+// and leave the real one unattributed, so multi-sid-linked calls keep every
+// sid-linked row (codex P2, PR #3275).
+function dedupeCrmCallRows(rows) {
+  const isSidLinked = (r) => !!(r.lead_call_sid && r.twilio_call_sid && r.lead_call_sid === r.twilio_call_sid);
+  // The joined row came through the STAMP arm and the call's own metadata
+  // stamp still targets this lead.
+  const isStampLinked = (r) => {
+    if (isSidLinked(r)) return false;
+    try {
+      const md = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      return md?.lead_id != null && String(md.lead_id) === String(r.lead_id);
+    } catch { return false; }
+  };
+  const callSettled = (r) => r.processing_token == null
+    && (r.processing_status == null || String(r.processing_status).toLowerCase() === 'processed');
+  const byId = new Map();
+  for (const row of rows) {
+    if (!byId.has(row.id)) byId.set(row.id, []);
+    byId.get(row.id).push(row);
+  }
+  // The call's own stamp target, regardless of whether the join could
+  // return that lead row.
+  const stampTargetOf = (r) => {
+    try {
+      const md = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      return md?.lead_id != null ? String(md.lead_id) : null;
+    } catch { return null; }
+  };
+  // A SETTLED stamp whose target the join could not return — the target
+  // lead is soft-deleted (the join's deleted_at filter hides it) or gone
+  // (codex P1, PR #3303 r7). The stamp is still the processor's verdict,
+  // so the sid row left behind must NOT be treated as authoritative: it
+  // would let the bridge rewrite the obsolete sid lead's source and
+  // transfer the history-bearing funnel row back to it. Clear the lead
+  // columns and flag the call — attributeResolvedLead then attributes
+  // nothing (and never falls to the plan), so a recorded match settles
+  // through the cleared-link path instead of moving.
+  const withMissingStampTarget = (group) => {
+    const target = stampTargetOf(group[0]);
+    if (!target || !callSettled(group[0])) return null;
+    if (group.some((r) => r.lead_id != null && String(r.lead_id) === target)) return null;
+    return {
+      ...group[0], lead_id: null, lead_customer_id: null, lead_call_sid: null, stamp_target_missing: true,
+    };
+  };
+  const deduped = [];
+  for (const group of byId.values()) {
+    const stampMissing = withMissingStampTarget(group);
+    if (stampMissing) { deduped.push(stampMissing); continue; }
+    if (group.length === 1) { deduped.push(group[0]); continue; }
+    const seenLeadIds = new Set();
+    const sidLinked = group.filter((r) => {
+      if (!isSidLinked(r)) return false;
+      const key = String(r.lead_id);
+      if (seenLeadIds.has(key)) return false;
+      seenLeadIds.add(key);
+      return true;
+    });
+    // SETTLED-STAMP AUTHORITY FIRST (codex P1, PR #3303 r5; pre-push P1
+    // r6/r14): a settled stamp targeting a lead OUTSIDE the sid-linked
+    // set is the processor's CURRENT verdict for this call — a
+    // force-reprocess repointed it after the sid lead(s) lost
+    // eligibility, and findReusableCallLead's sid precedence only ever
+    // applied to ELIGIBLE leads. This applies regardless of how many
+    // leads share the sid: collapsing to the sid row would hide the
+    // repoint, and preserving multi-sid ambiguity would starve the
+    // transfer reconciliation forever. A stamp AGREEING with a sid lead,
+    // or an UNSETTLED stamp twin (a retry that minted before its cleanup
+    // ran), falls through to the sid branches — that stamp is either
+    // redundant or not yet a verdict.
+    const settledStampVerdict = group.find((r) => isStampLinked(r) && callSettled(r));
+    if (settledStampVerdict
+      && !sidLinked.some((r) => String(r.lead_id) === String(settledStampVerdict.lead_id))) {
+      deduped.push(settledStampVerdict);
+    } else if (sidLinked.length === 1) deduped.push(sidLinked[0]);
+    else if (sidLinked.length > 1) deduped.push(...sidLinked);
+    else deduped.push(group[0]);
+  }
+  return deduped;
+}
 async function ensureBridgeLeadSource() {
   const existing = await db('lead_sources')
     .where({ name: GOOGLE_ADS_BRIDGE_SOURCE_NAME })
@@ -649,6 +780,7 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
+    dedupeCrmCallRows,
     findLeadForCall,
     googleAdsBridgeMetadata,
     leadMatchPlan,

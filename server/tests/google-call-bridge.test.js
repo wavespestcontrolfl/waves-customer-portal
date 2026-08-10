@@ -266,3 +266,168 @@ describe('isBridgeTargetNumber', () => {
     expect(GoogleCallBridge.isBridgeTargetNumber(null)).toBe(false);
   });
 });
+
+describe('dedupeCrmCallRows (PR #3275)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, callSid = 'CAcall') => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: callSid,
+  });
+
+  test('collapses the stale-stamp twin, sid-linked lead winning', () => {
+    // The OR join emits the stamp-linked lead first; the sid-linked lead is
+    // authoritative, so one row survives regardless of arrival order.
+    const stampFirst = dedupeCrmCallRows([row('c1', 'lead-stamp', null), row('c1', 'lead-sid', 'CAcall')]);
+    expect(stampFirst).toHaveLength(1);
+    expect(stampFirst[0].lead_id).toBe('lead-sid');
+
+    const sidFirst = dedupeCrmCallRows([row('c1', 'lead-sid', 'CAcall'), row('c1', 'lead-stamp', null)]);
+    expect(sidFirst).toHaveLength(1);
+    expect(sidFirst[0].lead_id).toBe('lead-sid');
+  });
+
+  test('KEEPS both rows when two live leads share one sid (ambiguity survives)', () => {
+    // leads.twilio_call_sid has no unique index. Collapsing these would let
+    // the bridge rewrite an arbitrary lead's source and leave the real one
+    // unattributed; buildMatches must still see the equal-score twin and
+    // mark the google call ambiguous.
+    const deduped = dedupeCrmCallRows([row('c1', 'lead-a', 'CAcall'), row('c1', 'lead-b', 'CAcall')]);
+    expect(deduped).toHaveLength(2);
+    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-a', 'lead-b']);
+  });
+
+  test('a stale stamp alongside two sid-linked leads keeps only the ambiguous pair', () => {
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null),
+      row('c1', 'lead-a', 'CAcall'),
+      row('c1', 'lead-b', 'CAcall'),
+    ]);
+    expect(deduped.map((r) => r.lead_id)).toEqual(['lead-a', 'lead-b']);
+  });
+
+  test('passes through lead-less calls and never merges distinct calls', () => {
+    const deduped = dedupeCrmCallRows([row('c1', null, null), row('c2', null, null, 'CAother')]);
+    expect(deduped.map((r) => r.id)).toEqual(['c1', 'c2']);
+  });
+});
+
+describe('dedupeCrmCallRows — settled-stamp dissent (PR #3303 r5)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, extra = {}) => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: 'CAcall', ...extra,
+  });
+
+  test('a SETTLED stamp targeting a DIFFERENT lead collapses to the STAMPED lead — the repoint is the processor verdict', () => {
+    // Same call → both join rows carry the same call columns: a settled
+    // stamp to lead-stamp while lead-sid still holds the sid residue.
+    // Collapsing to the sid row would hide the repoint; keeping both
+    // would read as ordinary match ambiguity FOREVER and starve the
+    // transfer reconciliation — the stamped lead is the current verdict.
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null, settled),
+      row('c1', 'lead-sid', 'CAcall', settled),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-stamp');
+  });
+
+  test('an UNSETTLED stamp twin still collapses to the sid row — a mid-flight stamp is not a verdict', () => {
+    const inflight = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: 'tok', processing_status: 'processing' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null, inflight),
+      row('c1', 'lead-sid', 'CAcall', inflight),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-sid');
+  });
+
+  test('a settled stamp AGREEING with the sid lead collapses normally', () => {
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-sid' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-sid', 'CAcall', settled),
+      row('c1', 'lead-sid', 'CAcall', settled),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-sid');
+  });
+});
+
+describe('dedupeCrmCallRows — settled stamp beats multi-sid ambiguity (pre-push P1 r14)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, extra = {}) => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: 'CAcall', ...extra,
+  });
+
+  test('two sid-sharing leads plus a settled dissenting stamp collapse to the STAMPED lead', () => {
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-a', 'CAcall', settled),
+      row('c1', 'lead-b', 'CAcall', settled),
+      row('c1', 'lead-stamp', null, settled),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-stamp');
+  });
+
+  test('two sid-sharing leads with NO settled stamp keep their ambiguity (conservative no-bridge)', () => {
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-a', 'CAcall'),
+      row('c1', 'lead-b', 'CAcall'),
+    ]);
+    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-a', 'lead-b']);
+  });
+});
+
+describe('soft-deleted stamp target (codex P1, PR #3303 r7)', () => {
+  const { dedupeCrmCallRows, shapeCallLog } = GoogleCallBridge._private;
+
+  test('a SETTLED stamp whose target the join could not return clears the lead columns and flags the call', () => {
+    // Stamp names lead-B (soft-deleted → absent from the join); only the
+    // obsolete sid lead-A came back. Collapsing to A would let the bridge
+    // rewrite A's source and pull the funnel row back to it.
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-a',
+      lead_call_sid: 'CAcall',
+      twilio_call_sid: 'CAcall',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBeNull();
+    expect(deduped.stamp_target_missing).toBe(true);
+    expect(shapeCallLog(deduped).stampTargetMissing).toBe(true);
+    expect(shapeCallLog(deduped).leadId).toBeNull();
+  });
+
+  test('an UNSETTLED call with an absent stamp target is untouched — no verdict yet', () => {
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-a',
+      lead_call_sid: 'CAcall',
+      twilio_call_sid: 'CAcall',
+      processing_token: 'tok',
+      processing_status: 'processing',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBe('lead-a');
+    expect(deduped.stamp_target_missing).toBeUndefined();
+  });
+
+  test('a settled stamp whose target IS in the join is not flagged', () => {
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-b',
+      lead_call_sid: null,
+      twilio_call_sid: 'CAcall',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBe('lead-b');
+    expect(deduped.stamp_target_missing).toBeUndefined();
+  });
+});
