@@ -666,8 +666,11 @@ async function applyFrozenExistingServiceExtension({
     if (repriced > 0) {
       summary.repricedRowCount += repriced;
       svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
+      // "/application" is the one price unit on every rendered discount
+      // (owner 2026-08-10, same ruling as the customer card) — "visits"
+      // stays schedule language only.
       summary.familyLines.push(
-        `${svc.label || svc.key} $${Number(svc.currentPerVisit).toFixed(2)} → $${Number(svc.newPerVisit).toFixed(2)}/visit (${repriced} upcoming)`,
+        `${svc.label || svc.key} $${Number(svc.currentPerVisit).toFixed(2)} → $${Number(svc.newPerVisit).toFixed(2)}/application (${repriced} upcoming)`,
       );
     }
     if (prepaidRows.length > 0) {
@@ -675,7 +678,7 @@ async function applyFrozenExistingServiceExtension({
       if (credit > 0) {
         creditTotal = Math.round((creditTotal + credit) * 100) / 100;
         summary.creditLines.push(
-          `${svc.label || svc.key} $${credit.toFixed(2)} (${prepaidRows.length} prepaid visit${prepaidRows.length === 1 ? '' : 's'} × $${Number(svc.perVisitSavings).toFixed(2)})`,
+          `${svc.label || svc.key} $${credit.toFixed(2)} (${prepaidRows.length} prepaid application${prepaidRows.length === 1 ? '' : 's'} × $${Number(svc.perVisitSavings).toFixed(2)})`,
         );
         svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
       }

@@ -126,6 +126,9 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(JSON.parse(auditRows[0].metadata)).toMatchObject({
       tier: 'Silver', repricedRowCount: 2, creditAmount: 0,
     });
+    // "/application" is the one price unit on every rendered discount
+    // (owner 2026-08-10) — the bell/audit copy follows the customer card.
+    expect(summary.familyLines).toEqual(['Pest Control $55.00 → $49.50/application (2 upcoming)']);
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
