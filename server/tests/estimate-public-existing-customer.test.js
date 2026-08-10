@@ -191,7 +191,32 @@ describe('existing-customer public estimate page', () => {
     expect(html).toContain('discounts the new services by up to 10%');
     expect(html).toContain('your current service prices stay unchanged');
     expect(html).not.toContain('including the ones you already have');
+    expect(html).not.toContain('current services listed below');
     expect(html).not.toContain('Your existing services');
+  });
+
+  test('extension copy names only the listed current services, never an account-wide claim', () => {
+    // The frozen plan is bounded to the quoted property (codex #3338 r9):
+    // a multi-property member's other-property contract is untouched by the
+    // accept, so the blurb must cover the LISTED services only.
+    const html = renderPage('existing-token-ext-copy', lawnEstimate(), lawnEstimateData(), donMembership({
+      discountAppliesTo: 'new_and_existing_services',
+      existingServices: [{
+        key: 'pest_control',
+        label: 'Pest Control',
+        currentPerVisit: 55,
+        newPerVisit: 49.5,
+        extraDiscountPct: 10,
+        perVisitSavings: 5.5,
+        remainingVisits: 2,
+        upcomingVisitDates: ['2099-10-28', '2100-01-27'],
+        prepaid: false,
+      }],
+    }));
+    expect(html).toContain('off the new services and the current services listed below');
+    expect(html).not.toContain('every qualifying service');
+    expect(html).not.toContain('including the ones you already have');
+    expect(html).toContain('Your existing services');
   });
 
   test('no-benefit membership (combined Bronze, 0% discount) renders no member card', () => {

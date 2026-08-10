@@ -58,6 +58,14 @@ const SERVICE_LABEL = {
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
+// Money equality in INTEGER CENTS (codex #3338 r9): a ±$0.01 tolerance
+// admits values that genuinely differ by a cent — a split-remainder prepaid
+// term ($16.75 ×5 + $16.76) would freeze one shared basis and the accept
+// would credit the frozen figure for every application, a cent off on the
+// remainder. Money columns are numeric(10,2), so exact-cents equality is
+// well-defined; Math.round absorbs float parse noise.
+function sameCents(a, b) { return Math.round(Number(a) * 100) === Math.round(Number(b) * 100); }
+
 // scheduled_date is a pg DATE column arriving as a midnight Date — read the
 // stored calendar day directly (repo DATE-column convention, mirrors
 // waveguard-existing-services.qualifyingRowDateKey), never via ET conversion.
@@ -818,14 +826,17 @@ async function computeMembershipContext(database, {
           if (prepaidEligible.length !== simpleRows.length) continue;
           const firstAllocation = Number(simpleRows.find((row) => Number(row.prepaid_amount) > 0)?.prepaid_amount);
           if (!(firstAllocation > 0)) continue;
-          if (!simpleRows.every((row) => Math.abs(Number(row.prepaid_amount) - firstAllocation) <= 0.01)) continue;
+          // EXACT cents (codex #3338 r9): a split-remainder term's odd cent
+          // is a different allocation — one shared frozen savings would be
+          // a cent off on it. Non-uniform terms stay on the review path.
+          if (!simpleRows.every((row) => sameCents(row.prepaid_amount, firstAllocation))) continue;
           basis = firstAllocation;
           basisRows = simpleRows;
         } else {
           const basisRow = simpleRows.find((row) => Number(row.estimated_price) > 0);
           basis = Number(basisRow?.estimated_price);
           if (!(basis > 0)) continue; // no billable basis to discount
-          basisRows = simpleRows.filter((row) => Math.abs(Number(row.estimated_price) - basis) <= 0.01);
+          basisRows = simpleRows.filter((row) => sameCents(row.estimated_price, basis));
         }
         const frozenRows = basisRows;
         const newPerVisit = round2(basis * (1 - delta));

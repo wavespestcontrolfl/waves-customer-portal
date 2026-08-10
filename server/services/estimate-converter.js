@@ -585,6 +585,13 @@ function hasWaveGuardSetupService(services = []) {
 // or clean rollback, never one without the other. Callers wrap this in a
 // nested transaction: a failure rolls back only the extension, never the
 // accept.
+//
+// Money equality is INTEGER CENTS (codex #3338 r9): a ±$0.01 tolerance
+// admits values that genuinely differ by a cent (split-remainder prepaid
+// allocations, a one-cent price edit), and the frozen figure would then be
+// a cent off the real basis. numeric(10,2) columns make exact cents
+// well-defined; Math.round absorbs float parse noise.
+const extensionSameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
 async function applyFrozenExistingServiceExtension({
   database, customerId, estimateId, estimateData, activatedTier,
   monthlyLaneMember = false, priorQualifyingKeys = [],
@@ -824,8 +831,9 @@ async function applyFrozenExistingServiceExtension({
       // a proportional delta would bill a figure the customer never saw,
       // and stamping the frozen figure could undo a legitimate post-save
       // price change. Drifted rows park for the owner (named in the
-      // notification's review clause below).
-      const matchesFrozen = Math.abs(price - Number(svc.currentPerVisit)) <= 0.01;
+      // notification's review clause below). Exact cents (r9): even a
+      // one-cent move is a different price than quoted.
+      const matchesFrozen = extensionSameCents(price, svc.currentPerVisit);
       if (!matchesFrozen) {
         driftRows += 1;
         continue;
@@ -960,7 +968,9 @@ async function applyFrozenExistingServiceExtension({
           allocationGaps += 1;
           continue;
         }
-        if (Math.abs(allocation - frozenBasis) > 0.01) {
+        // Exact cents (codex #3338 r9): a one-cent-different allocation is
+        // a different paid slice — the frozen savings no longer describes it.
+        if (!extensionSameCents(allocation, frozenBasis)) {
           allocationDrift += 1;
           continue;
         }

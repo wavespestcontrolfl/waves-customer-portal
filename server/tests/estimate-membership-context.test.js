@@ -942,6 +942,37 @@ describe('existing-service tier extension snapshot', () => {
     expect(unevenCtx.existingServices).toEqual([]);
   });
 
+  test('gate on: one-cent basis differences are different bases (exact cents)', async () => {
+    mockExtendExistingGate = true;
+    // Split-remainder prepaid term ($16.75 + $16.76): one shared frozen
+    // savings would be a cent off on the remainder application (codex
+    // #3338 r9) — not uniform, review path.
+    const remainder = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 20, annual_prepay_term_id: 'term-1', prepaid_amount: 16.75,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 20, annual_prepay_term_id: 'term-1', prepaid_amount: 16.76,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const remainderCtx = await computeMembershipContext(remainder, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(remainderCtx.existingServices).toEqual([]);
+    // Same rule on the pay-per-visit basis: a $120.01 sibling is NOT the
+    // $120 basis and stays off the frozen plan.
+    const centOff = fakeDb({
+      scheduledRows: [
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120.01 },
+      ],
+      paidInvoices: [],
+    });
+    const centCtx = await computeMembershipContext(centOff, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(centCtx.existingServices[0]).toMatchObject({ rowIds: ['s1'], remainingVisits: 1 });
+  });
+
   test('gate on: a visit with add-ons is excluded from the frozen plan; probe failure parks the family', async () => {
     mockExtendExistingGate = true;
     const withAddon = fakeDb({

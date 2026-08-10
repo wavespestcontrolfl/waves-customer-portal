@@ -4239,6 +4239,12 @@ function renderMembershipBlockHtml(membership) {
     ? `Welcome back, ${escapeHtml(membership.firstName)}`
     : 'Welcome back';
 
+  // The extension claim names ONLY the listed services (codex #3338 r9):
+  // the frozen plan is bounded to the quoted property, so "every qualifying
+  // service, including the ones you already have" would overpromise for a
+  // multi-property member whose other property carries the same family —
+  // that contract is untouched by the accept. The rows rendered below ARE
+  // the covered set.
   const upgradeHtml = membership.upgrade ? `
     <div class="wg-upgrade">
       Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
@@ -4246,7 +4252,7 @@ function renderMembershipBlockHtml(membership) {
       up to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
       ${membership.discountAppliesTo === 'new_services_only'
         ? `for this estimate. That tier discounts the new services by up to ${Number(membership.tierDiscountPct) || 0}%; your current service prices stay unchanged.`
-        : `&mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
+        : `&mdash; an extra ${membership.upgrade.deltaPct}% off the new services and the current services listed below.`}
     </div>` : '';
 
   const existingHtml = existing.length ? `

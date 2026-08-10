@@ -692,6 +692,36 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(cleared.dirtyFamilies).toEqual(['pest_control']);
   });
 
+  test('one-cent drift is drift: price and allocation matches are exact cents', async () => {
+    // Price side: a $55.01 row is NOT the quoted $55 basis (codex #3338
+    // r9) — under the old ±$0.01 tolerance it would have been repriced.
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow({ id: 'row-1', estimated_price: 55.01 })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit priced differently than quoted — apply manually)',
+    ]);
+    // Allocation side: a $49.01 slice is NOT the frozen $49 basis — under
+    // the old > $0.01 check it would have been credited the frozen $4.90.
+    const { database: allocDb } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49.01 }),
+    ];
+    const alloc = await applyFrozenExistingServiceExtension({
+      database: allocDb, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData({ rowIds: ['pre-1'] }), activatedTier: 'Silver',
+    });
+    expect(alloc.creditAmount).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(alloc.reviewFamilies).toEqual([
+      'Pest Control (1 prepaid visit whose paid allocation changed since the estimate — credit manually)',
+    ]);
+  });
+
   test('locked allocation read failure parks the family uncredited', async () => {
     const { database } = fakeTrx({ lockThrows: true });
     mockRowsState.rows = [
