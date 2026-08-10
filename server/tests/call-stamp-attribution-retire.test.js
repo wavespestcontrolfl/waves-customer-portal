@@ -346,10 +346,29 @@ describe('rejection-repair marker on the no_attribution clear (codex P1 r20)', (
     expect(branch).toMatch(/if \(!leadId && !mdRaw\.attribution_transfer_pending\)/);
   });
 
-  test('the target comes from DURABLE linkage only — live stamp, else the sid-originated live lead', () => {
-    expect(branch).toMatch(/mdRaw\.lead_id \? String\(mdRaw\.lead_id\) : null/);
-    expect(branch).toMatch(/twilio_call_sid: liveRow\.twilio_call_sid/);
+  test('the REJECTION-RECORDED lead is the authoritative target — phone reuse leaves no stamp or sid (codex P1 r21)', () => {
+    expect(branch).toMatch(/mdRaw\.no_attribution_lead_ids/);
+    // Only an unambiguous, still-live record is used.
+    expect(branch).toMatch(/recordedLeadIds\.length === 1/);
     expect(branch).toMatch(/whereNull\('deleted_at'\)/);
+    // ...and the verdict that strips the rows is what persists them.
+    expect(src).toMatch(/whereNotNull\('lead_id'\)/);
+    expect(src).toMatch(/'\{no_attribution_lead_ids\}'/);
+  });
+
+  test('stamp and sid remain the fallback arms, and an AMBIGUOUS sid refuses (codex P1 r21)', () => {
+    expect(branch).toMatch(/if \(!target && mdRaw\.lead_id\) target = String\(mdRaw\.lead_id\)/);
+    expect(branch).toMatch(/twilio_call_sid: liveRow\.twilio_call_sid/);
+    // leads.twilio_call_sid is NOT unique — a second live row must fail closed.
+    expect(branch).toMatch(/\.limit\(2\)/);
+    expect(branch).toMatch(/sidLeads\.length === 1/);
+  });
+
+  test('database failures in the repair PROPAGATE — only the JSON parse is swallowed (codex P1 r21)', () => {
+    // A swallowed statement error would return `written` from an already
+    // aborted transaction and report an unfinalized call as completed.
+    expect(branch).toMatch(/catch \{ mdRaw = null;/);
+    expect(branch).not.toMatch(/\} catch \{ \/\* unparseable metadata: leave the marker, conservative \*\/ \}/);
   });
 
   test('the channel is resolved through the SHARED resolver and bridge targets are excluded', () => {
@@ -359,9 +378,9 @@ describe('rejection-repair marker on the no_attribution clear (codex P1 r20)', (
   });
 
   test('the marker is written ATOMICALLY with the clear — one jsonb expression, marker armed on the already-cleared object', () => {
-    expect(branch).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution', '\{attribution_transfer_pending\}'/);
+    expect(branch).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids', '\{attribution_transfer_pending\}'/);
     // and the plain clear is still the fallback when no repair is possible
-    expect(branch).toMatch(/: db\.raw\("COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution'"\)/);
+    expect(branch).toMatch(/: db\.raw\("COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids'"\)/);
   });
 
   test('the shared resolver is used by the lead path too — no second copy of the variant matching', () => {

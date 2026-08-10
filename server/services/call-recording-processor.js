@@ -12565,15 +12565,26 @@ const CallRecordingProcessor = {
         // non-sales classification (pre-push P0 r8) is NOT such a
         // correction — it validates no attribution, so it must not
         // reopen a definitively rejected call to the bridge.
-        try {
+        {
           // The LIVE row, not the in-memory snapshot: the repair decision
           // below reads linkage state this pass may have just rewritten.
           const liveRow = await trx('call_log')
             .where({ id: call.id })
             .first('metadata', 'twilio_call_sid', 'to_phone');
-          const mdRaw = typeof liveRow?.metadata === 'string'
-            ? JSON.parse(liveRow.metadata)
-            : (liveRow?.metadata || {});
+          // ONLY the parse is guarded (codex P1 r21). Every database
+          // statement below must PROPAGATE: a failed statement has already
+          // aborted this transaction, so swallowing it would let the
+          // callback return `written` and report a finalized call whose
+          // status write, token clear and repair were all rolled back —
+          // the same silent-rollback trap the attribution write refuses at
+          // the runCallPpcAttribution site. A throw here lands in the
+          // outer `catch (procErr)` extraction_failed retry lane.
+          let mdRaw = null;
+          try {
+            mdRaw = typeof liveRow?.metadata === 'string'
+              ? JSON.parse(liveRow.metadata)
+              : (liveRow?.metadata || {});
+          } catch { mdRaw = null; /* unparseable metadata: leave the marker, conservative */ }
           if (mdRaw && mdRaw.no_attribution) {
             // REPAIR, not just forgiveness (codex P1 r20): the earlier
             // rejection retired this call's funnel row, and when THIS pass
@@ -12588,15 +12599,38 @@ const CallRecordingProcessor = {
             // the target, and completes exactly this write.
             let repairPayload = null;
             if (!leadId && !mdRaw.attribution_transfer_pending) {
-              // Durable linkage only: the stamp this call still carries,
-              // else the lead that originated from its sid.
-              let target = mdRaw.lead_id ? String(mdRaw.lead_id) : null;
-              if (!target && liveRow?.twilio_call_sid) {
-                const sidLead = await trx('leads')
-                  .where({ twilio_call_sid: liveRow.twilio_call_sid })
+              // The lead the REJECTION itself recorded is authoritative
+              // (codex P1 r21): a phone-REUSED lead carries neither this
+              // call's sid nor a stamp — stampThisPass requires !phone —
+              // so stamp/sid resolution alone silently found no target for
+              // exactly the linkage mode this repair exists to rescue.
+              // Only an unambiguous, still-live record is used; anything
+              // else falls through to the durable-linkage arms.
+              const recordedLeadIds = Array.isArray(mdRaw.no_attribution_lead_ids)
+                ? [...new Set(mdRaw.no_attribution_lead_ids.filter(Boolean).map(String))]
+                : [];
+              let target = null;
+              if (recordedLeadIds.length === 1) {
+                const recordedLead = await trx('leads')
+                  .where({ id: recordedLeadIds[0] })
                   .whereNull('deleted_at')
                   .first('id');
-                if (sidLead) target = String(sidLead.id);
+                if (recordedLead) target = String(recordedLead.id);
+              }
+              if (!target && mdRaw.lead_id) target = String(mdRaw.lead_id);
+              if (!target && liveRow?.twilio_call_sid) {
+                // `leads.twilio_call_sid` is NOT unique, and this query is
+                // not the processor's authoritative newest-first
+                // resolution — an arbitrary pick would move the corrected
+                // call's history onto the wrong lead. Require a UNIQUE
+                // live match and otherwise fail closed to a plain clear
+                // (codex P1 r21).
+                const sidLeads = await trx('leads')
+                  .where({ twilio_call_sid: liveRow.twilio_call_sid })
+                  .whereNull('deleted_at')
+                  .limit(2)
+                  .select('id');
+                if (sidLeads.length === 1) target = String(sidLeads[0].id);
               }
               if (target) {
                 const { row: repairSource } = await resolveCallLeadSource({
@@ -12627,15 +12661,30 @@ const CallRecordingProcessor = {
             await trx('call_log').where({ id: call.id }).update({
               metadata: repairPayload
                 ? db.raw(
-                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution', '{attribution_transfer_pending}', ?::jsonb, true)",
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids', '{attribution_transfer_pending}', ?::jsonb, true)",
                   [JSON.stringify(repairPayload)],
                 )
-                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids'"),
             });
           }
-        } catch { /* unparseable metadata: leave the marker, conservative */ }
+        }
       }
       if (written > 0 && deferredNonLeadAttributionRetire) {
+        // WHICH leads this rejection is about to strip, captured BEFORE
+        // the retire clears the provenance that names them (codex P1 r21).
+        // A phone-REUSED lead carries neither this call's sid nor a stamp,
+        // so the verdict itself is the only place that still knows the
+        // answer — without it a later corrected pass cannot tell what to
+        // repair. Reassigned-to-successor rows are recorded too and cost
+        // nothing: the repair's write then refuses as 'other_call' (the
+        // lead is counted once by design) and the sweep clears the marker.
+        const retiredLeadIds = [...new Set(
+          (await trx('ad_service_attribution')
+            .where({ source_call_id: call.id })
+            .whereNotNull('lead_id')
+            .select('lead_id'))
+            .map((r) => String(r.lead_id)),
+        )];
         await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
         // Durable no-attribution verdict, same transaction (pre-push P1
         // r14): the google bridge would otherwise re-join this call's
@@ -12646,9 +12695,14 @@ const CallRecordingProcessor = {
         await trx('call_log')
           .where({ id: call.id })
           .update({
-            metadata: db.raw(
-              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
-            ),
+            metadata: retiredLeadIds.length
+              ? db.raw(
+                "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true)",
+                [JSON.stringify(retiredLeadIds)],
+              )
+              : db.raw(
+                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
+              ),
           });
       }
       return written;
