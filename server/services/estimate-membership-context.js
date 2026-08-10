@@ -627,6 +627,14 @@ async function computeMembershipContext(database, {
   // this flag gets tier/upgrade/new-service context but no frozen plan —
   // the review-bell fallback, never a wrong-property write.
   freezeExtensionPlan = false,
+  // Street bound for the frozen PLAN alone (codex #3338 r8): the primary-
+  // address lane keeps ACCOUNT-WIDE priors pricing (long-standing, ungated),
+  // so the tier/upgrade context here must keep matching it — but the plan
+  // must never freeze a visit outside the quoted street. Rows at another
+  // property stay on the review-bell path. Grouped/secondary estimates pass
+  // the global streetScope instead (their pricing scoped the same way), and
+  // this bound is then redundant.
+  extensionStreetScope = null,
 } = {}) {
   try {
     if (!customerId) return null;
@@ -725,6 +733,16 @@ async function computeMembershipContext(database, {
       && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
       const today = etDateString();
+      // Quoted-street bound for the plan (codex #3338 r8): on the primary-
+      // address lane existingRows are account-wide (matching the priors
+      // pricing), so a multi-property customer's other-property series must
+      // be filtered out HERE before any family can freeze it. Null when the
+      // caller's rows were already street-scoped globally.
+      let planEligibleIds = null;
+      if (extensionStreetScope) {
+        const planScopedRows = await filterRowsToStreet(database, existingRows, extensionStreetScope);
+        planEligibleIds = new Set(planScopedRows.map((row) => String(row.id)));
+      }
       // The plan is built from the CATALOG-AUTHORITATIVE enriched qualifying
       // rows — the SAME loader + classifier the accept-time apply matches
       // with (codex #3338 r18: a stale service_type label must never freeze
@@ -746,6 +764,7 @@ async function computeMembershipContext(database, {
         // estimate itself — never also listed as an existing extension.
         if (newKeys.includes(familyKey)) continue;
         const eligibleRows = familyRows.filter((row) => {
+          if (planEligibleIds && !planEligibleIds.has(String(row.id))) return false;
           if (isCallbackServiceRow(row)) return false;
           const day = visitDateKey(row.scheduled_date);
           if (!day || day < today) return false;

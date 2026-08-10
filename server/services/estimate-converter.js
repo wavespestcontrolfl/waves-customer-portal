@@ -602,6 +602,11 @@ async function applyFrozenExistingServiceExtension({
     // rows, allocation gaps) — the committed recap projects only families
     // absent from this list (codex #3338 r26).
     dirtyFamilies: [],
+    // Appointment identities this apply actually repriced or credited —
+    // persisted into the audit metadata so a LATER accept's dedup blocks
+    // only these exact applications, never a disjoint same-family plan at
+    // another property (codex #3338 r8).
+    appliedRowIds: [],
     monthlyRateReviewNeeded: false,
   };
   const snapshot = estimateData?.membershipSnapshot;
@@ -669,18 +674,20 @@ async function applyFrozenExistingServiceExtension({
     return true;
   });
 
-  // At-most-once per family (codex #3338 r7 dedup): a SECOND tier-raising
-  // estimate saved before the first was accepted freezes the same
-  // Bronze-origin plan, and accepting both must not reprice or credit the
-  // same applications twice. Row reprices self-park on the second pass (the
-  // frozen-price check no longer matches the already-lowered price) but the
-  // prepaid credit has no natural guard — prepaid_amount is untouched by
-  // design. The applied-extension audit row commits atomically with the
-  // writes, so it is the reliable at-most-once marker: any prior applied
-  // extension covering a family parks that family for owner review instead
-  // of re-applying. FAIL CLOSED: if the audit probe cannot run, every
-  // family parks.
-  let previouslyExtended = new Map();
+  // At-most-once per covered appointment (codex #3338 r7 dedup, refined by
+  // r8): a SECOND tier-raising estimate saved before the first was accepted
+  // freezes the same Bronze-origin plan, and accepting both must not
+  // reprice or credit the same applications twice. Row reprices self-park
+  // on the second pass (the frozen-price check no longer matches the
+  // already-lowered price) but the prepaid credit has no natural guard —
+  // prepaid_amount is untouched by design. The applied-extension audit row
+  // commits atomically with the writes, so it is the reliable at-most-once
+  // marker: a plan whose frozen appointments INTERSECT a prior extension's
+  // covered appointments parks for owner review instead of re-applying —
+  // while a disjoint same-family plan (the same family at another property)
+  // still applies. FAIL CLOSED: audits without identities block their whole
+  // family; if the probe cannot run, every family parks.
+  let priorExtensionCoverage = [];
   try {
     const priorAudits = await database('activity_log')
       .where({ customer_id: customerId, action: 'waveguard_tier_extension_applied' })
@@ -691,28 +698,30 @@ async function applyFrozenExistingServiceExtension({
         meta = typeof auditRow.metadata === 'string' ? JSON.parse(auditRow.metadata) : auditRow.metadata;
       } catch { meta = null; }
       if (!meta || String(meta.estimateId) === String(estimateId)) continue;
-      for (const key of (Array.isArray(meta.families) ? meta.families : [])) {
-        if (!previouslyExtended.has(key)) previouslyExtended.set(key, meta.estimateId);
-      }
+      priorExtensionCoverage.push({
+        estimateId: meta.estimateId,
+        families: new Set(Array.isArray(meta.families) ? meta.families : []),
+        // Covered appointment identities (codex #3338 r8): a prior
+        // extension blocks only the appointments it actually repriced or
+        // credited — a same-family plan whose frozen rows are DISJOINT
+        // (the same Bronze family at a different property) still applies.
+        // An audit without identities (malformed) blocks its whole family,
+        // fail closed.
+        appliedRowIds: Array.isArray(meta.appliedRowIds)
+          ? new Set(meta.appliedRowIds.map(String))
+          : null,
+      });
     }
   } catch (probeErr) {
     logger.warn(`[estimate-converter] prior-extension audit probe failed — parking the plan: ${probeErr.message}`);
-    previouslyExtended = null;
+    priorExtensionCoverage = null;
   }
 
   let creditTotal = 0;
   const creditTermIds = new Set();
   for (const svc of plan) {
-    if (previouslyExtended === null) {
+    if (priorExtensionCoverage === null) {
       summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify prior extensions — apply manually)`);
-      summary.dirtyFamilies.push(svc.key);
-      continue;
-    }
-    const priorExtensionEstimate = svc.keys.map((key) => previouslyExtended.get(key)).find(Boolean);
-    if (priorExtensionEstimate) {
-      summary.reviewFamilies.push(
-        `${svc.label || svc.key} (already extended via estimate #${priorExtensionEstimate} — verify before applying again)`,
-      );
       summary.dirtyFamilies.push(svc.key);
       continue;
     }
@@ -724,6 +733,16 @@ async function applyFrozenExistingServiceExtension({
     const frozenRowIds = Array.isArray(svc.rowIds) ? svc.rowIds.map(String) : [];
     if (!frozenRowIds.length) {
       summary.reviewFamilies.push(`${svc.label || svc.key} (no frozen appointment identities — apply manually)`);
+      continue;
+    }
+    const priorHit = priorExtensionCoverage.find((prior) => (prior.appliedRowIds === null
+      ? svc.keys.some((key) => prior.families.has(key))
+      : frozenRowIds.some((id) => prior.appliedRowIds.has(id))));
+    if (priorHit) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (already extended via estimate #${priorHit.estimateId} — verify before applying again)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
       continue;
     }
     let familyRows = liveRows.filter((row) => frozenRowIds.includes(String(row.id))
@@ -827,6 +846,7 @@ async function applyFrozenExistingServiceExtension({
       }
       repriced += 1;
       repricedApplied.push(row);
+      summary.appliedRowIds.push(String(row.id));
     }
     // Mint race (codex #3338 r7): Charge Now reads the visit without a row
     // lock, so an invoice built from the OLD price can commit between the
@@ -861,6 +881,7 @@ async function applyFrozenExistingServiceExtension({
             throw new Error(`extension revert failed for scheduled service ${row.id}`);
           }
           repriced -= 1;
+          summary.appliedRowIds = summary.appliedRowIds.filter((id) => id !== String(row.id));
         }
         summary.reviewFamilies.push(
           `${svc.label || svc.key} (${revertRows.length} visit${revertRows.length === 1 ? '' : 's'} invoiced during apply — reverted, adjust manually)`,
@@ -945,6 +966,7 @@ async function applyFrozenExistingServiceExtension({
         }
         familyCredit = Math.round((familyCredit + frozenSavings) * 100) / 100;
         creditedRows += 1;
+        summary.appliedRowIds.push(String(row.id));
         // Term breadcrumb for the credit note (codex #3338 r27): the
         // annual-prepay refund flow claws back only its own credit class,
         // so the ledger note must name the term(s) this credit rode on —
@@ -999,6 +1021,9 @@ async function applyFrozenExistingServiceExtension({
         estimateId,
         tier: activatedTier,
         families: summary.families,
+        // The exact appointments repriced/credited — the dedup key a later
+        // accept's at-most-once check intersects against (codex #3338 r8).
+        appliedRowIds: [...summary.appliedRowIds].sort(),
         repricedRowCount: summary.repricedRowCount,
         familyLines: summary.familyLines,
         creditAmount: summary.creditAmount,

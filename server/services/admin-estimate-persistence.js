@@ -1814,17 +1814,26 @@ async function resolveEstimateWritePayload({
         // The snapshot sees exactly the rows the priors lookup above priced
         // with (codex #3338 r22): grouped estimates scope to the quoted
         // street; a grouped estimate whose street could not be parsed
-        // priced with NO priors, so the snapshot sees none either.
+        // priced with NO priors, so the snapshot sees none either. The
+        // primary-address lane prices priors ACCOUNT-WIDE (long-standing),
+        // so its tier context stays account-wide to match — but its frozen
+        // PLAN is still bounded to the quoted street (codex #3338 r8): a
+        // multi-property customer's other-property series must never be
+        // frozen (or later repriced) by a primary-address estimate.
         ...(groupedEstimate
           ? (perPropertyStreetScope
             ? { streetScope: perPropertyStreetScope }
             : { excludeExistingRows: true })
-          : {}),
-        // This lane resolves property scope (the branches above mirror the
-        // priors pricing), so it may freeze an existing-service extension
-        // plan. Agent lanes (IB estimate tools, estimator engine) pass no
-        // scope and deliberately stay plan-less (codex #3338 r7).
-        freezeExtensionPlan: true,
+          : (perPropertyStreetScope
+            ? { extensionStreetScope: perPropertyStreetScope }
+            : {})),
+        // This lane resolves property scope, so it may freeze an
+        // existing-service extension plan — but only when the quoted street
+        // actually resolved (no parsed street = no way to bound the plan =
+        // review-bell fallback, fail closed). Agent lanes (IB estimate
+        // tools, estimator engine) pass no scope and deliberately stay
+        // plan-less (codex #3338 r7).
+        freezeExtensionPlan: !!perPropertyStreetScope,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;

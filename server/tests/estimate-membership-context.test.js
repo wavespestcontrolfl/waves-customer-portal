@@ -1013,6 +1013,53 @@ describe('existing-service tier extension snapshot', () => {
     expect(ctx.discountAppliesTo).toBe('new_services_only');
   });
 
+  test('primary-lane plan scoping: a series stamped at another property never freezes; tier context stays account-wide', async () => {
+    mockExtendExistingGate = true;
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    // Pest series stamped at the customer's SECONDARY property while the
+    // estimate quotes the primary street (codex #3338 r8): the primary
+    // lane's priors pricing is account-wide, so the tier context must keep
+    // matching it — but the frozen plan must not cover the other
+    // property's visits.
+    const database = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row,
+        service_address_line1: '999 Other Ave',
+        service_address_city: 'Venice',
+        service_address_zip: '34285',
+      })),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      extensionStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey },
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+    // Control: the same series stamped AT the quoted street freezes.
+    const atQuoted = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row,
+        service_address_line1: '123 Main St',
+        service_address_city: 'Venice',
+        service_address_zip: '34285',
+      })),
+      paidInvoices: [],
+    });
+    const scoped = await computeMembershipContext(atQuoted, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      extensionStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey },
+    });
+    expect(scoped.existingServices).toHaveLength(1);
+    expect(scoped.existingServices[0].rowIds).toEqual(['s1', 's2', 's3']);
+  });
+
   test('gate on: a family this estimate re-quotes is never listed as an extension too', async () => {
     mockExtendExistingGate = true;
     const database = fakeDb({

@@ -8097,7 +8097,7 @@ export default function EstimateToolViewV2({
             )}
 
             {memberLinkageWarning && (
-              <div className="text-12 text-ink bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-3 mt-2">
+              <div className="text-14 text-ink bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-3 mt-2">
                 <span className="font-medium">Member pricing not applied.</span>{" "}
                 {memberLinkageWarning.message}
               </div>

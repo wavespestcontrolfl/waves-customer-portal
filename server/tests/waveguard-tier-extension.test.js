@@ -257,7 +257,11 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(auditRows).toHaveLength(1);
     expect(auditRows[0]).toMatchObject({ customer_id: 'c1', action: 'waveguard_tier_extension_applied' });
     expect(JSON.parse(auditRows[0].metadata)).toMatchObject({
-      tier: 'Silver', repricedRowCount: 2, creditAmount: 0,
+      tier: 'Silver',
+      repricedRowCount: 2,
+      creditAmount: 0,
+      // The dedup key a later accept intersects against (codex #3338 r8).
+      appliedRowIds: ['row-1', 'row-2'],
     });
     // "/application" is the one price unit on every rendered discount
     // (owner 2026-08-10) — the bell/audit copy follows the customer card.
@@ -375,6 +379,7 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(summary.applied).toBe(true);
     expect(summary.creditAmount).toBe(9.8);
     expect(summary.dirtyFamilies).toEqual([]);
+    expect([...summary.appliedRowIds].sort()).toEqual(['pre-1', 'pre-2']);
     expect(summary.creditLines).toEqual([
       'Pest Control $9.80 (2 prepaid applications × $4.90/application off the paid allocation)',
     ]);
@@ -587,7 +592,7 @@ describe('applyFrozenExistingServiceExtension', () => {
   });
 
   test('an invoice minted during the apply reverts that visit and parks it (mint race)', async () => {
-    const { database, updates } = fakeTrx({ invoiceLinksLateMint: ['row-1'] });
+    const { database, updates, auditRows } = fakeTrx({ invoiceLinksLateMint: ['row-1'] });
     mockRowsState.rows = [
       pestRow({ id: 'row-1' }),
       pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
@@ -610,6 +615,50 @@ describe('applyFrozenExistingServiceExtension', () => {
       'Pest Control (1 visit invoiced during apply — reverted, adjust manually)',
     ]);
     expect(summary.dirtyFamilies).toEqual(['pest_control']);
+    // The reverted visit is NOT a covered appointment — a later accept's
+    // dedup must not treat it as already extended (codex #3338 r8).
+    expect(JSON.parse(auditRows[0].metadata).appliedRowIds).toEqual(['row-2']);
+  });
+
+  test('dedup is by covered appointments: a disjoint same-family plan at another property still applies', async () => {
+    // A prior accept extended property A's pest visits; this plan freezes
+    // property B's — same family key, completely disjoint row ids. It must
+    // apply, not park (codex #3338 r8 refinement of the r7 family-level
+    // at-most-once).
+    const { database, updates } = fakeTrx({
+      priorExtensionAudits: [{
+        metadata: JSON.stringify({
+          estimateId: 'e0', families: ['pest_control'], appliedRowIds: ['propA-1', 'propA-2'],
+        }),
+      }],
+    });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(true);
+    expect(updates).toEqual([{ id: 'row-1', estimated_price: 49.5 }]);
+    expect(summary.reviewFamilies).toEqual([]);
+    // Overlapping identities still park — the double-credit case.
+    const { database: overlapDb, updates: overlapUpdates } = fakeTrx({
+      priorExtensionAudits: [{
+        metadata: JSON.stringify({
+          estimateId: 'e0', families: ['pest_control'], appliedRowIds: ['row-1'],
+        }),
+      }],
+    });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const overlap = await applyFrozenExistingServiceExtension({
+      database: overlapDb, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(overlap.applied).toBe(false);
+    expect(overlapUpdates).toEqual([]);
+    expect(overlap.reviewFamilies).toEqual([
+      'Pest Control (already extended via estimate #e0 — verify before applying again)',
+    ]);
+    expect(overlap.dirtyFamilies).toEqual(['pest_control']);
   });
 
   test('a prepaid allocation changed between read and credit parks (locked re-read)', async () => {
