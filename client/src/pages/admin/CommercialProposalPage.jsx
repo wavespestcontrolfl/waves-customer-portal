@@ -417,7 +417,14 @@ export default function CommercialProposalPage() {
       // by the programs branch above.
       if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim() && programsInstalled) {
         setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
-        generatedRespByFamilyRef.current = draft.responsibilitiesByFamily || null;
+        // MERGE over the load-time registry, never replace — the draft map
+        // carries only the generated families, and a later family switch
+        // needs the FULL registry to install the new family's lines
+        // (pre-push codex r14b).
+        generatedRespByFamilyRef.current = {
+          ...(generatedRespByFamilyRef.current || {}),
+          ...(draft.responsibilitiesByFamily || {}),
+        };
         filled += 1;
       }
       if (filled > 0) {
