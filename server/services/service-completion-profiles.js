@@ -283,11 +283,20 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // does — never a coin flip between a recurring and a one-time identity, where
   // one side bills the customer. Same fail-closed rule the accept-path catalog
   // lookup uses for duplicate engine keys (#3328 r3).
-  const shortNameMatches = await knex('services')
-    .whereRaw('lower(short_name) = lower(?)', [serviceType])
-    .limit(2)
-    .select('service_key', 'name', 'category', 'billing_type')
-    .catch(() => []);
+  // try/catch rather than `.catch()` ON THE BUILDER: a rejected query and a
+  // builder that never returns a thenable are different failures, and only the
+  // first has a `.catch`. Guarding with Array.isArray keeps a non-array result
+  // on the fail-closed side instead of reading `.length` off whatever came back.
+  let shortNameMatches = [];
+  try {
+    shortNameMatches = await knex('services')
+      .whereRaw('lower(short_name) = lower(?)', [serviceType])
+      .limit(2)
+      .select('service_key', 'name', 'category', 'billing_type');
+  } catch (err) {
+    shortNameMatches = [];
+  }
+  if (!Array.isArray(shortNameMatches)) shortNameMatches = [];
   if (shortNameMatches.length === 1) return shortNameMatches[0];
   if (shortNameMatches.length > 1) {
     logger.warn(`[completion-profiles] short name "${serviceType}" is shared by multiple catalog services — refusing to guess an identity (give the rows distinct short names)`);
