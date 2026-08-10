@@ -2927,6 +2927,29 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
+  // Multifamily/HOA master-parcel guidance: county rolls model condo and
+  // townhome communities as building-level "Multifamily" parcels, so a
+  // unit-less address (typed or geocoder-snapped) resolves to the
+  // ASSOCIATION'S whole-building parcel and flips an individual resident's
+  // lookup to Commercial (two real leads in two days: a condo flea call and
+  // a townhome spider/wasp form lead, both truly residential units).
+  // Guidance only — the classification, the commercial manual-quote gate,
+  // and every pricing path are untouched; the operator decides
+  // resident-vs-association. Distinct field key so the win/loss byFlagField
+  // slice doesn't double-count propertyType.
+  if (rc && detectCategory(rc, ai) === 'COMMERCIAL') {
+    const masterParcelSubtype = resolveCommercialSubtype(rc, ai);
+    if (masterParcelSubtype === 'multifamily_common_area_residential'
+        || masterParcelSubtype === 'hoa_common_area_residential') {
+      const unitCount = Number(rc.unitCount) || 0;
+      flags.push({
+        field: 'commercialSubtype',
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way. If the customer is a resident of ONE unit, collect the unit number and price it as a residential condo/townhome unit (override Property Type). Commercial applies only when the client is the association or property manager.`,
+        priority: 'HIGH',
+      });
+    }
+  }
+
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {

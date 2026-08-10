@@ -348,3 +348,72 @@ describe('buildEnrichedProfile end-to-end', () => {
     expect(profile.isCommercial).toBe(true);
   });
 });
+
+// Condo/townhome resident misclassification (2026-08-10): county rolls file
+// these communities as building-level "Multifamily" master parcels, so a
+// unit-less address resolves to the association's whole building and a
+// resident's lookup prices commercial. The guidance flag names the fix
+// without touching the classification itself.
+describe('multifamily master-parcel guidance flag', () => {
+  const { buildFieldVerifyFlags } = routePrivate;
+
+  function countyMultifamilyBuilding(overrides = {}) {
+    return {
+      formattedAddress: '100 Harbour Isle Ct, Bradenton, FL 34212',
+      propertyType: 'Multifamily',
+      unitCount: 8,
+      squareFootage: 63096,
+      lotSize: 93940,
+      stories: 2,
+      _source: 'county',
+      ...overrides,
+    };
+  }
+
+  test('county Multifamily building parcel → HIGH guidance naming the unit count and the resident path', () => {
+    const flags = buildFieldVerifyFlags(countyMultifamilyBuilding(), null, null);
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/8-unit/);
+    expect(flag.reason).toMatch(/master parcel/i);
+    expect(flag.reason).toMatch(/unit number/i);
+    expect(flag.reason).toMatch(/association or property manager/i);
+  });
+
+  test('HOA common-area parcel subtype gets the same guidance (no unit-count prefix at 1)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'HOA Common Area', unitCount: 1 }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/\d-unit/);
+  });
+
+  test('true commercial (office) → no master-parcel guidance even with unitCount > 4', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Office Building' }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('residential single-family → no guidance', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Single Family', unitCount: 1, squareFootage: 1200 }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('untrusted AI-only Multifamily (Gateway Ave shape) classifies residential → no guidance either', () => {
+    const flags = buildFieldVerifyFlags(untrustedAiRecord(), null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('guidance rides the enriched profile without changing the commercial verdict', () => {
+    const profile = buildEnrichedProfile(countyMultifamilyBuilding(), {}, 27.5, -82.45);
+    expect(profile.category).toBe('COMMERCIAL');
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('multifamily_common_area_residential');
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+});
