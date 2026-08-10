@@ -246,6 +246,7 @@ const PROPERTY_PREFERENCES = {
   irrigationSystem: true, irrigationControllerLocation: 'Garage', irrigationZones: 6,
   irrigationInchesPerWeek: null, irrigationScheduleNotes: '', wateringDays: ['tuesday', 'saturday'],
   irrigationSystemType: [], rainSensor: true, irrigationIssues: '',
+  mowingDays: ['Thu'], mowingTimeOfDay: 'morning', mowingNotes: '',
   hoaName: '', hoaRestrictions: '', hoaCompany: '', hoaPhone: '', hoaEmail: '',
   hoaLawnHeight: '', hoaSignageRules: '', hoaTimingRestrictions: '', hoaInspectionPeriod: '',
   accessNotes: '', specialInstructions: '',

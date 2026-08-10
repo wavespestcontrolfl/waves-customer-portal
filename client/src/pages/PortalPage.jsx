@@ -6494,6 +6494,13 @@ function PropertyTab({ customer }) {
   const irrigationSummary = prefs.irrigationSystem
     ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
     : 'No irrigation system listed';
+  const MOWING_DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const MOWING_TIME_SUMMARY = { morning: 'mornings', midday: 'midday', afternoon: 'afternoons', varies: 'time varies' };
+  const mowingDaysList = MOWING_DAY_ORDER.filter(d => (Array.isArray(prefs.mowingDays) ? prefs.mowingDays : []).includes(d));
+  const mowingTimeLabel = MOWING_TIME_SUMMARY[prefs.mowingTimeOfDay] || '';
+  const mowingSummary = mowingDaysList.length
+    ? `${mowingDaysList.join(', ')}${mowingTimeLabel ? ` · ${mowingTimeLabel}` : ''}`
+    : 'No mowing schedule listed';
   const hoaSummary = prefs.hoaName || prefs.hoaCompany || 'No HOA details listed';
   const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const staticMapUrl = mapsKey && customer.address?.line1
@@ -6563,7 +6570,7 @@ function PropertyTab({ customer }) {
                 My Property
               </h1>
               <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-                Access notes, pets, scheduling preferences, irrigation, and HOA details for your service team.
+                Access notes, pets, scheduling preferences, irrigation, mowing, and HOA details for your service team.
               </div>
               {fullAddress && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{fullAddress}</div>}
             </div>
@@ -6884,6 +6891,41 @@ function PropertyTab({ customer }) {
             </div>
           </>
         )}
+      </PropertySection>
+
+      <PropertySection title="Mowing" icon="sprout" summary={mowingSummary}>
+        <div style={{ marginBottom: 14, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+          Mowing right before or right after a lawn treatment can undo it. Tell us when your
+          mower or lawn crew typically comes through and we will time applications around the cut.
+        </div>
+        <div>
+          <label style={labelStyle}>Typical Mowing Days</label>
+          <PillSelector
+            multiple
+            value={Array.isArray(prefs.mowingDays) ? prefs.mowingDays : []}
+            onChange={v => updateField('mowingDays', v)}
+            options={MOWING_DAY_ORDER.map(d => ({ value: d, label: d }))}
+          />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>
+          <div>
+            <label style={labelStyle}>Typical Time</label>
+            <PillSelector
+              value={prefs.mowingTimeOfDay}
+              onChange={v => updateField('mowingTimeOfDay', v)}
+              options={[
+                { value: 'morning', label: 'Morning (7-11)' },
+                { value: 'midday', label: 'Midday (11-2)' },
+                { value: 'afternoon', label: 'Afternoon (2-6)' },
+                { value: 'varies', label: 'Varies' },
+              ]}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Mowing Notes</label>
+            {textArea('mowingNotes', 'e.g., Lawn crew comes every other Thursday, usually before lunch.', 2)}
+          </div>
+        </div>
       </PropertySection>
 
       <PropertySection title="HOA" icon="building" summary={hoaSummary}>
