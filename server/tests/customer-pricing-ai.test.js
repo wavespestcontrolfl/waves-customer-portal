@@ -41,6 +41,9 @@ function activePlanDb(customerId, serviceTypes, tier = 'Bronze') {
 // the date so the suite never ages out.
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
+// property_sqft is TREATED LAWN AREA by schema, so a building footprint can
+// only come from the lookup — these fixtures carry the address every real
+// customer row has so that lookup can run.
 const propertyCustomer = (overrides = {}) => ({
   id: 'cust-1',
   waveguard_tier: 'Bronze',
@@ -48,6 +51,10 @@ const propertyCustomer = (overrides = {}) => ({
   property_sqft: 2200,
   lot_sqft: 7000,
   lawn_type: 'St. Augustine',
+  address_line1: '123 Gulf Dr',
+  city: 'Sarasota',
+  state: 'FL',
+  zip: '34236',
   ...overrides,
 });
 
@@ -61,7 +68,7 @@ describe('customer pricing AI helpers', () => {
   test('does not invent service coverage from a WaveGuard tier label', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ waveguard_tier: 'Silver', monthly_rate: 110 }),
     });
@@ -75,7 +82,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-existing', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer,
     });
@@ -92,7 +99,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-upgrade', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I want to upgrade my lawn care to something better',
       customer,
     });
@@ -106,7 +113,7 @@ describe('customer pricing AI helpers', () => {
     const customer = propertyCustomer({ id: 'cust-mixed', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'upgrade my lawn care and add mosquito control',
       customer,
     });
@@ -120,21 +127,21 @@ describe('customer pricing AI helpers', () => {
   test('prices a requested service from the customer property profile', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-price' }),
     });
 
     expect(result.ok).toBe(true);
     expect(result.requestedServices).toContain('Lawn Care');
-    expect(result.property.source).toBe('customer_profile');
+    expect(result.property.source).toBe('customer_profile_plus_property_lookup');
     expect(result.options.some(option => option.monthly > 0)).toBe(true);
   });
 
   test('palm injection pricing prompts for palm count instead of defaulting to one', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in palm injection',
       customer: propertyCustomer({ id: 'cust-palm' }),
     });
@@ -171,7 +178,7 @@ describe('customer pricing AI helpers', () => {
   test('uses modeled baseline for add-on delta when billing differs', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-mismatch', monthly_rate: 500 }),
     });
@@ -188,7 +195,7 @@ describe('count-based WaveGuard tier truth', () => {
     const customer = propertyCustomer({ id: 'cust-tier', waveguard_tier: 'Gold' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Pest Control', 'Lawn Care', 'Termite Bait Monitoring'], 'Gold'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Platinum',
       targetTier: 'Platinum',
       customer,
@@ -213,7 +220,7 @@ describe('count-based WaveGuard tier truth', () => {
   test('a stored Gold label does not fabricate three current services', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Platinum',
       targetTier: 'Platinum',
       customer: propertyCustomer({ id: 'cust-no-rows', waveguard_tier: 'Gold' }),
@@ -228,7 +235,7 @@ describe('count-based WaveGuard tier truth', () => {
     const customer = propertyCustomer({ id: 'cust-any-combo', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Mosquito Control', 'Termite Bait Monitoring'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Silver',
       targetTier: 'Silver',
       customer,
@@ -259,7 +266,7 @@ describe('never-re-price guard, r2 regressions', () => {
     });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I want to upgrade my lawn care',
       customer,
     });
@@ -275,7 +282,7 @@ describe('never-re-price guard, r2 regressions', () => {
     const customer = propertyCustomer({ id: 'cust-mixed-desc', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'upgrade my lawn care and add mosquito control',
       customer,
     });
@@ -293,7 +300,7 @@ describe('never-re-price guard, r2 regressions', () => {
     const customer = propertyCustomer({ id: 'cust-rodent', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Rodent Monitoring', 'Quarterly Pest Control'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Can you add rodent bait stations?',
       customer,
     });
@@ -329,7 +336,7 @@ describe('never-re-price guard, r2 regressions', () => {
     };
     const result = await buildCustomerPricingResponse({
       db: dbWithStamps,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: customerId, address_line1: '100 Main St' }),
     });
@@ -348,7 +355,7 @@ describe('combined pest & rodent ownership', () => {
     const customer = propertyCustomer({ id: 'cust-pest-rodent', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Pest & Rodent Control'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Can you add rodent bait stations?',
       customer,
     });
@@ -412,7 +419,7 @@ describe('termite monitoring ownership', () => {
     const customer = propertyCustomer({ id: 'cust-termite', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Termite Monitoring Service'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is termite protection?',
       customer,
     });
@@ -448,7 +455,7 @@ describe('commercial ownership and termite bond distinction', () => {
     const customer = propertyCustomer({ id: 'cust-commercial', waveguard_tier: null, monthly_rate: 189 });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Commercial Pest Control'], null),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is pest control?',
       customer,
     });
@@ -460,7 +467,7 @@ describe('commercial ownership and termite bond distinction', () => {
     const customer = propertyCustomer({ id: 'cust-bond', waveguard_tier: 'Bronze' });
     const result = await buildCustomerPricingResponse({
       db: activePlanDb(customer.id, ['Termite Bond'], 'Bronze'),
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'How much is termite bait monitoring?',
       customer,
     });
@@ -590,7 +597,7 @@ describe('ownership lookup failure fails closed', () => {
     };
     const result = await buildCustomerPricingResponse({
       db,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'I am interested in adding lawn care',
       customer: propertyCustomer({ id: 'cust-failclosed' }),
     });
@@ -649,7 +656,7 @@ describe('r5 regressions', () => {
     };
     const result = await buildCustomerPricingResponse({
       db,
-      propertyLookup: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
       prompt: 'Price WaveGuard Silver',
       targetTier: 'Silver',
       customer: propertyCustomer({ id: 'cust-tier-fc', waveguard_tier: 'Silver' }),
@@ -690,5 +697,844 @@ describe('live in-progress rows survive the ownership date cutoff', () => {
       status: 'en_route', is_recurring: true, is_callback: true,
     }]), 'cust-live');
     expect(owned).toEqual([]);
+  });
+});
+
+describe('property context reads only columns the customers table actually has', () => {
+  // Verified against the live schema 2026-08-09: customers carries bed_sqft,
+  // canopy_type, lot_sqft, palm_count, property_sqft, property_type — and
+  // NONE of home_sqft / stories / pool / pool_cage / shrub_density /
+  // tree_density / landscape_complexity / tree_count / year_built /
+  // construction_material / foundation_type / roof_type. Those reads used to
+  // resolve undefined and silently take the moderate/false/0 defaults.
+  const customerWithBasics = {
+    id: 'cust-features',
+    monthly_rate: 55,
+    address_line1: '123 Gulf Dr',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34236',
+    property_sqft: 2200,
+    lot_sqft: 9000,
+  };
+
+  test('a fully-populated profile STILL gets a lookup — bed/palm values are not evidence of pools or density', async () => {
+    // Regression for the half-gate: bed_sqft + palm_count present would have
+    // skipped the lookup, leaving pool/cage/complexity/treeCount hardcoded.
+    let lookedUp = false;
+    const { _private } = require('../services/customer-pricing-ai');
+    const ctx = await _private.resolvePropertyContext({
+      customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 6 },
+      turfProfile: null,
+      propertyLookup: async () => {
+        lookedUp = true;
+        return { enriched: { pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY', estimatedTreeCount: 12, treeCountConfidence: 85 } };
+      },
+    });
+    expect(lookedUp).toBe(true);
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.shrubs).toBe('heavy');
+    expect(ctx.propertyInput.features.treeCount).toBe(12);
+    // Stored values still win over the lookup for the fields the profile has.
+    expect(ctx.propertyInput.bedArea).toBe(1800);
+    expect(ctx.propertyInput.bedAreaSource).toBe('explicit');
+  });
+
+  test('a customer with home+lot still gets a lookup, so features are observed not defaulted', async () => {
+    let lookedUp = false;
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in adding tree and shrub care',
+      propertyLookup: async () => {
+        lookedUp = true;
+        return {
+          enriched: {
+            homeSqFt: 2200, lotSqFt: 9000,
+            pool: 'YES', poolCage: 'YES',
+            shrubDensity: 'HEAVY', treeDensity: 'HEAVY',
+            estimatedTreeCount: 12, estimatedBedAreaSf: 2600, estimatedPalmCount: 8,
+          },
+        };
+      },
+      customer: customerWithBasics,
+    });
+    // The old gate was (!homeSqFt || !lotSqFt): this customer would never
+    // have been looked up, and would have priced pool-less/moderate/zero-tree.
+    expect(lookedUp).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+
+  test('a lookup-derived bed area is labelled ESTIMATED, never explicit', async () => {
+    const { _private } = require('../services/customer-pricing-ai');
+    const resolve = _private?.resolvePropertyContext;
+    if (!resolve) return;
+    const fromLookup = await resolve({
+      customer: customerWithBasics,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88 } }),
+    });
+    expect(fromLookup.propertyInput.bedArea).toBe(2600);
+    // Provenance drives money: the T&S density factor applies to measured
+    // sources only, so an AI-derived area must not claim to be measured.
+    expect(fromLookup.propertyInput.bedAreaSource).toBe('estimated');
+
+    const fromProfile = await resolve({
+      customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 4 },
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88 } }),
+    });
+    expect(fromProfile.propertyInput.bedArea).toBe(1800);
+    expect(fromProfile.propertyInput.bedAreaSource).toBe('explicit');
+  });
+});
+
+describe('AI palm estimates never auto-price palm injection (customer-facing route)', () => {
+  test('a lookup palm estimate does not satisfy the measured-count requirement', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I want palm injections',
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, lotSqFt: 9000, estimatedPalmCount: 14 },
+      }),
+      customer: {
+        id: 'cust-palm-est',
+        monthly_rate: 55,
+        address_line1: '123 Gulf Dr',
+        city: 'Sarasota',
+        state: 'FL',
+        zip: '34236',
+        property_sqft: 2200,
+        lot_sqft: 9000,
+      },
+    });
+    // An AI count is not a measurement — the customer is asked, not quoted.
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'PROPERTY_DETAILS_NEEDED',
+      message: 'Palm count is required for palm injection pricing.',
+    });
+  });
+});
+
+describe('lookup confidence gates every vision-derived price modifier', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-conf', monthly_rate: 55, property_sqft: 2200, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+  const enriched = (extra) => ({
+    homeSqFt: 2200, pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY',
+    estimatedTreeCount: 12, treeCountConfidence: 88, estimatedBedAreaSf: 2600, yearBuilt: 1998, ...extra,
+  });
+
+  test('a confident read feeds pool/cage/density/trees and the bed area', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer,
+      turfProfile: null,
+      // bedAreaConfidence: the field-level stamp is required for the bed
+      // area specifically — the blended average alone no longer prices it.
+      propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 88, bedAreaConfidence: 88 }) }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.shrubs).toBe('heavy');
+    expect(ctx.propertyInput.features.treeCount).toBe(12);
+    expect(ctx.propertyInput.bedArea).toBe(2600);
+  });
+
+  test('a LOW-confidence read moves nothing — features stay at their defaults', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null, propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 38 }) }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.features.poolCage).toBe(false);
+    expect(ctx.propertyInput.features.shrubs).toBe('moderate');
+    // Absent, not 0: priceTreeShrub treats any supplied count (incl. 0) as
+    // explicit and would price zero per-tree labor with no review warning.
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+    // County-sourced facts are not vision reads and still apply.
+    expect(ctx.propertyInput.yearBuilt).toBe(1998);
+  });
+
+  test('a field-verify flag on the imagery disqualifies the features too', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: enriched({ aiConfidence: 95, fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'stale imagery', priority: 'HIGH' }] }),
+      }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+  });
+});
+
+describe('lookup trust: global flags, record-backed pools, bed-area-only T&S', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-trust', monthly_rate: 55, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+
+  test("an 'address' flag adopts NOTHING from the lookup — a wrong-premise quote is never produced", async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 4200, stories: 3, pool: 'YES', poolSource: 'county',
+          estimatedBedAreaSf: 5000, aiConfidence: 95,
+          fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }],
+        },
+      }),
+    });
+    // Not the neighbour's 4,200 sqft home, pool, or bed area.
+    expect(ctx.propertyInput.homeSqFt).toBeNull();
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+    expect(ctx.hasHomeSqFt).toBe(false); // fails closed → PROPERTY_DETAILS_NEEDED
+  });
+
+  test('a county-confirmed pool/cage survives a low AI grade (assessor data, not an imagery guess)', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2200, aiConfidence: 35,
+          pool: 'YES', poolSource: 'county', poolCageSqft: 900, poolCageSize: 'LARGE',
+          shrubDensity: 'HEAVY', estimatedTreeCount: 12,
+        },
+      }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.poolCageSize).toBe('large');
+    // Vision-only reads stay gated at that confidence.
+    expect(ctx.propertyInput.features.shrubs).toBe('moderate');
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
+  });
+
+  test('a vision-only pool stays gated at low confidence', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, aiConfidence: 35, pool: 'YES', poolSource: 'vision' } }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+  });
+
+  test('a stored bed area alone is enough to price Tree & Shrub', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in adding tree and shrub care',
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      customer: {
+        id: 'cust-bedonly', monthly_rate: 55, bed_sqft: 2400,
+        address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+      },
+    });
+    // No lot_sqft and no lawn area, but priceTreeShrub prices from bedArea.
+    expect(result.ok).toBe(true);
+    expect(result.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
+  });
+});
+
+describe("structural facts: 'UNKNOWN' record values do not suppress trusted ones", () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-facts', monthly_rate: 55, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+
+  test('a high-confidence enriched fact wins over an UNKNOWN record field', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 90, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', roofType: 'TILE' },
+        propertyRecord: { constructionMaterial: 'UNKNOWN', foundationType: 'UNKNOWN', roofType: 'UNKNOWN' },
+      }),
+    });
+    // These drive the wood-frame multiplier, the raised-foundation
+    // adjustment and the tile-roof rodent adjustment.
+    expect(ctx.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+    expect(ctx.propertyInput.foundationType).toBe('CRAWLSPACE');
+    expect(ctx.propertyInput.roofType).toBe('TILE');
+  });
+
+  test('a real record value still beats the enriched one, and low confidence drops the enriched', async () => {
+    const withRecord = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 90, constructionMaterial: 'WOOD_FRAME' },
+        propertyRecord: { constructionMaterial: 'CONCRETE_BLOCK' },
+      }),
+    });
+    expect(withRecord.propertyInput.constructionMaterial).toBe('CONCRETE_BLOCK');
+
+    const lowConfidence = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 30, constructionMaterial: 'WOOD_FRAME' },
+        propertyRecord: { constructionMaterial: 'UNKNOWN' },
+      }),
+    });
+    expect(lowConfidence.propertyInput.constructionMaterial).toBeNull();
+  });
+});
+
+describe('outdoor measurement sufficiency is per service, not one shared test', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const ctx = (over) => ({ hasHomeSqFt: true, hasLotSqFt: false, hasLawnSqFt: false, hasBedArea: false, palmCount: 0, ...over });
+  const missing = _private.missingPropertyFor || null;
+
+  test('mosquito needs the LOT — a lawn area alone would only buy its zero-area fallback', () => {
+    if (!missing) return;
+    expect(missing(['mosquito'], ctx({ hasLawnSqFt: true }))).toBe('outdoor_sqft');
+    expect(missing(['mosquito'], ctx({ hasLotSqFt: true }))).toBeNull();
+  });
+
+  test('tree & shrub takes a bed area OR a lot it can infer one from', () => {
+    if (!missing) return;
+    expect(missing(['tree_shrub'], ctx({ hasBedArea: true }))).toBeNull();
+    expect(missing(['tree_shrub'], ctx({ hasLotSqFt: true }))).toBeNull();
+    expect(missing(['tree_shrub'], ctx({ hasLawnSqFt: true }))).toBe('outdoor_sqft');
+  });
+
+  test('lawn takes turf OR lot', () => {
+    if (!missing) return;
+    expect(missing(['lawn_care'], ctx({ hasLawnSqFt: true }))).toBeNull();
+    expect(missing(['lawn_care'], ctx({ hasLotSqFt: true }))).toBeNull();
+    expect(missing(['lawn_care'], ctx({ hasBedArea: true }))).toBe('outdoor_sqft');
+  });
+
+  test('a mixed request blocks when ANY requested service lacks its own area', () => {
+    if (!missing) return;
+    // T&S is satisfied by the bed area; mosquito still needs a lot.
+    expect(missing(['tree_shrub', 'mosquito'], ctx({ hasBedArea: true }))).toBe('outdoor_sqft');
+    expect(missing(['tree_shrub', 'mosquito'], ctx({ hasBedArea: true, hasLotSqFt: true }))).toBeNull();
+  });
+});
+
+describe('an explicit zero turf measurement is preserved, never backfilled', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const missing = _private?.missingPropertyFor || null;
+  const customer = {
+    id: 'cust-zero-lawn',
+    address_line1: '9 Xeriscape Ct',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34285',
+    property_sqft: 2200, // stale mirror from before the turf profile existed
+    lot_sqft: 9000,
+  };
+
+  test('profile lawn_sqft 0 beats the stale customer.property_sqft mirror AND the satellite turf estimate', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: { lawn_sqft: 0 },
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 3400, aiConfidence: 90 } }),
+    });
+    // The zero is a measurement — the pricing engine preserves >= 0 — so
+    // neither the mirrored 2200 nor the lookup's 3400 may resurrect a lawn.
+    expect(ctx.propertyInput.lawnSqFt).toBe(0);
+    expect(ctx.hasLawnSqFt).toBe(false);
+    expect(ctx.lawnKnownZero).toBe(true);
+  });
+
+  test('a SILENT profile (null/absent) still falls back to customer.property_sqft', async () => {
+    if (!resolve) return;
+    const fromNull = await resolve({
+      customer,
+      turfProfile: { lawn_sqft: null },
+      propertyLookup: null,
+    });
+    expect(fromNull.propertyInput.lawnSqFt).toBe(2200);
+    expect(fromNull.lawnKnownZero).toBe(false);
+    const fromMissingProfile = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(fromMissingProfile.propertyInput.lawnSqFt).toBe(2200);
+  });
+
+  test('a measured-zero lawn blocks the lot stand-in for lawn quotes — ask, do not infer turf', () => {
+    if (!missing) return;
+    const ctx = { hasHomeSqFt: true, hasLotSqFt: true, hasLawnSqFt: false, hasBedArea: false, palmCount: 0 };
+    expect(missing(['lawn_care'], { ...ctx, lawnKnownZero: true })).toBe('outdoor_sqft');
+    expect(missing(['one_time_lawn'], { ...ctx, lawnKnownZero: true })).toBe('outdoor_sqft');
+    // Unmeasured lawn keeps the lot inference; other lot-based services are untouched.
+    expect(missing(['lawn_care'], { ...ctx, lawnKnownZero: false })).toBeNull();
+    expect(missing(['mosquito'], { ...ctx, lawnKnownZero: true })).toBeNull();
+  });
+});
+
+describe('a verify-flagged satellite property type never moves a customer quote', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-type-flag',
+    address_line1: '4 Rowhouse Ln',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34236',
+    property_type: 'single_family',
+    lot_sqft: 6000,
+  };
+
+  test('a propertyType carrying its field-verify flag is ignored — the saved type stands', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          propertyType: 'townhome',
+          aiConfidence: 85,
+          // property-lookup-v2's flag copy: confirm townhome vs
+          // single-family before pricing.
+          fieldVerifyFlags: [{ field: 'propertyType', reason: 'Satellite imagery suggests townhome — confirm before pricing', priority: 'MEDIUM' }],
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('single_family');
+  });
+
+  test('an unflagged lookup type is still adopted, and an UNKNOWN record type never overrides', async () => {
+    if (!resolve) return;
+    const adopted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { propertyType: 'townhome', aiConfidence: 85 } }),
+    });
+    expect(adopted.propertyInput.propertyType).toBe('townhome');
+    const unknownRecord = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ propertyRecord: { propertyType: 'UNKNOWN' } }),
+    });
+    // Property records normalize a missing field to the TRUTHY string
+    // 'UNKNOWN' — it must not eat the customer's saved classification.
+    expect(unknownRecord.propertyInput.propertyType).toBe('single_family');
+  });
+});
+
+describe('verify-flagged core dimensions never price a customer quote (pre-push P0s)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-flagged-dims',
+    address_line1: '12 Verify Way',
+    city: 'Bradenton',
+    state: 'FL',
+    zip: '34205',
+    property_type: 'single_family',
+  };
+
+  test('flagged squareFootage / lotSize are not adopted — the measurement fails closed as missing', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400,
+          lotSqFt: 9500,
+          fieldVerifyFlags: [
+            { field: 'squareFootage', reason: 'conflicting AI/source evidence — verify before pricing', priority: 'HIGH' },
+            { field: 'lotSize', reason: 'came from a weak source with low confidence', priority: 'HIGH' },
+          ],
+        },
+      }),
+    });
+    // No review lane exists on this path, so a number the lookup itself said
+    // to verify first cannot become an exact price — the request routes to
+    // PROPERTY_DETAILS_NEEDED via the ordinary missing-measurement checks.
+    expect(ctx.hasHomeSqFt).toBe(false);
+    expect(ctx.hasLotSqFt).toBe(false);
+    const unflagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 9500 } }),
+    });
+    expect(unflagged.hasHomeSqFt).toBe(true);
+    expect(unflagged.hasLotSqFt).toBe(true);
+  });
+
+  test('a stored lot survives a flagged lookup lotSize, and flagged stories keeps the default', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer: { ...customer, lot_sqft: 8000 },
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          lotSqFt: 20000,
+          stories: 3,
+          fieldVerifyFlags: [
+            { field: 'lotSize', reason: 'verify', priority: 'HIGH' },
+            { field: 'stories', reason: 'verify', priority: 'HIGH' },
+          ],
+        },
+      }),
+    });
+    expect(ctx.propertyInput.lotSqFt).toBe(8000);
+    expect(ctx.propertyInput.stories).toBe(1);
+  });
+
+  test('the mutated record cannot re-introduce a rejected satellite property type', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // applyVisionPropertyTypeEvidence mutates the RECORD in place —
+        // both the enriched and record types carry the same unverified
+        // satellite classification here, exactly as in prod.
+        enriched: {
+          propertyType: 'townhome',
+          fieldVerifyFlags: [{ field: 'propertyType', reason: 'Satellite imagery suggests townhome — confirm before pricing', priority: 'MEDIUM' }],
+        },
+        propertyRecord: {
+          propertyType: 'townhome',
+          _propertyTypeSource: 'satellite',
+          _fieldEvidence: { propertyType: { fieldVerify: true, sourceType: 'satellite' } },
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('single_family');
+  });
+});
+
+describe('an untrusted satellite turf estimate never becomes a lawn price', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-turf-trust',
+    address_line1: '77 Palmetto Row',
+    city: 'Parrish',
+    state: 'FL',
+    zip: '34219',
+  };
+
+  test('a turf-flagged or low-confidence estimate is not adopted — the measurement fails closed', async () => {
+    if (!resolve) return;
+    const flagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          estimatedTurfSf: 5200,
+          aiConfidence: 88,
+          fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'obstructed imagery — verify before pricing', priority: 'HIGH' }],
+        },
+      }),
+    });
+    expect(flagged.hasLawnSqFt).toBe(false);
+    const lowConfidence = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 5200, aiConfidence: 40 } }),
+    });
+    expect(lowConfidence.hasLawnSqFt).toBe(false);
+    const trusted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 5200, aiConfidence: 88 } }),
+    });
+    expect(trusted.propertyInput.lawnSqFt).toBe(5200);
+  });
+});
+
+describe('story provenance and record-backed structural facts (r6)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-stories-structural',
+    address_line1: '31 Perimeter Pl',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34293',
+  };
+
+  test('a defaulted story count carries storiesSource so the pricers emit stories_estimated', async () => {
+    if (!resolve) return;
+    // Flagged stories read is discarded — provenance must say 'default' so
+    // pest/termite add their review marker instead of silently pricing a
+    // guessed one-story footprint.
+    const flagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400,
+          stories: 2,
+          fieldVerifyFlags: [{ field: 'stories', reason: 'conflicting evidence', priority: 'HIGH' }],
+        },
+      }),
+    });
+    expect(flagged.propertyInput.stories).toBe(1);
+    expect(flagged.propertyInput.storiesSource).toBe('default');
+    const noLookup = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(noLookup.propertyInput.storiesSource).toBe('default');
+    const adopted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { stories: 2 } }),
+    });
+    expect(adopted.propertyInput.stories).toBe(2);
+    expect(adopted.propertyInput.storiesSource).toBe('lookup');
+  });
+
+  test('a verify-flagged structural fact is withheld even when the record value is non-UNKNOWN', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          fieldVerifyFlags: [
+            { field: 'constructionMaterial', reason: 'conflicting AI/source evidence', priority: 'MEDIUM' },
+          ],
+        },
+        propertyRecord: {
+          // Merged from a weak listing — non-UNKNOWN, but flagged.
+          constructionMaterial: 'WOOD_FRAME',
+          foundationType: 'SLAB',
+          _fieldEvidence: {
+            constructionMaterial: { fieldVerify: true },
+            roofType: { fieldVerify: true },
+          },
+          roofType: 'TILE',
+        },
+      }),
+    });
+    // Flagged via enriched flags AND via the record's own evidence.
+    expect(ctx.propertyInput.constructionMaterial).toBeNull();
+    expect(ctx.propertyInput.roofType).toBeNull();
+    // Unflagged record fact still applies.
+    expect(ctx.propertyInput.foundationType).toBe('SLAB');
+  });
+});
+
+describe('risk notices vs evidence distrust, and yearBuilt gating (r7)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-risk-notice',
+    address_line1: '5 Crawlspace Ct',
+    city: 'Nokomis',
+    state: 'FL',
+    zip: '34275',
+  };
+
+  test('an authoritative WOOD_FRAME/CRAWLSPACE with only operational RISK flags still prices its modifiers', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // The flag builder emits same-named notices for AUTHORITATIVE risky
+        // values (wood frame = termite risk, crawlspace = different
+        // treatment) — evidence is NOT weak, so the modifiers must apply.
+        enriched: {
+          fieldVerifyFlags: [
+            { field: 'constructionMaterial', reason: 'Wood frame construction — higher termite risk, verify exterior condition', priority: 'MEDIUM' },
+            { field: 'foundationType', reason: 'CRAWLSPACE foundation — termite treatment approach differs from standard slab', priority: 'HIGH' },
+          ],
+        },
+        propertyRecord: {
+          constructionMaterial: 'WOOD_FRAME',
+          foundationType: 'CRAWLSPACE',
+          _fieldEvidence: {
+            constructionMaterial: { fieldVerify: false, sourceType: 'county' },
+            foundationType: { fieldVerify: false, sourceType: 'county' },
+          },
+        },
+      }),
+    });
+    // Dropping these would UNDERQUOTE exactly the risky homes the
+    // multipliers exist for.
+    expect(ctx.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+    expect(ctx.propertyInput.foundationType).toBe('CRAWLSPACE');
+  });
+
+  test('a yearBuilt with disputed field evidence is withheld; an undisputed one prices', async () => {
+    if (!resolve) return;
+    const disputed = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        propertyRecord: {
+          yearBuilt: 1962,
+          _fieldEvidence: { yearBuilt: { fieldVerify: true } },
+        },
+      }),
+    });
+    expect(disputed.propertyInput.yearBuilt).toBeNull();
+    const clean = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ propertyRecord: { yearBuilt: 1962 } }),
+    });
+    expect(clean.propertyInput.yearBuilt).toBe(1962);
+  });
+});
+
+describe('r8: unset tree counts, observed vision zero-turf', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const missing = _private?.missingPropertyFor || null;
+  const customer = {
+    id: 'cust-r8',
+    address_line1: '2 Shellrock Way',
+    city: 'Osprey',
+    state: 'FL',
+    zip: '34229',
+    lot_sqft: 9000,
+  };
+
+  test('no lookup → treeCount stays ABSENT so the pricer density fallback (with its warning) runs', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
+    // A zero estimatedTreeCount is indistinguishable from missing (the
+    // enriched payload coerces absent to 0) — also stays unset.
+    const zeroCount = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 0, aiConfidence: 90 } }),
+    });
+    expect(zeroCount.propertyInput.features.treeCount).toBeUndefined();
+  });
+
+  test('a trusted vision ZERO turf is an observed no-lawn property — lot inference must not resurrect it', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'vision', aiConfidence: 90 },
+      }),
+    });
+    expect(ctx.lawnKnownZero).toBe(true);
+    expect(ctx.propertyInput.lawnSqFt).toBe(0);
+    if (missing) {
+      expect(missing(['lawn_care'], { ...ctx, hasHomeSqFt: true, palmCount: 0 })).toBe('outdoor_sqft');
+    }
+    // The synthetic no-basis zero (turfSource 'none') keeps the lot fallback.
+    const synthetic = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'none', aiConfidence: 90 },
+      }),
+    });
+    expect(synthetic.lawnKnownZero).toBe(false);
+    // An untrusted vision zero proves nothing either.
+    const lowConf = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'vision', aiConfidence: 30 },
+      }),
+    });
+    expect(lowConf.lawnKnownZero).toBe(false);
+  });
+});
+
+describe('r9: field-confident tree counts, story evidence, authoritative types, palm-only lookup skip', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-r9',
+    address_line1: '8 Provenance Pl',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34231',
+    property_type: 'single_family',
+  };
+
+  test('a tree count without its field-level stamp (or with a low one) stays unset', async () => {
+    if (!resolve) return;
+    const unstamped = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 12, aiConfidence: 88 } }),
+    });
+    expect(unstamped.propertyInput.features.treeCount).toBeUndefined();
+    // Gap-filled from a lone 40-confidence provider riding a 73 blend.
+    const gapFilled = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 12, treeCountConfidence: 40, aiConfidence: 73 } }),
+    });
+    expect(gapFilled.propertyInput.features.treeCount).toBeUndefined();
+  });
+
+  test('an AI stories fallback without direct evidence prices as estimated, county stories as lookup', async () => {
+    if (!resolve) return;
+    const aiFallback = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { stories: 2 },
+        propertyRecord: {
+          stories: 2,
+          _storiesSource: 'ai',
+          // Non-direct, low-confidence inference — no verify flag emitted.
+          _storiesEvidence: { value: 2, basis: 'inferred', confidence: 'low', sourceUrl: null, sourceType: 'unknown' },
+        },
+      }),
+    });
+    expect(aiFallback.propertyInput.stories).toBe(2);
+    // 'estimated' fires stories_estimated in the pest/termite pricers.
+    expect(aiFallback.propertyInput.storiesSource).toBe('estimated');
+    const county = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { stories: 2 } }),
+    });
+    expect(county.propertyInput.storiesSource).toBe('lookup');
+  });
+
+  test('an authoritative county type with a mere DISAGREEMENT verify flag still prices its adjustment', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // mergePropertyRecords keeps the authoritative winner and sets
+        // fieldVerify on disagreement — that flag alone is not weakness.
+        propertyRecord: {
+          propertyType: 'Townhome',
+          _fieldEvidence: { propertyType: { fieldVerify: true, disagreement: true, sourceType: 'county' } },
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('Townhome');
+    // A weak/generic winner stays rejected.
+    const weak = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        propertyRecord: {
+          propertyType: 'Condo',
+          _fieldEvidence: { propertyType: { fieldVerify: true, sourceType: 'generic' } },
+        },
+      }),
+    });
+    expect(weak.propertyInput.propertyType).toBe('single_family');
+  });
+
+  test('a palm-only request never invokes the property lookup', async () => {
+    let lookedUp = false;
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in palm injection',
+      propertyLookup: async () => { lookedUp = true; return { enriched: { homeSqFt: 2200 } }; },
+      customer: { ...customer, id: 'cust-palm-only' },
+    });
+    // Palm prices from the stored count alone; the lookup would spend
+    // provider calls to produce the same PROPERTY_DETAILS_NEEDED answer.
+    expect(lookedUp).toBe(false);
+    expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
   });
 });

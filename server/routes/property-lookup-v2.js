@@ -1455,6 +1455,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     delete ai.imperviosSurfacePercent;
     delete ai.estimatedBedAreaSf;
     delete ai.estimatedBedAreaPercent;
+    delete ai._bedAreaConfidence;
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1743,7 +1744,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     landscapeComplexity,
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
+    // Field-level confidence behind the winning tree count (stamped by
+    // mergeAiAnalyses) — same contract as bedAreaConfidence below.
+    treeCountConfidence: ai?._treeCountConfidence,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
+    // Field-level confidence behind the winning bed-area value (stamped by
+    // mergeAiAnalyses) — the trust predicate requires it; the blended
+    // aiConfidence can be held above the floor by providers that never
+    // reported a bed area.
+    bedAreaConfidence: ai?._bedAreaConfidence,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
@@ -3959,6 +3968,74 @@ function mergeAiAnalyses(providerResults) {
       (mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0
     );
     merged._structureAttachmentSupport = supporters.length;
+  }
+
+  // Confidence behind the FINAL bed-area value — same rationale as
+  // structureAttachment above. estimatedBedAreaSf is not divergence-tracked
+  // and the gap-fill loop can adopt it from a lone low-confidence provider
+  // while the other providers' high scores hold the blended average above
+  // the pricing floor. The T&S bed-area trust predicate keys off this stamp
+  // so a gap-filled read can't average its way into a customer price.
+  const mergedBedArea = Number(merged.estimatedBedAreaSf);
+  if (Number.isFinite(mergedBedArea) && mergedBedArea > 0) {
+    const bedReads = sorted
+      .map((r) => ({ provider: r.provider, value: Number(r.analysis?.estimatedBedAreaSf), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => Number.isFinite(r.value) && r.value > 0);
+    const maxRead = Math.max(...bedReads.map((r) => r.value));
+    const minRead = Math.min(...bedReads.map((r) => r.value));
+    // Two providers disagreeing MATERIALLY on the bed area (>25% of the
+    // larger) is a conflict no single provider's confidence can launder —
+    // the winner is whichever provider sorted first, not a measurement.
+    // Zero the stamp so the trust predicate routes the estimate to its
+    // reviewed lot-inference fallback, and record the divergence.
+    const bedAreaDivergent = bedReads.length > 1 && (maxRead - minRead) > maxRead * 0.25;
+    if (bedAreaDivergent) {
+      merged._bedAreaConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedBedAreaSf',
+          primary: primary.provider,
+          ...Object.fromEntries(bedReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._bedAreaConfidence = bedReads
+        .filter((r) => r.value === mergedBedArea)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // Same stamp for the tree count — it feeds per-tree labor minutes AND the
+  // per-tree material term, and like the bed area it can be gap-filled from
+  // a lone low-confidence provider outside divergence tracking. The
+  // absolute-difference guard (>2 trees) keeps small-count noise (4 vs 3)
+  // from flagging.
+  const mergedTreeCount = Number(merged.estimatedTreeCount);
+  if (Number.isFinite(mergedTreeCount) && mergedTreeCount > 0) {
+    const countReads = sorted
+      .map((r) => ({ provider: r.provider, value: Number(r.analysis?.estimatedTreeCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => Number.isFinite(r.value) && r.value > 0);
+    const maxCount = Math.max(...countReads.map((r) => r.value));
+    const minCount = Math.min(...countReads.map((r) => r.value));
+    const treeCountDivergent = countReads.length > 1
+      && (maxCount - minCount) > 2
+      && (maxCount - minCount) > maxCount * 0.25;
+    if (treeCountDivergent) {
+      merged._treeCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedTreeCount',
+          primary: primary.provider,
+          ...Object.fromEntries(countReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._treeCountConfidence = countReads
+        .filter((r) => r.value === mergedTreeCount)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
   }
 
   return merged;

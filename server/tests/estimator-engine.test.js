@@ -1179,3 +1179,238 @@ describe('verifyEvidenceQuotes — SMS-origin per-message records (transcriptRec
       .toEqual({ total: 1, unverified: 1 });
   });
 });
+
+describe('Tree & Shrub measurement inputs reach the agent draft engine input', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+
+  test('lookup bed area + palm count are forwarded (residential only)', () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, estimatedPalmCount: 8, shrubDensity: 'HEAVY', aiConfidence: 88 };
+    const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(input.estimatedBedAreaSf).toBe(2600);
+    // The AI palm estimate is NOT forwarded: property.palmCount is a
+    // green-lane fallback for palm-INJECTION pricing (resolvePalmCount sets
+    // requiresManualReview false), so forwarding it would auto-price
+    // per-palm injections nobody measured.
+    expect(input.palmCount).toBeUndefined();
+
+    // Commercial prices off footprint/risk-type, not homeowner measurements.
+    const commercial = buildEngineInput({
+      intent: { ...baseIntent(), is_commercial: true, category: 'COMMERCIAL' },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: enriched,
+    });
+    expect(commercial.estimatedBedAreaSf).toBeUndefined();
+  });
+
+  test('a T&S quote off that input stops using the 2,000 sqft LOW-confidence fallback', () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const withBedArea = buildEngineInput({
+      intent: { ...baseIntent(), services: { treeShrub: {} } },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88 },
+    });
+    const ts = generateEstimate({ ...withBedArea, services: { treeShrub: { tier: 'standard' } } })
+      .lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(2600);
+    // Truthful provenance: AI-derived, not an operator measurement.
+    expect(ts.bedAreaSource).toBe('estimated');
+    expect(ts.pricingConfidence).toBe('medium');
+    expect(ts.manualReviewReasons).not.toContain('missing_bed_area_fallback');
+
+    // Without it, the same property falls to the fallback the audit found.
+    const withoutBedArea = buildEngineInput({
+      intent: { ...baseIntent(), services: { treeShrub: {} } },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: {},
+    });
+    const tsFallback = generateEstimate({ ...withoutBedArea, services: { treeShrub: { tier: 'standard' } } })
+      .lineItems.find((li) => li.service === 'tree_shrub');
+    expect(tsFallback.bedAreaSource).toBe('lot_based');
+  });
+});
+
+describe('lookup bed areas carry their confidence into the agent draft', () => {
+  const facts = {
+    home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+  };
+  const build = (enriched) => buildEngineInput({
+    intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched,
+  });
+
+  test('a confident read forwards; a low-confidence one does not', () => {
+    expect(build({ estimatedBedAreaSf: 2600, bedAreaConfidence: 82, aiConfidence: 82 }).estimatedBedAreaSf).toBe(2600);
+    // The lookup's own copy calls <60 low-confidence — priceTreeShrub would
+    // otherwise stamp it medium-confidence with no review reason.
+    expect(build({ estimatedBedAreaSf: 2600, bedAreaConfidence: 41, aiConfidence: 41 }).estimatedBedAreaSf).toBeUndefined();
+    // Bed area is a NEW consumption, so it fails closed without a score —
+    // an unscored area would become a medium-confidence price on no evidence.
+    expect(build({ estimatedBedAreaSf: 2600 }).estimatedBedAreaSf).toBeUndefined();
+  });
+
+  test('a field-verify flag on the bed area or the imagery it came from disqualifies it', () => {
+    expect(build({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 90, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'estimatedBedAreaSf', reason: 'obstructed', priority: 'HIGH' }],
+    }).estimatedBedAreaSf).toBeUndefined();
+    // Stale/conflicting imagery is flagged on the turf read, but the bed area
+    // came from that same picture.
+    expect(build({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 90, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'stale imagery', priority: 'HIGH' }],
+    }).estimatedBedAreaSf).toBeUndefined();
+    // An unrelated flag does not.
+    expect(build({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 90, aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }],
+    }).estimatedBedAreaSf).toBe(2600);
+  });
+});
+
+describe('global lookup verification failures disqualify every derived input', () => {
+  const { lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy } = require('../services/lookup-confidence');
+  const base = { estimatedBedAreaSf: 2600, bedAreaConfidence: 95, aiConfidence: 95, pool: 'YES' };
+
+  test("an 'address' flag (geocoder snapped to another premise) rejects both", () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(false);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(false);
+  });
+
+  test("an 'all' flag (no property record, every dimension estimated) rejects both", () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'all', reason: 'no record', priority: 'HIGH' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(false);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(false);
+  });
+
+  test('an unrelated field flag still passes both', () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(true);
+    // Features keep the lenient rule (already consumed pre-lane); bed area
+    // does not (new consumption).
+    expect(lookupFeaturesAreTrustworthy({ pool: 'YES' })).toBe(true);
+    expect(lookupBedAreaIsTrustworthy({ estimatedBedAreaSf: 2600 })).toBe(false);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(true);
+  });
+});
+
+describe('a global verification failure drops the whole enriched payload', () => {
+  test("an 'address' flag stops another parcel's data steering the draft", () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = {
+      estimatedBedAreaSf: 5000, aiConfidence: 95, pool: 'YES', poolCage: 'YES',
+      treeDensity: 'HEAVY', yearBuilt: 1965, constructionMaterial: 'WOOD_FRAME', roofType: 'TILE',
+      modifiers: { mosquitoWaterMult: 1.75 },
+      fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }],
+    };
+    const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(input.estimatedBedAreaSf).toBeUndefined();
+    expect(input.features).toBeUndefined();
+    expect(input.treeDensity).toBeUndefined();
+    expect(input.yearBuilt).toBeUndefined();
+    expect(input.constructionMaterial).toBeUndefined();
+    expect(input.roofType).toBeUndefined();
+    expect(input.modifierOverrides).toBeUndefined();
+    // The arbitrated facts carry their own per-field provenance and stand.
+    expect(input.homeSqFt).toBe(2000);
+    expect(input.lotSqFt).toBe(9000);
+  });
+});
+
+describe('wrong-premise parcel signals are stripped before property-fact arbitration', () => {
+  const { _private: idxPriv } = require('../services/estimator-engine/index');
+  const usable = idxPriv?.parcelSignalsDescribeGatheredAddress;
+
+  test('a global verify flag or a snapped record audit disqualifies the parcel signals', () => {
+    if (!usable) return;
+    // 'address' flag: the geocoder snapped to a different premise — the
+    // county record's home/lot describe the SNAPPED parcel, and arbitrated
+    // in as 'county' facts they would green-lane a draft for the wrong house.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }] },
+      propertyRecord: { squareFootage: 2400 },
+    })).toBe(false);
+    // Audit marker on the record itself survives an enrichment failure.
+    expect(usable({
+      enriched: null,
+      propertyRecord: { squareFootage: 2400, _addressAudit: { snappedRecord: { typed: '123', record: '125' } } },
+    })).toBe(false);
+    // Clean lookups keep their record.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'stories', reason: 'weak', priority: 'HIGH' }] },
+      propertyRecord: { squareFootage: 2400, _addressAudit: { hasExactMatch: true } },
+    })).toBe(true);
+    expect(usable({ enriched: null, propertyRecord: { squareFootage: 2400 } })).toBe(true);
+  });
+});
+
+describe("an 'all' flag on an AI-backed record does NOT strip the parcel (r7)", () => {
+  const { _private: idxPriv } = require('../services/estimator-engine/index');
+  const usable = idxPriv?.parcelSignalsDescribeGatheredAddress;
+
+  test("only wrong-premise signals strip; the AI-backed 'all' record arbitrates as a reviewable low-confidence fact", () => {
+    if (!usable) return;
+    // MEDIUM 'all' = record from AI web search for the RIGHT address —
+    // source-arbitration grades its dimensions LOOKUP_ESTIMATE (yellow
+    // draft), so stripping would turn a promised quote red for no premise
+    // doubt.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'all', reason: 'Property data sourced from AI web search — verify key dimensions on site', priority: 'MEDIUM' }] },
+      propertyRecord: { squareFootage: 2100, _source: 'ai' },
+    })).toBe(true);
+    // 'address' still strips.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }, { field: 'all', reason: 'ai', priority: 'MEDIUM' }] },
+      propertyRecord: { squareFootage: 2100 },
+    })).toBe(false);
+  });
+});
+
+describe('bed-area trust keys off FIELD-level confidence, not the blended average (pre-push P1)', () => {
+  const { lookupBedAreaIsTrustworthy } = require('../services/lookup-confidence');
+
+  test('a gap-filled bed area from a lone low-confidence provider cannot ride a high blended score', () => {
+    // mergeAiAnalyses stamps bedAreaConfidence = max confidence among the
+    // providers that reported the WINNING value. Two 90s that omitted the
+    // bed area can hold the blended average at 73 while the only actual
+    // bed-area read scored 40 — that read must not price.
+    expect(lookupBedAreaIsTrustworthy({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 40, aiConfidence: 73,
+    })).toBe(false);
+    // A missing stamp (legacy cached payloads merged before the stamp
+    // existed) fails closed — new consumption, no invented trust.
+    expect(lookupBedAreaIsTrustworthy({
+      estimatedBedAreaSf: 2600, aiConfidence: 88,
+    })).toBe(false);
+    // Stamped and confident → prices.
+    expect(lookupBedAreaIsTrustworthy({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88,
+    })).toBe(true);
+  });
+});
+
+describe('r8: materially divergent bed-area readings never stamp trustworthy', () => {
+  const { lookupBedAreaIsTrustworthy } = require('../services/lookup-confidence');
+
+  test('a zeroed divergence stamp fails the predicate regardless of provider confidence', () => {
+    // mergeAiAnalyses zeroes _bedAreaConfidence when providers disagree by
+    // >25% of the larger reading — the winner was sort order, not a
+    // measurement.
+    expect(lookupBedAreaIsTrustworthy({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 0, aiConfidence: 92,
+    })).toBe(false);
+  });
+});
