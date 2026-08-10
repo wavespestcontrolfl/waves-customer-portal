@@ -427,23 +427,37 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flag.reason).toMatch(/set Commercial to No/i);
     expect(flag.reason).toMatch(/clear the Commercial Subtype/i);
     // The prefilled dimensions are the building's — the copy must demand
-    // unit-specific dimensions (re-lookup with the unit, or replace them)
-    // before the resident path is priced (codex P0).
+    // unit-specific dimensions before the resident path is priced (codex P0).
     expect(flag.reason).toMatch(/WHOLE BUILDING/);
-    expect(flag.reason).toMatch(/re-run the lookup|replace home\/lot/i);
+    expect(flag.reason).toMatch(/sq ft and stories from the customer|replace home\/lot/i);
   });
 
-  test('apartment complex → customer-supplied unit dimensions, never a unit re-lookup (codex P1)', () => {
-    const flags = buildFieldVerifyFlags(
-      countyMultifamilyBuilding({ propertyType: 'Apartments', unitCount: 24 }), null, null
-    );
-    const flag = flags.find((f) => f.field === 'commercialSubtype');
-    expect(flag).toBeDefined();
-    expect(flag.reason).toMatch(/no separate county parcel/i);
-    expect(flag.reason).not.toMatch(/re-run the lookup/i);
+  test('generic Multifamily and apartment records → customer-supplied unit dimensions, no re-lookup recommendation (codex P1)', () => {
+    // Generic "Multifamily" covers rental buildings whose units have no
+    // separate parcels — only positive condo/townhome or aggregation
+    // evidence earns the re-lookup recommendation.
+    for (const propertyType of ['Multifamily', 'Apartments']) {
+      const flags = buildFieldVerifyFlags(
+        countyMultifamilyBuilding({ propertyType, unitCount: 24 }), null, null
+      );
+      const flag = flags.find((f) => f.field === 'commercialSubtype');
+      expect(flag).toBeDefined();
+      expect(flag.reason).toMatch(/from the customer/i);
+      expect(flag.reason).not.toMatch(/re-run the lookup/i);
+    }
   });
 
-  test('aggregated condo parcel labeled Apartment still gets the re-lookup path (unit parcels proven to exist)', () => {
+  test('condo/townhome record text → re-lookup path (unit parcels exist)', () => {
+    for (const propertyType of ['Multifamily Condominium', 'Multifamily Townhouse']) {
+      const flag = buildFieldVerifyFlags(
+        countyMultifamilyBuilding({ propertyType }), null, null
+      ).find((f) => f.field === 'commercialSubtype');
+      expect(flag).toBeDefined();
+      expect(flag.reason).toMatch(/re-run the lookup/i);
+    }
+  });
+
+  test('aggregated parcel labeled Apartment still gets the re-lookup path (aggregation is built from unit parcels)', () => {
     const flags = buildFieldVerifyFlags(
       countyMultifamilyBuilding({ propertyType: 'Apartment', _parcel: { aggregated: true } }), null, null
     );
