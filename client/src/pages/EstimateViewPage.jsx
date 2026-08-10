@@ -2463,7 +2463,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
-          A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
+          A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home. Rescheduling is free but doesn&rsquo;t reset the cancellation window.
           {' '}{CARD_SURCHARGE_DISCLOSURE}
         </div>
         <div ref={mountRef} />
@@ -4492,7 +4492,10 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/card-hold-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+          // cardHoldDisclosureVersion attests which fee-policy copy THIS
+          // bundle renders — bump it in lockstep with the disclosure
+          // sentence (server stamps the sticky marker only on a match).
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, cardHoldDisclosureVersion: 'sticky_v1' }),
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
@@ -5676,7 +5679,7 @@ function EstimateViewPageInner() {
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Rescheduling is free but doesn't reset the cancellation window. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`

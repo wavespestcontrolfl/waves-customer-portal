@@ -1037,7 +1037,7 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
     // Row values, never live config — and the exact enforced window stated.
-    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
+    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free, though a reschedule made within 24 hours doesn\'t reset the cancellation window.');
   });
 
   test('secured render for a satisfied (auto-secured) row carries NO fee note — no disclosure means no fee', async () => {

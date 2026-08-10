@@ -161,7 +161,7 @@ function readCancelFeeDisclosure() {
     return {
       feeAmount,
       windowHours,
-      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`,
+      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`,
     };
   } catch (err) {
     logger.warn(`[appt-card-request] fee disclosure unavailable — omitting: ${err.message}`);
@@ -188,7 +188,7 @@ function frozenFeeNoteForRow(request) {
   const windowHours = Number(request?.cancel_window_hours);
   if (!(fee > 0) || !(windowHours > 0)) return null;
   const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`;
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -720,6 +720,9 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
                 'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
                 [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
               ),
+              // The invitation's fee sentence discloses the sticky rule —
+              // stamp the frozen policy marker with the frozen terms.
+              sticky_window_disclosed: true,
               updated_at: new Date(),
             });
           if (stampedRows !== 1) {
@@ -1345,6 +1348,9 @@ async function loadSecureCardPageData(token) {
         'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
         [feeDisclosure.windowHours, feeDisclosure.windowHours],
       );
+      // This render's note discloses the sticky rule — the frozen policy
+      // marker rides with the frozen terms it belongs to.
+      disclosure.sticky_window_disclosed = true;
     } else {
       disclosure.no_show_fee_amount = null;
       disclosure.cancel_window_hours = 0;
@@ -1993,7 +1999,38 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
       return { handled: false, released: false, reason: 'charge_review' };
     }
   }
-  if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
+  // Sticky window (owner ruling 2026-08-10, shared with the card-hold rail):
+  // outside the CURRENT slot's window, the cancel is still a late cancel if
+  // a customer-initiated reschedule was itself made inside the window —
+  // rebooker's in-place date overwrite must not reset the clock. This rail's
+  // r19 posture applies to the lookup: a FAILED read must not fall through
+  // to the terminal free-release stamp below, so it parks review instead.
+  const inWindow = !!start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  // Sticky evidence applies ONLY to a LIVE current slot: a start already
+  // past the cancellation grace keeps its free release (the visit came and
+  // went undelivered — day-later cleanup must never bill), mirroring the
+  // card-hold rail's guard.
+  const { CARD_HOLD_POST_START_GRACE_MS: STICKY_GRACE_MS } = require('./estimate-card-holds');
+  const liveStartDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const liveStartMs = liveStartDate && !Number.isNaN(liveStartDate.getTime()) ? liveStartDate.getTime() : null;
+  const startLive = liveStartMs != null && (liveStartMs - now.getTime()) > -STICKY_GRACE_MS;
+  let sticky = null;
+  // sticky_window_disclosed (migration 20260810000040): only rows whose
+  // consent surface stated the sticky rule may be charged on its strength.
+  if (!inWindow && startLive && request.sticky_window_disclosed && isApptCardFeeRailEnabled()) {
+    try {
+      const { findStickyLateReschedule } = require('./estimate-card-holds');
+      sticky = await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
+        notBefore: request.fee_agreed_at,
+      });
+    } catch (err) {
+      logger.error(`[appt-card-request] sticky-window lookup for cancel FAILED — unresolved, parking review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
+    }
+  }
+  if (inWindow || sticky) {
     const chargeResult = await chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
     // Normalized for cancellation callers (Codex #3153 r17 P1): unresolved
     // charge outcomes (parked review, or a definite decline whose reverted
@@ -2107,7 +2144,27 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
     return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
   }
-  const feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  let feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  const { CARD_HOLD_POST_START_GRACE_MS: PREVIEW_GRACE_MS } = require('./estimate-card-holds');
+  const previewStartMs = start ? new Date(start).getTime() : NaN;
+  const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -PREVIEW_GRACE_MS;
+  if (!feeApplies && isApptCardFeeRailEnabled() && previewStartLive && request.sticky_window_disclosed) {
+    // Sticky window — the preview must agree with the cancellation handler.
+    // A THROWN lookup is unresolved, not fee-free (same posture as the
+    // time-resolution catch above): the cancel path parks review on the
+    // same failure, so the prompt must surface the waiver choice.
+    try {
+      const { findStickyLateReschedule } = require('./estimate-card-holds');
+      feeApplies = !!(await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
+        notBefore: request.fee_agreed_at,
+      }));
+    } catch (err) {
+      logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
+      return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
+    }
+  }
   return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
 }
 

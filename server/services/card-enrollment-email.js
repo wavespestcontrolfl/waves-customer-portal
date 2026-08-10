@@ -287,7 +287,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       if (feeDisclosure && Number(feeDisclosure.feeAmount) > 0) {
         const fee = Number(feeDisclosure.feeAmount);
         const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${Number(feeDisclosure.windowHours)} hours before your visit. Rescheduling is always free.`;
+        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${Number(feeDisclosure.windowHours)} hours before your visit. Rescheduling is always free, though a reschedule made within ${Number(feeDisclosure.windowHours)} hours doesn't reset the cancellation window.`;
       }
     } else {
       // Legacy derivation for callers without a frozen snapshot.
@@ -299,7 +299,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
           // The enforced window is part of the disclosure (Codex #3153 r3 P0)
           // — same derived hours the /secure page states and stamps.
           const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
-          cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+          cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`;
         }
       } catch (feeErr) {
         logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);

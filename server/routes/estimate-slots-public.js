@@ -670,7 +670,11 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       logger.warn(`[estimate-slots-public:card-hold-intent] saved-method check failed — minting capture intent: ${err.message}`);
     }
 
-    const intent = await createCardHoldSetupIntentForEstimate(estimate);
+    const intent = await createCardHoldSetupIntentForEstimate(estimate, {
+      // Client-attested disclosure version — governs the sticky-window
+      // policy marker; absent/legacy versions stamp non-sticky.
+      disclosureVersion: typeof req.body?.cardHoldDisclosureVersion === 'string' ? req.body.cardHoldDisclosureVersion : null,
+    });
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
