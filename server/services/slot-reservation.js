@@ -168,6 +168,90 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   return cappedServiceType(fallback);
 }
 
+// Catalog link for the accepted service — the ID, not the label.
+//
+// `service_type` above is a DISPLAY string, and its whitelist silently
+// returns the estimate's `service_interest` verbatim for any engine key it
+// doesn't list. Every one-time engine key observed on accepted estimates in
+// prod falls through that way (`pre_slab_termiticide`, `german_roach`,
+// `stinging_insect`), producing a label that matches no `services` row — so
+// resolveCompletionProfileForScheduledService degrades to the GENERIC
+// profile. That silently kills typed one-time billing (no invoice ⇒ the
+// card-hold completion charge never fires, since it is gated on
+// `if (invoice?.id)`) AND the compliance-project lane (a pre-slab visit could
+// not produce its certificate of compliance).
+//
+// lookupServiceForScheduledService checks `service_id` FIRST, so stamping the
+// id makes profile resolution label-independent — without changing a single
+// customer-facing string. The primary service is chosen with the SAME rule
+// the label uses, so the id and the label can never describe different
+// services on one row.
+//
+// FAIL-OPEN by design: an unmapped engine key, a missing column (a deploy
+// that lands before the migration), or any lookup error leaves service_id
+// null and the accept books exactly as it does today.
+//
+// Runs in a SAVEPOINT (pre-push Codex P1; same failure mode and same fix as
+// inspection-credit's booking marker, Codex #3178 r4 P1). Both callers hand
+// us a TRANSACTION, and Postgres aborts the ENTIRE transaction after any
+// failed statement — so a plain try/catch around this SELECT would NOT leave
+// the caller's transaction usable. A deploy that lands before its migration
+// (engine_key absent) would then fail the reservation insert with "current
+// transaction is aborted" and take down estimate acceptance itself: the exact
+// opposite of the fail-open contract this helper promises. The savepoint
+// confines any failure to this read.
+async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
+  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
+  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
+  // stinging_insect) all collapse to 'pest_control', which is keyed to nothing
+  // in the catalog. `engineKey` is the row's RAW pricing-engine key, carried
+  // through by oneTimeProfileServices for exactly this lookup (codex #3328 r1
+  // P1); recurring rows have no engineKey, so their category IS their identity.
+  // NO fallback from an unmapped engineKey to the category: stamping a
+  // specialty visit with the generic category's catalog row would be a WRONG
+  // identity (wrong billing, wrong completion profile), which is worse than
+  // leaving it null and failing open.
+  const engineKey = String(primary?.engineKey || primary?.service || '').trim();
+  if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
+  let resolved = null;
+  try {
+    await conn.transaction(async (sp) => {
+      // Containment, not equality: engine_keys is a jsonb ARRAY because the
+      // engine emits versioned aliases for one catalog service
+      // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
+      // #3328 r2 P1.
+      //
+      // FAIL CLOSED on ambiguity (codex #3328 r3 P1): a jsonb array column
+      // cannot carry a scalar unique index, so nothing at the DB level stops an
+      // admin edit or a future migration from giving the same engine key to two
+      // ACTIVE rows. An unordered `.first()` would then pick NONDETERMINISTICALLY
+      // and could stamp the wrong billing/completion lane — strictly worse than
+      // no stamp, which merely reverts to today's behavior. Take two and resolve
+      // only on exactly one. The DB-backed contract test catches drift at CI
+      // time; this is the runtime guard that CI cannot provide.
+      const rows = await sp('services')
+        .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
+        .andWhere({ is_active: true })
+        .limit(2)
+        .select('id');
+      if (rows.length === 1) {
+        resolved = rows[0].id;
+      } else if (rows.length > 1) {
+        logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
+      }
+    });
+  } catch (err) {
+    // The savepoint rolled back; the caller's transaction is still healthy and
+    // the accept MUST still commit. An unresolved link is recoverable (the
+    // visit books, completion falls back to the generic profile exactly as it
+    // did before this change); a broken accept is not.
+    logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
+    return null;
+  }
+  return resolved;
+}
+
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
   const label = String(serviceProfile?.serviceLabel || fallback || '')
     .replace(/\s+/g, ' ')
@@ -402,6 +486,46 @@ async function reserveSlot({
         throw err;
       }
 
+      // Revalidated on the LOCKED row (pre-push P1, PR #3304): the route's
+      // archive/marker/call-side guards ran before this transaction opened,
+      // and an invalidation committing in between would still mint a
+      // scheduled-service hold for a quarantined estimate. Scoped to engine
+      // drafts; the same generic not-found the route's call-side guard
+      // returns, so quarantined tokens stay indistinguishable from missing
+      // ones.
+      {
+        const reservationData = (() => {
+          try {
+            const d = typeof estimate.estimate_data === 'string'
+              ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+            return d && typeof d === 'object' ? d : null;
+          } catch { return null; }
+        })();
+        const eng = reservationData?.estimatorEngine;
+        if (eng?.callLogId) {
+          const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+          // Lock the call row and HOLD it through the reservation commit
+          // (codex P1, PR #3304 — generation-rework GH round), mirroring
+          // the deposit-confirm and manual-acceptance paths: with only an
+          // awaited read, a linkage correction starting after the verdict
+          // returned could repoint the call while its estimate
+          // invalidation waited on our estimate row lock — the hold would
+          // then commit for the just-invalidated estimate and consume real
+          // capacity until expiry. Lock order holds: occupancy rung →
+          // estimates → call_log; no leads lock is taken in this txn, so
+          // no cycle with the processor's leads → call_log writers.
+          await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
+          const blocked = estimate.archived_at || eng.linkage_invalidated_at
+            || eng.invalidation_pending_at
+            || await callSideBlockForEstimateData(trx, reservationData);
+          if (blocked) {
+            const err = new Error('estimate is quarantined by a call-linkage correction');
+            err.code = 'ESTIMATE_NOT_FOUND';
+            throw err;
+          }
+        }
+      }
+
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
           serviceMode,
@@ -488,6 +612,10 @@ async function reserveSlot({
       const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+      // Catalog link — see catalogServiceIdForProfile. Stamped on the HOLD so
+      // the graduated visit carries it even if the profile can't be re-resolved
+      // at commit; commitReservation backfills it when this returns null.
+      const catalogServiceId = await catalogServiceIdForProfile(trx, serviceProfile);
 
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
@@ -747,6 +875,7 @@ async function reserveSlot({
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
+        ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
         // Geo stamp (best-effort): coords make the hold a real route anchor
         // for find-time's detour math; the zone slug lets the zone-capacity
         // conflict check see holds directly instead of via the (absent)
@@ -1015,6 +1144,26 @@ async function commitReservation({
       updates.estimated_duration_minutes = effectiveDurationMinutes;
       updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
+      // The catalog link is RESTAMPED from the accepted profile, in the same
+      // block that recomputes the label — id and label must describe the same
+      // service, and the accept is authoritative over the hold.
+      //
+      // This deliberately OVERWRITES the reserve-path stamp (codex #3328 r6
+      // P1). The earlier "never overwrite" guard was meant to protect an admin
+      // repoint, but on a graduating hold there is no repoint to protect: the
+      // row is a 15-minute reservation with customer_id NULL, invisible as a
+      // customer visit, so any id on it is reserve-DERIVED by construction.
+      // Meanwhile the accept-side reservation lookup binds only
+      // estimate/date/start/technician — NOT the reserved service mode — so a
+      // hold reserved as a mapped one-time specialty can be accepted in
+      // recurring mode. Preserving the hold's id there would commit recurring
+      // pricing and scheduling carrying a german-roach / bee-wasp / pre-slab
+      // catalog ID, and completion resolution trusts `service_id` BEFORE the
+      // label — the wrong billing and compliance lane.
+      //
+      // Assigned unconditionally, including null: if the accepted profile
+      // resolves to nothing, a stale specialty id must be CLEARED, not kept.
+      updates.service_id = await catalogServiceIdForProfile(client, serviceProfile);
     }
 
     const [updated] = await client('scheduled_services')
@@ -1109,5 +1258,12 @@ module.exports = {
   // estimate-backed label recovery compares stored fall-through values
   // against this exact transform, so it must reuse it, never re-implement.
   cappedServiceType,
-  _internals: { parseSlotId, addMinutesToTime, cappedServiceType, canonicalServiceTypeForProfile, notesWithServiceMix },
+  _internals: {
+    parseSlotId,
+    addMinutesToTime,
+    cappedServiceType,
+    canonicalServiceTypeForProfile,
+    notesWithServiceMix,
+    catalogServiceIdForProfile,
+  },
 };

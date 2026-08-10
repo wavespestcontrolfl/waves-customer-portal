@@ -710,9 +710,6 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {subFields.map((subField) => {
-                if (subField.showWhen && String(row[subField.showWhen.field] || '') !== subField.showWhen.value) {
-                  return null;
-                }
                 return (
                   <div key={subField.key}>
                     <label
@@ -961,6 +958,13 @@ export default function ProjectFindingFieldInput({
   const isDateOrTime = field.type === 'date' || field.type === 'time';
   const noDictationProps = noDictationInputProps(field);
   const suppressDictation = Boolean(noDictationProps['data-no-dictation']);
+  // iOS WebKit gives date/time inputs an intrinsic shadow-DOM width that can
+  // exceed width:100% — clamp it and drop the native appearance so the field
+  // tracks the container like the sibling text inputs (same treatment the
+  // project-date input in CreateProjectModal already carries).
+  const dateOrTimeClamp = isDateOrTime
+    ? { WebkitAppearance: 'none', appearance: 'none', minWidth: 0, maxWidth: '100%' }
+    : {};
   return (
     <div style={{ position: 'relative' }}>
       <input
@@ -971,7 +975,12 @@ export default function ProjectFindingFieldInput({
         onChange={(event) => onChange(event.target.value)}
         placeholder={field.placeholder || ''}
         {...noDictationProps}
-        style={{ ...inputStyle, ...themedInputStyle(T), ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }) }}
+        style={{
+          ...inputStyle,
+          ...themedInputStyle(T),
+          ...dateOrTimeClamp,
+          ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }),
+        }}
       />
       {!isDateOrTime && !suppressDictation && (
         <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>

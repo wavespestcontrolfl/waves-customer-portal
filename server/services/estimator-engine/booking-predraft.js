@@ -111,7 +111,7 @@ async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   }
 }
 
-async function maybePreDraftForBooking(scheduledServiceId) {
+async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = null, ownerProcGeneration = null } = {}) {
   try {
     if (!bookingPreDraftsEnabled()) return { drafted: false, skipped: 'gate_off' };
     if (!scheduledServiceId) return { drafted: false, skipped: 'no_booking_id' };
@@ -148,9 +148,37 @@ async function maybePreDraftForBooking(scheduledServiceId) {
       }
 
       const { maybeDraftEstimateForCall } = require('./index');
+      const delegatedCallLogId = freshBooking.source_call_log_id || booking.source_call_log_id;
+      // The delegation must carry a PASS IDENTITY (codex P1, PR #3304 —
+      // generation-rework GH round): without one, the engine's pass-start
+      // clear cannot retire an old generation-stamped estimator_draft_block,
+      // so a previously rejected call reprocessed into a Waves Assessment
+      // bounced off callRejectedForDrafting forever — no quarantine queue
+      // exists to sweep that obsolete block. The processor forwards its own
+      // claim token + generation; the detached entry points (admin re-draft,
+      // appointment tagger) adopt the call's CURRENT generation instead,
+      // which is valid exactly while the call is settled — an in-flight
+      // claim owns the pass identity, so adopt nothing then and the live
+      // pass performs its own clears.
+      let passToken = ownerProcToken;
+      let passGeneration = ownerProcGeneration;
+      if (!passToken && passGeneration == null) {
+        try {
+          const liveCall = await db('call_log').where({ id: delegatedCallLogId })
+            .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
+          const { callReprocessInFlight } = require('../../utils/estimate-claim-sql');
+          if (liveCall && !callReprocessInFlight(liveCall) && liveCall.processing_generation != null) {
+            passGeneration = Number(liveCall.processing_generation);
+          }
+        } catch (genErr) {
+          logger.warn(`[booking-predraft] pass-identity resolve skipped for call ${delegatedCallLogId}: ${genErr.message}`);
+        }
+      }
       const outcome = await maybeDraftEstimateForCall({
-        callLogId: freshBooking.source_call_log_id || booking.source_call_log_id,
+        callLogId: delegatedCallLogId,
         quotePromised: true,
+        ownerProcToken: passToken || null,
+        ownerProcGeneration: passGeneration ?? null,
       });
       if (outcome?.estimateId) {
         // The engine stamps its call linkage but not the booking's — merge

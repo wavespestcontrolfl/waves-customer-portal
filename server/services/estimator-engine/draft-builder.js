@@ -763,6 +763,69 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 }
 
 // ── Draft row ─────────────────────────────────────────────────
+// The creator's post-commit leads.estimate_id mirror, GUARDED (codex P1,
+// PR #3304 r5): a stale detached creator can resume AFTER a corrected
+// retry's reconciliation moved the linkage — an unconditional write would
+// re-link the old lead and leave two leads pointing at one estimate. The
+// write claims only an unclaimed-or-ours destination, and for call-origin
+// drafts additionally requires the call to STILL link this lead (sid or
+// metadata stamp) at write time. SMS-origin drafts (no call) keep the
+// destination guard alone — their linkage is not call-based.
+async function writeGuardedLeadEstimateLink(context, estimateId) {
+  let q = db('leads')
+    .where({ id: context.lead.id })
+    // The candidate estimate must still be UNARCHIVED — for EVERY linkage
+    // class (codex P1, PR #3304 r11): a paused phone_touched creator can
+    // resume after a corrected retry archived its estimate, and would
+    // otherwise point the lead back at the invalidated row.
+    .whereExists(function estimateStillLive() {
+      this.select(db.raw('1')).from('estimates as e')
+        .whereRaw('e.id = ?', [estimateId])
+        .whereNull('e.archived_at')
+        // A marker-only invalidated TERMINAL stays UNARCHIVED by design
+        // (codex P2, PR #3304 GH r7 — the new terminal doctrine breaks
+        // the archive-only assumption this guard was written against):
+        // a stale creator resuming after an identity quarantine would
+        // otherwise restore leads.estimate_id to the invalidated row,
+        // blocking replacement linkage and keeping agent context on it.
+        .whereRaw("COALESCE(e.estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''");
+    })
+    .where(function claimable() {
+      this.whereNull('estimate_id')
+        .orWhere('estimate_id', estimateId)
+        // An OLDER referenced estimate — the accepted/expired/declined
+        // history that never blocks drafting anew — YIELDS to this draft
+        // (codex P1, PR #3304 r6): refusing it stranded send/view/accept
+        // advancement on the stale pointer. Only a NEWER estimate keeps
+        // the slot.
+        .orWhereExists(function referencedIsOlder() {
+          this.select(db.raw('1')).from('estimates as ref')
+            .whereRaw('ref.id = leads.estimate_id')
+            .whereRaw('ref.created_at < (SELECT created_at FROM estimates WHERE id = ?)', [estimateId]);
+        });
+    });
+  // The live-linkage EXISTS applies ONLY to the durable classes (codex
+  // P1, PR #3304 r7): a phone_touched lead retains its ORIGINAL call's
+  // sid and normally carries no stamp, so the sid/stamp predicate can
+  // never match it and the canonical mirror always zero-rowed for that
+  // whole class. Phone-touched (and SMS-origin) writes keep the
+  // destination guard alone — the reconcile never unlinks them either,
+  // so the stale-creator race is bounded to a class whose linkage was
+  // best-effort to begin with.
+  if (context?.call?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
+    q = q.whereExists(function callStillLinked() {
+      this.select(db.raw('1'))
+        .from('call_log')
+        .where('call_log.id', context.call.id)
+        .andWhere(function linkageArms() {
+          this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
+            .orWhereRaw("call_log.metadata->>'lead_id' = leads.id::text");
+        });
+    });
+  }
+  await q.update({ estimate_id: estimateId });
+}
+
 async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
@@ -818,22 +881,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
         ['estimator_engine_call', String(call.id)]
       );
-      const existingForCall = await trx('estimates')
-        .select('id', 'status')
-        .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
-        .whereNull('archived_at')
-        .first();
-      if (existingForCall) {
-        return {
-          duplicateBlock: {
-            blocked: true,
-            reason: 'duplicate_call_draft',
-            existingEstimateId: existingForCall.id,
-            existingStatus: existingForCall.status || null,
-            message: 'A draft for this call already exists — a concurrent run created it first.',
-          },
-        };
-      }
+      // (The call-scoped in-lock recheck now runs inside the serialized
+      // callback for EVERY path — see creationResult below.)
       // No draft phone of our own, but a linked customer's number and
       // identity can still be read by the guard below — lock them here, in
       // the same canonical order every other caller uses. Lock order across
@@ -846,6 +895,121 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   };
 
   const creationResult = await runSerialized(async (trx) => {
+    // Call-scoped in-lock recheck on EVERY serialization path (codex P1,
+    // PR #3304 r18): the phone-lock path used to skip it, so a stale and
+    // a corrected composer with DIFFERENT lead addresses could both pass
+    // the early existing check and the address bypass then let the second
+    // insert through — two drafts for one call.
+    if (call?.id) {
+      const existingForCall = await trx('estimates')
+        .select('id', 'status')
+        .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
+        .whereNull('archived_at')
+        // A marker-only invalidated TERMINAL is not archived (codex P1,
+        // PR #3304 GH r6) but is not the call's live draft either —
+        // treating it as one would bounce the corrected rebuild as
+        // duplicate_call_draft with no replacement ever produced.
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .first();
+      if (existingForCall) {
+        return {
+          duplicateBlock: {
+            blocked: true,
+            reason: 'duplicate_call_draft',
+            existingEstimateId: existingForCall.id,
+            existingStatus: existingForCall.status || null,
+            message: 'A draft for this call already exists — a concurrent run created it first.',
+          },
+        };
+      }
+      // LIVE call-linkage check in the same lock as the insert (codex P1,
+      // PR #3304 GH r7): a composer that started before a linkage
+      // correction would otherwise insert a draft composed for the FORMER
+      // lead moments after the reconcile pass found nothing to fix —
+      // leaving the wrong lead linked with a live public token and no
+      // later pass to catch it (the reconcile-only entry runs once per
+      // call pass). Aborting the stale insert is the atomic half of that
+      // race; the corrected retry composes the replacement.
+      // A REJECTED call never receives a new draft (codex P0, PR #3304 GH
+      // r8e) — checked for EVERY call-origin insert, not just durably
+      // linked ones: the terminal spam/voicemail path invalidates existing
+      // drafts, but a detached composer would otherwise insert after
+      // terminalization and keep a live public token on a rejected call.
+      {
+        const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+        const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
+        if (rejected) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'call_rejected',
+              message: `This call was rejected by the pipeline (${rejected}) — no draft is created.`,
+            },
+          };
+        }
+      }
+      // GENERATION fence for EVERY call-origin insert (codex P1, PR #3304
+      // — generation-rework GH round): the sid/stamp branch below
+      // re-verifies linkage, but a lead-less or phone_touched composer
+      // never compared its pass identity with the live call row — an older
+      // detached composer resuming after a newer pass finalized could
+      // insert stale identity/service/pricing content AFTER that pass's
+      // reconcile-only sweep found no committed draft to fix, leaving the
+      // wrong content live with composedGeneration as audit-only data.
+      // Fence doctrine (PR #3304): token match = in-flight me; SAME
+      // generation = no newer claim since mine (survives this pass's own
+      // finalization). The call row is already locked above
+      // (callRejectedForDrafting lockCallRow) and held through the insert,
+      // so the compare is against settled truth. A composer carrying
+      // neither identity (legacy entry points) keeps today's behavior —
+      // there is nothing to compare.
+      {
+        const { callPassStillOwned } = require('../../utils/estimate-claim-sql');
+        const stillOwned = await callPassStillOwned(trx, call.id, {
+          ownerProcToken: context?.ownerProcToken || null,
+          ownerProcGeneration: context?.ownerProcGeneration ?? null,
+        });
+        if (!stillOwned) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'stale_processing_generation',
+              message: 'A newer processing pass claimed this call while the draft was composing — that pass owns the rebuild.',
+            },
+          };
+        }
+      }
+      if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
+        const { staleCallLinkageReason } = require('../admin-estimate-persistence');
+        // LOCK the call row and HOLD it through the INSERT (codex P1, PR
+        // #3304 GH r8): a plain read left a window where a corrected
+        // retry could finalize — its reconcile-only pass finding no
+        // committed estimate — and this transaction would then insert the
+        // stale former-lead draft. The processor's stamp writers
+        // token-fence under this same row lock, so they either commit
+        // first (seen here) or wait for this insert and their own
+        // reconcile invalidates it. Lock order holds: estimates (advisory
+        // + insert) → call_log; no lead lock is taken in this txn.
+        const staleReason = await staleCallLinkageReason(trx, {
+          lead_id: context.lead.id,
+          lead_linkage: context.leadLinkage,
+          estimatorEngine: { callLogId: call.id },
+        }, {
+          lockCallRow: true,
+          ownerProcToken: context.ownerProcToken || null,
+          ownerProcGeneration: context.ownerProcGeneration ?? null,
+        });
+        if (staleReason) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'stale_call_linkage',
+              message: `This call's lead linkage changed while the draft was composing (${staleReason}) — the corrected run rebuilds it.`,
+            },
+          };
+        }
+      }
+    }
     // The base duplicate guard is phone-only: a caller with several
     // properties on one number would have their SECOND property's draft
     // suppressed by the first property's open estimate. The bypass must
@@ -903,7 +1067,15 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // created or touched may be linked — a stale phone-matched lead
         // (leadIsForThisCall === false) did not originate this quote and
         // linking it would advance the wrong pipeline record.
-        ...(context?.lead?.id && context?.leadIsForThisCall ? { lead_id: context.lead.id } : {}),
+        ...(context?.lead?.id && context?.leadIsForThisCall ? {
+          lead_id: context.lead.id,
+          // HOW the lead resolved ('sid' / 'stamp' / 'phone_touched') —
+          // the existing-draft reconciliation only unlinks drafts whose
+          // recorded linkage was durable; legacy rows without this key
+          // stay linked unless a repoint proves a correction (codex P1,
+          // PR #3304 r4).
+          lead_linkage: context.leadLinkage || null,
+        } : {}),
         // Existing-customer marker the accept path reads to waive the $99
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
@@ -917,6 +1089,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           version: 1,
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
+          // The processing generation whose claim composed this draft —
+          // lets any later reconciler prove the draft predates (or
+          // matches) the call's current pass without wall clocks or
+          // token-state guessing (PR #3304).
+          ...(context?.ownerProcGeneration != null ? { composedGeneration: context.ownerProcGeneration } : {}),
           // Channel provenance: absent = the original call pipeline. The
           // SMS entry stamps its phone-scoped thread key so thread-level
           // dedupe and reporting can distinguish text-drafted quotes.
@@ -996,7 +1173,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // must not be mutated as if it originated this call.
   if (context?.lead?.id && context?.leadIsForThisCall) {
     try {
-      await db('leads').where({ id: context.lead.id }).update({ estimate_id: creationResult.estimate.id });
+      await writeGuardedLeadEstimateLink(context, creationResult.estimate.id);
     } catch (linkErr) {
       logger.warn(`[estimator-engine] lead link update failed (non-blocking): ${linkErr.message}`);
     }
@@ -1006,6 +1183,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 }
 
 module.exports = {
+  writeGuardedLeadEstimateLink,
   LANES,
   lineRequiresReview,
   lineHasHeuristicTurf,

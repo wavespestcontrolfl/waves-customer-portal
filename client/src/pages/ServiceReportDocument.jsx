@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
+import {
+  MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
+} from '../components/report/markedPhotoCopy';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -1150,6 +1153,97 @@ export default function ServiceReportDocument({ data, token }) {
             )}
           </div>
         )}
+
+        {/* Treated-point marks (GATE_PHOTO_MARKS, dark — empty otherwise).
+            The PDF path returns before ReportViewPage's live card ever mounts,
+            so the document renders its own block (codex P1). Deliberately NOT
+            the fixed-height contain thumbnail used for the gallery below:
+            pins are positioned as percentages of the IMAGE, and a contained
+            image inside a taller box would leave every pin offset from the
+            point it marks. Natural aspect keeps the percentages honest.
+            Static by nature — no animation in print. States no count. */}
+        {/* A failed image must take its whole block with it (codex P2): the
+            gallery has an explicit `unavailable` placeholder, but a marked
+            block left "Where we treated", the caption, and positioned pins
+            floating over a broken image. The failure counter only blocks
+            CACHING — the malformed document would still be served on each
+            download. Nothing marked is better than pins over nothing. */}
+        {(data.markedPhotos || []).filter((m) => !failedImages.has(m.url)).map((marked) => (
+          <div key={marked.photoId} className="doc-keep">
+            <SectionHeader>Where we treated</SectionHeader>
+            <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
+              {MARKED_PHOTO_INTRO}
+            </p>
+            {/* The wrapper SHRINK-WRAPS the image (inline-block + auto size),
+                which is what keeps the pins aligned once a height cap binds:
+                pins are percentages of this box, so a box larger than the
+                rendered image would offset every one of them. A full-width
+                portrait phone photo is ~10in tall at the document's 7.5in
+                printable width and could not fit the page beside its heading
+                and legend, so the image is capped at 6.4in and allowed to
+                shrink its own width to match (codex P1). */}
+            <div style={{
+              position: 'relative', lineHeight: 0, display: 'inline-block', maxWidth: '100%',
+            }}>
+              <img
+                src={marked.url}
+                alt={marked.caption || 'Photograph of the treated area with the treated points marked'}
+                onError={() => markImageFailed(marked.url)}
+                style={{
+                  display: 'block',
+                  width: 'auto', height: 'auto',
+                  maxWidth: '100%', maxHeight: '6.4in',
+                  // border-box or the 1px border lands OUTSIDE the 100% width
+                  // (Tailwind preflight is disabled, so this img is content-box
+                  // and the only box-sizing rule in index.css is scoped to
+                  // admin form controls). Measured in the PDF's own engine: a
+                  // landscape photo — every phone photo, since max-width binds
+                  // for anything wider than the printable area — rendered a
+                  // 722px image inside the wrapper's 720px cap, drifting the
+                  // percentage-positioned pins ~1px off their points. The
+                  // height-capped portrait case codex flagged measured exact
+                  // either way; this is the case that actually moved.
+                  boxSizing: 'border-box',
+                  borderRadius: 4, border: `1px solid ${HAIR}`,
+                }}
+              />
+              {(marked.marks || []).map((mark) => (
+                <span
+                  key={`${mark.n}-${mark.kind}`}
+                  style={{
+                    position: 'absolute',
+                    left: `${mark.x * 100}%`,
+                    top: `${mark.y * 100}%`,
+                    transform: 'translate(-50%, -50%)',
+                    minWidth: 17, height: 17, padding: '0 4px',
+                    borderRadius: 999, border: '1.5px solid rgba(255,255,255,.94)',
+                    background: markColor(mark.kind),
+                    color: '#fff', fontSize: 9.5, fontWeight: 700, lineHeight: 1,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  {mark.n}
+                </span>
+              ))}
+            </div>
+            {(marked.legend || []).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', margin: '6px 0 0' }}>
+                {marked.legend.map((entry) => (
+                  <span key={entry.kind} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: INK }}>
+                    <span style={{
+                      width: 8, height: 8, borderRadius: '50%', flex: 'none', background: markColor(entry.kind),
+                    }}
+                    />
+                    {entry.label}
+                  </span>
+                ))}
+              </div>
+            )}
+            <p style={{ margin: '6px 0 0', fontSize: 10, lineHeight: 1.5, color: MUTED }}>
+              {markedPhotoCaption(marked.marks, marked.captionKey)}
+            </p>
+          </div>
+        ))}
 
         {/* Service photos — embedded (owner 2026-08-03, supersedes the
             portal-link-only call earlier the same day). */}

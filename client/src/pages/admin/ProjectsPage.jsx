@@ -390,6 +390,9 @@ function deliverySummary(channels = {}) {
 // per additional_applications row — mirror of the server gate in
 // server/routes/admin-projects.js.
 function certApplicationChecks(app = {}, labelPrefix = "") {
+  // Unchanged from main on purpose — see the note in the server mirror
+  // (admin-projects.js): re-gating stored "Other" records is a separate
+  // business decision, not part of removing the form inputs.
   const productName = app.product_name === "Other"
     ? app.product_name_other
     : app.product_name;
