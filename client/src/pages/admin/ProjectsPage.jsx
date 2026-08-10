@@ -394,9 +394,14 @@ function certApplicationChecks(app = {}, labelPrefix = "") {
   // incomplete with or without a `_other` description, since neither the bare
   // sentinel nor a description the applicator can no longer see belongs on an
   // issued certificate. Mirror of the server comment in admin-projects.js.
-  const productName = app.product_name === "Other" ? null : app.product_name;
+  // `hard` only for the sentinel failure — a blank field stays overridable.
+  // Mirrors the server's hardMissing so the UI doesn't walk the admin into an
+  // override prompt the send route will 422 anyway.
+  const productIsSentinel = app.product_name === "Other";
+  const methodIsSentinel = app.treatment_method === "Other";
+  const productName = productIsSentinel ? null : app.product_name;
   const rawMethod = app.treatment_method;
-  const treatmentMethod = rawMethod === "Other" ? null : rawMethod;
+  const treatmentMethod = methodIsSentinel ? null : rawMethod;
   // Method-aware coverage requirements — bait systems have no gallons, borate
   // wood treatments may not either.
   const isBaitSystem = rawMethod === "Bait system";
@@ -418,10 +423,12 @@ function certApplicationChecks(app = {}, labelPrefix = "") {
     {
       label: `${labelPrefix}Method of treatment`,
       ok: hasMeaningfulValue(treatmentMethod),
+      hard: methodIsSentinel,
     },
     {
       label: `${labelPrefix}Product used`,
       ok: hasMeaningfulValue(productName),
+      hard: productIsSentinel,
     },
     {
       label: `${labelPrefix}${

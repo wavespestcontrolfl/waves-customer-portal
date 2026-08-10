@@ -600,9 +600,16 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
   // showing "Other" and is editable, not dead-ended. Do not reintroduce a
   // fallback to `_other` or to the picker value; either one lets the sentinel
   // satisfy the gate.
-  const productName = app.product_name === 'Other' ? null : app.product_name;
+  // `hard` only when the SENTINEL is what failed the check. A simply-blank
+  // method or product stays an ordinary missing item an admin can override
+  // with a reason, exactly as before; the sentinel cannot be overridden,
+  // because no reason makes "Other" a lawful FBC 1816.1.7 method or FDACS
+  // 5E-14.106 product on an issued certificate.
+  const productIsSentinel = app.product_name === 'Other';
+  const methodIsSentinel = app.treatment_method === 'Other';
+  const productName = productIsSentinel ? null : app.product_name;
   const rawMethod = app.treatment_method;
-  const method = rawMethod === 'Other' ? null : rawMethod;
+  const method = methodIsSentinel ? null : rawMethod;
   // Coverage requirements vary by application method. Liquid soil barriers
   // (chemical) are sized by gallons of finished solution applied across a
   // measured area. Wood treatments (borate) are measured by treated area
@@ -625,8 +632,8 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
     ? 'Coverage (sq ft or linear ft + gallons applied)'
     : 'Coverage (sq ft or linear ft)';
   return [
-    { key: `${keyPrefix}treatment_method`, label: `${labelPrefix}Method of treatment`, ok: hasMeaningfulValue(method) },
-    { key: `${keyPrefix}product`, label: `${labelPrefix}Product used`, ok: hasMeaningfulValue(productName) },
+    { key: `${keyPrefix}treatment_method`, label: `${labelPrefix}Method of treatment`, ok: hasMeaningfulValue(method), hard: methodIsSentinel },
+    { key: `${keyPrefix}product`, label: `${labelPrefix}Product used`, ok: hasMeaningfulValue(productName), hard: productIsSentinel },
     {
       key: `${keyPrefix}active_ingredient`,
       label: `${labelPrefix}${needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient'}`,
