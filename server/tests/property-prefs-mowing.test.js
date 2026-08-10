@@ -67,9 +67,11 @@ describe('property preferences — mowing schedule fields', () => {
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
 
-    expect(src).toMatch(/mowingDays:\s*Joi\.array\(\)/);
-    // Enum-validated, NOT shortText: the column is varchar(30) and shortText
-    // allows 200, so an over-long value would 500 instead of 400.
+    // Both mowing enums are validated against the exact keys the pills emit.
+    // A length-only check would persist values ("Monday", a 40-char time)
+    // that the summary and the technician alert both filter out — a silent
+    // write that vanishes from every surface — or overflow varchar(30).
+    expect(src).toMatch(/mowingDays:\s*Joi\.array\(\)[\s\S]{0,200}?\.valid\('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'\)/);
     expect(src).toMatch(/mowingTimeOfDay:\s*Joi\.string\(\)[^\n]*\.valid\(/);
     expect(src).toMatch(/mowingNotes:\s*longText/);
     expect(src).toMatch(/'mowing_days',\s*'mowing_time_of_day',\s*'mowing_notes'/);

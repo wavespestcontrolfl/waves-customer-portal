@@ -54,7 +54,14 @@ const prefsSchema = Joi.object({
   ).allow(null),
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
-  mowingDays: Joi.array().items(Joi.string().max(20)).max(7),
+  // Same seven keys the pills emit. A length-only check would persist
+  // "Monday" with a 200, and both the portal summary and mowingAlertText
+  // filter against the canonical keys — so the day would silently vanish
+  // from the customer's view AND the technician's alert.
+  mowingDays: Joi.array()
+    .items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'))
+    .unique()
+    .max(7),
   // Controlled vocabulary, not free text: the column is varchar(30), so a
   // longer value would turn a client mistake into a Postgres 22001 → 500.
   // The four keys mirror the portal's Typical Time pills.

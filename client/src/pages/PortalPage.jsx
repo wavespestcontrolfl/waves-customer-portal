@@ -6916,7 +6916,10 @@ function PropertyTab({ customer }) {
             <label style={labelStyle}>Typical Time</label>
             <PillSelector
               value={prefs.mowingTimeOfDay}
-              onChange={v => updateField('mowingTimeOfDay', v)}
+              // Tapping the active pill clears it. This field feeds the
+              // technician's visit alert, so a stale time must be removable
+              // without picking a different wrong one.
+              onChange={v => updateField('mowingTimeOfDay', v === prefs.mowingTimeOfDay ? '' : v)}
               options={[
                 { value: 'morning', label: 'Morning (7-11)' },
                 { value: 'midday', label: 'Midday (11-2)' },
@@ -6924,6 +6927,9 @@ function PropertyTab({ customer }) {
                 { value: 'varies', label: 'Varies' },
               ]}
             />
+            <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+              Tap the selected time again to clear it.
+            </div>
           </div>
           <div>
             <label style={labelStyle}>Mowing Notes</label>
