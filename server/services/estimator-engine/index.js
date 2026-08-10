@@ -24,20 +24,25 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { buildCallContext, existingDraftForCall } = require('./context-builder');
 const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
-const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { hasWrongPremiseFlag } = require('../lookup-confidence');
 
-// A global verification failure poisons the RECORD leg too, not just the
-// enriched payload buildEngineInput already rejects: an 'address' flag means
-// the geocoder snapped to a DIFFERENT premise, so the county home/lot
+// A wrong-premise lookup poisons the RECORD leg too, not just the enriched
+// payload buildEngineInput already rejects: an 'address' flag means the
+// geocoder snapped to a DIFFERENT premise, so the county home/lot
 // dimensions describe the SNAPPED parcel — arbitrated in as high-confidence
 // 'county' facts they would size and green-lane a draft for the wrong
 // house. Strip the parcel-scoped signals before arbitration; caller-stated
 // extraction facts and the (address-matched) profile stay, and the draft
 // falls to the fallback-source machinery that already routes to review.
-// The snappedRecord check survives an enrichment failure (flags live on the
-// enriched payload, the audit marker on the record itself).
+// Deliberately NOT the broader global-flag check: an 'all' flag on an
+// AI-backed record describes the RIGHT address — arbitration grades those
+// dimensions low-confidence LOOKUP_ESTIMATE and routes to a reviewable
+// draft, which stripping would needlessly turn red (the strict rule stays
+// on the customer-facing path, which has no review lane). The snappedRecord
+// check survives an enrichment failure (flags live on the enriched payload,
+// the audit marker on the record itself).
 function parcelSignalsDescribeGatheredAddress({ enriched, propertyRecord }) {
-  if (hasGlobalVerifyFlag(enriched)) return false;
+  if (hasWrongPremiseFlag(enriched)) return false;
   if (propertyRecord?._addressAudit?.snappedRecord) return false;
   return true;
 }

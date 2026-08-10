@@ -137,19 +137,32 @@ function recordPropertyTypeIsTrustworthy(record) {
   return true;
 }
 
-// Structural facts (constructionMaterial / foundationType / roofType) are
-// merged into the RECORD from listings and AI when county data is absent —
-// _fieldEvidence.<field>.fieldVerify marks those weak/conflicting merges,
-// and buildFieldVerifyFlags surfaces them on the enriched payload. So a
-// non-'UNKNOWN' record value is NOT proof of county evidence: a flagged
-// structural fact may not move a price from either leg. Checked on both the
-// record's own evidence and the enriched flags so an enrichment failure
-// cannot launder a disputed value.
-function structuralFactIsTrustworthy({ record, enriched, field }) {
-  if (record?._fieldEvidence?.[field]?.fieldVerify) return false;
-  const flat = String(field || '').toLowerCase();
-  const snake = String(field || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-  return !hasVerifyFlagMatching(enriched, (f) => f.includes(flat) || f.includes(snake));
+// Structural facts (constructionMaterial / foundationType / roofType /
+// yearBuilt) are merged into the RECORD from listings and AI when county
+// data is absent — `_fieldEvidence.<field>.fieldVerify` marks those
+// weak/conflicting merges, and that evidence bit is the ONLY reliable
+// distrust signal for them. The fieldVerifyFlags STREAM must not be used
+// here: the flag builder also emits same-named OPERATIONAL RISK notices for
+// authoritative values (wood frame = "higher termite risk", crawlspace =
+// "treatment approach differs") — treating those as distrust would drop
+// county-confirmed facts and underquote exactly the risky homes their
+// pricing modifiers exist for. A record without evidence metadata (legacy
+// cache) keeps its pre-existing trusted-record semantics.
+function structuralFactIsTrustworthy({ record, field }) {
+  return !record?._fieldEvidence?.[field]?.fieldVerify;
+}
+
+// 'address' alone marks a WRONG-PREMISE lookup: the geocoder snapped to a
+// different parcel, so the record's dimensions describe the neighbor. 'all'
+// is deliberately excluded here — its MEDIUM form marks an AI-web-search
+// record for the RIGHT address (the county roll gave nothing), whose
+// dimensions source-arbitration grades as low-confidence LOOKUP_ESTIMATE
+// facts that route to a reviewable draft; its HIGH form fires only when
+// there is no record to strip at all. Callers with NO review lane (the
+// customer-facing path) keep the stricter hasGlobalVerifyFlag instead.
+function hasWrongPremiseFlag(enriched) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  return flags.some((flag) => String(flag?.field || '').trim().toLowerCase() === 'address');
 }
 
 // A satellite attachment reclassification deliberately ships with a
@@ -194,4 +207,5 @@ module.exports = {
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
   structuralFactIsTrustworthy,
+  hasWrongPremiseFlag,
 };

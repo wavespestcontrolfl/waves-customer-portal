@@ -491,7 +491,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       propertyType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
         || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null)
         || propertyType;
-      yearBuilt = yearBuilt || p.yearBuilt || record.yearBuilt || null;
+      // Year built drives the pest/WDO age modifiers — same evidence gate
+      // as the structural facts below (the enriched value is a mirror of
+      // the same record merge, so one evidence bit covers both legs).
+      yearBuilt = yearBuilt
+        || (structuralFactIsTrustworthy({ record, field: 'yearBuilt' })
+          ? (p.yearBuilt || record.yearBuilt)
+          : null)
+        || null;
       // Structural facts move pest, termite/WDO and rodent prices. The
       // county RECORD is authoritative and always applies (through the same
       // knownFact 'UNKNOWN' guard); the merged enriched value may have been
@@ -500,11 +507,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       const visionFactsOk = lookupFeaturesAreTrustworthy(p);
       // A non-'UNKNOWN' record value is not proof of county evidence:
       // structural facts get merged into the record from listings/AI, and
-      // those weak or conflicting merges carry fieldVerify markers. A
-      // flagged fact is withheld from BOTH legs — the modifier simply does
-      // not apply, same as the untrusted-vision default.
+      // those weak or conflicting merges carry fieldVerify on the record's
+      // own _fieldEvidence. A disputed fact is withheld from BOTH legs —
+      // the modifier simply does not apply, same as the untrusted-vision
+      // default. (Evidence bit only — the fieldVerifyFlags stream also
+      // carries same-named RISK notices on authoritative values, which must
+      // keep pricing; see structuralFactIsTrustworthy.)
       const structuralFact = (field, recordValue, enrichedValue) => {
-        if (!structuralFactIsTrustworthy({ record, enriched: p, field })) return null;
+        if (!structuralFactIsTrustworthy({ record, field })) return null;
         return knownFact(recordValue)
           || (visionFactsOk ? knownFact(enrichedValue) : null)
           || null;

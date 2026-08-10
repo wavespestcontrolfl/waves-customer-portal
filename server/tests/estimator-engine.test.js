@@ -1345,3 +1345,25 @@ describe('wrong-premise parcel signals are stripped before property-fact arbitra
     expect(usable({ enriched: null, propertyRecord: { squareFootage: 2400 } })).toBe(true);
   });
 });
+
+describe("an 'all' flag on an AI-backed record does NOT strip the parcel (r7)", () => {
+  const { _private: idxPriv } = require('../services/estimator-engine/index');
+  const usable = idxPriv?.parcelSignalsDescribeGatheredAddress;
+
+  test("only wrong-premise signals strip; the AI-backed 'all' record arbitrates as a reviewable low-confidence fact", () => {
+    if (!usable) return;
+    // MEDIUM 'all' = record from AI web search for the RIGHT address —
+    // source-arbitration grades its dimensions LOOKUP_ESTIMATE (yellow
+    // draft), so stripping would turn a promised quote red for no premise
+    // doubt.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'all', reason: 'Property data sourced from AI web search — verify key dimensions on site', priority: 'MEDIUM' }] },
+      propertyRecord: { squareFootage: 2100, _source: 'ai' },
+    })).toBe(true);
+    // 'address' still strips.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }, { field: 'all', reason: 'ai', priority: 'MEDIUM' }] },
+      propertyRecord: { squareFootage: 2100 },
+    })).toBe(false);
+  });
+});

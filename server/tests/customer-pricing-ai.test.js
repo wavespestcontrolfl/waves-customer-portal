@@ -1307,3 +1307,67 @@ describe('story provenance and record-backed structural facts (r6)', () => {
     expect(ctx.propertyInput.foundationType).toBe('SLAB');
   });
 });
+
+describe('risk notices vs evidence distrust, and yearBuilt gating (r7)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-risk-notice',
+    address_line1: '5 Crawlspace Ct',
+    city: 'Nokomis',
+    state: 'FL',
+    zip: '34275',
+  };
+
+  test('an authoritative WOOD_FRAME/CRAWLSPACE with only operational RISK flags still prices its modifiers', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // The flag builder emits same-named notices for AUTHORITATIVE risky
+        // values (wood frame = termite risk, crawlspace = different
+        // treatment) — evidence is NOT weak, so the modifiers must apply.
+        enriched: {
+          fieldVerifyFlags: [
+            { field: 'constructionMaterial', reason: 'Wood frame construction — higher termite risk, verify exterior condition', priority: 'MEDIUM' },
+            { field: 'foundationType', reason: 'CRAWLSPACE foundation — termite treatment approach differs from standard slab', priority: 'HIGH' },
+          ],
+        },
+        propertyRecord: {
+          constructionMaterial: 'WOOD_FRAME',
+          foundationType: 'CRAWLSPACE',
+          _fieldEvidence: {
+            constructionMaterial: { fieldVerify: false, sourceType: 'county' },
+            foundationType: { fieldVerify: false, sourceType: 'county' },
+          },
+        },
+      }),
+    });
+    // Dropping these would UNDERQUOTE exactly the risky homes the
+    // multipliers exist for.
+    expect(ctx.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+    expect(ctx.propertyInput.foundationType).toBe('CRAWLSPACE');
+  });
+
+  test('a yearBuilt with disputed field evidence is withheld; an undisputed one prices', async () => {
+    if (!resolve) return;
+    const disputed = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        propertyRecord: {
+          yearBuilt: 1962,
+          _fieldEvidence: { yearBuilt: { fieldVerify: true } },
+        },
+      }),
+    });
+    expect(disputed.propertyInput.yearBuilt).toBeNull();
+    const clean = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ propertyRecord: { yearBuilt: 1962 } }),
+    });
+    expect(clean.propertyInput.yearBuilt).toBe(1962);
+  });
+});
