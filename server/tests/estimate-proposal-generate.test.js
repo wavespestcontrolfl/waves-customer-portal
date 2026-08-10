@@ -828,6 +828,41 @@ describe('deriveProposalDraft', () => {
     expect(green.warnings).toEqual([]);
   });
 
+  test('r17b: mapped/raw mirrors merge authoritative metadata — accepted net outranks, explicit tax propagates, disagreement fails', async () => {
+    // Raw twin carries the operator-accepted net: ONE charge at $250,
+    // never $550 across both rows.
+    const acceptedNet = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300 }] } },
+        engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, manualFinalOneTime: 250 }] },
+      },
+    });
+    expect(acceptedNet.correctiveWork).toHaveLength(1);
+    expect(acceptedNet.correctiveWork[0].amount).toBe(250);
+
+    // Explicit taxable:false on the raw twin beats the mapped row's family
+    // default.
+    const twinTax = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300 }] } },
+        engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, taxable: false }] },
+      },
+    });
+    expect(twinTax.correctiveWork).toHaveLength(1);
+    expect(twinTax.correctiveWork[0].taxable).toBe(false);
+
+    // Mirrors that disagree with NO accepted net are ambiguous — fail the
+    // draft (nullable onetime_total gives reconciliation no backstop).
+    const disagree = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300 }] } },
+        engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 275 }] },
+      },
+    });
+    expect(disagree.correctiveWork).toBeNull();
+    expect(disagree.warnings[0]).toMatch(/disagreeing amounts/i);
+  });
+
   test('r17: same-container rows that CANONICALIZE together fail the draft — literal-name counting hid the collision', async () => {
     // "Pest — Tower A"/"Pest — Tower B" are distinct charges whose names
     // both normalize to pest_control; the collector merges them into one

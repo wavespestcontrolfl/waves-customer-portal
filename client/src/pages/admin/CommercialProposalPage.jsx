@@ -387,11 +387,11 @@ export default function CommercialProposalPage() {
       // justify clearing the synthesized building pricing (codex 1A-ii r2h).
       let monetaryFilled = 0;
       let programsInstalled = false;
-      // Section-content predicates consider EVERY editable field — the form
-      // stays editable during the fetch, so a value/amount typed before its
-      // label must not be silently replaced (codex 1A-ii r15b, same rule as
-      // programRowHasContent).
-      if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim() || i.value.trim())) {
+      // ANY existing row in a section blocks its fill — rows exist only
+      // because the operator added or loaded them, and content predicates
+      // can't see field edits that leave no text (family/frequency/tax —
+      // codex 1A-ii r17b). Fill-only means fill EMPTY sections.
+      if (draft?.propertyScope?.items?.length && live.scopeItems.length === 0) {
         setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
         filled += 1;
       }
@@ -404,7 +404,11 @@ export default function CommercialProposalPage() {
       // fallback lines, which generation may freely replace (codex 1A-ii r1).
       const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
         && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
-      if (draft?.programs?.length && !live.programsState.some(programRowHasContent) && !hasAuthoredBuildingLines) {
+      // ANY existing program row blocks the fill — a row exists only
+      // because the operator added or loaded it, and family/frequency/tax
+      // edits leave no text for a content predicate to see (codex 1A-ii
+      // r17b). Fill-only means fill EMPTY sections.
+      if (draft?.programs?.length && live.programsState.length === 0 && !hasAuthoredBuildingLines) {
         setProgramsState(draft.programs.map((program) => ({
           service: program.service,
           label: program.label,
@@ -422,9 +426,7 @@ export default function CommercialProposalPage() {
         monetaryFilled += 1;
         programsInstalled = true;
       }
-      if (draft?.correctiveWork?.length
-        && !live.correctiveWork.some((w) => String(w.label || '').trim()
-          || String(w.includesText || '').trim() || Number(w.amount) > 0 || w.taxable === true)
+      if (draft?.correctiveWork?.length && live.correctiveWork.length === 0
         && !hasAuthoredBuildingLines) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
           label: w.label,

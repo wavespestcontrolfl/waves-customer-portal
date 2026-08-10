@@ -797,32 +797,81 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   });
   const work = [];
   const comped = [];
+  const conflicted = [];
   // Mapped estimates persist specialty rows in BOTH oneTime.specItems and
   // root specItems as distinct objects — the canonical extractor dedupes by
   // object identity only, so dedupe here by stable service+amount identity
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
+  // A mapped item and its raw lineItems twin are ONE charge — the mapped
+  // item CONSUMES the twin and merges its authoritative metadata instead
+  // of a drop-if-equal check (codex 1A-ii r17b P0): the twin's
+  // manualFinalOneTime (operator-accepted net) outranks the mapped gross,
+  // an explicit taxable flag on EITHER row beats the family default, and
+  // mirrors whose amounts disagree with no accepted net fail the draft —
+  // a nullable onetime_total gives reconciliation no backstop here.
+  const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
+  const mappedResolvedAmount = (item) => num(item.manualFinalOneTime
+    ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
+    ?? item.installation?.price);
+  const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
+    ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+  const serviceIdOf = (row) => String(row.service || row.name || '').toLowerCase();
+  const rawPool = fromLineItems.map((line) => ({ line, used: false }));
   for (const item of fromOneTime) {
+    const label = String(item.label || item.name || item.service || 'item');
     if (rowIsReviewGated(item) || gatedOneTimeIdentities.has(oneTimeIdentity(item))) {
-      gated.push(String(item.label || item.name || item.service || 'item'));
+      gated.push(label);
       continue;
     }
     // An EXPLICIT accepted zero is comped scope, not an unpriced row
     // (codex 1A-ii r2c) — fail rather than silently lose it.
     if (item.manualFinalOneTime === 0) {
-      comped.push(String(item.label || item.name || item.service || 'item'));
+      comped.push(label);
       continue;
     }
     // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps
     // `price` gross) — it outranks everything (pre-push codex P0).
-    const amount = num(item.manualFinalOneTime
-      ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
-      ?? item.installation?.price);
+    const mappedAmount = mappedResolvedAmount(item);
+    if (!(mappedAmount > 0)) continue;
+    const itemService = serviceIdOf(item);
+    // Twin: prefer the exact-amount mirror, else any same-service raw row
+    // (the shapes persist from ONE engine run — same service key across
+    // the mapped/raw boundary is a mirror, not a second charge).
+    const twinEntry = rawPool.find((entry) => !entry.used && serviceIdOf(entry.line) === itemService
+      && roundCents(rawResolvedAmount(entry.line)) === roundCents(mappedAmount))
+      || rawPool.find((entry) => !entry.used && serviceIdOf(entry.line) === itemService);
+    let amount = mappedAmount;
+    let explicitTaxable = (item.taxable === true || item.taxable === false) ? item.taxable : undefined;
+    if (twinEntry) {
+      twinEntry.used = true;
+      const twin = twinEntry.line;
+      if (twin.manualFinalOneTime === 0) {
+        comped.push(label);
+        continue;
+      }
+      const twinManual = num(twin.manualFinalOneTime);
+      const itemManual = num(item.manualFinalOneTime);
+      if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) {
+        conflicted.push(label);
+        continue;
+      }
+      if (twinManual != null && itemManual == null) {
+        amount = twinManual;
+      } else if (twinManual == null && itemManual == null
+        && roundCents(rawResolvedAmount(twin)) !== roundCents(mappedAmount)) {
+        conflicted.push(label);
+        continue;
+      }
+      if (explicitTaxable === undefined && (twin.taxable === true || twin.taxable === false)) {
+        explicitTaxable = twin.taxable;
+      }
+    }
     if (!(amount > 0)) continue;
     work.push({
-      label: String(item.label || item.name || item.service || 'One-time service').slice(0, 160),
+      label: label.slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: commercialTaxableDefault(item.service || item.name, item.taxable, { taxabilityMap, oneTime: true }),
+      taxable: commercialTaxableDefault(item.service || item.name, explicitTaxable, { taxabilityMap, oneTime: true }),
       // Mapped specialty rows persist customer-facing scope (bed-bug room/
       // visit counts) under the `det` alias — resolve it exactly like the
       // public extraction (`item.detail || item.det`) or Generate → Save
@@ -831,25 +880,26 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       includes: (item.detail || item.det) ? [String(item.detail || item.det).slice(0, 200)] : [],
     });
   }
-  for (const line of fromLineItems) {
+  for (const { line, used } of rawPool) {
+    if (used) continue;
     if (line.manualFinalOneTime === 0) {
       comped.push(String(line.displayName || line.name || line.service || 'item'));
       continue;
     }
-    const amount = num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
-      ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+    const amount = rawResolvedAmount(line);
     if (!(amount > 0)) continue;
-    // Skip rows the canonical containers already carried (same service +
-    // amount) — the raw lineItems mirror them for engine drafts.
-    const mirrored = fromOneTime.some((item) => String(item.service || item.name || '').toLowerCase() === String(line.service || line.name || '').toLowerCase()
-      && num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total ?? item.installation?.price) === amount);
-    if (mirrored) continue;
     work.push({
       label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
       taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
       includes: [],
     });
+  }
+  if (conflicted.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${conflicted.join(', ')} has mirrored rows with disagreeing amounts and no accepted price — verify the price and author the corrective work manually.`,
+    };
   }
   // The v1 mapper already emits bait installations into oneTime.items —
   // when both the mapped result and the raw engineResult persist, the
