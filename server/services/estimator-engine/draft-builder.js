@@ -992,6 +992,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 module.exports = {
   LANES,
   buildEngineInput,
+  // Shared story-provenance rule — the customer-facing pricing assistant
+  // grades its lookup stories through the same evidence test so a
+  // low-confidence AI inference prices as 'estimated' on both paths.
+  storiesSourceForPricing,
   stampPestCurveVersion,
   deriveTotals,
   compsBand,

@@ -1744,6 +1744,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     landscapeComplexity,
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
+    // Field-level confidence behind the winning tree count (stamped by
+    // mergeAiAnalyses) — same contract as bedAreaConfidence below.
+    treeCountConfidence: ai?._treeCountConfidence,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
     // Field-level confidence behind the winning bed-area value (stamped by
     // mergeAiAnalyses) — the trust predicate requires it; the blended
@@ -3999,6 +4002,38 @@ function mergeAiAnalyses(providerResults) {
     } else {
       merged._bedAreaConfidence = bedReads
         .filter((r) => r.value === mergedBedArea)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // Same stamp for the tree count — it feeds per-tree labor minutes AND the
+  // per-tree material term, and like the bed area it can be gap-filled from
+  // a lone low-confidence provider outside divergence tracking. The
+  // absolute-difference guard (>2 trees) keeps small-count noise (4 vs 3)
+  // from flagging.
+  const mergedTreeCount = Number(merged.estimatedTreeCount);
+  if (Number.isFinite(mergedTreeCount) && mergedTreeCount > 0) {
+    const countReads = sorted
+      .map((r) => ({ provider: r.provider, value: Number(r.analysis?.estimatedTreeCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => Number.isFinite(r.value) && r.value > 0);
+    const maxCount = Math.max(...countReads.map((r) => r.value));
+    const minCount = Math.min(...countReads.map((r) => r.value));
+    const treeCountDivergent = countReads.length > 1
+      && (maxCount - minCount) > 2
+      && (maxCount - minCount) > maxCount * 0.25;
+    if (treeCountDivergent) {
+      merged._treeCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedTreeCount',
+          primary: primary.provider,
+          ...Object.fromEntries(countReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._treeCountConfidence = countReads
+        .filter((r) => r.value === mergedTreeCount)
         .reduce((mx, r) => Math.max(mx, r.conf), 0);
     }
   }

@@ -312,3 +312,30 @@ describe('mergeAiAnalyses — bed-area field confidence (T&S reprice lane)', () 
     expect(merged._bedAreaConfidence).toBe(92);
   });
 });
+
+describe('mergeAiAnalyses — tree-count field confidence (T&S reprice lane)', () => {
+  const { _private: priv } = require('../routes/property-lookup-v2');
+  const merge = priv?.mergeAiAnalyses;
+
+  test('gap-filled count carries ITS provider confidence; material divergence zeroes the stamp', () => {
+    if (!merge) return;
+    const gapFilled = merge([
+      { provider: 'claude', analysis: { confidenceScore: 90 } },
+      { provider: 'gemini', analysis: { confidenceScore: 40, estimatedTreeCount: 12 } },
+    ]);
+    expect(gapFilled.estimatedTreeCount).toBe(12);
+    expect(gapFilled._treeCountConfidence).toBe(40);
+    const divergent = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedTreeCount: 14 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedTreeCount: 6 } },
+    ]);
+    expect(divergent._treeCountConfidence).toBe(0);
+    expect((divergent.aiDivergences || []).some((d) => d.field === 'estimatedTreeCount')).toBe(true);
+    // Small-count noise (4 vs 3) does not flag.
+    const close = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedTreeCount: 4 } },
+      { provider: 'openai', analysis: { confidenceScore: 88, estimatedTreeCount: 3 } },
+    ]);
+    expect(close._treeCountConfidence).toBe(92);
+  });
+});

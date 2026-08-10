@@ -158,13 +158,41 @@ function lookupDimensionIsTrustworthy(enriched, dimension) {
 // fieldVerify kept on rc._fieldEvidence.propertyType) — it only ever fires
 // on a weak-typed record. So when the enriched type is rejected for its
 // verify flag, a bare record fallback would hand the SAME rejected
-// classification straight back. A record type stands only when it is
-// neither satellite-sourced nor verify-flagged.
+// classification straight back.
+//
+// But a fieldVerify bit alone does NOT make the winner weak:
+// mergePropertyRecords sets it on mere source DISAGREEMENT even when
+// authoritative county/cadastral/listing/verified data won the field (the
+// route's own recordPropertyTypeIsWeak contract). Rejecting every flagged
+// record type dropped the authoritative townhome/condo winner and repriced
+// it as single_family. Distrust only a satellite-sourced type or a weak
+// WINNING source; a no-evidence record (legacy cache) keeps its plain
+// record semantics — the caller's 'UNKNOWN' guard still applies.
 function recordPropertyTypeIsTrustworthy(record) {
-  if (!record) return false;
+  if (!record || !record.propertyType) return false;
   if (String(record._propertyTypeSource || '').trim().toLowerCase() === 'satellite') return false;
-  if (record._fieldEvidence?.propertyType?.fieldVerify) return false;
-  return true;
+  const ev = record._fieldEvidence?.propertyType;
+  if (!ev) return true;
+  const sourceType = String(ev.sourceType || '').trim().toLowerCase();
+  if (sourceType === 'satellite') return false;
+  return !(sourceType === '' || sourceType === 'unknown' || sourceType === 'generic');
+}
+
+// Same field-level rule as the bed area below: estimatedTreeCount is
+// gap-filled outside divergence tracking, so the blended average can
+// launder a lone low-confidence count straight into per-tree labor minutes
+// AND the per-tree material term. mergeAiAnalyses stamps the winning
+// count's provider confidence (zeroed on material divergence), surfaced as
+// treeCountConfidence. Missing stamp = legacy payload = fail closed — the
+// pricer's density fallback runs and carries its own review warning.
+function lookupTreeCountIsTrustworthy(enriched) {
+  const count = Number(enriched?.estimatedTreeCount);
+  if (!Number.isFinite(count) || count <= 0) return false;
+  const fieldConfidence = Number(enriched?.treeCountConfidence ?? enriched?._treeCountConfidence);
+  if (!Number.isFinite(fieldConfidence) || fieldConfidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
+  return !hasVerifyFlagMatching(enriched, (field) => (
+    field.includes('treecount') || field.includes('tree_count')
+  ));
 }
 
 // Structural facts (constructionMaterial / foundationType / roofType /
@@ -237,6 +265,7 @@ module.exports = {
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
   lookupTurfZeroIsObserved,
+  lookupTreeCountIsTrustworthy,
   structuralFactIsTrustworthy,
   hasWrongPremiseFlag,
 };

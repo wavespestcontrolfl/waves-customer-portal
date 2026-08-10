@@ -1,6 +1,7 @@
 const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
 const { loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
+const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
 
 const RECURRING_SERVICE_ORDER = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'];
 const TIER_MIN_SERVICE_COUNT = {
@@ -348,7 +349,8 @@ function lookupEnabled() {
 const {
   lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
-  lookupTurfEstimateIsTrustworthy, lookupTurfZeroIsObserved, structuralFactIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy, lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
+  structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
@@ -384,6 +386,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   // AI-derived area must never claim to be an operator measurement.
   let bedAreaSource = bedArea ? 'explicit' : undefined;
   let stories = null;
+  let storiesEvidence = null;
   let propertyType = customer.property_type || 'single_family';
   let yearBuilt = null;
   let constructionMaterial = null;
@@ -477,6 +480,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // verification stays a human's job.
       if (lookupDimensionIsTrustworthy(p, 'stories')) {
         stories = positiveNumber(stories, p.stories, record.stories);
+        // The AI stories-fallback stamps full provenance on the record
+        // WITHOUT a fieldVerifyFlags entry — the flag check above cannot
+        // see it. Carry the evidence so the provenance decision below can
+        // grade a non-direct or low-confidence inference as 'estimated'
+        // (same rule the agent path applies via source-arbitration).
+        storiesEvidence = record._storiesEvidence || null;
       }
       // Property records normalize a missing field to the literal string
       // 'UNKNOWN', which is TRUTHY — a plain `record.x || enriched.x` chain
@@ -566,11 +575,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         trees: String(p.treeDensity || features.trees || 'moderate').toLowerCase(),
         complexity: String(p.landscapeComplexity || features.complexity || 'moderate').toLowerCase(),
         irrigation: !!p.irrigationVisible || features.irrigation,
-        // Only a POSITIVE observed count is a count. The enriched payload
-        // coerces an absent read to 0 (`|| 0`), so zero is
-        // indistinguishable from missing — leave it unset and let the
-        // pricer's density fallback (which carries its own warning) run.
-        treeCount: positiveNumber(p.estimatedTreeCount) || undefined,
+        // Only a POSITIVE observed count with FIELD-level confidence is a
+        // count. The enriched payload coerces an absent read to 0, so zero
+        // is indistinguishable from missing — and a gap-filled count from a
+        // lone low-confidence provider can ride the blended average (same
+        // trap as the bed area, hence the same stamped-confidence
+        // predicate). Anything less stays unset and the pricer's density
+        // fallback (which carries its own warning) runs.
+        treeCount: lookupTreeCountIsTrustworthy(p) ? positiveNumber(p.estimatedTreeCount) : undefined,
       };
       } else {
         // Record-backed pool/cage still price — they are assessor data, not
@@ -600,8 +612,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     // or a verify-flagged read discarded above) must say so, or the
     // story-sensitive pricers (pest per-story minutes, termite bait
     // footprint→perimeter) price a guessed one-story home with no
-    // stories_estimated review marker on the quote.
-    storiesSource: stories ? 'lookup' : 'default',
+    // stories_estimated review marker on the quote. An adopted count is
+    // graded through the SAME evidence rule the agent path uses
+    // (draft-builder#storiesSourceForPricing): the AI stories-fallback
+    // carries provenance without any verify flag, and a non-direct or
+    // low-confidence inference must price as 'estimated', not 'lookup'.
+    storiesSource: stories
+      ? storiesSourceForPricing({ stories, storiesEvidence })
+      : 'default',
     propertyType,
     features,
     bedArea: bedArea || undefined,
@@ -856,10 +874,15 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
 
   // Null lookup → resolvePropertyContext stays profile-only (no external
   // calls), which is all an owned-only response needs for its summary.
+  // Palm-only requests skip it too: palm injection prices from the STORED
+  // palm_count alone (an AI estimatedPalmCount is deliberately never
+  // adopted), so on a cache miss the lookup would spend provider calls and
+  // latency to produce exactly the same quote or PROPERTY_DETAILS_NEEDED.
+  const lookupCanInformPricing = servicesToPrice.some((key) => key !== 'palm');
   const propertyContext = await resolvePropertyContext({
     customer,
     turfProfile,
-    propertyLookup: servicesToPrice.length ? lookupFn : null,
+    propertyLookup: lookupCanInformPricing ? lookupFn : null,
   });
 
   // Measured AFTER the exclusion: an owned service missing a measurement must

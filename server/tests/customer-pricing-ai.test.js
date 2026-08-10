@@ -728,7 +728,7 @@ describe('property context reads only columns the customers table actually has',
       turfProfile: null,
       propertyLookup: async () => {
         lookedUp = true;
-        return { enriched: { pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY', estimatedTreeCount: 12 } };
+        return { enriched: { pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY', estimatedTreeCount: 12, treeCountConfidence: 85 } };
       },
     });
     expect(lookedUp).toBe(true);
@@ -825,7 +825,7 @@ describe('lookup confidence gates every vision-derived price modifier', () => {
   };
   const enriched = (extra) => ({
     homeSqFt: 2200, pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY',
-    estimatedTreeCount: 12, estimatedBedAreaSf: 2600, yearBuilt: 1998, ...extra,
+    estimatedTreeCount: 12, treeCountConfidence: 88, estimatedBedAreaSf: 2600, yearBuilt: 1998, ...extra,
   });
 
   test('a confident read feeds pool/cage/density/trees and the bed area', async () => {
@@ -1437,5 +1437,104 @@ describe('r8: unset tree counts, observed vision zero-turf', () => {
       }),
     });
     expect(lowConf.lawnKnownZero).toBe(false);
+  });
+});
+
+describe('r9: field-confident tree counts, story evidence, authoritative types, palm-only lookup skip', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-r9',
+    address_line1: '8 Provenance Pl',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34231',
+    property_type: 'single_family',
+  };
+
+  test('a tree count without its field-level stamp (or with a low one) stays unset', async () => {
+    if (!resolve) return;
+    const unstamped = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 12, aiConfidence: 88 } }),
+    });
+    expect(unstamped.propertyInput.features.treeCount).toBeUndefined();
+    // Gap-filled from a lone 40-confidence provider riding a 73 blend.
+    const gapFilled = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 12, treeCountConfidence: 40, aiConfidence: 73 } }),
+    });
+    expect(gapFilled.propertyInput.features.treeCount).toBeUndefined();
+  });
+
+  test('an AI stories fallback without direct evidence prices as estimated, county stories as lookup', async () => {
+    if (!resolve) return;
+    const aiFallback = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { stories: 2 },
+        propertyRecord: {
+          stories: 2,
+          _storiesSource: 'ai',
+          // Non-direct, low-confidence inference — no verify flag emitted.
+          _storiesEvidence: { value: 2, basis: 'inferred', confidence: 'low', sourceUrl: null, sourceType: 'unknown' },
+        },
+      }),
+    });
+    expect(aiFallback.propertyInput.stories).toBe(2);
+    // 'estimated' fires stories_estimated in the pest/termite pricers.
+    expect(aiFallback.propertyInput.storiesSource).toBe('estimated');
+    const county = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { stories: 2 } }),
+    });
+    expect(county.propertyInput.storiesSource).toBe('lookup');
+  });
+
+  test('an authoritative county type with a mere DISAGREEMENT verify flag still prices its adjustment', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // mergePropertyRecords keeps the authoritative winner and sets
+        // fieldVerify on disagreement — that flag alone is not weakness.
+        propertyRecord: {
+          propertyType: 'Townhome',
+          _fieldEvidence: { propertyType: { fieldVerify: true, disagreement: true, sourceType: 'county' } },
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('Townhome');
+    // A weak/generic winner stays rejected.
+    const weak = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        propertyRecord: {
+          propertyType: 'Condo',
+          _fieldEvidence: { propertyType: { fieldVerify: true, sourceType: 'generic' } },
+        },
+      }),
+    });
+    expect(weak.propertyInput.propertyType).toBe('single_family');
+  });
+
+  test('a palm-only request never invokes the property lookup', async () => {
+    let lookedUp = false;
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in palm injection',
+      propertyLookup: async () => { lookedUp = true; return { enriched: { homeSqFt: 2200 } }; },
+      customer: { ...customer, id: 'cust-palm-only' },
+    });
+    // Palm prices from the stored count alone; the lookup would spend
+    // provider calls to produce the same PROPERTY_DETAILS_NEEDED answer.
+    expect(lookedUp).toBe(false);
+    expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
   });
 });
