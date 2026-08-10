@@ -190,20 +190,38 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 // FAIL-OPEN by design: an unmapped engine key, a missing column (a deploy
 // that lands before the migration), or any lookup error leaves service_id
 // null and the accept books exactly as it does today.
+//
+// Runs in a SAVEPOINT (pre-push Codex P1; same failure mode and same fix as
+// inspection-credit's booking marker, Codex #3178 r4 P1). Both callers hand
+// us a TRANSACTION, and Postgres aborts the ENTIRE transaction after any
+// failed statement — so a plain try/catch around this SELECT would NOT leave
+// the caller's transaction usable. A deploy that lands before its migration
+// (engine_key absent) would then fail the reservation insert with "current
+// transaction is aborted" and take down estimate acceptance itself: the exact
+// opposite of the fail-open contract this helper promises. The savepoint
+// confines any failure to this read.
 async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   const engineKey = primary?.service ? String(primary.service).trim() : '';
-  if (!conn || !engineKey) return null;
+  if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
+  let resolved = null;
   try {
-    const row = await conn('services')
-      .where({ engine_key: engineKey, is_active: true })
-      .first('id');
-    return row?.id || null;
+    await conn.transaction(async (sp) => {
+      const row = await sp('services')
+        .where({ engine_key: engineKey, is_active: true })
+        .first('id');
+      resolved = row?.id || null;
+    });
   } catch (err) {
+    // The savepoint rolled back; the caller's transaction is still healthy and
+    // the accept MUST still commit. An unresolved link is recoverable (the
+    // visit books, completion falls back to the generic profile exactly as it
+    // did before this change); a broken accept is not.
     logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
     return null;
   }
+  return resolved;
 }
 
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {

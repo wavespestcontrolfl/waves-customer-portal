@@ -56,16 +56,18 @@ describe('accept-path engine-key mapping (static)', () => {
 });
 
 describe('catalogServiceIdForProfile', () => {
-  const conn = (rows) => {
-    const fn = () => ({
-      where: () => ({ first: async () => rows }),
-    });
-    return fn;
+  // The helper runs its read inside conn.transaction(...) — a SAVEPOINT when
+  // the caller already holds a transaction — so the fake connection must model
+  // that, not a bare query builder.
+  const makeConn = (onQuery) => {
+    const builder = () => ({ where: (w) => ({ first: async () => onQuery(w) }) });
+    builder.transaction = async (cb) => cb(builder);
+    return builder;
   };
 
   test('resolves the primary service key to a catalog id', async () => {
     const id = await catalogServiceIdForProfile(
-      conn({ id: 'svc-1' }),
+      makeConn(() => ({ id: 'svc-1' })),
       { services: [{ service: 'pre_slab_termiticide' }] },
     );
     expect(id).toBe('svc-1');
@@ -76,33 +78,39 @@ describe('catalogServiceIdForProfile', () => {
     // services[0]; the id must describe the same service as the label, or one
     // row would claim two different services.
     let queried = null;
-    const spyConn = () => ({
-      where: (w) => { queried = w; return { first: async () => ({ id: 'svc-pest' }) }; },
-    });
-    await catalogServiceIdForProfile(spyConn, {
-      services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control' }],
-    });
+    await catalogServiceIdForProfile(
+      makeConn((w) => { queried = w; return { id: 'svc-pest' }; }),
+      { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control' }] },
+    );
     expect(queried.engine_key).toBe('pest_control');
     expect(queried.is_active).toBe(true);
   });
 
   test('returns null when the profile carries no service key', async () => {
-    expect(await catalogServiceIdForProfile(conn({ id: 'x' }), { services: [] })).toBeNull();
-    expect(await catalogServiceIdForProfile(conn({ id: 'x' }), {})).toBeNull();
+    const c = makeConn(() => ({ id: 'x' }));
+    expect(await catalogServiceIdForProfile(c, { services: [] })).toBeNull();
+    expect(await catalogServiceIdForProfile(c, {})).toBeNull();
   });
 
   test('returns null (never throws) when the key maps to nothing', async () => {
     expect(await catalogServiceIdForProfile(
-      conn(undefined), { services: [{ service: 'not_a_real_key' }] },
+      makeConn(() => undefined), { services: [{ service: 'not_a_real_key' }] },
     )).toBeNull();
   });
 
   test('FAILS OPEN when the lookup throws (pre-migration deploy)', async () => {
-    const throwingConn = () => ({
-      where: () => ({ first: async () => { throw new Error('column "engine_key" does not exist'); } }),
-    });
     await expect(catalogServiceIdForProfile(
-      throwingConn, { services: [{ service: 'pre_slab_termiticide' }] },
+      makeConn(() => { throw new Error('column "engine_key" does not exist'); }),
+      { services: [{ service: 'pre_slab_termiticide' }] },
+    )).resolves.toBeNull();
+  });
+
+  test('never queries on a connection that cannot open a savepoint', async () => {
+    // Guards the P1 directly: without conn.transaction the read would run
+    // bare on the caller's transaction and a failure would abort it.
+    const bare = () => { throw new Error('should not be queried'); };
+    await expect(catalogServiceIdForProfile(
+      bare, { services: [{ service: 'pre_slab_termiticide' }] },
     )).resolves.toBeNull();
   });
 });
@@ -134,5 +142,39 @@ describeOrSkip('seeded engine_key mapping against the migrated catalog', () => {
       const id = await catalogServiceIdForProfile(knex, { services: [{ service: seed.engine_key }] });
       expect(id).toBeTruthy();
     }
+  });
+
+  // The P1 regression, on a REAL Postgres transaction. A fake connection
+  // cannot expose this: Postgres aborts the whole transaction after a failed
+  // statement, so the savepoint — not the try/catch — is what keeps the
+  // caller's accept usable. Everything happens inside a transaction that is
+  // deliberately rolled back, so the schema is never actually altered.
+  test('a missing engine_key column does NOT abort the caller transaction', async () => {
+    const ROLLBACK = new Error('intentional rollback');
+    let resolved = 'unset';
+    let survivedQuery = null;
+
+    await expect(knex.transaction(async (trx) => {
+      // Simulate the deploy-skew window (code live, migration not yet run).
+      await trx.raw('ALTER TABLE services RENAME COLUMN engine_key TO engine_key__absent');
+
+      resolved = await catalogServiceIdForProfile(trx, {
+        services: [{ service: 'pre_slab_termiticide' }],
+      });
+
+      // THE ASSERTION THAT MATTERS: the caller's transaction is still usable.
+      // Before the savepoint fix this threw "current transaction is aborted",
+      // which in production is a FAILED ESTIMATE ACCEPT.
+      const row = await trx('services').select('service_key').limit(1).first();
+      survivedQuery = row ? 'ok' : 'empty';
+
+      throw ROLLBACK;
+    })).rejects.toBe(ROLLBACK);
+
+    expect(resolved).toBeNull();
+    expect(survivedQuery).toBe('ok');
+
+    // And the rollback really did restore the column.
+    expect(await knex.schema.hasColumn('services', 'engine_key')).toBe(true);
   });
 });
