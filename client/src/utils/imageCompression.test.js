@@ -37,33 +37,6 @@ function pngBytes(chunks) {
 
 const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0));
 
-// Real RIFF container bytes: "RIFF" + size + "WEBP", then FourCC/size/payload
-// chunks with the spec's even-length padding.
-function webpBytes(chunks) {
-  const body = [];
-  for (const { cc, payloadLength = 0 } of chunks) {
-    for (let i = 0; i < 4; i++) body.push(cc.charCodeAt(i));
-    body.push(
-      payloadLength & 0xff,
-      (payloadLength >> 8) & 0xff,
-      (payloadLength >> 16) & 0xff,
-      (payloadLength >> 24) & 0xff,
-    );
-    for (let i = 0; i < payloadLength + (payloadLength % 2); i++) body.push(0);
-  }
-  const header = [];
-  for (const ch of "RIFF") header.push(ch.charCodeAt(0));
-  const riffSize = body.length + 4;
-  header.push(
-    riffSize & 0xff,
-    (riffSize >> 8) & 0xff,
-    (riffSize >> 16) & 0xff,
-    (riffSize >> 24) & 0xff,
-  );
-  for (const ch of "WEBP") header.push(ch.charCodeAt(0));
-  return new Uint8Array([...header, ...body]);
-}
-
 const MB = 1024 * 1024;
 
 // A stand-in for a picked File. jsdom has no canvas, so every test injects a
@@ -105,14 +78,22 @@ describe("budget constants", () => {
 });
 
 describe("isCompressibleImage", () => {
-  it("accepts still raster images", () => {
+  it("accepts the two formats this composer actually sees", () => {
+    // iPhone camera photos are JPEG; iOS screenshots are PNG.
     expect(isCompressibleImage(fakeFile("a.jpg", 1, "image/jpeg"))).toBe(true);
     expect(isCompressibleImage(fakeFile("a.png", 1, "image/png"))).toBe(true);
-    expect(isCompressibleImage(fakeFile("a.webp", 1, "image/webp"))).toBe(true);
   });
 
-  it("refuses GIFs — a canvas round-trip would flatten the animation", () => {
+  it("passes every other format through rather than parsing its container", () => {
+    // Deliberate scope limit: no per-format animation parser, so these are
+    // never re-encoded and can never be silently flattened.
     expect(isCompressibleImage(fakeFile("a.gif", 1, "image/gif"))).toBe(false);
+    expect(isCompressibleImage(fakeFile("a.webp", 1, "image/webp"))).toBe(
+      false,
+    );
+    expect(isCompressibleImage(fakeFile("a.heic", 1, "image/heic"))).toBe(
+      false,
+    );
   });
 
   it("refuses non-images", () => {
@@ -124,10 +105,15 @@ describe("isCompressibleImage", () => {
 });
 
 describe("isAnimatedImage", () => {
-  it("treats every GIF as animated", async () => {
+  it("only answers for PNG — every other format is excluded by type", async () => {
+    // GIF/WebP never reach this check: isCompressibleImage already refuses
+    // them, so they are passed through whatever this returns.
     await expect(
       isAnimatedImage(fakeFile("a.gif", 1, "image/gif")),
-    ).resolves.toBe(true);
+    ).resolves.toBe(false);
+    await expect(
+      isAnimatedImage(fakeFile("a.jpg", 1, "image/jpeg")),
+    ).resolves.toBe(false);
   });
 
   it("detects APNG via the acTL chunk", async () => {
@@ -174,60 +160,6 @@ describe("isAnimatedImage", () => {
     await expect(
       isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
     ).resolves.toBe(false);
-  });
-
-  it("detects animated WebP via the ANIM chunk", async () => {
-    const bytes = webpBytes([
-      { cc: "VP8X", payloadLength: 10 },
-      { cc: "ANIM", payloadLength: 6 },
-    ]);
-    await expect(
-      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
-    ).resolves.toBe(true);
-  });
-
-  it("finds ANIM behind a large ICCP chunk, past any fixed byte window", async () => {
-    // The ordering Codex flagged: a colour profile legally precedes ANIM and
-    // pushes it well past a naive 512-byte scan.
-    const bytes = webpBytes([
-      { cc: "VP8X", payloadLength: 10 },
-      { cc: "ICCP", payloadLength: 4096 },
-      { cc: "ANIM", payloadLength: 6 },
-    ]);
-    expect(bytes.length).toBeGreaterThan(512);
-    await expect(
-      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
-    ).resolves.toBe(true);
-  });
-
-  it("does not treat a still WebP as animated", async () => {
-    const bytes = webpBytes([{ cc: "VP8 ", payloadLength: 32 }]);
-    await expect(
-      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
-    ).resolves.toBe(false);
-  });
-
-  it("treats a still lossless WebP behind a colour profile as still", async () => {
-    const bytes = webpBytes([
-      { cc: "VP8X", payloadLength: 10 },
-      { cc: "ICCP", payloadLength: 2048 },
-      { cc: "VP8L", payloadLength: 32 },
-    ]);
-    await expect(
-      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
-    ).resolves.toBe(false);
-  });
-
-  it("fails safe when the prefix ends before any decisive WebP chunk", async () => {
-    // ICCP larger than the sniff window: we never reach ANIM or VP8, so we
-    // must NOT claim "still" and flatten a possible animation.
-    const bytes = webpBytes([
-      { cc: "VP8X", payloadLength: 10 },
-      { cc: "ICCP", payloadLength: 4096 },
-    ]).slice(0, 40); // truncated mid-ICCP, mimicking a bounded read
-    await expect(
-      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
-    ).resolves.toBe(true);
   });
 
   it("fails safe when a PNG prefix ends before IDAT", async () => {
@@ -314,6 +246,26 @@ describe("fitImagesToBudget", () => {
     expect(res.reason).toBe("over-budget");
     expect(encode).not.toHaveBeenCalled();
     expect(res.bestBytes).toBe(4.1 * MB);
+    // The five photos necessarily add to that subtotal, so the caller must
+    // present it as "at least" rather than as the achievable total.
+    expect(res.bestBytesIsFloor).toBe(true);
+  });
+
+  it("marks a ladder-exhausted total as exact, not a floor", async () => {
+    // Here bestBytes is a total some rung actually produced, so there is no
+    // "at least" hedge to add.
+    const encode = encoderShrinkingByRung([0.9]);
+    const files = [fakeFile("a.jpg", 5 * MB), fakeFile("b.jpg", 5 * MB)];
+
+    const res = await fitImagesToBudget(files, {
+      availableBytes: 2 * MB,
+      encodeImage: encode,
+      detectAnimated: async () => false,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.bestBytesIsFloor).toBe(false);
+    expect(res.bestBytes).toBe(9 * MB);
   });
 
   it("still runs the ladder when preserved files leave room", async () => {
@@ -331,7 +283,7 @@ describe("fitImagesToBudget", () => {
     expect(res.files[0]).toBe(gif);
   });
 
-  it("passes animated PNG/WebP through instead of flattening them", async () => {
+  it("passes an animated PNG through instead of flattening it", async () => {
     const encode = vi.fn(async (file) => ({
       ...file,
       size: Math.round(file.size * 0.1),

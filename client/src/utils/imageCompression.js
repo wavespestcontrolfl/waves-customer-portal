@@ -25,10 +25,14 @@
  *     is RESTORED byte-for-byte — we never spend quality the budget didn't
  *     actually ask for.
  *
- * Animated images (GIF, APNG, animated WebP) are never re-encoded — a canvas
- * round-trip flattens them to a single frame. They pass through at full size
- * and still count against the budget, so an animation that can't fit reports
- * failure instead of silently shipping a still.
+ * Scope is deliberately narrow: only JPEG and PNG are re-encoded, because
+ * iPhone camera photos are JPEG and iOS screenshots are PNG. Everything else
+ * passes through untouched at full size, still counting against the budget, so
+ * an oversized file in another format reports failure rather than being
+ * flattened. The alternative — a container parser per format to detect
+ * animation — is a large, bug-prone surface for traffic this composer does not
+ * see. PNG keeps an APNG check because it IS re-encoded and a canvas
+ * round-trip would silently reduce it to a single frame.
  *
  * Files are encoded SEQUENTIALLY, not with Promise.all: a 4032x3024 RGBA
  * bitmap is ~46 MiB before its similarly sized canvas, so decoding a ten-file
@@ -58,24 +62,30 @@ const LADDER = [
   { maxEdge: 1024, quality: 0.65 },
 ];
 
-// Formats that can carry animation. GIF always can; PNG and WebP only in their
-// APNG / animated-WebP variants, which need a byte sniff to tell apart.
-const ALWAYS_ANIMATED = new Set(["image/gif"]);
-const MAYBE_ANIMATED = new Set(["image/png", "image/webp"]);
+/**
+ * The only formats we re-encode. iPhone camera photos are JPEG and iOS
+ * screenshots are PNG — between them they cover essentially all real traffic
+ * through this composer.
+ *
+ * Everything else (GIF, WebP, HEIC, anything unrecognized) passes through
+ * untouched. That is a deliberate trade: carrying a container parser per
+ * format to avoid silently flattening an animation is a large, bug-prone
+ * surface for cases that don't occur here. An oversized file in one of those
+ * formats simply fails the budget with a clear message instead of being
+ * compressed.
+ */
+const COMPRESSIBLE_TYPES = new Set(["image/jpeg", "image/png"]);
 
-// acTL must precede IDAT in an APNG, and ANIM sits in the WebP header block,
-// so a small prefix is enough — and bounding the scan avoids matching the
-// same bytes occurring by chance inside compressed pixel data.
+// APNG declares acTL before the first IDAT, so a bounded prefix is enough.
 const SNIFF_BYTES = 64 * 1024;
 
 function mimeOf(file) {
   return String(file?.type || "").toLowerCase();
 }
 
-/** Type-level check only. Animation needs `isAnimatedImage` (async). */
+/** Type-level check only. PNG additionally needs `isAnimatedImage` (async). */
 export function isCompressibleImage(file) {
-  const type = mimeOf(file);
-  return /^image\//.test(type) && !ALWAYS_ANIMATED.has(type);
+  return COMPRESSIBLE_TYPES.has(mimeOf(file));
 }
 
 function fourCC(bytes, off) {
@@ -94,42 +104,16 @@ const ANIMATED = "animated";
 const STILL = "still";
 const UNKNOWN = "unknown";
 
-/**
- * Walk the RIFF chunk table rather than scanning for a marker: in an extended
- * WebP an ICCP/EXIF chunk legally precedes ANIM and can push it arbitrarily
- * far into the file, so any fixed byte window is guessable-wrong.
- */
-function webpAnimationState(bytes) {
-  if (bytes.length < 12) return UNKNOWN;
-  if (fourCC(bytes, 0) !== "RIFF" || fourCC(bytes, 8) !== "WEBP") return STILL;
-  let off = 12;
-  while (off + 8 <= bytes.length) {
-    const cc = fourCC(bytes, off);
-    if (cc === "ANIM" || cc === "ANMF") return ANIMATED;
-    // Image data reached with no animation chunk — decisively a still.
-    if (cc === "VP8 " || cc === "VP8L") return STILL;
-    const size =
-      (bytes[off + 4] |
-        (bytes[off + 5] << 8) |
-        (bytes[off + 6] << 16) |
-        (bytes[off + 7] << 24)) >>>
-      0;
-    // Chunk payloads are padded to an even length.
-    off += 8 + size + (size % 2);
-  }
-  return UNKNOWN;
-}
-
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /**
- * Walk PNG's length/type chunk table for the same reason the WebP path does:
- * scanning raw bytes for "IDAT" or "acTL" can hit those four characters inside
- * an ancillary chunk's payload (a tEXt comment is enough), which would bound
- * the search at a phantom chunk and misreport a real APNG as a still.
+ * Walk PNG's length/type chunk table rather than scanning raw bytes: the four
+ * characters "IDAT" or "acTL" can occur inside an ancillary chunk's payload (a
+ * tEXt comment is enough) or inside compressed pixel data, and a byte scan
+ * would take either for a real chunk.
  *
  * APNG declares acTL before the first IDAT; ancillary chunks (iCCP, eXIf) may
- * precede acTL, so the "ran out of prefix" caveat applies here too.
+ * precede acTL, hence the bounded-prefix caveat.
  */
 function pngAnimationState(bytes) {
   if (bytes.length < 8) return UNKNOWN;
@@ -138,7 +122,6 @@ function pngAnimationState(bytes) {
   }
   let off = 8;
   while (off + 8 <= bytes.length) {
-    // PNG lengths are big-endian, unlike WebP's little-endian chunk sizes.
     const length =
       ((bytes[off] << 24) |
         (bytes[off + 1] << 16) |
@@ -160,19 +143,15 @@ function pngAnimationState(bytes) {
  * couldn't fully inspect.
  */
 export async function isAnimatedImage(file) {
-  const type = mimeOf(file);
-  if (ALWAYS_ANIMATED.has(type)) return true;
-  if (!MAYBE_ANIMATED.has(type)) return false;
+  // PNG is the only compressible format that can animate — JPEG cannot, and
+  // every other format is passed through untouched regardless.
+  if (mimeOf(file) !== "image/png") return false;
   if (typeof file?.slice !== "function") return false;
   try {
     const bytes = new Uint8Array(
       await file.slice(0, SNIFF_BYTES).arrayBuffer(),
     );
-    const state =
-      type === "image/png"
-        ? pngAnimationState(bytes)
-        : webpAnimationState(bytes);
-    return state !== STILL;
+    return pngAnimationState(bytes) !== STILL;
   } catch {
     return true;
   }
@@ -343,6 +322,7 @@ export async function fitImagesToBudget(
       reason: "no-budget",
       originalBytes,
       bestBytes: originalBytes,
+      bestBytesIsFloor: false,
       availableBytes: budget,
     };
   }
@@ -378,8 +358,11 @@ export async function fitImagesToBudget(
       ok: false,
       reason: "over-budget",
       originalBytes,
-      // A floor, not the true total: the compressible files only add to it.
       bestBytes: preservedBytes,
+      // The compressible files necessarily add to this, so it is a LOWER
+      // BOUND, not an achievable total. Callers must present it as "at least",
+      // or they understate how much the operator has to remove.
+      bestBytesIsFloor: true,
       availableBytes: budget,
     };
   }
@@ -419,7 +402,9 @@ export async function fitImagesToBudget(
     ok: false,
     reason: "over-budget",
     originalBytes,
+    // Exact: the smallest total any rung actually produced.
     bestBytes,
+    bestBytesIsFloor: false,
     availableBytes: budget,
   };
 }
