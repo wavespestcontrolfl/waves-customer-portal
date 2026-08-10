@@ -247,6 +247,15 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .first();
       if (byStamp) return { lead: byStamp, forThisCall: true, linkage: 'stamp' };
+      // The stamp is the AUTHORITATIVE linkage for this call — when its
+      // target no longer resolves (deleted, or a repoint is mid-flight),
+      // falling through to phone matching would let a shared/reused line
+      // hand the estimator a DIFFERENT lead's address, email, and
+      // estimate linkage for this call. Fail closed instead: `unavailable`
+      // keeps reconcilers from reading the miss as an established
+      // absence — the stamp says linkage exists; the target's state is
+      // indeterminate, not absent (codex P1, this PR).
+      return { lead: null, forThisCall: false, unavailable: true };
     }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
