@@ -5387,6 +5387,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // cancelled ids to finalize reminders for, under the claim token their
     // in-trx claims were minted with.
     const parsedPlannedCount = Number.parseInt(recurringPlannedCount, 10);
+    // Refuse a count while the lane is dark rather than dropping it: a
+    // silently ignored length reads to the office as a plan they just capped,
+    // and they'd find out when the extra visits ran.
+    if (recurringPlannedCount !== undefined && !isEnabled('editApptVisitCount')) {
+      throw httpError(409, 'Setting a plan length from Edit appointment is turned off (GATE_EDIT_APPT_VISIT_COUNT). Nothing was changed.');
+    }
     const wantsVisitCountReconcile = Number.isInteger(parsedPlannedCount) && parsedPlannedCount > 0;
     let visitCountResult = null;
     const visitCountClaimToken = wantsVisitCountReconcile
@@ -8475,6 +8481,10 @@ router.get('/:id/series-summary', async (req, res, next) => {
       upcomingCount: upcoming.length,
       upcomingDates: upcoming.map((v) => dateOnly(v.scheduled_date)).filter(Boolean),
       maxCount: MAX_SERIES_VISIT_COUNT,
+      // Dark by default: the modal renders the length controls only on true,
+      // so with the gate off a series template shows exactly the panel it
+      // showed before this lane existed.
+      canSetCount: isEnabled('editApptVisitCount'),
     });
   } catch (err) { next(err); }
 });

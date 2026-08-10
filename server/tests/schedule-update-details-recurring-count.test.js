@@ -332,3 +332,30 @@ describe('update-details wiring (source guards)', () => {
     expect(src).toContain("action: 'recurring_plan_count_set'");
   });
 });
+
+describe('GATE_EDIT_APPT_VISIT_COUNT — the lane ships dark', () => {
+  const gatesSrc = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
+
+  test('the gate defaults OFF — only the exact string "true" arms it', () => {
+    expect(gatesSrc).toContain("editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true'");
+  });
+
+  test('a count sent while dark is REFUSED, never silently dropped', () => {
+    // A dropped count reads to the office as a plan they capped — they would
+    // find out when the extra visits ran.
+    const guard = src.indexOf("if (recurringPlannedCount !== undefined && !isEnabled('editApptVisitCount'))");
+    expect(guard).toBeGreaterThan(-1);
+    expect(src.slice(guard, guard + 320)).toContain('GATE_EDIT_APPT_VISIT_COUNT');
+    expect(src.slice(guard, guard + 320)).toContain('httpError(409');
+  });
+
+  test('the summary endpoint publishes the gate so the modal can hide the controls', () => {
+    expect(src).toContain("canSetCount: isEnabled('editApptVisitCount')");
+  });
+
+  test('the refusal is checked before the reconcile can write anything', () => {
+    const guard = src.indexOf("if (recurringPlannedCount !== undefined && !isEnabled('editApptVisitCount'))");
+    const reconcileCall = src.indexOf('await reconcileRecurringSeriesVisitCount(trx, {');
+    expect(guard).toBeLessThan(reconcileCall);
+  });
+});

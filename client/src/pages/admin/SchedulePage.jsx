@@ -1617,10 +1617,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // server (so an untouched field still reads the truth) or the operator typed
   // one. Without that gate a failed summary fetch would let the field's
   // placeholder resize a real plan.
+  //
+  // Dark by default (GATE_EDIT_APPT_VISIT_COUNT): with the gate off the
+  // server answers canSetCount:false and a series template shows exactly the
+  // panel it showed before this lane existed. Fail closed — an unreadable
+  // summary means we don't know the gate state, so the controls stay hidden.
+  const planLengthControlsAvailable =
+    !serviceIsRecurringTemplate || seriesSummary?.canSetCount === true;
   const countFieldLoading =
     serviceIsRecurringTemplate && seriesSummaryState === "loading";
   const canSetPlanLength =
     serviceIsRecurringTemplate &&
+    seriesSummary?.canSetCount === true &&
     (seriesSummaryState === "loaded" || recurringCountTouched.current);
   const countHint = (() => {
     if (!serviceIsRecurringTemplate) return null;
@@ -3430,6 +3438,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         ))}
                       </select>{" "}
                     </div>{" "}
+                    {planLengthControlsAvailable && (
                     <div>
                       {" "}
                       <label style={labelStyle}>End repeating</label>{" "}
@@ -3446,7 +3455,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         <option value="count">After count</option>{" "}
                       </select>{" "}
                     </div>
-                    {!recurringOngoing && (
+                    )}
+                    {planLengthControlsAvailable && !recurringOngoing && (
                       <div>
                         {" "}
                         <label style={labelStyle}>

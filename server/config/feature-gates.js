@@ -150,6 +150,17 @@ const gates = {
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
 
+  // Setting a recurring plan's LENGTH from Edit appointment. The count is not
+  // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
+  // live rows — so lowering it CANCELS real future visits, which is why it
+  // ships dark. Gate off: /series-summary answers canSetCount:false, the modal
+  // hides "End repeating" and "Count" on a series template exactly as before,
+  // and update-details refuses a recurringPlannedCount outright rather than
+  // silently ignoring one (an ignored count reads to the office as a plan they
+  // capped). Kill switch: unset or any non-'true' value; visits already added
+  // or cancelled are not reversed when it flips.
+  editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
