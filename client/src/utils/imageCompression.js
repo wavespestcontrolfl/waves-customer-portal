@@ -78,18 +78,6 @@ export function isCompressibleImage(file) {
   return /^image\//.test(type) && !ALWAYS_ANIMATED.has(type);
 }
 
-function indexOfAscii(bytes, marker, end = bytes.length) {
-  const codes = Array.from(marker, (c) => c.charCodeAt(0));
-  const limit = Math.min(end, bytes.length) - codes.length;
-  outer: for (let i = 0; i <= limit; i++) {
-    for (let j = 0; j < codes.length; j++) {
-      if (bytes[i + j] !== codes[j]) continue outer;
-    }
-    return i;
-  }
-  return -1;
-}
-
 function fourCC(bytes, off) {
   return String.fromCharCode(
     bytes[off],
@@ -132,17 +120,37 @@ function webpAnimationState(bytes) {
   return UNKNOWN;
 }
 
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
 /**
- * APNG declares acTL before the first IDAT. Ancillary chunks (iCCP, eXIf) may
- * precede acTL, so the same "ran out of prefix" caveat applies here.
+ * Walk PNG's length/type chunk table for the same reason the WebP path does:
+ * scanning raw bytes for "IDAT" or "acTL" can hit those four characters inside
+ * an ancillary chunk's payload (a tEXt comment is enough), which would bound
+ * the search at a phantom chunk and misreport a real APNG as a still.
+ *
+ * APNG declares acTL before the first IDAT; ancillary chunks (iCCP, eXIf) may
+ * precede acTL, so the "ran out of prefix" caveat applies here too.
  */
 function pngAnimationState(bytes) {
-  const idat = indexOfAscii(bytes, "IDAT");
-  // Bound the acTL search by IDAT — past that we'd be scanning compressed
-  // pixel data where "acTL" can occur by coincidence.
-  const acTL = indexOfAscii(bytes, "acTL", idat === -1 ? bytes.length : idat);
-  if (acTL !== -1) return ANIMATED;
-  return idat === -1 ? UNKNOWN : STILL;
+  if (bytes.length < 8) return UNKNOWN;
+  for (let i = 0; i < PNG_SIGNATURE.length; i++) {
+    if (bytes[i] !== PNG_SIGNATURE[i]) return STILL;
+  }
+  let off = 8;
+  while (off + 8 <= bytes.length) {
+    // PNG lengths are big-endian, unlike WebP's little-endian chunk sizes.
+    const length =
+      ((bytes[off] << 24) |
+        (bytes[off + 1] << 16) |
+        (bytes[off + 2] << 8) |
+        bytes[off + 3]) >>>
+      0;
+    const type = fourCC(bytes, off + 4);
+    if (type === "acTL") return ANIMATED;
+    if (type === "IDAT") return STILL;
+    off += 12 + length; // length(4) + type(4) + payload + CRC(4)
+  }
+  return UNKNOWN;
 }
 
 /**
@@ -355,6 +363,25 @@ export async function fitImagesToBudget(
     recompressible.push(
       isCompressibleImage(file) && !(await detectAnimated(file)),
     );
+  }
+
+  // Files we must ship as-is (animations, undecodables). If those alone break
+  // the budget no rung can rescue the batch, so fail now rather than burning
+  // eight rungs of full-resolution decodes — on the mobile composer that's a
+  // long frozen-looking wait for an outcome already known.
+  const preservedBytes = files.reduce(
+    (sum, file, i) => sum + (recompressible[i] ? 0 : Number(file.size || 0)),
+    0,
+  );
+  if (preservedBytes >= budget) {
+    return {
+      ok: false,
+      reason: "over-budget",
+      originalBytes,
+      // A floor, not the true total: the compressible files only add to it.
+      bestBytes: preservedBytes,
+      availableBytes: budget,
+    };
   }
 
   // Tracked only to report how close we got when nothing fits.

@@ -10,16 +10,6 @@ import {
 } from "./imageCompression";
 
 // Build a fake File whose header bytes are sniffable, for animation detection.
-function fileWithHeader(name, type, headerAscii, size = 1024) {
-  const bytes = new TextEncoder().encode(headerAscii);
-  return {
-    name,
-    type,
-    size,
-    slice: () => ({ arrayBuffer: async () => bytes.buffer }),
-  };
-}
-
 function fileWithBytes(name, type, bytes, size = 1024) {
   return {
     name,
@@ -30,6 +20,22 @@ function fileWithBytes(name, type, bytes, size = 1024) {
     }),
   };
 }
+
+// Real PNG container bytes: 8-byte signature, then length(4, big-endian) +
+// type(4) + payload + CRC(4) chunks.
+function pngBytes(chunks) {
+  const out = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (const { type, payload = [] } of chunks) {
+    const n = payload.length;
+    out.push((n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+    for (const ch of type) out.push(ch.charCodeAt(0));
+    out.push(...payload);
+    out.push(0, 0, 0, 0); // CRC — not validated by the sniff
+  }
+  return new Uint8Array(out);
+}
+
+const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0));
 
 // Real RIFF container bytes: "RIFF" + size + "WEBP", then FourCC/size/payload
 // chunks with the spec's even-length padding.
@@ -125,23 +131,49 @@ describe("isAnimatedImage", () => {
   });
 
   it("detects APNG via the acTL chunk", async () => {
-    const apng = fileWithHeader(
-      "a.png",
-      "image/png",
-      "\x89PNG\r\n\x1a\nIHDR....acTL....IDAT",
-    );
-    await expect(isAnimatedImage(apng)).resolves.toBe(true);
+    const bytes = pngBytes([
+      { type: "IHDR", payload: new Array(13).fill(0) },
+      { type: "acTL", payload: new Array(8).fill(0) },
+      { type: "IDAT", payload: [1, 2, 3] },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(true);
+  });
+
+  it("is not fooled by 'IDAT' occurring inside an ancillary chunk payload", async () => {
+    // A tEXt comment containing the four bytes "IDAT" would bound a raw byte
+    // scan at a phantom chunk and misreport this real APNG as a still.
+    const bytes = pngBytes([
+      { type: "IHDR", payload: new Array(13).fill(0) },
+      { type: "tEXt", payload: ascii("Comment: IDAT appears here") },
+      { type: "acTL", payload: new Array(8).fill(0) },
+      { type: "IDAT", payload: [1, 2, 3] },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(true);
   });
 
   it("does not treat a still PNG as animated", async () => {
-    const png = fileWithHeader(
-      "a.png",
-      "image/png",
-      "\x89PNG\r\n\x1a\nIHDR....IDATacTL",
-    );
-    // "acTL" here sits AFTER IDAT — that's compressed pixel data coinciding,
-    // not an animation control chunk.
-    await expect(isAnimatedImage(png)).resolves.toBe(false);
+    const bytes = pngBytes([
+      { type: "IHDR", payload: new Array(13).fill(0) },
+      { type: "IDAT", payload: [1, 2, 3] },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(false);
+  });
+
+  it("is not fooled by 'acTL' bytes inside compressed pixel data", async () => {
+    // Past the first IDAT, those four characters are just pixel bytes.
+    const bytes = pngBytes([
+      { type: "IHDR", payload: new Array(13).fill(0) },
+      { type: "IDAT", payload: ascii("acTL and more pixels") },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(false);
   });
 
   it("detects animated WebP via the ANIM chunk", async () => {
@@ -199,8 +231,21 @@ describe("isAnimatedImage", () => {
   });
 
   it("fails safe when a PNG prefix ends before IDAT", async () => {
-    const png = fileWithHeader("a.png", "image/png", "\x89PNG\r\n\x1a\nIHDR");
-    await expect(isAnimatedImage(png)).resolves.toBe(true);
+    // Header + IHDR only: neither acTL nor IDAT was reached, so the answer is
+    // "unknown" and must not be reported as a still.
+    const bytes = pngBytes([{ type: "IHDR", payload: new Array(13).fill(0) }]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(true);
+  });
+
+  it("treats a file that is not really a PNG as still", async () => {
+    // Wrong signature: nothing to parse, and canvas will either decode it
+    // (harmlessly, it can't animate) or fail and pass the original through.
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.png", "image/png", bytes)),
+    ).resolves.toBe(false);
   });
 
   it("fails safe — an unreadable header counts as animated", async () => {
@@ -249,6 +294,41 @@ describe("fitImagesToBudget", () => {
 
     expect(res.ok).toBe(true);
     expect(maxInFlight).toBe(1);
+  });
+
+  it("fails immediately when preserved files alone exhaust the budget", async () => {
+    // A 4.1MB GIF can't be recompressed, so with 4MB available no rung can
+    // ever fit — the encoder must never run.
+    const encode = vi.fn();
+    const gif = fakeFile("big.gif", 4.1 * MB, "image/gif");
+    const photos = Array.from({ length: 5 }, (_, i) =>
+      fakeFile(`p${i}.jpg`, 3 * MB),
+    );
+
+    const res = await fitImagesToBudget([gif, ...photos], {
+      availableBytes: 4 * MB,
+      encodeImage: encode,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("over-budget");
+    expect(encode).not.toHaveBeenCalled();
+    expect(res.bestBytes).toBe(4.1 * MB);
+  });
+
+  it("still runs the ladder when preserved files leave room", async () => {
+    const encode = vi.fn(async (file) => ({ ...file, size: 0.5 * MB }));
+    const gif = fakeFile("small.gif", 1 * MB, "image/gif");
+    const photo = fakeFile("p.jpg", 8 * MB);
+
+    const res = await fitImagesToBudget([gif, photo], {
+      availableBytes: 4 * MB,
+      encodeImage: encode,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(encode).toHaveBeenCalled();
+    expect(res.files[0]).toBe(gif);
   });
 
   it("passes animated PNG/WebP through instead of flattening them", async () => {
