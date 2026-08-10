@@ -390,12 +390,15 @@ function deliverySummary(channels = {}) {
 // per additional_applications row — mirror of the server gate in
 // server/routes/admin-projects.js.
 function certApplicationChecks(app = {}, labelPrefix = "") {
+  // "Other" is a sentinel, not a valid entry — a legacy draft carrying it with
+  // no description stays incomplete rather than printing "Other" onto the
+  // certificate. Mirror of the server comment in admin-projects.js.
   const productName = app.product_name === "Other"
-    ? (app.product_name_other || app.product_name)
+    ? app.product_name_other
     : app.product_name;
   const rawMethod = app.treatment_method;
   const treatmentMethod = rawMethod === "Other"
-    ? (app.treatment_method_other || rawMethod)
+    ? app.treatment_method_other
     : rawMethod;
   // Method-aware coverage requirements — bait systems have no gallons, borate
   // wood treatments may not either.
