@@ -6258,6 +6258,31 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } catch (e) {
         logger.error(`[schedule/visit-count] reminder cleanup failed for trimmed visits (${visitCountResult.cancelledIds.join(', ')}): ${e.message}`);
       }
+      // The rest of what cancelling a visit owes: card fee rails (estimate
+      // hold, then the /secure appointment-card agreement), the invoice void,
+      // and the tracker cancel. Shared with the dispatch series-cancel rather
+      // than reimplemented — three review rounds each found a different piece
+      // of this pipeline missing from the trim, which is the signal that a
+      // trim IS a cancellation and belongs on the same mechanism
+      // (AGENTS.md: extend the existing one, don't grow a sibling).
+      //
+      // waiveFee is FALSE here by design: the Edit-appointment modal has no
+      // fee-waiver control, and the trim's pre-commit guard already refuses
+      // any surplus visit carrying a live hold or agreed fee — so a visit that
+      // reaches this call has no fee decision to make. The separate
+      // Cancel-appointment button keeps its own waive prompt.
+      try {
+        const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+        await runVisitCancellationFollowThrough({
+          targetIds: visitCountResult.cancelledIds,
+          actorId: req.technicianId,
+          waiveFee: false,
+          reason: `Recurring plan shortened to ${visitCountResult.target} visit(s) from Edit appointment`,
+          source: 'schedule/visit-count',
+        });
+      } catch (e) {
+        logger.error(`[schedule/visit-count] cancellation follow-through failed for trimmed visits (${visitCountResult.cancelledIds.join(', ')}): ${e.message}`);
+      }
     }
 
     // Audit line for a plan whose length the office changed — the row moves
@@ -7393,7 +7418,7 @@ async function findBillingCoveredVisits(conn, visits) {
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
-      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items');
+      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id');
     const hasDepositCreditLine = (items) => {
       try {
         const arr = typeof items === 'string' ? JSON.parse(items) : items;
@@ -7408,6 +7433,15 @@ async function findBillingCoveredVisits(conn, visits) {
         mark(inv.scheduled_service_id, 'attached to an invoice with account credit already applied');
       } else if (hasDepositCreditLine(inv.line_items)) {
         mark(inv.scheduled_service_id, 'attached to an invoice carrying an estimate deposit credit');
+      } else if (inv.stripe_payment_intent_id) {
+        // A charge that can still settle (Codex #3337 r4 P1). The post-commit
+        // void deliberately REFUSES to void an in-flight or unverifiable
+        // PaymentIntent (invoice.js:3892-3915) — it logs and leaves the
+        // invoice for manual review — so relying on it would cancel the visit
+        // and let the customer be charged for it afterwards. Column-only and
+        // conservative: no Stripe round-trip in a refusal path, and an
+        // already-dead PI just means the operator voids the invoice first.
+        mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
       }
     }
   }

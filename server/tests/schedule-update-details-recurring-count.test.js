@@ -565,6 +565,59 @@ describe('update-details wiring (source guards)', () => {
     expect(block.slice(0, 1500)).toContain('await trx.transaction(async (sp) => {');
   });
 
+  test('refuses a trim while an attached PaymentIntent can still settle (Codex #3337 r4 P1)', () => {
+    // The post-commit void deliberately does NOT void an in-flight or
+    // unverifiable PI — it logs and leaves the invoice for manual review — so
+    // the refusal has to happen before the cancel commits.
+    const guard = src.slice(
+      src.indexOf('An invoice already holding money for a future visit'),
+      src.indexOf('return covered;'),
+    );
+    expect(guard).toContain('stripe_payment_intent_id');
+    expect(guard).toContain('card payment that can still settle');
+    const invoiceSrc = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    expect(invoiceSrc).toContain('PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)');
+  });
+
+  test('the trim runs the SHARED cancellation follow-through, not a copy of it (Codex #3337 r4)', () => {
+    // Three review rounds each found a different piece of the cancellation
+    // pipeline missing from the trim. Both surfaces now call one module.
+    const shared = fs.readFileSync(path.join(__dirname, '../services/visit-cancellation-followthrough.js'), 'utf8');
+    // Every obligation lives in the shared module...
+    expect(shared).toContain('handleCardHoldCancellation');
+    expect(shared).toContain('handleAppointmentCardCancellation');
+    expect(shared).toContain('alertUnresolvedCancellationFee');
+    expect(shared).toContain('voidOpenInvoicesForCancelledService');
+    expect(shared).toContain('trackTransitions.cancel');
+    expect(shared).toContain('recordTrackTransitionResultFailure');
+    expect(shared).toContain('recordTrackTransitionFailure');
+
+    // ...and BOTH cancel surfaces call it rather than inlining their own.
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatchSrc).toContain("require('../services/visit-cancellation-followthrough')");
+    expect(dispatchSrc).toContain("source: 'admin-dispatch'");
+    expect(src).toContain("require('../services/visit-cancellation-followthrough')");
+    expect(src).toContain("source: 'schedule/visit-count'");
+
+    // The dispatch series-cancel must no longer carry its own copy of the
+    // rails — that duplication is what this extraction removed.
+    const seriesBranch = dispatchSrc.slice(
+      dispatchSrc.indexOf("if (toStatus === 'cancelled' && ['following', 'series'].includes(scope))"),
+      dispatchSrc.indexOf("await db('activity_log').insert({"),
+    );
+    expect(seriesBranch).not.toContain('handleCardHoldCancellation');
+    expect(seriesBranch).not.toContain('trackTransitions.cancel');
+  });
+
+  test('the dispatch waive-fee gate survives the extraction (admin-only)', () => {
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatchSrc).toContain("waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true");
+    // The trim has no waiver control and refuses fee-bearing visits up front,
+    // so it must never waive one silently.
+    const trimCall = src.slice(src.indexOf("source: 'schedule/visit-count'") - 700, src.indexOf("source: 'schedule/visit-count'"));
+    expect(trimCall).toContain('waiveFee: false');
+  });
+
   test('trimmed visits reuse the shared status writer, which owns the invoice void', () => {
     // Rebuttal guard for Codex #3337 r2 "Void open invoices for trimmed
     // visits": transitionJobStatus runs voidOpenInvoicesForCancelledService
