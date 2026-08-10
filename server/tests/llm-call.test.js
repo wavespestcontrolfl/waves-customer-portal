@@ -384,6 +384,35 @@ describe('dispatchWithFallback', () => {
     expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'empty_text' });
   });
 
+  test('a validator rejection on a max_tokens-truncated Anthropic response records the truncation, not just "unparseable"', async () => {
+    // Single-leg (pinned) policy, like the sealed-exam lanes: no fallback.
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{ type: 'text', text: '{"reply": "cut off mid-jso' }],
+      stop_reason: 'max_tokens',
+    });
+    const result = await dispatchWithFallback(
+      { primary: { provider: PROVIDER.ANTHROPIC, model: 'claude-pinned' } },
+      { text: 'write', jsonMode: false, maxTokens: 600 },
+      { validate: () => 'unparseable' },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.failures[0].reason).toBe('unparseable (response truncated at max_tokens=600)');
+  });
+
+  test('a validator rejection with a normal stop_reason keeps the plain reason', async () => {
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'not json at all' }],
+      stop_reason: 'end_turn',
+    });
+    const result = await dispatchWithFallback(
+      { primary: { provider: PROVIDER.ANTHROPIC, model: 'claude-pinned' } },
+      { text: 'write', jsonMode: false, maxTokens: 600 },
+      { validate: () => 'unparseable' },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.failures[0].reason).toBe('unparseable');
+  });
+
   // Codex 07-18 round 6 (P1): with no caller timeoutMs the chain had NO
   // shared deadline — a stalled primary sat on the adapter's 10-minute
   // default before the fallback leg ever started. Default chains now run

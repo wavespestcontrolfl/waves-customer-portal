@@ -101,6 +101,35 @@ afterEach(() => {
   delete process.env.ESTIMATE_DEPOSIT_REQUIRED;
 });
 
+describe('deposit retirement (owner ruling 2026-08-10)', () => {
+  it('isDepositEnforced is permanently false — the env flag is dead on purpose', () => {
+    // beforeEach sets ESTIMATE_DEPOSIT_REQUIRED='true'; the flag must not
+    // resurrect the feature (re-enabling is a build decision — the mint and
+    // payment endpoints were removed with the retirement).
+    const { isDepositEnforced } = require('../services/estimate-deposits');
+    expect(isDepositEnforced()).toBe(false);
+  });
+
+  it('resolveDepositPolicy is not-enforced for every accept shape', () => {
+    const estimate = { id: 'est-1', onetime_total: 280 };
+    for (const args of [
+      { estimate, membership: {} },
+      { estimate, membership: {}, oneTime: true, oneTimeUninvoiced: true },
+      { estimate, membership: { isExistingCustomer: true } },
+      { estimate, membership: {}, committedPrepayTerm: true },
+    ]) {
+      expect(resolveDepositPolicy(args)).toEqual({
+        enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled',
+      });
+    }
+  });
+
+  it('the enforcement half is gone from the module surface', () => {
+    expect(ensureDepositSatisfied).toBeUndefined();
+    expect(createDepositIntentForEstimate).toBeUndefined();
+  });
+});
+
 describe('computeDepositAmount — flat per service class, never a percentage', () => {
   it('recurring = $49, one-time = $99, regardless of job size', () => {
     expect(computeDepositAmount()).toBe(49);
@@ -126,251 +155,6 @@ describe('computeDepositAmount — flat per service class, never a percentage', 
   });
 });
 
-describe('resolveDepositPolicy', () => {
-  const estimate = { id: 'est-1', onetime_total: 280 };
-
-  it('requires the deposit for new customers on any acceptance', () => {
-    const policy = resolveDepositPolicy({ estimate, membership: {} });
-    expect(policy).toEqual({ enforced: true, required: true, slotRequired: false, exemptReason: null, amount: 49 });
-    // No preference chosen yet (data fetch) — still the required path.
-    expect(resolveDepositPolicy({ estimate, membership: {} }).required).toBe(true);
-  });
-
-  it('one-time accepts are REQUIRED at the heavier flat amount — not exempt', () => {
-    const policy = resolveDepositPolicy({
-      estimate,
-      membership: {},
-      oneTime: true,
-    });
-    expect(policy.required).toBe(true);
-    expect(policy.amount).toBe(99);
-  });
-
-  it('one-time UNINVOICED accepts must book — no invoice at accept means the roll-forward needs source_estimate_id (P1)', () => {
-    const policy = resolveDepositPolicy({
-      estimate,
-      membership: {},
-      oneTime: true,
-      oneTimeUninvoiced: true,
-    });
-    expect(policy.required).toBe(true);
-    expect(policy.slotRequired).toBe(true);
-    // Invoice-mode one-time accepts credit their first invoice inside the
-    // accept transaction — no booking needed for the money to come back.
-    expect(resolveDepositPolicy({
-      estimate,
-      membership: {},
-      oneTime: true,
-    }).slotRequired).toBe(false);
-  });
-
-  it('choosing prepay-annual is REQUIRED at the recurring amount — no longer exempt (owner decision 2026-07-05)', () => {
-    const policy = resolveDepositPolicy({ estimate, membership: {} });
-    expect(policy.required).toBe(true);
-    expect(policy.amount).toBe(49);
-    expect(policy.exemptReason).toBe(null);
-  });
-
-  it('a COMMITTED prepay term is exempt (post-accept summaries: legacy accepts predate the deposit)', () => {
-    const policy = resolveDepositPolicy({ estimate, committedPrepayTerm: true, membership: {} });
-    expect(policy.required).toBe(false);
-    expect(policy.exemptReason).toBe('prepay_annual');
-    expect(policy.slotRequired).toBe(false);
-  });
-
-  it('existing plan customers skip the deposit but must book an appointment', () => {
-    const policy = resolveDepositPolicy({
-      estimate,
-      membership: { isExistingCustomer: true },
-    });
-    expect(policy.required).toBe(false);
-    expect(policy.slotRequired).toBe(true);
-    expect(policy.exemptReason).toBe('existing_plan_customer');
-  });
-
-  it('feature dark = nothing enforced', () => {
-    delete process.env.ESTIMATE_DEPOSIT_REQUIRED;
-    const policy = resolveDepositPolicy({ estimate, membership: {} });
-    expect(policy.enforced).toBe(false);
-    expect(policy.required).toBe(false);
-    expect(policy.slotRequired).toBe(false);
-  });
-});
-
-describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)', () => {
-  const linkedEstimate = { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 };
-
-  it('exempts a legacy customer-linked estimate whose CURRENT services qualify (no membershipSnapshot)', async () => {
-    mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([{ id: 'svc-1' }]);
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: false },
-    });
-    expect(mockLoadExistingRecurringQualifyingRows).toHaveBeenCalledWith(expect.anything(), 'cust-9');
-    expect(policy.required).toBe(false);
-    expect(policy.exemptReason).toBe('existing_plan_customer');
-    expect(policy.slotRequired).toBe(true);
-  });
-
-  it('an auto-derived tier LABEL never waives the deposit — snapshot or live rows (Codex #3011 r8-r10)', async () => {
-    mockTierLabelStatus.mockResolvedValueOnce('label');
-    // Frozen snapshot claims membership; provenance override must clear it
-    // and skip the live rows fallback entirely.
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: true },
-    });
-    expect(policy.required).toBe(true);
-    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
-  });
-
-  it("unverifiable provenance ('unknown') keeps the deposit required (Codex #3011 r10)", async () => {
-    mockTierLabelStatus.mockResolvedValueOnce('unknown');
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: false },
-    });
-    expect(policy.required).toBe(true);
-    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
-  });
-
-  it('no qualifying services or a failed lookup = deposit stays required (fail-closed)', async () => {
-    mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([]);
-    expect((await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: {},
-    })).required).toBe(true);
-    mockLoadExistingRecurringQualifyingRows.mockRejectedValueOnce(new Error('db down'));
-    expect((await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: {},
-    })).required).toBe(true);
-  });
-
-  it('no linked customer = no live lookup; snapshot exemption short-circuits it', async () => {
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', onetime_total: 280 },
-      membership: {},
-    });
-    expect(policy.required).toBe(true);
-    await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: true },
-    });
-    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
-  });
-});
-
-describe('resolveDepositPolicyForEstimate — third-party payer exemption', () => {
-  const linkedEstimate = { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 };
-
-  it('exempts a would-be-required deposit when the customer resolves to a payer', async () => {
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: false },
-    });
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });
-    expect(policy.required).toBe(false);
-    expect(policy.exemptReason).toBe('payer_billed');
-    // Only the deposit gate is dropped — slotRequired stays as the base policy
-    // computed it (false here for a non-oneTimeUninvoiced accept).
-    expect(policy.slotRequired).toBe(false);
-  });
-
-  it('threads the live linked appointment as the payer scope (per-job payer)', async () => {
-    // The helper delegates to findLinkedUpcomingAppointment (live constraints);
-    // its returned id becomes the resolveForInvoice scope.
-    mockFindLinkedAppt.mockResolvedValueOnce({ id: 'ss-55', payer_id: 7 });
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
-    await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
-      membership: { isExistingCustomer: false },
-    });
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-55' });
-  });
-
-  it('an explicit committed-appointment scheduledServiceId short-circuits the linked lookup', async () => {
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
-    await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
-      membership: { isExistingCustomer: false },
-      scheduledServiceId: 'ss-committed',
-    });
-    expect(mockFindLinkedAppt).not.toHaveBeenCalled();
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-committed' });
-  });
-
-  it('useLinkedFallback:false suppresses the linked lookup (slot accept → customer default only)', async () => {
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 9 });
-    await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
-      membership: { isExistingCustomer: false },
-      useLinkedFallback: false,
-    });
-    expect(mockFindLinkedAppt).not.toHaveBeenCalled();
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });
-  });
-
-  it('does NOT override an already-exempt existing-plan policy (keeps its slot gate)', async () => {
-    // policy.required is already false (existing plan) → payer check never runs,
-    // so the existing_plan_customer booking gate (slotRequired:true) is preserved.
-    const policy = await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate,
-      membership: { isExistingCustomer: true },
-    });
-    expect(policy.required).toBe(false);
-    expect(policy.exemptReason).toBe('existing_plan_customer');
-    expect(policy.slotRequired).toBe(true);
-    expect(mockResolveForInvoice).not.toHaveBeenCalled();
-  });
-
-  it('a payer lookup miss/error leaves the deposit required (fail-safe direction)', async () => {
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: null });
-    expect((await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate, membership: {},
-    })).required).toBe(true);
-    mockResolveForInvoice.mockRejectedValueOnce(new Error('db down'));
-    expect((await resolveDepositPolicyForEstimate({
-      estimate: linkedEstimate, membership: {},
-    })).required).toBe(true);
-  });
-
-  it('no linked customer = no payer lookup', async () => {
-    await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', onetime_total: 280 },
-      membership: {},
-    });
-    expect(mockResolveForInvoice).not.toHaveBeenCalled();
-  });
-});
-
-describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)', () => {
-  it('never sends a deposit-abandonment SMS to a payer-billed estimate', async () => {
-    const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
-    mockDbHandler = (table) => {
-      if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
-      throw new Error(`unexpected table ${table}`);
-    };
-    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
-    const result = await assessDepositFollowUpEligibility('est-1');
-    expect(result).toEqual({ eligible: false, reason: 'payer_billed' });
-    // Strict (throwOnError) so an unverifiable payer status skips the SMS.
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null, throwOnError: true });
-  });
-
-  it('fails closed — an errored payer lookup skips the nudge (no SMS)', async () => {
-    const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
-    mockDbHandler = (table) => {
-      if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
-      throw new Error(`unexpected table ${table}`);
-    };
-    mockResolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
-    const result = await assessDepositFollowUpEligibility('est-1');
-    expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
-  });
-});
-
 describe('depositIntentMatchesEstimate — the trust boundary', () => {
   const good = {
     status: 'succeeded',
@@ -385,266 +169,6 @@ describe('depositIntentMatchesEstimate — the trust boundary', () => {
     expect(depositIntentMatchesEstimate({ ...good, metadata: { purpose: 'invoice', estimate_id: 'est-1' } }, 'est-1')).toBe(false);
     expect(depositIntentMatchesEstimate({ ...good, amount_received: 0 }, 'est-1')).toBe(false);
     expect(depositIntentMatchesEstimate(null, 'est-1')).toBe(false);
-  });
-});
-
-describe('ensureDepositSatisfied', () => {
-  // receivedTotals: sequence of ledger sums per call — the live-PI path
-  // re-sums AFTER marking the PI received, so the second value models the
-  // freshly recorded money. Last value repeats.
-  function depositsTable({ receivedTotal = 0, receivedTotals = null, ledgerRow, upserts = [], statusUpdates = [] } = {}) {
-    const totals = Array.isArray(receivedTotals) ? [...receivedTotals] : null;
-    return {
-      where(criteria) {
-        if (criteria && criteria.stripe_payment_intent_id && criteria.status === 'pending') {
-          return { update: async (payload) => { statusUpdates.push({ criteria, payload }); } };
-        }
-        if (criteria && criteria.stripe_payment_intent_id) {
-          return { first: async () => ledgerRow };
-        }
-        return this;
-      },
-      whereIn() { return this; },
-      // receivedDepositTotal reads rows and nets refunded_amount out of each;
-      // one synthetic row carries the modeled total.
-      select: async () => {
-        const total = totals ? (totals.length > 1 ? totals.shift() : totals[0]) : receivedTotal;
-        return total > 0 ? [{ amount: total, refunded_amount: 0 }] : [];
-      },
-      insert(payload) {
-        // ignore() is awaited directly by the claim path and chained with
-        // .returning() by markDepositReceived — support both shapes.
-        return {
-          onConflict: () => ({
-            ignore: () => {
-              const promise = (async () => { upserts.push(payload); return [{ id: 'dep-new' }]; })();
-              promise.returning = () => promise;
-              return promise;
-            },
-          }),
-        };
-      },
-    };
-  }
-
-  it('a webhook-recorded deposit satisfies without touching Stripe', async () => {
-    mockDbHandler = () => depositsTable({ receivedTotal: 70 });
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' } });
-    expect(result).toEqual({ satisfied: true, receivedTotal: 70 });
-    expect(mockRetrievePaymentIntent).not.toHaveBeenCalled();
-  });
-
-  it('closes the webhook race via live PI verification and records it', async () => {
-    const upserts = [];
-    // One shared table: the totals sequence must advance across db() calls.
-    const table = depositsTable({
-      receivedTotals: [0, 70],
-      upserts,
-      ledgerRow: { status: 'received', amount: '70.00' },
-    });
-    mockDbHandler = () => table;
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_1', status: 'succeeded', amount_received: 7000,
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
-    });
-
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_1' });
-    expect(result.satisfied).toBe(true);
-    expect(result.receivedTotal).toBe(70);
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0].stripe_payment_intent_id).toBe('pi_1');
-  });
-
-  it('live verification WINNING the webhook race still fires the surcharge-bypass audit (r6)', async () => {
-    // A modified client confirmed a CREDIT card directly at face value
-    // (quote_at_confirm, no card_surcharge stamp, PM not a wallet), and the
-    // accept flow's live verification records it before the webhook — the
-    // webhook then replays out, so THIS path must raise the alert.
-    const upserts = [];
-    const table = depositsTable({
-      receivedTotals: [0, 49],
-      upserts,
-      ledgerRow: { status: 'received', amount: '49.00' },
-    });
-    mockDbHandler = () => table;
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_bypass', status: 'succeeded', amount_received: 4900, payment_method: 'pm_credit',
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', surcharge_policy: 'quote_at_confirm' },
-    });
-    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_credit', type: 'card', card: { funding: 'credit', wallet: null } });
-
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_bypass' });
-    expect(result.satisfied).toBe(true);
-    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
-  });
-
-  it('a REFUNDED ledger row never satisfies, even though Stripe still says succeeded', async () => {
-    mockDbHandler = () => depositsTable({
-      receivedTotal: 0,
-      ledgerRow: { status: 'refunded', amount: '70.00' },
-    });
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_refunded', status: 'succeeded', amount_received: 7000,
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
-    });
-
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_refunded' });
-    expect(result.satisfied).toBe(false);
-  });
-
-  it('a client-named PI for a DIFFERENT estimate never satisfies', async () => {
-    mockDbHandler = () => depositsTable({ receivedTotal: 0 });
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_2', status: 'succeeded', amount_received: 7000,
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-OTHER' },
-    });
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_2' });
-    expect(result.satisfied).toBe(false);
-  });
-
-  it('Stripe retrieval failure fails closed', async () => {
-    mockDbHandler = () => depositsTable({ receivedTotal: 0 });
-    mockRetrievePaymentIntent.mockRejectedValue(new Error('stripe down'));
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_3' });
-    expect(result.satisfied).toBe(false);
-  });
-
-  it('the recorded total must MEET the resolved policy amount — $49 never unlocks a $99 one-time accept', async () => {
-    mockDbHandler = () => depositsTable({ receivedTotal: 49 });
-    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 99 });
-    expect(result).toEqual({ satisfied: false, receivedTotal: 49 });
-    expect(mockRetrievePaymentIntent).not.toHaveBeenCalled();
-
-    mockDbHandler = () => depositsTable({ receivedTotal: 99 });
-    expect((await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 99 })).satisfied).toBe(true);
-    // The heavier deposit always covers a switch BACK to the lighter class.
-    mockDbHandler = () => depositsTable({ receivedTotal: 99 });
-    expect((await ensureDepositSatisfied({ estimate: { id: 'est-1' }, requiredAmount: 49 })).satisfied).toBe(true);
-  });
-
-  it('a live PI top-up counts the WHOLE ledger toward the required amount', async () => {
-    const table = depositsTable({
-      receivedTotals: [49, 148],
-      ledgerRow: { status: 'received', amount: '99.00' },
-    });
-    mockDbHandler = () => table;
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_topup', status: 'succeeded', amount_received: 9900,
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
-    });
-    const result = await ensureDepositSatisfied({
-      estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_topup', requiredAmount: 99,
-    });
-    expect(result).toEqual({ satisfied: true, receivedTotal: 148 });
-  });
-
-  it('a live-verified PI below the required amount still fails closed', async () => {
-    const table = depositsTable({
-      receivedTotals: [0, 49],
-      ledgerRow: { status: 'received', amount: '49.00' },
-    });
-    mockDbHandler = () => table;
-    mockRetrievePaymentIntent.mockResolvedValue({
-      id: 'pi_light', status: 'succeeded', amount_received: 4900,
-      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
-    });
-    const result = await ensureDepositSatisfied({
-      estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_light', requiredAmount: 99,
-    });
-    expect(result).toEqual({ satisfied: false, receivedTotal: 49 });
-  });
-});
-
-describe('createDepositIntentForEstimate', () => {
-  // ledgerRows feed receivedDepositTotal — the intent charges only the
-  // missing slice of the policy amount. terminalCount feeds the retry
-  // generation (count of refunded/refunding/failed rows).
-  function intentDb({ ledgerRows = [], upserts = [], terminalCount = 0 } = {}) {
-    return () => ({
-      where() { return this; },
-      whereIn() { return this; },
-      count() { return this; },
-      first: async () => ({ n: terminalCount }),
-      select: async () => ledgerRows.map((r) => ({ ...r })),
-      insert(payload) { return { onConflict: () => ({ merge: async () => { upserts.push(payload); } }) }; },
-    });
-  }
-
-  it('creates the PI at the computed amount and tracks it pending', async () => {
-    const upserts = [];
-    mockDbHandler = intentDb({ upserts });
-    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_9', client_secret: 'cs_9' });
-
-    const result = await createDepositIntentForEstimate({ id: 'est-1', onetime_total: 280, customer_email: 'x@y.com' });
-    // Email is deliberately NOT passed — every PI create param must be
-    // deterministic from (estimate, amount) or Stripe rejects idempotent
-    // retries as key reuse with different parameters.
-    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 49, retryGeneration: 0,
-    });
-    expect(result).toEqual({
-      clientSecret: 'cs_9', amount: 49, paymentIntentId: 'pi_9', requiredAmount: 49, receivedTotal: 0,
-    });
-    expect(upserts[0].status).toBe('pending');
-  });
-
-  it('one-time service class mints the heavier flat amount', async () => {
-    mockDbHandler = intentDb({});
-    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_10', client_secret: 'cs_10' });
-    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
-    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 99, retryGeneration: 0,
-    });
-    expect(result.amount).toBe(99);
-  });
-
-  it('charges only the MISSING amount after a mode switch — $49 paid + one-time selected = $50 top-up (P2)', async () => {
-    mockDbHandler = intentDb({ ledgerRows: [{ amount: '49.00', refunded_amount: '0.00' }] });
-    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_topup', client_secret: 'cs_t' });
-    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
-    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 50, retryGeneration: 0,
-    });
-    expect(result).toMatchObject({ amount: 50, requiredAmount: 99, receivedTotal: 49 });
-  });
-
-  it('an already-covering ledger mints NOTHING — switch back to the lighter class owes $0', async () => {
-    mockDbHandler = intentDb({ ledgerRows: [{ amount: '99.00', refunded_amount: '0.00' }] });
-    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: false });
-    expect(mockCreateEstimateDepositIntent).not.toHaveBeenCalled();
-    expect(result).toEqual({ alreadySatisfied: true, amount: 0, requiredAmount: 49, receivedTotal: 99 });
-  });
-
-  it('partially refunded money does not count toward the missing amount', async () => {
-    // $99 paid but $50 already refunded from the dashboard — only $49 is
-    // really held, so a one-time policy needs a $50 top-up.
-    mockDbHandler = intentDb({ ledgerRows: [{ amount: '99.00', refunded_amount: '50.00' }] });
-    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_t2', client_secret: 'cs_t2' });
-    const result = await createDepositIntentForEstimate({ id: 'est-1' }, { oneTime: true });
-    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 50, retryGeneration: 0,
-    });
-    expect(result.receivedTotal).toBe(49);
-  });
-
-  it('terminal ledger rows bump the retry generation — a refunded deposit never blocks a replacement PI (P1)', async () => {
-    // The customer's first $49 deposit was refunded (stale/dispute). The
-    // bare estimate+amount idempotency key would make Stripe replay the
-    // old refunded PI within its window; the terminal-row count joins the
-    // key so the retry mints a fresh intent.
-    mockDbHandler = intentDb({ terminalCount: 1 });
-    mockCreateEstimateDepositIntent.mockResolvedValue({ id: 'pi_retry', client_secret: 'cs_r' });
-    const result = await createDepositIntentForEstimate({ id: 'est-1' });
-    expect(mockCreateEstimateDepositIntent).toHaveBeenCalledWith({
-      estimateId: 'est-1', amountDollars: 49, retryGeneration: 1,
-    });
-    expect(result.paymentIntentId).toBe('pi_retry');
-  });
-
-  it('returns null when Stripe is unconfigured', async () => {
-    mockDbHandler = intentDb({});
-    mockCreateEstimateDepositIntent.mockResolvedValue(null);
-    expect(await createDepositIntentForEstimate({ id: 'est-1' })).toBeNull();
   });
 });
 
@@ -716,12 +240,23 @@ describe('webhook + invoice credit', () => {
     return { handler, state };
   }
 
+  // RETIREMENT (owner ruling 2026-08-10): the deposit policy is permanently
+  // not-required, so the RECORD path is reachable only through the fail-open
+  // arms of depositStillRecordable (eligibility recheck error -> record: the
+  // money has already been taken and a tracked row beats losing sight of it).
+  // These tests pin the KEPT recording/receipt/lead machinery through that arm.
+  const forceRecordableViaFailOpen = () => {
+    require('../routes/estimate-public').buildPricingBundle
+      .mockRejectedValue(new Error('eligibility gates unavailable (test) — fail open to record'));
+  };
+
   const succeededPi = {
     id: 'pi_1', amount_received: 7000,
     metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1' },
   };
 
   it('records an eligible deposit (monotonic: only pending rows advance)', async () => {
+    forceRecordableViaFailOpen();
     mockIsEstimateAcceptActive.mockReturnValue(true);
     const { handler, state } = statefulWebhookDb({ estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280 } });
     mockDbHandler = handler;
@@ -734,6 +269,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('texts the deposit receipt exactly once — first record only, never on replay', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -767,6 +303,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -802,6 +339,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('customer-linked receipt retries carry the location from-number and flag recipient refresh', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -832,6 +370,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('email-only receipt channel: no SMS, sends the deposit.receipt email instead', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -895,6 +434,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('receipt channel "both" sends the SMS and the email', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -919,6 +459,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('default sms channel sends NO email; phoneless sms-channel customer falls back to email', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -953,6 +494,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('receipt-texts opt-out on the default sms channel falls back to the email receipt', async () => {
+    forceRecordableViaFailOpen();
     // payment_confirmation_sms=false blocks the SMS leg at the consent gate
     // (PURPOSE_OPTED_OUT since the policy added it as a prefsColumn) — a
     // default-channel customer would otherwise get NO record of the paid
@@ -982,6 +524,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('email-only channel whose email leg is undeliverable falls back to the TEXT', async () => {
+    forceRecordableViaFailOpen();
     // Stale email-only rows (email removed / email messages opted out after
     // choosing Email) must not leave a paid deposit with no receipt on any
     // channel (codex P1 on d040aa76) — mirrors the consent gate fallback.
@@ -1020,6 +563,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('leads: SMS when the estimate has a phone; email gap-fill when it only has an email', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -1075,6 +619,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {
+    forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -1104,6 +649,7 @@ describe('webhook + invoice credit', () => {
   });
 
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {
+    forceRecordableViaFailOpen();
     mockIsEstimateAcceptActive.mockReturnValue(true);
     mockConvertLeadFromEvent.mockClear();
     const { handler } = statefulWebhookDb({ estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280 } });
@@ -2029,13 +1575,12 @@ describe('handleDepositIntentCanceled — canceled PIs go terminal so retries mi
   });
 });
 
-describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
+describe('assessDepositFollowUpEligibility (deposit-abandonment nudge) — RETIRED', () => {
   const gates = require('../routes/estimate-public');
   const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
   const { assessDepositFollowUpEligibility } = require('../services/estimate-deposits');
 
-  // Minimal chainable for this helper's three reads: the estimate row, the
-  // refund-netted received rows, and the latest pending intent.
+  // Minimal chainable for this helper's three reads.
   function followUpDb({ estimate, receivedRows = [], pendingRow = undefined }) {
     return (table) => {
       const b = {};
@@ -2054,9 +1599,6 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
 
   const NOW = new Date('2026-06-10T15:00:00Z');
   const hoursBefore = (h) => new Date(NOW.getTime() - h * 3600000);
-  const liveEstimate = { id: 'est-1', status: 'viewed', estimate_data: '{}' };
-  const inWindowPending = (over = {}) =>
-    ({ id: 'dep-1', status: 'pending', updated_at: hoursBefore(3), ...over });
 
   beforeEach(() => {
     mockIsEstimateAcceptActive.mockReturnValue(true);
@@ -2067,112 +1609,21 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
     mockLoadExistingRecurringQualifyingRows.mockResolvedValue([]);
   });
 
-  it('eligible: quotes the policy amount minus refund-netted received money', async () => {
+  // RETIREMENT PIN (owner ruling 2026-08-10): the deposit policy is
+  // permanently not-required, so the abandonment nudge is permanently
+  // ineligible — even for the once-perfect shape (live estimate, in-window
+  // pending intent, nothing received). No new pending intents can exist
+  // (the mint endpoints were removed); this covers webhook-era residue.
+  it('never eligible — deposits are retired, even for the once-perfect nudge shape', async () => {
     mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      receivedRows: [{ amount: '20.00', refunded_amount: '0.00' }],
-      pendingRow: inWindowPending(),
+      estimate: { id: 'est-1', status: 'viewed', estimate_data: '{}' },
+      receivedRows: [],
+      pendingRow: { id: 'dep-1', status: 'pending', updated_at: hoursBefore(3) },
     });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: true, outstandingAmount: 29 });
-  });
-
-  it('top-up case: $49 received toward a $99 structural one-time policy stays eligible for $50', async () => {
-    gates.isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
-    mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      receivedRows: [{ amount: '49.00', refunded_amount: '0.00' }],
-      pendingRow: inWindowPending({ id: 'dep-topup' }),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: true, outstandingAmount: 50 });
-  });
-
-  it('satisfied policy goes silent even with a stale pending row lingering', async () => {
-    mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      receivedRows: [{ amount: '49.00', refunded_amount: '0.00' }],
-      pendingRow: inWindowPending({ id: 'dep-stale' }),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'deposit_satisfied' });
-  });
-
-  it('no pending intent means no abandonment — never started paying', async () => {
-    mockDbHandler = followUpDb({ estimate: liveEstimate, pendingRow: undefined });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'no_pending_intent' });
-  });
-
-  it('pending intent touched under 2h ago is NOT nudged (customer may be mid-payment)', async () => {
-    mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      pendingRow: inWindowPending({ updated_at: hoursBefore(0.5) }),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'pending_intent_recent' });
-  });
-
-  it('pending intent older than 72h is stale — expiring stage owns it', async () => {
-    mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      pendingRow: inWindowPending({ updated_at: hoursBefore(80) }),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'pending_intent_stale' });
-  });
-
-  it('non-live estimate status is ineligible (accepted race)', async () => {
-    mockDbHandler = followUpDb({ estimate: { ...liveEstimate, status: 'accepted' } });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'status:accepted' });
-  });
-
-  it('accept-inactive estimate is ineligible', async () => {
-    mockIsEstimateAcceptActive.mockReturnValueOnce(false);
-    mockDbHandler = followUpDb({ estimate: liveEstimate });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'estimate_inactive' });
-  });
-
-  it('exempt plan customer (snapshot) is ineligible', async () => {
-    buildEstimateMembershipContext.mockResolvedValueOnce({ isExistingCustomer: true });
-    mockDbHandler = followUpDb({
-      estimate: liveEstimate,
-      pendingRow: inWindowPending(),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'existing_plan_customer' });
-  });
-
-  it('live plan-customer check exempts a linked customer with qualifying services', async () => {
-    mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([{ id: 'svc-1' }]);
-    mockDbHandler = followUpDb({
-      estimate: { ...liveEstimate, customer_id: 'cust-1' },
-      pendingRow: inWindowPending(),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'existing_plan_customer' });
-  });
-
-  it('fails CLOSED when the live plan-customer lookup throws (accept gate fails open here — SMS must not)', async () => {
-    mockLoadExistingRecurringQualifyingRows.mockRejectedValueOnce(new Error('scheduled_services unavailable'));
-    mockDbHandler = followUpDb({
-      estimate: { ...liveEstimate, customer_id: 'cust-1' },
-      pendingRow: inWindowPending(),
-    });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
-  });
-
-  it('fails CLOSED when verification errors (unlike depositStillRecordable)', async () => {
-    gates.buildPricingBundle.mockRejectedValueOnce(new Error('bundle exploded'));
-    mockDbHandler = followUpDb({ estimate: liveEstimate });
-    const result = await assessDepositFollowUpEligibility('est-1', NOW);
-    expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
+    const out = await assessDepositFollowUpEligibility('est-1', NOW);
+    expect(out.eligible).toBe(false);
   });
 });
-
 describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the email leg', () => {
   const { sendDepositReceiptEmailFallback } = require('../services/estimate-deposits');
 

@@ -96,6 +96,7 @@ const {
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
   pestProgramFloorAnnual, validateEstimateDiscounts,
+  serviceManualRecurringDiscountEligible,
 } = require('./discount-engine');
 const {
   isCommercialProperty,
@@ -157,17 +158,8 @@ function attachPalmCountMetadata(result, resolution) {
   return result;
 }
 
-const MANUAL_RECURRING_DISCOUNT_ELIGIBLE = new Set([
-  'pest_control',
-  'lawn_care',
-  'lawn_care_enhanced',
-  'lawn_care_premium',
-  'mosquito',
-  'tree_shrub',
-]);
-
 function isManualRecurringDiscountEligible(item) {
-  return MANUAL_RECURRING_DISCOUNT_ELIGIBLE.has(resolveDiscountKey(item));
+  return serviceManualRecurringDiscountEligible(resolveDiscountKey(item));
 }
 
 // Effective (post-WaveGuard, post-service-credit) price of a one-time or

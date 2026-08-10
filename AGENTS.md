@@ -591,25 +591,21 @@ violations at the severity noted.
   43-char base64url token format gate, 60 req/min read limit, 120 req/min
   CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
   generic 404 for missing, draft, revoked, or malformed tokens),
-  `/api/public/estimates/:token/deposit-intent` (required acceptance
-  deposit; estimate token format gate, generic 404, 10 req/min limit,
-  terminal/expired rejection, mirrors the accept-time quote gate so money
-  is never collected for an estimate accept would reject, 409 for exempt
-  policies, PaymentIntent idempotent per estimate+amount with
-  metadata-pinned purpose/estimate id; dark behind
-  ESTIMATE_DEPOSIT_REQUIRED).
-  `/api/public/estimates/:token/deposit-quote` + `/deposit-finalize`
-  (deposit card surcharge, owner ruling 2026-07-13 reversing the 2026-06-12
-  exemption: manual card entry prices via computeChargeAmount — credit
-  funding only — behind a 10-min HMAC quote token, finalize re-derives from
-  the live PM and confirms server-side; wallets pay through Express
-  Checkout at FACE value, Phase-1 parity with pay-v2. The PI mints at face
-  value and the ledger credits face value (metadata.base_amount) — the fee
-  rides estimate_deposits.card_surcharge, never the credit. Both routes:
-  token format gate, generic 404, deposit rate limit, terminal/expired
-  rejection; trust re-derives from the PI's own purpose/estimate_id pin.
-  Commercial prepay keeps its separate exemption — owner ruling 2026-07-05,
-  expressly not reversed).
+  `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
+  owner ruling 2026-08-10: acceptance deposits are permanently
+  not-enforced. Token format gate + deposit rate limit, then an
+  unconditional 409 `{ exemptReason: 'deposits_retired' }` — the accept
+  client consults this after a non-superseding card/hold 409 and reads a
+  409-with-exemptReason as "nothing owed"; no PaymentIntent, no Stripe
+  call, no DB write. `/deposit-quote`, `/deposit-finalize`, and
+  `/deposit-reset` carry the SAME verdict stub — a 409 with exemptReason
+  is exactly what their kill-switch check returned while the flag was
+  off, so the retirement preserves the live contract for any stale open
+  page. The
+  deposit LEDGER — credit roll-forward, void-restore, refunds, webhook
+  recording — stays for the 2026-06/07 historical rows; the 2026-07-13
+  surcharge ruling and 2026-07-05 commercial-prepay exemption remain the
+  ledger's interpretation rules for those rows.)
   `/api/public/estimates/:token/card-hold-intent` (one-time card-on-file
   hold; estimate token format gate, generic 404, 10 req/min limit,
   terminal/expired rejection, mirrors the accept-time quote + one-time
