@@ -9866,11 +9866,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // certificate. Only ever FILLS A NULL: the T&S tier stamp above and
           // any identity already on the row are authoritative. Single-service
           // accepts only — see catalogServiceIdForAcceptedEstimate.
+          // The SAME resolved inputs the reservation paths pass (see the
+          // commitReservation calls above): the ACCEPTED estimate data, the
+          // normalized mode, and the frequency KEY. Passing the raw request
+          // values instead is a money bug (codex #3328 r4 P0) — a structurally
+          // one-time estimate defaults `serviceMode` to 'recurring', so a
+          // pre-slab accept would resolve pest_control, match no seeded row,
+          // and leave service_id null: exactly the billing/compliance failure
+          // this PR exists to close.
           if (!updates.service_id && !lockedAdoptRow?.service_id) {
             const adoptedCatalogServiceId = await slotReservation
-              .catalogServiceIdForAcceptedEstimate(trx, estimate, {
-                serviceMode,
-                selectedFrequency,
+              .catalogServiceIdForAcceptedEstimate(trx, acceptedEstimateForScheduling, {
+                serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+                selectedFrequency: acceptedSchedulingFrequencyKey,
                 requireSingleService: true,
               });
             if (adoptedCatalogServiceId) updates.service_id = adoptedCatalogServiceId;
