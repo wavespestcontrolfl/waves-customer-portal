@@ -16,7 +16,7 @@ const logger = require('./logger');
 // Boundary-rotation generation guard (codex #3233 r37).
 const PROCESS_BOOT_AT = new Date();
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
+const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -825,8 +825,8 @@ async function isLandline(customerId, phone) {
     // the legacy customers.line_type primary cache never covered).
     const cached = await readCachedLineType(phone);
     if (cached.state === 'hit') {
-      if (cached.lineType === 'landline') {
-        logger.info(`[appt-remind] Skipping SMS — cached landline for ${maskPhone(phone)}`);
+      if (NON_SMS_LINE_TYPES.has(cached.lineType)) {
+        logger.info(`[appt-remind] Skipping SMS — cached ${cached.lineType} for ${maskPhone(phone)}`);
         return true;
       }
       return false;
@@ -840,8 +840,8 @@ async function isLandline(customerId, phone) {
     // gate is on. Only fresh Twilio lookups (below) seed the shared cache, which
     // also re-validates a stale legacy entry on the next send.
     if (isPrimaryPhone && customer.line_type) {
-      if (customer.line_type === 'landline') {
-        logger.info(`[appt-remind] Skipping SMS — cached landline for customer ${customerId}`);
+      if (NON_SMS_LINE_TYPES.has(customer.line_type)) {
+        logger.info(`[appt-remind] Skipping SMS — cached ${customer.line_type} for customer ${customerId}`);
         return true;
       }
       return false; // cached as mobile/voip/etc
@@ -864,8 +864,8 @@ async function isLandline(customerId, phone) {
         await db('customers').where({ id: customerId }).update({ line_type: lineType });
       }
 
-      if (lineType === 'landline') {
-        logger.info(`[appt-remind] Landline detected for customer ${customerId}, skipping SMS`);
+      if (NON_SMS_LINE_TYPES.has(lineType)) {
+        logger.info(`[appt-remind] ${lineType} detected for customer ${customerId}, skipping SMS`);
         return true;
       }
       return false;

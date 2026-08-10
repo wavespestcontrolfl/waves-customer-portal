@@ -303,6 +303,17 @@ router.get('/:token', async (req, res, next) => {
     // invoices settled before the held-coverage flow shipped; a still-
     // collectible invoice whose credit WOULD fully cover is the held
     // state (round-7 P1 — coverage now applies only after capture).
+    // NO previous-balance / sibling-invoice data on this surface — EVER
+    // (pre-push P0 ×2 on the balance-visibility lane): this is an
+    // unauthenticated, permanent, per-invoice bearer token that AGENTS.md
+    // notes is commonly forwarded (bookkeepers, spouses). Possession of one
+    // invoice link must not disclose the account's other invoice numbers,
+    // service history, amounts, or balance total, let alone their tokens.
+    // Consolidated-balance visibility lives on the surfaces addressed to the
+    // customer themselves: the invoice email's previous-balance note
+    // (GATE_BALANCE_VISIBILITY, invoice-email.js) and the authenticated
+    // portal Billing tab (GATE_PORTAL_PAY_NOW, billing-v2.js).
+
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     const getCaptureNeeded = getSaveRequired
       && (data.status === 'prepaid'

@@ -72,8 +72,33 @@ function lineRequiresReview(line = {}) {
     // No caller-stated count and no property density data: the pricer
     // silently priced ZERO trees (fixed costs only) — an underquote with no
     // warning of its own, so the draft must carry the review flag here.
-    || (line.service === 'tree_shrub' && line.treeCountSource === 'default_zero')
+    // v4.7: palms exempt this line ONLY when they actually priced —
+    // service-line palms (which fold into the legacy tree terms while the
+    // reserve is unarmed) or any palms once the reserve is armed. A
+    // PROPERTY-sourced palm count with the reserve off deliberately prices
+    // nothing, so exempting it would let that fixed-cost underquote bypass
+    // review — the exact hole this gate exists to catch.
+    || (line.service === 'tree_shrub'
+      && line.treeCountSource === 'default_zero'
+      && !(Number(line.palmCount) > 0
+        && (line.palmCountSource === 'service_line' || line.palmReserveActive === true)))
   );
+}
+
+// The residential lawn pricer reports its low-confidence signal as
+// turfConfidence/turfBasis, NOT pricingConfidence. Flag by BASIS, not just
+// confidence: plausibleMaxTurfCap comes back MEDIUM yet means the estimate
+// was capped at the parcel's plausible maximum — every heuristic/capped
+// basis is a field-verification price. Measured/supplied bases
+// (measuredTurfSf, lawnSqFt, estimatedTurfSf) stay green unless graded LOW.
+const HEURISTIC_TURF_BASES = new Set([
+  'lotFallback', 'plausibleMaxTurfCap', 'legacyHardscapeEstimate',
+  'countyPrior', 'commercialLotFallback', 'commercialDefault',
+]);
+
+function lineHasHeuristicTurf(line = {}) {
+  return String(line.turfConfidence || '').toLowerCase() === 'low'
+    || (line.turfBasis != null && HEURISTIC_TURF_BASES.has(line.turfBasis));
 }
 
 // ── Engine input ──────────────────────────────────────────────
@@ -94,6 +119,10 @@ function knownEnrichedValue(value) {
   const v = String(value || '').trim();
   return v && v.toUpperCase() !== 'UNKNOWN' ? v : null;
 }
+
+// Trust predicate lives in one place — the customer-facing pricing
+// assistant applies the same rule (services/lookup-confidence.js).
+const { lookupBedAreaIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
@@ -150,6 +179,17 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   // Only then may the profile's saved turf measurement / property type
   // steer pricing.
   const isCommercial = intent.is_commercial === true;
+  // A global verification failure ('address' — the geocoder snapped to a
+  // different premise; 'all' — no property record at all) invalidates the
+  // WHOLE enriched payload, not one field of it. Dropping it here is the
+  // only way to be sure another parcel's features, tree density,
+  // construction/roof/foundation facts and mosquito multiplier can't steer
+  // an auto-generated draft. The RECORD leg of the same failure is handled
+  // upstream: runDraftPipeline strips the parcel-scoped signals
+  // (propertyRecord/parcelView) before property-fact arbitration, so the
+  // snapped parcel's county dimensions never arrive here as high-confidence
+  // facts either.
+  if (hasGlobalVerifyFlag(lookupEnriched)) lookupEnriched = null;
   const featureModifiers = isCommercial ? null : lookupFeatureModifiers(lookupEnriched);
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);
@@ -200,6 +240,35 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(!isCommercial && lookupEnriched?.treeDensity
       ? { treeDensity: lookupEnriched.treeDensity }
       : {}),
+    // Tree & Shrub measurement inputs from the lookup. Without these the
+    // T&S pricer had no bed area at all on this path and fell back to its
+    // 2,000 sqft default (bedAreaSource 'fallback', LOW confidence, manual
+    // review) — the Aug-2026 audit found two of the three real T&S quotes
+    // priced that way. estimatedBedAreaSf lands as bedAreaSource
+    // 'estimated' / MEDIUM confidence, so the provenance stays truthful:
+    // an AI-derived area is never labelled an operator measurement.
+    // The admin estimator already prefills both fields from the same
+    // enriched payload (EstimateToolViewV2) — this closes the agent path.
+    // Only a CONFIDENT lookup area is forwarded. priceTreeShrub upgrades any
+    // estimatedBedAreaSf to pricingConfidence 'medium' with no review
+    // reason, so an area read off obstructed or stale imagery would turn a
+    // low-confidence draft into a green one-click lane. When the lookup
+    // itself says the measurement needs verification, forwarding nothing is
+    // the honest move: the pricer then falls back to the lot inference (or
+    // its 2,000 default), both of which carry their own review markers.
+    ...(!isCommercial && lookupBedAreaIsTrustworthy(lookupEnriched)
+      ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
+      : {}),
+    // The lookup's estimatedPalmCount is deliberately NOT forwarded here.
+    // property.palmCount is read by BOTH the T&S reserve and
+    // resolvePalmCount, and the latter treats it as a valid green-lane
+    // fallback for a palm-INJECTION line (requiresManualReview: false) — so
+    // an AI-detected count would auto-price per-palm injections nobody
+    // measured. Routing it through the T&S service line instead is no
+    // better today: that source folds into the legacy tree terms while the
+    // reserve is unarmed, which would raise prices off an AI guess. It
+    // needs its own review-marked input, which belongs with the work that
+    // arms the reserve.
     // Structural facts deriveModifiers() prices from: home age (pest $/app),
     // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
     // merges stay off the input so the engine's own defaults apply.
@@ -518,21 +587,12 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (lowConfidenceLines.length) {
     reasons.push(`engine low pricing confidence: ${lowConfidenceLines.map((l) => l.service).join(', ')}`);
   }
-  // The residential lawn pricer reports its low-confidence signal as
-  // turfConfidence/turfBasis, NOT pricingConfidence — without this check a
-  // new caller's lawn line priced off heuristic turf (lot minus impervious
-  // and bed defaults, turfBasis lotFallback) green-laned as if measured.
-  // Flag by BASIS, not just confidence: plausibleMaxTurfCap comes back
-  // MEDIUM yet means the estimate was capped at the parcel's plausible
-  // maximum — every heuristic/capped basis must land yellow, same as any
-  // fallback sqft source. Measured/supplied bases (measuredTurfSf,
-  // lawnSqFt, estimatedTurfSf) stay green unless graded LOW.
-  const HEURISTIC_TURF_BASES = new Set([
-    'lotFallback', 'plausibleMaxTurfCap', 'legacyHardscapeEstimate',
-    'countyPrior', 'commercialLotFallback', 'commercialDefault',
-  ]);
-  const lowTurfLines = pricedLines.filter((l) => String(l.turfConfidence || '').toLowerCase() === 'low'
-    || (l.turfBasis && HEURISTIC_TURF_BASES.has(l.turfBasis)));
+  // Heuristic turf provenance — without this check a new caller's lawn
+  // line priced off heuristic turf (lot minus impervious and bed defaults,
+  // turfBasis lotFallback) green-laned as if measured; every heuristic/
+  // capped basis must land yellow, same as any fallback sqft source (see
+  // lineHasHeuristicTurf above — shared with proposal generation).
+  const lowTurfLines = pricedLines.filter(lineHasHeuristicTurf);
   if (lowTurfLines.length) {
     reasons.push(`turf area is a heuristic estimate (${lowTurfLines.map((l) => `${l.service}: ${l.turfBasis || 'unknown basis'}`).join(', ')}) — verify treated area before send`);
   }
@@ -947,7 +1007,13 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
 module.exports = {
   LANES,
+  lineRequiresReview,
+  lineHasHeuristicTurf,
   buildEngineInput,
+  // Shared story-provenance rule — the customer-facing pricing assistant
+  // grades its lookup stories through the same evidence test so a
+  // low-confidence AI inference prices as 'estimated' on both paths.
+  storiesSourceForPricing,
   stampPestCurveVersion,
   deriveTotals,
   compsBand,

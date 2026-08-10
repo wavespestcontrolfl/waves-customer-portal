@@ -99,6 +99,33 @@ const gates = {
   // unset or any non-'true' value.
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
+  // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
+  // invoice EMAIL carries a "previous balance" note when the customer has
+  // other open, live-payer-verified self-pay invoices, so one email surfaces
+  // everything owed. EMAIL ONLY by design — the public /pay page is an
+  // unauthenticated per-invoice bearer surface and must never disclose
+  // sibling-invoice data (pre-push P0 ×2); the authenticated portal Billing
+  // tab (portalPayNow) is the in-app counterpart. Display-only — no money
+  // moves under this gate and every underlying invoice stays intact
+  // (dunning still ages off each invoice's own due date, so the oldest debt
+  // keeps escalating — ruling #2). Customer-facing copy change, so
+  // fail-closed ==='true' in EVERY environment. Gate off: emails
+  // byte-identical to today.
+  balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
+
+  // Completion full-balance Auto Pay pull (owner ruling 2026-08-08: "when
+  // autopay runs after a visit and the customer also has an old unpaid
+  // balance, take everything they owe"). After a completion auto-charge
+  // SUCCEEDS on the visit's own invoice, sweep the customer's OTHER open,
+  // already-delivered self-pay invoices oldest-first through the same
+  // chargeInvoiceWithSavedCard authority — one charge per invoice, each
+  // capped at that invoice's own current amount, so every existing lock/
+  // surcharge/ledger/receipt rail applies unchanged and a decline stops the
+  // sweep (the remaining invoices keep their pay links + dunning exactly as
+  // today). Money surface — fail-closed ==='true' in EVERY environment.
+  // Kill switch: unset or any non-'true' value.
+  completionBalanceSweep: process.env.GATE_COMPLETION_BALANCE_SWEEP === 'true',
+
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
   // ready … Invoice for today's visit: {pay_url}") has been unreachable since

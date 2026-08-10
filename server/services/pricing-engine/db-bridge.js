@@ -1029,6 +1029,16 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     // ── Tree & Shrub ─────────────────────────────────────────
+    // v4.7 knobs rebase to their NEUTRAL in-code defaults on EVERY sync —
+    // same mutate-in-place trap as the lawn floor kill values above: after
+    // a valid value loads, deleting its key (or writing an out-of-range
+    // replacement) must reassert neutral on the next sync, not leave the
+    // old value resident until restart with pods drifting apart. An
+    // out-of-range value therefore degrades to NEUTRAL (fail-safe toward
+    // "no adjustment"), never to whatever loaded before it.
+    constants.TREE_SHRUB.densityFactors = { light: 1, moderate: 1, heavy: 1 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+    constants.TREE_SHRUB.callbackReservePerVisit = 0;
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
       const model = constants.TREE_SHRUB.materialModel;
@@ -1048,6 +1058,34 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         if (Number(rates.enhanced_factor) >= 1 && Number(rates.enhanced_factor) <= 3) {
           model.enhancedFactor = Number(rates.enhanced_factor);
         }
+      }
+      // v4.7 knobs (reprice lane 2026-08-08). All ship neutral in constants;
+      // real values arrive via this row when the owner flips them. Bounds
+      // are fat-finger guards, not calibration opinions.
+      const density = constants.TREE_SHRUB.densityFactors;
+      if (density) {
+        for (const key of ['light', 'moderate', 'heavy']) {
+          const val = Number(rates[`density_${key}`]);
+          // 0.5–2x: outside that a density multiplier is a typo, not a
+          // planting style.
+          if (val >= 0.5 && val <= 2) density[key] = val;
+        }
+      }
+      const reserve = constants.TREE_SHRUB.routinePalmCareReserve;
+      if (reserve) {
+        const perPalm = Number(rates.palm_per_palm_annual);
+        // $0–200/palm/yr — the specialty injection ladder starts around
+        // $35/palm per EVENT; a routine reserve above $200/yr means someone
+        // typed a palm_injection price into the wrong box.
+        if (perPalm >= 0 && perPalm <= 200) reserve.perPalmAnnual = perPalm;
+        const perPalmMin = Number(rates.palm_minutes_per_visit);
+        // 0–10 min/palm/visit; beyond that a 12-palm property books 2h of
+        // palm time per visit.
+        if (perPalmMin >= 0 && perPalmMin <= 10) reserve.minutesPerPalmVisit = perPalmMin;
+      }
+      const callbackReserve = Number(rates.callback_reserve_per_visit);
+      if (callbackReserve >= 0 && callbackReserve <= 50) {
+        constants.TREE_SHRUB.callbackReservePerVisit = callbackReserve;
       }
     }
     if (config.ts_monthly_floors) {

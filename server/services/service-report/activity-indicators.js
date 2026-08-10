@@ -1106,6 +1106,19 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
         errors.push(`Invalid count for ${field.key}: ${value}`);
       }
     }
+    if (field.type === 'measurement') {
+      // Numeric field without count's 4-digit ceiling (bed sqft runs to 5
+      // digits). Free text must fail HERE, at entry — the calibration
+      // reconcile parses these later and a dictated "about two thousand"
+      // would otherwise vanish silently from the ledger. Digit grouping
+      // commas/spaces are tolerated (dictation writes "2,400").
+      const str = typeof value === 'number'
+        ? String(value)
+        : (typeof value === 'string' ? value.trim().replace(/[,\s]/g, '') : null);
+      if (str == null || !/^\d{1,6}(\.\d+)?$/.test(str)) {
+        errors.push(`Invalid measurement for ${field.key}: ${value}`);
+      }
+    }
     if (typeof value === 'string' && value.length > 4000) {
       errors.push(`Value for ${field.key} exceeds 4000 characters`);
     }

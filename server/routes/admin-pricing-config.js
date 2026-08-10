@@ -309,6 +309,41 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(quarters) || quarters < 1 || quarters > 120) {
       return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
+  } else if (configKey === 'ts_material_rates') {
+    // A JSON null / array payload would wipe the DB-authoritative material
+    // rates row (the loop below optional-chains straight past it), leaving
+    // every T&S quote on in-code defaults with no audit of what was lost.
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return fail('ts_material_rates must be an object of material-model values');
+    }
+    // v4.7 knobs (density factors / routine palm reserve / callback
+    // reserve). Strict finite numbers with the same bounds db-bridge
+    // enforces at sync — without this branch an admin PUT could persist
+    // booleans or numeric strings that Number() would coerce live (true
+    // becomes a $1 callback reserve). The pre-existing material-model keys
+    // (fixed/per_tree/per_sqft/light_factor/enhanced_factor) are validated
+    // when present too; all keys optional — db-bridge rebases absent v4.7
+    // knobs to their neutral in-code defaults.
+    // exclusiveMin marks keys db-bridge applies only when > 0: accepting a
+    // stored 0 for those would audit success while live quotes keep the
+    // prior value — DB/UI saying one thing, pricing another. The v4.7 knobs
+    // accept 0 legitimately (the bridge rebases + applies >= 0).
+    const checks = [
+      ['fixed', 0, 500, true], ['per_tree', 0, 100, true], ['per_sqft', 0, 5, true],
+      ['light_factor', 0.1, 1], ['enhanced_factor', 1, 3],
+      ['density_light', 0.5, 2], ['density_moderate', 0.5, 2], ['density_heavy', 0.5, 2],
+      ['palm_per_palm_annual', 0, 200], ['palm_minutes_per_visit', 0, 10],
+      ['callback_reserve_per_visit', 0, 50],
+    ];
+    for (const [key, min, max, exclusiveMin] of checks) {
+      if (data?.[key] === undefined) continue;
+      const val = num(data[key]);
+      if (!Number.isFinite(val) || val < min || val > max || (exclusiveMin && val <= min)) {
+        return fail(exclusiveMin
+          ? `ts_material_rates.${key} must be a number greater than ${min} and at most ${max} (the runtime sync ignores zero values)`
+          : `ts_material_rates.${key} must be a number between ${min} and ${max}`);
+      }
+    }
   } else if (configKey === 'lawn_pricing_v2' && data?.bermudaSuppression !== undefined) {
     // DB-editable per-application adder knobs for the bermuda-suppression
     // add-on. Strict numbers only (no numeric strings), both keys required,

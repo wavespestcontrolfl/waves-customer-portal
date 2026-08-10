@@ -31,6 +31,7 @@ const {
   saveVerifiedOverride,
 } = require('../services/property-lookup/lookup-cache');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
@@ -1455,6 +1456,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     delete ai.imperviosSurfacePercent;
     delete ai.estimatedBedAreaSf;
     delete ai.estimatedBedAreaPercent;
+    delete ai._bedAreaConfidence;
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1742,8 +1744,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     treeDensity: ai?.treeDensity || 'MODERATE',
     landscapeComplexity,
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
+    // Field-level confidence behind the winning palm count (stamped by
+    // mergeAiAnalyses) — same contract as tree count / bed area below.
+    palmCountConfidence: ai?._palmCountConfidence,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
+    // Field-level confidence behind the winning tree count (stamped by
+    // mergeAiAnalyses) — same contract as bedAreaConfidence below.
+    treeCountConfidence: ai?._treeCountConfidence,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
+    // Field-level confidence behind the winning bed-area value (stamped by
+    // mergeAiAnalyses) — the trust predicate requires it; the blended
+    // aiConfidence can be held above the floor by providers that never
+    // reported a bed area.
+    bedAreaConfidence: ai?._bedAreaConfidence,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
@@ -1910,6 +1923,24 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
+
+  // Palm-count prefill verdict, computed HERE so the trust rule keeps one
+  // home (services/lookup-confidence) — the estimator pages only read the
+  // boolean. Requires the fieldVerifyFlags above (wrong-premise 'address'
+  // flags veto it) and the field-level palmCountConfidence stamp; a
+  // distrusted count leaves the estimator's palm field EMPTY for the
+  // operator to count, instead of prefilling garbage that would ride the
+  // service-line override into per-palm pricing.
+  // Stamped ONLY when the field-level confidence exists: cached lookups
+  // merged before the stamp shipped rebuild through here too, and stamping
+  // their absent confidence as an explicit `false` would suppress every
+  // cached address's prefill for the cache lifetime — the exact
+  // legacy-preservation the client contract promises (`!== false`). A
+  // legacy payload simply carries NO verdict; fresh merges always stamp a
+  // positive count, so every new lookup gets one.
+  if (Number.isFinite(Number(profile.palmCountConfidence))) {
+    profile.palmCountTrusted = lookupPalmCountIsTrustworthy(profile);
+  }
 
   // The number the pricing engine will actually use on this profile if the
   // operator leaves Confirmed Sq Ft blank (codex P1 r1 + pre-push P1 r3
@@ -3699,12 +3730,20 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       ? 'estimated'
       : undefined,
     palmCount: positiveIntegerValue(p.palmCount),
-    palmInventory: {
-      ...(p.palmInventory || {}),
-      ...(positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) !== undefined
-        ? { palmCount: positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) }
-        : {}),
-    },
+    // The AI estimate leg honors the stamped trust verdict (same `!== false`
+    // contract as the client prefill): a distrusted count must not be
+    // promoted into palmInventory.palmCount here either — the client
+    // request spreads the whole profile, so the raw field can arrive even
+    // after the UI cleared it. A REAL stored inventory count is not an AI
+    // read and always stands.
+    palmInventory: (() => {
+      const estimateLeg = p.palmCountTrusted === false ? undefined : p.estimatedPalmCount;
+      const resolved = positiveIntegerValue(p.palmInventory?.palmCount, estimateLeg);
+      return {
+        ...(p.palmInventory || {}),
+        ...(resolved !== undefined ? { palmCount: resolved } : {}),
+      };
+    })(),
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
@@ -3959,6 +3998,125 @@ function mergeAiAnalyses(providerResults) {
       (mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0
     );
     merged._structureAttachmentSupport = supporters.length;
+  }
+
+  // Numeric field reads for the divergence sets below: null/blank means the
+  // provider DIDN'T measure (the gap-fill loop treats it as missing too) —
+  // Number(null) is 0, which would masquerade as an explicit observed zero
+  // and falsely flag divergence against a valid positive read. Only real
+  // numbers (including a genuine 0) participate.
+  const numericRead = (raw) => {
+    if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+
+  // Confidence behind the FINAL bed-area value — same rationale as
+  // structureAttachment above. estimatedBedAreaSf is not divergence-tracked
+  // and the gap-fill loop can adopt it from a lone low-confidence provider
+  // while the other providers' high scores hold the blended average above
+  // the pricing floor. The T&S bed-area trust predicate keys off this stamp
+  // so a gap-filled read can't average its way into a customer price.
+  const mergedBedArea = Number(merged.estimatedBedAreaSf);
+  if (Number.isFinite(mergedBedArea) && mergedBedArea > 0) {
+    // Divergence considers explicit ZEROS too — an observed no-beds read
+    // materially contradicts a positive one, and dropping it would leave a
+    // 2600-vs-0 disagreement looking like a single supported read (only
+    // ABSENT reads are excluded). The stamp's supporters stay keyed to the
+    // winning positive value.
+    const bedReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedBedAreaSf), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxRead = Math.max(...bedReads.map((r) => r.value));
+    const minRead = Math.min(...bedReads.map((r) => r.value));
+    // Two providers disagreeing MATERIALLY on the bed area (>25% of the
+    // larger) is a conflict no single provider's confidence can launder —
+    // the winner is whichever provider sorted first, not a measurement.
+    // Zero the stamp so the trust predicate routes the estimate to its
+    // reviewed lot-inference fallback, and record the divergence.
+    const bedAreaDivergent = bedReads.length > 1 && (maxRead - minRead) > maxRead * 0.25;
+    if (bedAreaDivergent) {
+      merged._bedAreaConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedBedAreaSf',
+          primary: primary.provider,
+          ...Object.fromEntries(bedReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._bedAreaConfidence = bedReads
+        .filter((r) => r.value === mergedBedArea)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // Same stamp for the tree count — it feeds per-tree labor minutes AND the
+  // per-tree material term, and like the bed area it can be gap-filled from
+  // a lone low-confidence provider outside divergence tracking. The
+  // absolute-difference guard (>2 trees) keeps small-count noise (4 vs 3)
+  // from flagging.
+  const mergedTreeCount = Number(merged.estimatedTreeCount);
+  if (Number.isFinite(mergedTreeCount) && mergedTreeCount > 0) {
+    // Explicit zero counts join divergence detection (same rationale as
+    // the bed area above); only absent reads are excluded.
+    const countReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedTreeCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxCount = Math.max(...countReads.map((r) => r.value));
+    const minCount = Math.min(...countReads.map((r) => r.value));
+    const treeCountDivergent = countReads.length > 1
+      && (maxCount - minCount) > 2
+      && (maxCount - minCount) > maxCount * 0.25;
+    if (treeCountDivergent) {
+      merged._treeCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedTreeCount',
+          primary: primary.provider,
+          ...Object.fromEntries(countReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._treeCountConfidence = countReads
+        .filter((r) => r.value === mergedTreeCount)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // And the palm count — it prefills the estimator's palm field (owner
+  // ruling 2026-08-10) and, submitted, prices per-palm injection. Same
+  // gap-fill/divergence exposure, same stamp.
+  const mergedPalmCount = Number(merged.estimatedPalmCount);
+  if (Number.isFinite(mergedPalmCount) && mergedPalmCount > 0) {
+    // Explicit zero counts join divergence detection (a confident "no
+    // palms" read contradicts a confident 7); only absent reads are
+    // excluded.
+    const palmReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedPalmCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxPalm = Math.max(...palmReads.map((r) => r.value));
+    const minPalm = Math.min(...palmReads.map((r) => r.value));
+    const palmCountDivergent = palmReads.length > 1
+      && (maxPalm - minPalm) > 2
+      && (maxPalm - minPalm) > maxPalm * 0.25;
+    if (palmCountDivergent) {
+      merged._palmCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedPalmCount',
+          primary: primary.provider,
+          ...Object.fromEntries(palmReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._palmCountConfidence = palmReads
+        .filter((r) => r.value === mergedPalmCount)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
   }
 
   return merged;

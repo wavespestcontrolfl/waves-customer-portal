@@ -192,3 +192,39 @@ describe('runUnworkedCommsWatcher', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 });
+
+describe('lane SQL binding integrity', () => {
+  // The unanswered-texts lane shipped a regex whose bare ? quantifiers knex
+  // consumed as positional bindings ($2..$5, "could not determine data type
+  // of parameter $2") — the lane failed every run until escaped. Compile
+  // every lane's real SQL through knex's pg dialect and require each emitted
+  // $n placeholder to have a bound value.
+  test('every lane compiles with fully-resolved bindings — no bare ? swallowed by knex', async () => {
+    const captured = [];
+    jest.resetModules();
+    jest.doMock('../models/db', () => {
+      const qb = () => { throw new Error('unexpected query-builder use'); };
+      qb.raw = (sql, bindings) => { captured.push({ sql, bindings }); return Promise.resolve({ rows: [] }); };
+      return qb;
+    });
+    let loaders;
+    jest.isolateModules(() => {
+      ({ _private: loaders } = require('../services/unworked-comms-watcher'));
+    });
+    jest.dontMock('../models/db');
+    await loaders.loadCallbackCalls(new Date('2026-08-08T00:00:00Z'));
+    await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'));
+    await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'));
+    await loaders.loadOpenServiceRequests(new Date('2026-08-08T00:00:00Z'));
+    expect(captured.length).toBe(4);
+
+    const knexPg = require('knex')({ client: 'pg' });
+    for (const { sql, bindings } of captured) {
+      const native = knexPg.raw(sql, bindings).toSQL().toNative();
+      const maxPlaceholder = (native.sql.match(/\$\d+/g) || [])
+        .reduce((max, p) => Math.max(max, Number(p.slice(1))), 0);
+      expect(maxPlaceholder).toBe(native.bindings.length);
+      for (const value of native.bindings) expect(value).toBeDefined();
+    }
+  });
+});

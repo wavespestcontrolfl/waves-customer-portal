@@ -835,10 +835,26 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the count from the property's treeDensity only when the field is
       // absent — so blank-count estimate-page quotes priced zero trees.
       const treeShrubCount = Number(services.treeShrub.treeCount);
+      // v4.7: distinct palms-on-property count for the routine palm-care
+      // reserve. treeCount stays NON-palm trees where both are supplied.
+      // ABSENCE means "not supplied" (no reserve); a PRESENT but malformed
+      // value is rejected outright rather than silently dropped — dropping
+      // it would return a confident zero-palm price for a palm-heavy job
+      // once the knob is armed (codex P0). Bounds mirror the intent
+      // contract: integer 1–200.
+      const palmsSupplied = services.treeShrub.palmCount !== undefined
+        && services.treeShrub.palmCount !== null
+        && String(services.treeShrub.palmCount).trim() !== '';
+      const treeShrubPalms = Number(services.treeShrub.palmCount);
+      if (palmsSupplied
+        && !(Number.isInteger(treeShrubPalms) && treeShrubPalms > 0 && treeShrubPalms <= 200)) {
+        return res.status(400).json({ error: 'Palm count must be a whole number between 1 and 200.' });
+      }
       engineInput.services.treeShrub = {
         tier: services.treeShrub.tier,
         access: services.treeShrub.access || 'easy',
         ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
+        ...(palmsSupplied ? { palmCount: treeShrubPalms } : {}),
       };
     }
     if (services.palm) {

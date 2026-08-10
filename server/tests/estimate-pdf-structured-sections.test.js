@@ -148,6 +148,37 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect((buffer.toString('latin1').match(/\/Type \/Page[^s]/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
+  test('programs-mode proposal renders the programs block in the fallback (slice 1A-ii)', async () => {
+    const programsEstimate = {
+      ...STRUCTURED_ESTIMATE,
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          title: 'Commercial Service Proposal',
+          buildings: [],
+          programs: [{
+            service: 'pest',
+            label: 'Quarterly pest program',
+            frequencyPerYear: 4,
+            pricePerApplication: 120,
+            inclusions: ['4 scheduled applications per year'],
+            exclusions: ['Termite treatment — separate program'],
+            buildings: [{ name: 'Tower A' }],
+          }],
+        },
+      },
+    };
+    const buffer = await buildEstimateProposalPDFBuffer(programsEstimate, { billsPerApplication: false });
+    const text = extractPdfText(buffer);
+    expect(text).toContain('SERVICE PROGRAMS');
+    expect(text).toContain('Quarterly pest program');
+    expect(text).toContain('4 applications per year');
+    expect(text).toContain('Covers: Tower A');
+    expect(text).toContain('Not included (quoted separately): Termite treatment');
+    // Programs carry authored inclusions — no canned guarantee beside them.
+    expect(text).not.toContain('callback guarantee between scheduled visits');
+  });
+
   test('legacy proposal renders no structured section labels', async () => {
     const legacy = {
       ...STRUCTURED_ESTIMATE,

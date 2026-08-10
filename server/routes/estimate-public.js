@@ -2586,6 +2586,11 @@ function proposalPestRecurringOnly(proposal, estimate = {}) {
     if (/pest/.test(raw)) return 'pest';
     return 'unclassified';
   };
+  // Programs-mode proposals (slice 1A-ii) classify by their declared
+  // family enum — the description heuristic stays for legacy line items.
+  if (Array.isArray(proposal?.programs) && proposal.programs.length) {
+    return proposal.programs.every((program) => program.service === 'pest');
+  }
   const recurringClasses = (proposal?.buildings || [])
     .flatMap((building) => (building.lineItems || []))
     .filter((item) => item.frequency !== 'one_time')
@@ -5368,9 +5373,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // — SSR parity with ProposalDetailCard / EstimateProposalDocument.
       const proposalAnyTaxable = (proposalForCard.buildings || [])
         .some((b) => (b.lineItems || []).some((li) => li.taxable === true))
-        // Corrective-work rows carry the same '*' marker, so they must arm
-        // the legend too — parity with the React card and both PDFs.
-        || (proposalForCard.correctiveWork || []).some((work) => work.taxable === true);
+        // Corrective-work and program rows carry the same '*' marker, so
+        // they must arm the legend too — parity with React and both PDFs.
+        || (proposalForCard.correctiveWork || []).some((work) => work.taxable === true)
+        || (proposalForCard.programs || []).some((program) => program.taxable === true);
       const proposalTaxRatePct = proposalCardTotals.taxRate > 0
         ? (proposalCardTotals.taxRate * 100).toFixed(2)
         : null;
@@ -5388,6 +5394,24 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <ul class="proposal-work-includes">
       ${proposalForCard.customerResponsibilities.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
     </ul>` : '';
+      // Service programs (slice 1A-ii) — the recurring itemization when
+      // authored (the PUT guard keeps building line items out beside them).
+      const proposalProgramsHtml = (proposalForCard.programs || []).length ? proposalForCard.programs.map((program) => `
+    <div class="proposal-building">
+      <div class="proposal-building-name">${escapeHtml(program.label)}</div>
+      ${program.note ? `<div class="proposal-building-note">${escapeHtml(program.note)}</div>` : ''}
+      <div class="proposal-line">
+        <span class="proposal-line-desc">${program.frequencyPerYear} application${program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+        <span class="proposal-line-amt">${fmtMoney(program.pricePerApplication)}${program.taxable === true ? ' *' : ''} <span class="proposal-line-freq">per application</span></span>
+      </div>
+      <div class="proposal-line">
+        <span class="proposal-line-desc">Annual program total</span>
+        <span class="proposal-line-amt">${fmtMoney(program.annual)}</span>
+      </div>
+      ${(program.buildings || []).length ? `<div class="proposal-building-note">Covers: ${program.buildings.map((b) => escapeHtml(b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}</div>` : ''}
+      ${(program.inclusions || []).length ? `<ul class="proposal-work-includes">${program.inclusions.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>` : ''}
+      ${(program.exclusions || []).length ? `<div class="proposal-building-note">Not included (quoted separately): ${program.exclusions.map((line) => escapeHtml(line)).join(' · ')}</div>` : ''}
+    </div>`).join('') : '';
       const proposalCorrectiveHtml = (proposalForCard.correctiveWork || []).length ? `
     <div class="proposal-section-title">Corrective work (one-time)</div>
     ${proposalForCard.correctiveWork.map((work) => `
@@ -5430,7 +5454,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ? 'Everything in your formal proposal, itemized &mdash; the emailed PDF carries this same detail.'
       : 'Everything in your formal proposal, itemized.'}</p>
     ${proposalScopeHtml}
-    ${proposalBuildingsHtml}${proposalCorrectiveHtml}
+    ${proposalProgramsHtml}${proposalBuildingsHtml}${proposalCorrectiveHtml}
     ${proposalResponsibilitiesHtml}
     <div class="proposal-totals">
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
@@ -5442,7 +5466,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>
     ${proposalStructuredTermsHtml}
     ${proposalFreeTermsHtml}
-    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms && !proposalTermRows.length ? `<div class="proposal-included">
+    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms && !proposalTermRows.length && !(proposalForCard.programs || []).length ? `<div class="proposal-included">
       <div class="proposal-included-title">What your commercial pest service includes</div>
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
@@ -7960,7 +7984,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       delete estData.pricingContext.tierDiscounts;
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    // Replay of an ALREADY-PERSISTED estimate (this row was loaded from the
+    // DB, not posted by a browser), so its quote-time T&S knob snapshot is
+    // trustworthy and must be reused — a membership lapse must not also
+    // re-price the T&S line off knobs flipped after the quote was sent.
+    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed
@@ -12373,8 +12401,12 @@ function savedFloorReplayOverrides(estData) {
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
+    .treeShrubKnobSignalForReplay(estData);
+  if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
   return overrides;
 }
+
 
 // Saved pest post-discount floor state: pricingMetadata stamps first, then
 // legacy row evidence — armed-era rows carry the floor metadata itself
@@ -20530,6 +20562,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
               })),
             },
           } : {}),
+          ...(proposalForView.programs ? {
+            programs: proposalForView.programs.map((program) => ({
+              service: program.service,
+              label: program.label,
+              frequencyPerYear: program.frequencyPerYear,
+              pricePerApplication: program.pricePerApplication,
+              annual: program.annual,
+              taxable: program.taxable === true,
+              note: program.note,
+              inclusions: program.inclusions,
+              exclusions: program.exclusions,
+              buildings: program.buildings.map((b) => ({ name: b.name, note: b.note })),
+            })),
+          } : {}),
           ...(proposalForView.correctiveWork ? {
             correctiveWork: proposalForView.correctiveWork.map((work) => ({
               label: work.label,
@@ -20585,8 +20631,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // page, which the render pipeline treats as a failed pass → pdfkit
       // fallback.
       ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf')
-        && Array.isArray(proposalPublicView?.buildings)
-        && proposalPublicView.buildings.some((b) => (b.lineItems || []).length > 0) ? {
+        && ((Array.isArray(proposalPublicView?.buildings)
+          && proposalPublicView.buildings.some((b) => (b.lineItems || []).length > 0))
+          // Programs-mode proposals (slice 1A-ii) price through programs;
+          // one-time-only proposals price through corrective work alone.
+          || (Array.isArray(proposalPublicView?.programs) && proposalPublicView.programs.length > 0)
+          || (Array.isArray(proposalPublicView?.correctiveWork) && proposalPublicView.correctiveWork.length > 0)) ? {
         documentRender: true,
         publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin(),
       } : {}),
@@ -20965,3 +21015,7 @@ module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscou
 // Test hook (owner GO 2026-08-04): accept-side first-visit slice of a
 // multi-service PERCENT plan credit.
 module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
+// Test hook (T&S reprice lane 2026-08-08): the saved-knob replay signal that
+// keeps an already-sent Tree & Shrub quote at its sent price after an admin
+// flips the v4.7 pricing_config knobs.
+module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;
