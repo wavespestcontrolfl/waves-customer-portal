@@ -6092,6 +6092,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const parent = self?.recurring_parent_id
           ? await trx('scheduled_services').where({ id: self.recurring_parent_id }).first()
           : self;
+        // Owner-change abort, same seam and same wording as the make-recurring
+        // spawn below: the comms fence this trx holds was keyed off the
+        // pre-lock peek, so a merge-undo that repointed the appointment while
+        // we waited would have the reconcile insert and cancel visits for a
+        // customer whose fence we do NOT hold — invisible to a simultaneous
+        // undo of the restored owner. Retry re-keys correctly (Codex #3337 r2).
+        if (parent && commsPeek && String(parent.customer_id) !== String(commsPeek.customer_id)) {
+          const movedErr = new Error("This appointment's customer changed while saving (a merge was undone) — reload and save again.");
+          movedErr.statusCode = 409;
+          movedErr.isOperational = true;
+          movedErr.code = 'CUSTOMER_CHANGED_RETRY';
+          throw movedErr;
+        }
         const seriesCols = await trx('scheduled_services').columnInfo();
         // recurring_ongoing lives on every row of the series, and several
         // readers (cancellation eligibility, follow-up planning) scan children
@@ -6192,6 +6205,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Register reminder rows for the children spawned above — without this
     // the spawned visits never enter appointment_reminders, so they get no
     // confirmation and no 72h/24h reminders (the cron reads only that table).
+    const visitCountAddedIds = new Set((visitCountResult?.added || []).map((c) => c.id));
     for (const child of spawnedRecurringChildren) {
       await registerSpawnedVisitReminder({
         scheduledServiceId: child.id,
@@ -6201,6 +6215,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         serviceType: child.serviceType,
         source: 'admin_manual',
       });
+      // Terminal re-check for visits the COUNT reconcile added (Codex #3337
+      // r2 P1) — the same close the auto-extend does after its own
+      // registration. A series cancel can take the per-parent maintenance
+      // lock the instant this resize commits and cancel the fresh visit
+      // before the line above inserts its reminder row; the cancel's own
+      // reminder sweep finds nothing to cancel, and the registration then
+      // arms a reminder for a cancelled appointment — a 72h text about a
+      // visit that is not happening. Scoped to the reconcile's rows: the
+      // make-recurring spawn path that also feeds this array seeds a NEW
+      // series and predates this lane, so its (separate) exposure is left
+      // exactly as it was rather than changed under this PR.
+      if (visitCountAddedIds.has(child.id)) {
+        await cancelSpawnedReminderIfVisitTerminal(db, child.id, 'schedule/visit-count');
+      }
     }
 
     if (assignmentChanged || detailsChanged || addonsReplaced) {
@@ -7246,14 +7274,26 @@ async function findBillingCoveredVisits(conn, visits) {
       .select('scheduled_service_id');
     for (const h of holds) mark(h.scheduled_service_id, 'holding a card for a late-cancel fee');
   }
-  // A settled invoice already attached to a future visit — the deposit and
-  // pay-ahead shapes that don't stamp either field above.
+  // An invoice already holding money for a future visit — the deposit and
+  // pay-ahead shapes that stamp neither field above. Derived from the
+  // canonical INVOICE_UNCOLLECTIBLE_STATUSES vocabulary rather than a
+  // hand-listed subset, minus the terminal states that hold NO money
+  // (void / refunded / cancelled): those are exactly the invoices a trim may
+  // walk past. 'prepaid' is the one this list existed to catch — account
+  // credit covering an invoice in full closes it as terminal `prepaid` with
+  // paid_at, without stamping prepaid_amount or an annual term on the visit
+  // (Codex #3337 r2 P1).
   if (ids.length > 0 && await conn.schema.hasTable('invoices')) {
+    const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+    const NO_MONEY_HELD = new Set(['void', 'refunded', 'canceled', 'cancelled']);
+    const moneyHeld = INVOICE_UNCOLLECTIBLE_STATUSES.filter((s) => !NO_MONEY_HELD.has(s));
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
-      .whereIn('status', ['paid', 'partially_paid'])
+      // partially_paid is collectible (so absent from the list above) but
+      // still holds money the customer handed over.
+      .whereIn('status', [...moneyHeld, 'partially_paid'])
       .select('scheduled_service_id');
-    for (const inv of invoiced) mark(inv.scheduled_service_id, 'attached to an invoice that has been paid');
+    for (const inv of invoiced) mark(inv.scheduled_service_id, 'attached to an invoice that has money on it');
   }
   return covered;
 }

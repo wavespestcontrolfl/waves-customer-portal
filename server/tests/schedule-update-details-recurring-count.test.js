@@ -288,13 +288,33 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 
-  test('refuses when a surplus visit already has a paid invoice attached', async () => {
+  test('refuses when a surplus visit already has an invoice holding money', async () => {
     const { conn, parent } = scenario({ upcoming: 4, paidInvoiceVisitIds: [103] });
     await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
       status: 409,
-      message: expect.stringContaining('invoice that has been paid'),
+      message: expect.stringContaining('invoice that has money on it'),
     });
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('the invoice guard covers `prepaid` — credit-covered invoices stamp no field on the visit (Codex #3337 r2 P1)', () => {
+    // An invoice fully covered by account credit closes as terminal
+    // 'prepaid' with paid_at and does NOT necessarily stamp prepaid_amount
+    // or an annual term on the scheduled_service, so a hand-listed
+    // ['paid','partially_paid'] guard walked straight past it.
+    const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+    const guard = src.slice(
+      src.indexOf('An invoice already holding money for a future visit'),
+      src.indexOf('for (const inv of invoiced)'),
+    );
+    // Derived from the canonical vocabulary, not re-listed by hand.
+    expect(guard).toContain('INVOICE_UNCOLLECTIBLE_STATUSES');
+    expect(INVOICE_UNCOLLECTIBLE_STATUSES).toContain('prepaid');
+    // ...minus the terminal states that hold no money.
+    for (const empty of ['void', 'refunded', 'canceled', 'cancelled']) {
+      expect(guard).toContain(`'${empty}'`);
+    }
+    expect(guard).toContain("'partially_paid'");
   });
 
   test('a zero/null prepaid stamp is not coverage — an ordinary plan still trims', async () => {
@@ -393,6 +413,51 @@ describe('update-details wiring (source guards)', () => {
 
   test('the plan-length change is audited', () => {
     expect(src).toContain("action: 'recurring_plan_count_set'");
+  });
+
+  test('the reconcile aborts when a merge-undo repoints the customer mid-save (Codex #3337 r2 P1)', () => {
+    // The comms fence was keyed off the pre-lock peek. Inserting/cancelling
+    // for a customer whose fence we do not hold is invisible to a concurrent
+    // undo of the restored owner — the same abort the spawn path takes.
+    const block = src.slice(src.indexOf('Owner-change abort, same seam and same wording'));
+    expect(block.slice(0, 900)).toContain("String(parent.customer_id) !== String(commsPeek.customer_id)");
+    expect(block.slice(0, 900)).toContain("code = 'CUSTOMER_CHANGED_RETRY'");
+    // Both writers take it — the reconcile and the make-recurring spawn.
+    expect((src.match(/CUSTOMER_CHANGED_RETRY/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
+    // A series cancel landing between this commit and the reminder insert
+    // would otherwise leave an armed reminder on a cancelled visit.
+    const loop = src.slice(
+      src.indexOf('const visitCountAddedIds = new Set('),
+      src.indexOf('if (assignmentChanged || detailsChanged || addonsReplaced)'),
+    );
+    expect(loop).toContain('registerSpawnedVisitReminder(');
+    expect(loop).toContain('visitCountAddedIds.has(child.id)');
+    expect(loop).toContain("cancelSpawnedReminderIfVisitTerminal(db, child.id, 'schedule/visit-count')");
+    // The re-check must run AFTER the registration it is closing the race on.
+    expect(loop.indexOf('registerSpawnedVisitReminder('))
+      .toBeLessThan(loop.indexOf('cancelSpawnedReminderIfVisitTerminal('));
+  });
+
+  test('trimmed visits reuse the shared status writer, which owns the invoice void', () => {
+    // Rebuttal guard for Codex #3337 r2 "Void open invoices for trimmed
+    // visits": transitionJobStatus runs voidOpenInvoicesForCancelledService
+    // post-commit for EVERY caller (job-status.js, inside
+    // maybeReparkFollowupObligation, fired from trx.executionPromise.then).
+    // A second sweep here would be the parallel mechanism AGENTS.md forbids.
+    // If the trim ever stops going through transitionJobStatus, this fails
+    // and the void has to be re-homed.
+    const trim = src.slice(
+      src.indexOf('const { transitionJobStatus } = require'),
+      src.indexOf('return result;', src.indexOf('const { transitionJobStatus } = require')),
+    );
+    expect(trim).toContain('toStatus: \'cancelled\'');
+    expect(trim).toContain('trx,');
+    const jobStatusSrc = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
+    expect(jobStatusSrc).toContain("require('./invoice').voidOpenInvoicesForCancelledService(jobId)");
+    expect(jobStatusSrc).toContain('maybeReparkFollowupObligation();');
   });
 });
 
