@@ -44,8 +44,15 @@ const FINDINGS_TYPE_RULES = {
     captionKey: 'sprayPerimeter',
     requiresChipMatch: /^(?:insect treatment|disease \/ fungicide treatment|horticultural oil|foliar treatment|pre-emergent bed treatment)$/i,
   },
+  // OUTLINE geometry (owner 2026-08-10), joining flea/fire-ant/tick: the
+  // treated geometry is the yard, not the building line. The form's own
+  // Treatment zones chips say so — front/back/side yards, shrubs &
+  // ornamentals, fence lines, shaded vegetation, under decks — which is the
+  // same shape as tick_control's "yard, fence line, and wooded edges".
+  // requiresAppliedWork STAYS: 'Inspection only' is a first-class completion
+  // on this form, and an inspection must not publish a treated-area map.
   mosquito_event: {
-    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', requiresAppliedWork: true,
   },
   // Flea joins the evidence-conditional lanes (codex P1 r5): interior-only
   // and inspection-only completions are first-class choices on its form.
@@ -148,9 +155,24 @@ const SERVICE_KEY_RULES = {
   // never a property-perimeter application (codex P1 r6).
   bee_wasp_removal: { eligible: false, reason: 'localized_treatment_lane' },
   mud_dauber_removal: { eligible: false, reason: 'localized_treatment_lane' },
-  // mosquito programs
-  mosquito_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  mosquito_seasonal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // mosquito programs — yard geometry (owner 2026-08-10), same family as
+  // fire_ant/tick_control above.
+  //
+  // overridesSnapshot is REQUIRED here, not decorative: neither key matches
+  // PROJECT_TYPE_BY_SERVICE_KEY (only /^mosquito_event$/ does), so both fall
+  // to projectTypeForService's generic 'one_time_pest_treatment' default and
+  // every recurring mosquito stop carries that snapshot. Findings type beats
+  // service key, so WITHOUT this flag the two lines below are a no-op for the
+  // actual route volume — verified: mosquito_monthly + a one_time_pest_treatment
+  // snapshot resolved spray/sprayPerimeter via eligible_findings_type. This is
+  // the same reason fire_ant and tick_control carry it; they fall to the same
+  // generic pointer.
+  mosquito_monthly: {
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', overridesSnapshot: true,
+  },
+  mosquito_seasonal: {
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', overridesSnapshot: true,
+  },
   // Billing construct, not a visit (zero duration, booking disabled) —
   // WaveGuard's actual stops book as the mosquito programs above (codex
   // P2 r4).
@@ -266,12 +288,15 @@ const ELIGIBLE_NAME_RES = [
   // Yard-geometry families FIRST (codex P2 r13): identity-less fire-ant/
   // tick/flea rows must resolve the same outline geometry their stable
   // rules define, not the generic spray token below.
-  [/\b(?:fire\s*ants?|ticks?|fleas?)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  // mosquito joins them (owner 2026-08-10) and is REMOVED from the generic
+  // spray token list below — leaving it in both would put two rules on one
+  // token, and the loser would be whichever happened to sit lower.
+  [/\b(?:fire\s*ants?|ticks?|fleas?|mosquitos?|mosquitoes)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
   // Ranked ABOVE the bait check below: combined names like "Quarterly
   // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
   // real (codex P1 r1). A pure "Termite Bait" name matches neither of
   // these and falls to the bait rule.
-  [/\b(?:pest|mosquito|spray|trees?|shrubs?|roach(?:es)?|ants?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+  [/\b(?:pest|spray|trees?|shrubs?|roach(?:es)?|ants?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
 ];
 const TRAILING_INELIGIBLE_NAME_RES = [
   [/\bbait\b/i, 'bait_station_lane'],

@@ -208,15 +208,17 @@ describe('classification behavior', () => {
       typedValues: { treatment_completed: ['Inspection only'] },
     })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
     // codex P1 r7: source reduction is real work but not an application —
-    // tipping containers cannot honestly render as a sprayed perimeter
+    // tipping containers cannot honestly render as a treated area
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Source reduction'] },
     })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // outline, not spray, since owner 2026-08-10 — the applied-work guard is
+    // unchanged, only the geometry it admits.
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Barrier treatment', 'Source reduction'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline' });
     expect(resolveTraceEligibility({
       findingsType: 'one_time_lawn_treatment',
       typedValues: { work_completed: 'Inspection completed' },
@@ -267,7 +269,7 @@ describe('classification behavior', () => {
     })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
   });
 
-  test('larvicide-only mosquito visits cannot substantiate a perimeter trace (round 9)', () => {
+  test('larvicide-only mosquito visits cannot substantiate any trace (round 9)', () => {
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Larvicide applied'] },
@@ -275,7 +277,47 @@ describe('classification behavior', () => {
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Larvicide applied', 'Barrier treatment'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('mosquito is yard geometry across every identity path (owner 2026-08-10)', () => {
+    // The form's Treatment zones are yards, shrubs, fence lines, shaded
+    // vegetation and under-decks — the tick_control shape, not a building
+    // perimeter band.
+    const outline = { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' };
+
+    // 1. typed findings (mosquito_event, and mosquito_one_time points here)
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Barrier treatment'] },
+    })).toMatchObject(outline);
+
+    // 2. catalog keys. These MUST survive the generic snapshot: neither key
+    // matches PROJECT_TYPE_BY_SERVICE_KEY, so both fall to
+    // projectTypeForService's 'one_time_pest_treatment' default and every
+    // recurring stop carries it. Findings type beats service key, so without
+    // overridesSnapshot the key rules would be a no-op for the route volume.
+    for (const serviceKey of ['mosquito_monthly', 'mosquito_seasonal']) {
+      expect(resolveTraceEligibility({ serviceKey })).toMatchObject(outline);
+      expect(resolveTraceEligibility({ serviceKey, findingsType: 'one_time_pest_treatment' }))
+        .toMatchObject(outline);
+    }
+
+    // 3. display name, including one carrying BOTH tokens — the yard rule is
+    // ranked above the generic spray list, and 'mosquito' was removed from
+    // that list so only one rule claims the token.
+    for (const displayName of ['WaveGuard Mosquito Program', 'Mosquito Barrier Treatment', 'Mosquito Event Spray']) {
+      expect(resolveTraceEligibility({ displayName })).toMatchObject(outline);
+    }
+
+    // Neighbours on the same regex must not have moved.
+    expect(resolveTraceEligibility({ displayName: 'Quarterly Pest Control' }))
+      .toMatchObject({ variant: 'spray' });
+    expect(resolveTraceEligibility({ displayName: 'Tree & Shrub Treatment' }))
+      .toMatchObject({ variant: 'spray' });
+    // The billing rider stays out of it entirely.
+    expect(resolveTraceEligibility({ serviceKey: 'waveguard_membership' }))
+      .toMatchObject({ eligible: false, reason: 'billing_rider' });
   });
 
   test('tick control is yard geometry and survives its stale snapshot (round 10)', () => {
