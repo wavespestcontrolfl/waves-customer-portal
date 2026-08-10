@@ -710,11 +710,58 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
 // never scans, and a cleared stamp there must retire its row the same
 // way). Runs on the caller's connection so it can ride a lead-locking
 // transaction.
+// Before a retire deletes a lead's only funnel row, leave a REHOME marker
+// on an eligible successor call (codex P1 r17): with multiple calls
+// reusing one lead, the first call owns the single row and every later
+// call was refused as 'other_call' — if the OWNER is then definitively
+// rejected, the delete removed the lead's booked/completed stage and
+// revenue even though a later valid call still supports it, and
+// dedicated/organic calls have no rescan to recreate it. The successor =
+// the newest OTHER settled-attributable call stamped to this lead; the
+// payload-less attribution_transfer_pending marker defers to the daily
+// sweep, which derives the funnel decision from the live lead's source
+// (see sweepPendingAttributionTransfers). A mid-flight successor is
+// deliberately skipped — its own pass re-attributes at finalization now
+// that the lead has no row. An existing marker is never overwritten (it
+// may carry a real from-lead block with a call-time decision). Best-effort
+// by design: rehome failure must never block the retire it rides.
+async function leaveRehomeMarkerForLead(dbc, leadId, rejectedCallId) {
+  try {
+    const successor = await dbc('call_log')
+      .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+      .whereNot('id', rejectedCallId)
+      .whereNull('processing_token')
+      .whereRaw("COALESCE(processing_status, '') IN ('processed', '')")
+      .whereRaw("COALESCE(metadata->>'no_attribution', '') != 'true'")
+      .whereRaw("metadata->'attribution_transfer_pending' IS NULL")
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (!successor) return false;
+    const marked = await dbc('call_log')
+      .where({ id: successor.id })
+      .whereNull('processing_token')
+      .whereRaw("metadata->'attribution_transfer_pending' IS NULL")
+      .update({
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
+          [JSON.stringify({ from_lead_id: String(leadId), rehome: true })],
+        ),
+        updated_at: new Date(),
+      });
+    return marked > 0;
+  } catch (e) {
+    logger.warn(`[call-attribution] rehome marker for lead ${leadId} failed: ${e.code || e.name || 'db_error'}`);
+    return false;
+  }
+}
+
 async function retireCallAttributionRow(dbc, callLogId, leadId) {
   if (!callLogId || !leadId) return 0;
-  return dbc('ad_service_attribution')
+  const deleted = await dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })
     .del();
+  if (deleted) await leaveRehomeMarkerForLead(dbc, leadId, callLogId);
+  return deleted;
 }
 
 // Retire EVERY funnel row a call created, whichever lead they sit on —
@@ -725,7 +772,18 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
 // stage/revenue for a rejected call.
 async function retireAllCallAttributionRows(dbc, callLogId) {
   if (!callLogId) return 0;
-  return dbc('ad_service_attribution').where({ source_call_id: callLogId }).del();
+  // Affected leads read BEFORE the delete so each can get a rehome marker
+  // (codex P1 r17) — a surviving successor call still supports the lead.
+  const rows = await dbc('ad_service_attribution')
+    .where({ source_call_id: callLogId })
+    .select('lead_id');
+  const deleted = await dbc('ad_service_attribution').where({ source_call_id: callLogId }).del();
+  if (deleted) {
+    for (const leadId of new Set(rows.map((r) => String(r.lead_id)))) {
+      await leaveRehomeMarkerForLead(dbc, leadId, callLogId);
+    }
+  }
+  return deleted;
 }
 
 // Move the funnel row a specific call created when its linkage moves to a
@@ -864,7 +922,8 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
             .where({ id: scannedLeadId })
             .whereNull('deleted_at')
             .forUpdate()
-            .first('id', 'customer_id')
+            // lead_source_id feeds the rehome markers' channel derivation.
+            .first('id', 'customer_id', 'lead_source_id')
           : null;
         const lockedCall = await trx('call_log')
           .where({ id: row.id })
@@ -960,12 +1019,42 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         if (legacy) return blocked(); // operator hasn't resolved it yet
         const owner = lockedLead.customer_id || null;
         if (!owner) return blocked(); // unclaimed lead — retry once claimed
+        // A REHOME marker carries no call-time funnel decision (codex P1
+        // r17 — the retire that wrote it has none): derive the channel
+        // from the LIVE lead's source, the same resolution the organic
+        // sweep uses. Bridge-target leads clear instead — with the row
+        // deleted, the lead re-qualifies for the bridge/unclaimed→organic
+        // pair, which owns that number's attribution; an unmapped source
+        // can never take the write.
+        let leadSourceKey = pending.lead_source || null;
+        let isPaid = pending.is_paid !== false;
+        let detail = pending.detail || 'inbound call';
+        if (!leadSourceKey) {
+          const src = lockedLead.lead_source_id
+            ? await trx('lead_sources')
+              .where({ id: lockedLead.lead_source_id })
+              .first('source_type', 'name', 'twilio_phone_number')
+            : null;
+          const channel = src ? attributionForSourceType(src.source_type) : null;
+          // Lazy require — google-call-bridge lazily requires this module.
+          const { isBridgeTargetNumber } = require('./google-call-bridge');
+          const bridgeTarget = (() => {
+            try { return !!(src?.twilio_phone_number && isBridgeTargetNumber(src.twilio_phone_number)); } catch { return false; }
+          })();
+          if (!channel || bridgeTarget) {
+            await clearMarker();
+            return 'cleared';
+          }
+          leadSourceKey = channel.leadSource;
+          isPaid = channel.isPaid;
+          detail = src.name || 'inbound call';
+        }
         const res = await recordCallPpcAttribution({
           customerId: owner,
           leadId: liveLeadId,
-          leadSource: pending.lead_source,
-          isPaid: pending.is_paid !== false,
-          leadSourceDetail: pending.detail || 'inbound call',
+          leadSource: leadSourceKey,
+          isPaid,
+          leadSourceDetail: detail,
           serviceInterest: pending.service_interest || null,
           leadDate: lockedCall.created_at || row.created_at || null,
           sourceCallId: row.id,

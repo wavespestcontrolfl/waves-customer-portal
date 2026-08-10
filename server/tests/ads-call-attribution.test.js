@@ -5,12 +5,14 @@ let firstByTable = {};
 let listQueueByTable = {};
 const insertCalls = [];
 const updateCalls = [];
+const deleteCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
   ['where', 'whereNot', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
+  b.del = jest.fn(() => { deleteCalls.push({ table }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
   // Awaited list queries consume a per-table queue when one is set (the
@@ -24,6 +26,7 @@ const mockDb = jest.fn((table) => {
   return b;
 });
 mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
+mockDb.raw = jest.fn((sql) => `raw(${sql})`);
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -41,6 +44,7 @@ beforeEach(() => {
   listQueueByTable = {};
   insertCalls.length = 0;
   updateCalls.length = 0;
+  deleteCalls.length = 0;
 });
 
 describe('shared service-line inference (utils/service-line-infer)', () => {
@@ -633,5 +637,32 @@ describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock
 
     expect(res.recorded).toBe(true);
     expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('s1');
+  });
+});
+
+describe('retire leaves a REHOME marker for a surviving successor (codex P1, PR #3303 r17)', () => {
+  test('retireCallAttributionRow marks the newest settled successor stamped to the lead', async () => {
+    // With multiple calls reusing one lead, the row owner's rejection
+    // deleted the lead's booked/completed history even though a later
+    // valid call still supported it — and nothing rescans dedicated/
+    // organic calls to recreate it.
+    firstByTable.call_log = { id: 'call-successor' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const marker = updateCalls.find((u) => u.table === 'call_log'
+      && typeof u.row.metadata === 'string'
+      && u.row.metadata.includes('attribution_transfer_pending'));
+    expect(marker).toBeTruthy();
+  });
+
+  test('no settled successor → retire deletes without a marker', async () => {
+    firstByTable.call_log = undefined;
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.filter((u) => u.table === 'call_log')).toHaveLength(0);
   });
 });

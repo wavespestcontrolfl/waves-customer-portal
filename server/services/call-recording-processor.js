@@ -2558,11 +2558,19 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
       // reclassifies it spam/voicemail/implausible/non-lead must not leave
       // that row reporting funnel stage and revenue for a rejected call.
       // Fenced the same way the stamp-clear write is: only the claim
-      // holder may retire.
+      // holder may retire — and the ownership read takes the row lock
+      // (pre-push P0 r18): a plain SELECT left a window where a peer
+      // could reclaim the call between the check and the delete, and the
+      // stale worker would irreversibly retire booked/completed
+      // attribution despite having lost ownership. FOR UPDATE holds the
+      // call row through the retirement in this same transaction, so a
+      // reclaimer serializes behind it and this worker's token either
+      // still matches (it owns the row) or the read returns nothing.
       if (attribution.mode !== 'retire') return true;
       const owned = await trx('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
+        .forUpdate()
         .first('id');
       if (!owned) return false;
       await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
@@ -2597,11 +2605,23 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
     const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
     const ownSeq = Number.isFinite(Number(md.lead_stamp_seq)) ? Number(md.lead_stamp_seq) : null;
+    // The pre-stamp settle persists the FORMER lead's identity atomically
+    // with its clear (codex P1 r17): the settle commits in its own
+    // transaction before the replacement stamp's — if that later
+    // transaction fails, the retry claims a call with NO stamp and no
+    // preSettleStampedLeadId, so the moved-link branch (its legacy-blocker
+    // check and pending-transfer marker) would be skipped and
+    // runCallPpcAttribution would double-count the call against the former
+    // lead's unresolved legacy row. The breadcrumb rides THIS fenced
+    // write; a successful restamp removes it in the stamp transaction.
+    const clearedExpr = "(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq'";
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq'"),
+        metadata: attribution.preserveFormerLeadId
+          ? db.raw(`jsonb_set(${clearedExpr}, '{attribution_former_lead_id}', ?::jsonb, true)`, [JSON.stringify(String(stampedLeadId))])
+          : db.raw(clearedExpr),
         updated_at: new Date(),
       });
     if (!cleared) return false;
@@ -8638,7 +8658,11 @@ const CallRecordingProcessor = {
                 preSettleStampedLeadId = currentStampedLeadId;
                 let priorSettled;
                 try {
-                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep' });
+                  // preserveFormerLeadId: the settle's clear persists the
+                  // former lead as metadata.attribution_former_lead_id in
+                  // the SAME fenced write (codex P1 r17) — a failed
+                  // restamp's retry recovers it below.
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep', preserveFormerLeadId: true });
                 } catch (settleErr) {
                   if (settleErr.abortProcessing) throw settleErr;
                   const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
@@ -8651,6 +8675,24 @@ const CallRecordingProcessor = {
                   throw lost;
                 }
                 currentStampedLeadId = null;
+              }
+              if (!preSettleStampedLeadId) {
+                // RETRY breadcrumb (codex P1 r17): a prior attempt settled
+                // the old stamp and then failed before its replacement
+                // stamp committed — this retry claims the call with no
+                // stamp, so the moved-link branch below would never see
+                // the former lead, skipping the legacy-blocker check and
+                // the pending-transfer marker and double-counting the
+                // call. The settle persisted the former lead's id into
+                // call metadata (read fresh at claim time); a successful
+                // restamp clears it in the stamp write.
+                try {
+                  const cmd = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+                  if (cmd.attribution_former_lead_id
+                    && String(cmd.attribution_former_lead_id) !== String(leadId)) {
+                    preSettleStampedLeadId = String(cmd.attribution_former_lead_id);
+                  }
+                } catch { /* unparseable metadata — no breadcrumb */ }
               }
               enriched = await db.transaction(async (trx) => {
                 // Snapshot under a ROW LOCK inside the same transaction that
@@ -8833,11 +8875,16 @@ const CallRecordingProcessor = {
                     // same-lead RETRY; a different-lead stamp and a settled
                     // restamp both take a fresh marker, which is what makes
                     // the restamp the newest mutation on the lead.
+                    // The trailing removal clears the settle's
+                    // attribution_former_lead_id breadcrumb once the
+                    // replacement stamp durably lands (codex P1 r17) — the
+                    // moved-link branch below consumes it this same
+                    // transaction.
                     metadata: db.raw(
-                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
+                      "(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
                       + `, '{lead_written_state}', ${writtenExpr}, true)`
-                      + `, '{lead_stamp_seq}', ${seqExpr}, true)`,
+                      + `, '{lead_stamp_seq}', ${seqExpr}, true)) - 'attribution_former_lead_id'`,
                       [
                         JSON.stringify(String(leadId)),
                         String(leadId), JSON.stringify(prior), JSON.stringify(prior),

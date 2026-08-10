@@ -8,6 +8,7 @@
 let scanRows = [];
 let scanRejects = false;
 let leadRows = {};
+let leadSourceRow = null; // lead_sources first() (rehome channel derivation)
 let lockedCallRow = null;
 let provenancedRow = null; // ad_service_attribution first for {source_call_id}
 let legacyRowByLead = {}; // fromLeadId -> legacy NULL-provenance row
@@ -32,6 +33,7 @@ const mockDb = jest.fn((table) => {
       return row;
     }
     if (table === 'call_log') return lockedCallRow || undefined;
+    if (table === 'lead_sources') return leadSourceRow || undefined;
     if (table === 'ad_service_attribution') {
       const bySource = whereObj('source_call_id');
       if (bySource !== undefined) return provenancedRow || undefined;
@@ -79,8 +81,9 @@ const markerClearUpdates = () => updates.filter((u) => u.table === 'call_log'
 beforeEach(() => {
   jest.clearAllMocks();
   scanRejects = false;
+  leadSourceRow = null;
   scanRows = [{ id: 'call-1', metadata: { lead_id: 'lead-B', attribution_transfer_pending: PENDING }, created_at: '2026-08-09T12:00:00Z' }];
-  leadRows = { 'lead-B': { id: 'lead-B', customer_id: 'cust-1' } };
+  leadRows = { 'lead-B': { id: 'lead-B', customer_id: 'cust-1', lead_source_id: 'src-1' } };
   lockedCallRow = { id: 'call-1', processing_token: null, metadata: { lead_id: 'lead-B', attribution_transfer_pending: PENDING }, created_at: '2026-08-09T12:00:00Z' };
   provenancedRow = null;
   legacyRowByLead = {};
@@ -215,6 +218,41 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(s.blocked).toBe(1);
     expect(inserts).toHaveLength(0);
     expect(markerClearUpdates()).toHaveLength(0);
+  });
+
+  test('a payload-less REHOME marker derives the funnel decision from the live lead source (codex P1 r17)', async () => {
+    // The retire that wrote it had no call-time decision — the sweep
+    // resolves the channel like the organic sweep does.
+    const rehome = { from_lead_id: 'lead-B', rehome: true };
+    scanRows = [{ id: 'call-1', metadata: { lead_id: 'lead-B', attribution_transfer_pending: rehome }, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow.metadata = { lead_id: 'lead-B', attribution_transfer_pending: rehome };
+    leadSourceRow = { source_type: 'main_site', name: 'Sarasota city page', twilio_phone_number: '+19995550000' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.recorded).toBe(1);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({
+      lead_id: 'lead-B',
+      source_call_id: 'call-1',
+      lead_source: 'waves_website', // derived from main_site, not from the marker
+      is_paid: false,
+      lead_source_detail: 'Sarasota city page',
+    });
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a rehome marker on an UNMAPPED-source lead clears without writing — it can never take the write', async () => {
+    const rehome = { from_lead_id: 'lead-B', rehome: true };
+    scanRows = [{ id: 'call-1', metadata: { lead_id: 'lead-B', attribution_transfer_pending: rehome }, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow.metadata = { lead_id: 'lead-B', attribution_transfer_pending: rehome };
+    leadSourceRow = { source_type: 'walk_in', name: 'Walk-in', twilio_phone_number: null };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.cleared).toBe(1);
+    expect(inserts).toHaveLength(0);
+    expect(markerClearUpdates()).toHaveLength(1);
   });
 
   test('a scan failure reports scanFailed so the cron can surface degradation in job health', async () => {

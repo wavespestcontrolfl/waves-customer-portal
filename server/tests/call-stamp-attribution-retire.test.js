@@ -8,6 +8,7 @@
 let mockCallRow = null;
 let mockTokenMatches = true;
 const mockDeletes = [];
+const mockUpdates = [];
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -22,7 +23,10 @@ jest.mock('../models/db', () => {
       if (cols.includes('metadata')) return mockCallRow;
       return mockCallRow;
     };
-    b.update = async () => (mockTokenMatches ? 1 : 0);
+    b.update = async (patch) => {
+      mockUpdates.push({ table, wheres: b._wheres.slice(), patch });
+      return mockTokenMatches ? 1 : 0;
+    };
     b.del = async () => { mockDeletes.push({ table, wheres: b._wheres.slice() }); return 1; };
     b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return b;
@@ -43,6 +47,7 @@ beforeEach(() => {
   mockCallRow = { metadata: {} }; // sid-linked: NO metadata.lead_id stamp
   mockTokenMatches = true;
   mockDeletes.length = 0;
+  mockUpdates.length = 0;
 });
 
 describe('clearStampAndRestoreLead without a stamp (sid-linked call)', () => {
@@ -70,5 +75,36 @@ describe('clearStampAndRestoreLead without a stamp (sid-linked call)', () => {
     expect(await clearStampAndRestoreLead(CALL, 'tok-1', 'CA-sid-linked', null, { mode: 'keep' })).toBe(true);
     expect(await clearStampAndRestoreLead(CALL, 'tok-1', 'CA-sid-linked', null, { mode: 'transfer', transferToLeadId: 'lead-9' })).toBe(true);
     expect(mockDeletes).toHaveLength(0);
+  });
+});
+
+describe('pre-stamp settle persists the former lead atomically with its clear (codex P1, PR #3303 r17)', () => {
+  const findClear = () => mockUpdates.find((u) => u.table === 'call_log'
+    && typeof u.patch.metadata === 'string'
+    && u.patch.metadata.includes("- 'lead_id'"));
+
+  test("mode 'keep' + preserveFormerLeadId writes attribution_former_lead_id in the SAME fenced clear", async () => {
+    // The settle commits before the replacement stamp's transaction — if
+    // that later transaction fails, the retry has no preSettleStampedLeadId
+    // and would skip the legacy-blocker check, double-counting the call.
+    mockCallRow = { metadata: { lead_id: 'lead-A' } };
+
+    const ok = await clearStampAndRestoreLead(CALL, 'tok-1', 'CA-sid-linked', null, { mode: 'keep', preserveFormerLeadId: true });
+
+    expect(ok).toBe(true);
+    const clear = findClear();
+    expect(clear).toBeTruthy();
+    expect(clear.patch.metadata).toContain('attribution_former_lead_id');
+    expect(clear.wheres).toContainEqual(['where', 'processing_token', 'tok-1']);
+  });
+
+  test("a plain 'keep' clear writes no breadcrumb", async () => {
+    mockCallRow = { metadata: { lead_id: 'lead-A' } };
+
+    await clearStampAndRestoreLead(CALL, 'tok-1', 'CA-sid-linked', null, { mode: 'keep' });
+
+    const clear = findClear();
+    expect(clear).toBeTruthy();
+    expect(clear.patch.metadata).not.toContain('attribution_former_lead_id');
   });
 });
