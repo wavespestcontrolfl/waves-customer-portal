@@ -1626,16 +1626,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !serviceIsRecurringTemplate || seriesSummary?.canSetCount === true;
   const countFieldLoading =
     serviceIsRecurringTemplate && seriesSummaryState === "loading";
-  // A length is submitted only when the number means something: either the
-  // operator typed it, or it was seeded from a plan that actually has visits
-  // ahead. An EXHAUSTED fixed plan reports upcomingCount 0, which leaves the
-  // field on its placeholder — submitting that would spawn a placeholder's
-  // worth of visits because someone edited the notes (Codex #3337 P1).
+  // A length is submitted ONLY after the operator explicitly changes it
+  // (Codex #3337 r3 P1). Resubmitting a seeded value looked harmless — the
+  // server no-ops when it matches — but the seed is a snapshot from the
+  // modal's GET: if a visit completes or is cancelled while the modal sits
+  // open, an untouched save of some unrelated field would ask the server to
+  // "restore" the plan to a length nobody chose, booking a replacement visit.
+  // The save also sends the seeded baseline so the server can refuse outright
+  // when the live plan moved underneath it.
   const canSetPlanLength =
     serviceIsRecurringTemplate &&
     seriesSummary?.canSetCount === true &&
-    (recurringCountTouched.current ||
-      (seriesSummaryState === "loaded" && seriesSummary?.upcomingCount > 0));
+    recurringCountTouched.current &&
+    seriesSummary?.upcomingCount != null;
   const countHint = (() => {
     if (!serviceIsRecurringTemplate) return null;
     if (seriesSummaryState === "loading") return "Reading the current plan…";
@@ -1650,7 +1653,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     const delta = recurringCount - seriesSummary.upcomingCount;
     if (delta === 0) {
-      return `${seriesSummary.upcomingCount} visit${seriesSummary.upcomingCount === 1 ? "" : "s"} scheduled — unchanged.`;
+      // Nothing is sent unless the number is changed, so an untouched field
+      // is genuinely a no-op rather than a value being re-submitted.
+      return `${seriesSummary.upcomingCount} visit${seriesSummary.upcomingCount === 1 ? "" : "s"} scheduled — no change to the plan length.`;
     }
     if (delta > 0) {
       return `Adds ${delta} visit${delta === 1 ? "" : "s"} after the last one booked.`;
@@ -1864,6 +1869,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // untouched (the latter is seeded by recurringCount above).
           recurringPlannedCount:
             canSetPlanLength && !recurringOngoing ? recurringCount : undefined,
+          // The plan length the modal READ on open — the server refuses the
+          // resize if the live count has moved since, rather than computing
+          // against a stale picture.
+          recurringPlannedCountBaseline:
+            canSetPlanLength && !recurringOngoing ? seriesSummary.upcomingCount : undefined,
           recurringOngoing: recurringControlsActive ? recurringOngoing : undefined,
           recurringNth:
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"

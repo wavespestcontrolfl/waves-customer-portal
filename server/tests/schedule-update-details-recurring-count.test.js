@@ -112,6 +112,7 @@ function scenario({
   cardHoldVisitIds = [],
   prepaidVisitIds = [],
   paidInvoiceVisitIds = [],
+  invoiceRows = null,
   zeroPrepaidAll = false,
   hasCardHoldTable = true,
 }) {
@@ -172,7 +173,10 @@ function scenario({
     }
     if (table === 'invoices') {
       if (op === 'await') {
-        return paidInvoiceVisitIds.map((id) => ({ scheduled_service_id: id }));
+        if (invoiceRows) return invoiceRows;
+        return paidInvoiceVisitIds.map((id) => ({
+          scheduled_service_id: id, status: 'paid', credit_applied: '0.00', line_items: '[]',
+        }));
       }
       return [];
     }
@@ -317,6 +321,43 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(guard).toContain("'partially_paid'");
   });
 
+  test('refuses on an invoice holding money WITHOUT a settled status — partial account credit (Codex #3337 r3 P1)', async () => {
+    // A partial credit application leaves the invoice 'sent' and charges
+    // total − credit_applied; the customer's balance is already drawn down.
+    const { conn, parent } = scenario({
+      upcoming: 4,
+      invoiceRows: [{ scheduled_service_id: 103, status: 'sent', credit_applied: '40.00', line_items: '[]' }],
+    });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('account credit already applied'),
+    });
+  });
+
+  test('refuses on a ledger-backed estimate deposit credit line', async () => {
+    const { conn, parent } = scenario({
+      upcoming: 4,
+      invoiceRows: [{
+        scheduled_service_id: 103, status: 'sent', credit_applied: '0.00',
+        line_items: JSON.stringify([{ category: 'deposit_credit', amount: -75 }]),
+      }],
+    });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('estimate deposit credit'),
+    });
+  });
+
+  test('an ordinary open invoice with no money on it does not block the trim', async () => {
+    // draft/sent with nothing collected: the cancel path voids it.
+    const { conn, parent, live } = scenario({
+      upcoming: 3,
+      invoiceRows: [{ scheduled_service_id: 102, status: 'sent', credit_applied: '0.00', line_items: '[]' }],
+    });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
+  });
+
   test('a zero/null prepaid stamp is not coverage — an ordinary plan still trims', async () => {
     const { conn, parent, live } = scenario({ upcoming: 3, prepaidVisitIds: [], zeroPrepaidAll: true });
     const result = await reconcile(conn, parent, 2);
@@ -377,6 +418,40 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const { conn, parent } = scenario({ upcoming: 2 });
     const result = await reconcile(conn, parent, 9999);
     expect(result.target).toBe(MAX_SERIES_VISIT_COUNT);
+  });
+
+  test('extend-only mode never trims, and stamps its rows ongoing (the flip to Never)', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 1 });
+    const result = await reconcile(conn, parent, 3, { ongoingSeries: true });
+    expect(result.added).toHaveLength(2);
+    for (const row of inserted) expect(row.recurring_ongoing).toBe(true);
+
+    // Same mode, already above target → no cancellations.
+    jest.clearAllMocks();
+    const over = scenario({ upcoming: 5 });
+    const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
+    expect(r2.cancelledIds).toHaveLength(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — stale-snapshot guard', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('refuses when the live plan moved since the modal read it (Codex #3337 r3 P1)', async () => {
+    // Modal saw 4; a completion/cancellation left 3 before Save landed.
+    const { conn, parent } = scenario({ upcoming: 3 });
+    await expect(reconcile(conn, parent, 2, { baselineCount: 4 })).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('changed while the appointment was open'),
+    });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('proceeds when the baseline still matches the live plan', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3 });
+    const result = await reconcile(conn, parent, 2, { baselineCount: 3 });
+    expect(result.cancelledIds).toEqual([live[2].id]);
   });
 });
 
@@ -439,6 +514,28 @@ describe('update-details wiring (source guards)', () => {
     // The re-check must run AFTER the registration it is closing the race on.
     expect(loop.indexOf('registerSpawnedVisitReminder('))
       .toBeLessThan(loop.indexOf('cancelSpawnedReminderIfVisitTerminal('));
+  });
+
+  test('flipping a spent plan back to Never leaves it with visits ahead (Codex #3337 r3 P1)', () => {
+    // Auto-extend only fires from a COMPLETION, so an exhausted plan flipped
+    // to ongoing with nothing booked has no completion coming. Reuses the
+    // convert_ongoing contract (flip + ensure 3 upcoming) via the same writer.
+    const block = src.slice(src.indexOf('Turning a plan back to "Never" must also leave it'));
+    expect(block.slice(0, 1400)).toContain('recurringOngoing === true && !wantsVisitCountReconcile');
+    expect(block.slice(0, 1400)).toContain('targetCount: 3');
+    expect(block.slice(0, 1400)).toContain('ongoingSeries: true');
+    // Only tops up when short — never on a plan that already has visits.
+    expect(block.slice(0, 1400)).toContain('if (liveNow < 3)');
+  });
+
+  test('a resize resolves the stale end-of-plan alert in the same transaction (Codex #3337 r3 P1)', () => {
+    // The alerts endpoint returns stored rows without rechecking them, so a
+    // refilled plan would keep a card whose extend click books more visits.
+    const block = src.slice(src.indexOf('A resize can invalidate an open end-of-plan alert'));
+    expect(block.slice(0, 1500)).toContain("resolved_action: 'plan_resized'");
+    expect(block.slice(0, 1500)).toContain("whereIn('alert_type', ['plan_ending', 'plan_ending_soon', 'ongoing_plan_exhausted'])");
+    // Savepoint — the bookkeeping must not poison the resize transaction.
+    expect(block.slice(0, 1500)).toContain('await trx.transaction(async (sp) => {');
   });
 
   test('trimmed visits reuse the shared status writer, which owns the invoice void', () => {

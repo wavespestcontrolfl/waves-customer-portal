@@ -4906,6 +4906,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // every save from the modal carries recurrence config, so an absent
       // field is the only way to say don't touch the length.
       recurringPlannedCount,
+      // The upcoming-visit count the modal READ when it opened. The plan's
+      // real length can move while the modal sits open — another completion,
+      // a cancellation, an auto-extend — and the maintenance lock cannot
+      // protect a snapshot taken by an earlier GET. Sent alongside the target
+      // so the reconcile can refuse a resize computed against a stale picture
+      // instead of "restoring" a visit somebody else just removed
+      // (Codex #3337 r3 P1).
+      recurringPlannedCountBaseline,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
@@ -6118,6 +6126,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             .whereNot('recurring_ongoing', !!recurringOngoing)
             .update({ recurring_ongoing: !!recurringOngoing, updated_at: new Date() });
         }
+        // Turning a plan back to "Never" must also leave it with visits ahead
+        // (Codex #3337 r3 P1): auto-extend only fires from a COMPLETION, so an
+        // exhausted plan flipped to ongoing with nothing scheduled has no
+        // completion coming and sits there advertising a cadence it will never
+        // run. The recurring-alert `convert_ongoing` action already defines the
+        // contract — flip the flag AND ensure 3 upcoming — so this reuses the
+        // same target through the same writer (extend-only; it never trims).
+        if (parent?.is_recurring && parent.recurring_pattern
+          && recurringOngoing === true && !wantsVisitCountReconcile) {
+          const liveNow = await countUpcomingSeriesVisits(trx, parentId);
+          if (liveNow < 3) {
+            visitCountResult = await reconcileRecurringSeriesVisitCount(trx, {
+              parentId,
+              parent,
+              cols: seriesCols,
+              targetCount: 3,
+              actorId: req.technicianId,
+              claimToken: visitCountClaimToken,
+              protectedVisitId: req.params.id,
+              ongoingSeries: true,
+            });
+            recurringCreated += visitCountResult.added.length;
+            for (const child of visitCountResult.added) {
+              spawnedRecurringChildren.push(child);
+              recurringUpdatedJobIds.push(child.id);
+            }
+          }
+        }
         // The count itself. Runs LAST inside the trx so it reconciles against
         // the cadence, anchor date and weekend rule this same save applied — a
         // save that moves a plan to every-14-days AND caps it at 2 must place
@@ -6136,6 +6172,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             actorId: req.technicianId,
             claimToken: visitCountClaimToken,
             protectedVisitId: req.params.id,
+            baselineCount: Number.isInteger(Number.parseInt(recurringPlannedCountBaseline, 10))
+              ? Number.parseInt(recurringPlannedCountBaseline, 10)
+              : null,
           });
           recurringCreated += visitCountResult.added.length;
           for (const child of visitCountResult.added) {
@@ -6143,6 +6182,37 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             recurringUpdatedJobIds.push(child.id);
           }
           for (const id of visitCountResult.cancelledIds) recurringUpdatedJobIds.push(id);
+        }
+
+        // A resize can invalidate an open end-of-plan alert (Codex #3337 r3
+        // P1). runRecurringSeriesMaintenance files `plan_ending` when a fixed
+        // plan hits zero upcoming; the alerts endpoint returns stored rows
+        // WITHOUT rechecking their condition, so a plan refilled here would
+        // keep a stale "plan ending" card whose `extend` click books more
+        // billable visits on top of the ones just added. Resolved in this
+        // transaction, so the card and the calendar commit together.
+        if (visitCountResult) {
+          // Savepoint, not a bare try/catch — same reason as the add-on
+          // mirror: a failed statement poisons the transaction, and this
+          // bookkeeping must never take the resize down with it.
+          try {
+            await trx.transaction(async (sp) => {
+              const upcomingAfter = await countUpcomingSeriesVisits(sp, parentId);
+              if (upcomingAfter > 0) {
+                await sp('recurring_plan_alerts')
+                  .where({ recurring_parent_id: parentId })
+                  .whereNull('resolved_at')
+                  .whereIn('alert_type', ['plan_ending', 'plan_ending_soon', 'ongoing_plan_exhausted'])
+                  .update({
+                    resolved_at: sp.fn.now(),
+                    resolved_action: 'plan_resized',
+                    resolved_by: req.technicianId || null,
+                  });
+              }
+            });
+          } catch (e) {
+            logger.warn(`[schedule/visit-count] end-of-plan alert revalidation failed for parent ${parentId} (non-blocking): ${e.message}`);
+          }
         }
       }
     });
@@ -7287,13 +7357,36 @@ async function findBillingCoveredVisits(conn, visits) {
     const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
     const NO_MONEY_HELD = new Set(['void', 'refunded', 'canceled', 'cancelled']);
     const moneyHeld = INVOICE_UNCOLLECTIBLE_STATUSES.filter((s) => !NO_MONEY_HELD.has(s));
+    // Status is NOT the only money marker, and the two that aren't ride on
+    // ordinary collectible statuses (Codex #3337 r3 P1):
+    //   • credit_applied > 0 — a PARTIAL account-credit application leaves the
+    //     invoice 'sent' and charges total − credit_applied; the customer's
+    //     money is already consumed from their balance.
+    //   • a `deposit_credit` line item — a ledger-backed estimate deposit,
+    //     tracked separately from credit_applied and likewise status-neutral.
+    // Voided/refunded/cancelled invoices are excluded outright: the void path
+    // restores both the account credit and the deposit ledger, so they hold
+    // nothing.
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
-      // partially_paid is collectible (so absent from the list above) but
-      // still holds money the customer handed over.
-      .whereIn('status', [...moneyHeld, 'partially_paid'])
-      .select('scheduled_service_id');
-    for (const inv of invoiced) mark(inv.scheduled_service_id, 'attached to an invoice that has money on it');
+      .whereNotIn('status', [...NO_MONEY_HELD])
+      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items');
+    const hasDepositCreditLine = (items) => {
+      try {
+        const arr = typeof items === 'string' ? JSON.parse(items) : items;
+        return Array.isArray(arr) && arr.some((i) => String(i?.category || '') === 'deposit_credit');
+      } catch { return false; }
+    };
+    const settled = new Set([...moneyHeld, 'partially_paid']);
+    for (const inv of invoiced) {
+      if (settled.has(String(inv.status || '').trim().toLowerCase())) {
+        mark(inv.scheduled_service_id, 'attached to an invoice that has money on it');
+      } else if (Number(inv.credit_applied) > 0) {
+        mark(inv.scheduled_service_id, 'attached to an invoice with account credit already applied');
+      } else if (hasDepositCreditLine(inv.line_items)) {
+        mark(inv.scheduled_service_id, 'attached to an invoice carrying an estimate deposit credit');
+      }
+    }
   }
   return covered;
 }
@@ -7321,11 +7414,28 @@ async function findBillingCoveredVisits(conn, visits) {
 // the customer asked for).
 async function reconcileRecurringSeriesVisitCount(trx, {
   parentId, parent, cols, targetCount, actorId, claimToken, protectedVisitId = null,
+  // The live count the caller's client last observed — see the staleness
+  // refusal below. Omit to skip the check (the ongoing top-up has no operator
+  // -supplied number to be stale).
+  baselineCount = null,
+  // Extend-only, and stamp the new rows as ongoing: the "End repeating →
+  // Never" flip reuses this writer to guarantee the plan has visits ahead of
+  // it, and must never trim.
+  ongoingSeries = false,
 }) {
   const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const result = { target, before: live.length, added: [], cancelledIds: [] };
+  // Optimistic concurrency on the length the operator was looking at. Without
+  // it, a plan that lost a visit between the modal's GET and this save reads
+  // as "one short of target" and the reconcile helpfully books a replacement
+  // the office never asked for.
+  if (Number.isInteger(baselineCount) && baselineCount !== live.length) {
+    throw httpError(409, `This plan changed while the appointment was open — it now has ${live.length} upcoming visit${live.length === 1 ? '' : 's'}, not ${baselineCount}. Reopen the appointment and set the count again.`);
+  }
   if (live.length === target) return result;
+
+  if (live.length > target && ongoingSeries) return result; // extend-only mode
 
   if (live.length > target) {
     // Cancel exactly `need` visits, taken from the far end of the ELIGIBLE
@@ -7436,8 +7546,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       recurring_parent_id: parentId,
     };
     // A counted plan is by definition not ongoing — the rows it adds must not
-    // carry the flag that would auto-extend past the count just set.
-    if (cols.recurring_ongoing) data.recurring_ongoing = false;
+    // carry the flag that would auto-extend past the count just set. The
+    // ongoing top-up is the mirror case and stamps the flag on.
+    if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
     if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
