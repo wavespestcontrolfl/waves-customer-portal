@@ -120,6 +120,10 @@ function knownEnrichedValue(value) {
   return v && v.toUpperCase() !== 'UNKNOWN' ? v : null;
 }
 
+// Trust predicate lives in one place — the customer-facing pricing
+// assistant applies the same rule (services/lookup-confidence.js).
+const { lookupBedAreaIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
+
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
   const up = (v) => String(v || '').toUpperCase();
@@ -175,6 +179,17 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   // Only then may the profile's saved turf measurement / property type
   // steer pricing.
   const isCommercial = intent.is_commercial === true;
+  // A global verification failure ('address' — the geocoder snapped to a
+  // different premise; 'all' — no property record at all) invalidates the
+  // WHOLE enriched payload, not one field of it. Dropping it here is the
+  // only way to be sure another parcel's features, tree density,
+  // construction/roof/foundation facts and mosquito multiplier can't steer
+  // an auto-generated draft. The RECORD leg of the same failure is handled
+  // upstream: runDraftPipeline strips the parcel-scoped signals
+  // (propertyRecord/parcelView) before property-fact arbitration, so the
+  // snapped parcel's county dimensions never arrive here as high-confidence
+  // facts either.
+  if (hasGlobalVerifyFlag(lookupEnriched)) lookupEnriched = null;
   const featureModifiers = isCommercial ? null : lookupFeatureModifiers(lookupEnriched);
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);
@@ -225,6 +240,35 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(!isCommercial && lookupEnriched?.treeDensity
       ? { treeDensity: lookupEnriched.treeDensity }
       : {}),
+    // Tree & Shrub measurement inputs from the lookup. Without these the
+    // T&S pricer had no bed area at all on this path and fell back to its
+    // 2,000 sqft default (bedAreaSource 'fallback', LOW confidence, manual
+    // review) — the Aug-2026 audit found two of the three real T&S quotes
+    // priced that way. estimatedBedAreaSf lands as bedAreaSource
+    // 'estimated' / MEDIUM confidence, so the provenance stays truthful:
+    // an AI-derived area is never labelled an operator measurement.
+    // The admin estimator already prefills both fields from the same
+    // enriched payload (EstimateToolViewV2) — this closes the agent path.
+    // Only a CONFIDENT lookup area is forwarded. priceTreeShrub upgrades any
+    // estimatedBedAreaSf to pricingConfidence 'medium' with no review
+    // reason, so an area read off obstructed or stale imagery would turn a
+    // low-confidence draft into a green one-click lane. When the lookup
+    // itself says the measurement needs verification, forwarding nothing is
+    // the honest move: the pricer then falls back to the lot inference (or
+    // its 2,000 default), both of which carry their own review markers.
+    ...(!isCommercial && lookupBedAreaIsTrustworthy(lookupEnriched)
+      ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
+      : {}),
+    // The lookup's estimatedPalmCount is deliberately NOT forwarded here.
+    // property.palmCount is read by BOTH the T&S reserve and
+    // resolvePalmCount, and the latter treats it as a valid green-lane
+    // fallback for a palm-INJECTION line (requiresManualReview: false) — so
+    // an AI-detected count would auto-price per-palm injections nobody
+    // measured. Routing it through the T&S service line instead is no
+    // better today: that source folds into the legacy tree terms while the
+    // reserve is unarmed, which would raise prices off an AI guess. It
+    // needs its own review-marked input, which belongs with the work that
+    // arms the reserve.
     // Structural facts deriveModifiers() prices from: home age (pest $/app),
     // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
     // merges stay off the input so the engine's own defaults apply.
@@ -966,6 +1010,10 @@ module.exports = {
   lineRequiresReview,
   lineHasHeuristicTurf,
   buildEngineInput,
+  // Shared story-provenance rule — the customer-facing pricing assistant
+  // grades its lookup stories through the same evidence test so a
+  // low-confidence AI inference prices as 'estimated' on both paths.
+  storiesSourceForPricing,
   stampPestCurveVersion,
   deriveTotals,
   compsBand,
