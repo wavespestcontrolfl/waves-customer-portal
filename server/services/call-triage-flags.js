@@ -187,7 +187,14 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // address, so the AV verdict can report a missing subpremise the
     // canonical record already supplies (codex r16 P1). Omitting the opt
     // preserves the old behavior for callers with no merged record.
+    // `inServiceArea === false` is checked as well as the status, not instead
+    // of it: deriveStatus tests completeness BEFORE service area, so a
+    // resolved PREMISE in an unsupported county returns `ambiguous` and never
+    // reaches the out_of_service_area branch (codex r17 P2). Collecting a
+    // unit cannot make an out-of-area building serviceable, so that ask is
+    // busywork the office can never usefully perform.
     if (avStatus !== 'out_of_service_area'
+        && av?.inServiceArea !== false
         && isMissingUnitNumber(av)
         && !(opts.canonicalRecord && recordCarriesUnit(opts.canonicalRecord))) {
       flags.push('missing_unit_number');
@@ -453,6 +460,10 @@ function recordCarriesUnit(flatRecord = {}) {
 
 function unitAskCorroborated(av, extracted = {}) {
   if (!isMissingUnitNumber(av)) return false;
+  // Out-of-area buildings get no unit ask — same reasoning as the enforce
+  // lane: the status is `ambiguous` because completeness outranks the
+  // service-area test, and a unit cannot make the address serviceable.
+  if (av?.inServiceArea === false) return false;
   const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
   if (recordCarriesUnit(extracted)) return false;
   // Compare through the CANONICAL suffix table, not streetCompareKey's

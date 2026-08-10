@@ -73,8 +73,17 @@ function checkTcpaConsent(extraction, opts = {}) {
 // 2026-07-31) — both change what canAutoRoute can decide, so reprocessing
 // must write a new decision row instead of onConflict-ignoring into the
 // pre-rule one.
-const V2_DECISION_VERSION = 'v2-1.2.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0'];
+// v2-1.3.0: street recovery now REFUSES a PREMISE verdict whose only missing
+// component is the subpremise (a resolved building given without its unit —
+// address-validation/recovery.js `avMissingUnitOnly`). Such a call previously
+// could recover into an accepted verdict and auto-route; it now keeps its
+// address hold and lands in review. That changes what canAutoRoute can
+// decide, and the producer inserts with onConflict-ignore, so without a bump
+// a force-reprocess would keep the stale auto_route recommendation while the
+// fresh run holds the call — corrupting the promotion metrics and any
+// feedback tied to that decision row.
+const V2_DECISION_VERSION = 'v2-1.3.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0'];
 
 function buildRouteDecision({
   callLogId,
@@ -140,6 +149,9 @@ function buildTriageItem({
   // recovered street + candidate list for address flags) so the Needs Review
   // card can show WHAT to confirm, not just that something needs confirming.
   extraPayload = null,
+  // The AV verdict behind this card, when the caller has one. Only the
+  // unit-ask stamp reads it — see below.
+  addressValidation = null,
 }) {
   const flagToCategoryMap = {
     out_of_service_area: 'out_of_service_area',
@@ -316,11 +328,19 @@ function buildTriageItem({
   // bridge passes its own extraPayload to override this with the LEGACY V1
   // address, which is what the record holds in that mode.
   if (flag === 'missing_unit_number') {
+    // Prefer GOOGLE's resolved building over the extraction's. A verdict can
+    // carry `hasReplaced` (a corrected street or ZIP) alongside the missing
+    // subpremise, and deriveStatus returns `ambiguous` for it — so nothing
+    // downstream adopts the correction, and stamping the extraction would
+    // print the misheard street on a card whose entire job is to say WHICH
+    // building needs a unit (codex r17 P2). The normalized form is the
+    // building Google actually resolved.
     const sa = extraction?.property?.service_address || {};
+    const n = addressValidation?.normalized || {};
     flagPayload.unit_ask_building = {
-      street_line_1: sa.street_line_1 ?? null,
-      city: sa.city ?? null,
-      postal_code: sa.postal_code ?? sa.zip ?? null,
+      street_line_1: n.street_line_1 || sa.street_line_1 || null,
+      city: n.city || sa.city || null,
+      postal_code: n.postal_code || sa.postal_code || sa.zip || null,
     };
   }
 

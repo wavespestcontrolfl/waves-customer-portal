@@ -6245,6 +6245,11 @@ const CallRecordingProcessor = {
     let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
+    // Did THIS pass conclude the call still needs a unit collected? Set by
+    // whichever lane ran; consumed by the same-call reconciliation below,
+    // which closes a stale card from an earlier pass when this one says the
+    // ask no longer applies.
+    let unitAskFiledThisPass = false;
     let v2ApprovedExtraction = null;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
@@ -6517,6 +6522,7 @@ const CallRecordingProcessor = {
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+          if (finalFlags.includes('missing_unit_number')) unitAskFiledThisPass = true;
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -6552,7 +6558,7 @@ const CallRecordingProcessor = {
           // against the blocked-branch inserts below.
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
             await db('triage_items')
-              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
+              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
           }
@@ -6642,7 +6648,7 @@ const CallRecordingProcessor = {
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
@@ -6655,7 +6661,7 @@ const CallRecordingProcessor = {
             for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
               try {
                 await db('triage_items')
-                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
               } catch (fe) {
                 logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -6676,7 +6682,7 @@ const CallRecordingProcessor = {
               for (const f of routingResult.failedOpenFlags) {
                 try {
                   await db('triage_items')
-                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
                     .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
                 } catch (fe) {
                   logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -6878,7 +6884,11 @@ const CallRecordingProcessor = {
                     flag,
                     extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                     severity: 'advisory',
-                    extraPayload: {
+                    // Google's resolved building when it has one (a corrected
+                    // street/ZIP rides on this verdict shape), else what the
+                    // legacy record holds.
+                    addressValidation: v2AddressValidation,
+                    extraPayload: v2AddressValidation?.normalized?.street_line_1 ? null : {
                       unit_ask_building: {
                         street_line_1: rawStreetBeforeAdopt || extracted.address_line1 || null,
                         city: extracted.city || null,
@@ -7395,6 +7405,47 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // SAME-CALL unit-ask reconciliation. This pass decided (in either lane)
+    // that this call no longer needs a unit collected — the re-extraction
+    // captured it, AV came back subpremise-complete, or the merged record
+    // already carried it. Evidence re-derived from THIS EXACT call IS
+    // attributable to the ask this call filed, which is precisely what the
+    // rejected cross-call resolver could never establish (a later call's unit
+    // may belong to a different door). So the stale card from an earlier pass
+    // is closed here, and only for this call_log_id.
+    //
+    // Shares the per-call lock + review_status re-sync contract every other
+    // triage writer uses (utils/triage-locks.js). Best-effort: a failure
+    // leaves the card open, which is the safe direction.
+    if (!unitAskFiledThisPass && !bridgeNeedsConfirmation.includes('missing_unit_number')) {
+      try {
+        await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          const closed = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+            .whereIn('status', ['open', 'in_progress'])
+            .update({
+              status: 'resolved',
+              resolution_note: 'Auto-resolved: reprocessing this call no longer finds a missing unit (the unit was captured, validated, or already on the record).',
+              resolved_at: new Date(),
+              updated_at: new Date(),
+            });
+          if (!closed) return;
+          const remaining = await trx('triage_items')
+            .where({ call_log_id: call.id })
+            .whereIn('status', ['open', 'in_progress'])
+            .count({ n: '*' })
+            .first();
+          if (Number(remaining?.n || 0) === 0) {
+            await trx('call_log').where({ id: call.id }).update({ review_status: 'resolved', updated_at: new Date() });
+          }
+          logger.info(`[call-proc] same-call unit ask reconciled for ${maskSid(callSid)} (${closed} card(s))`);
+        });
+      } catch (e) {
+        logger.warn(`[call-proc] same-call unit-ask reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
       }
     }
 

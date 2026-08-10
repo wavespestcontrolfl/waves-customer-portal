@@ -243,6 +243,18 @@ describe('computeDeterministicTriageFlags', () => {
       expect(computeDeterministicTriageFlags(e, { addressValidation: av })).toContain('missing_unit_number');
     });
 
+    test('a resolved building OUTSIDE the service area gets no unit ask', () => {
+      const e = validV2Extraction();
+      // deriveStatus tests completeness before service area, so this shape
+      // arrives as `ambiguous` with inServiceArea false — collecting a unit
+      // cannot make it serviceable.
+      const outOfArea = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'], inServiceArea: false };
+      expect(computeDeterministicTriageFlags(e, { addressValidation: outOfArea })).not.toContain('missing_unit_number');
+      // In-area and unknown-area still file it.
+      expect(computeDeterministicTriageFlags(e, { addressValidation: { ...outOfArea, inServiceArea: true } })).toContain('missing_unit_number');
+      expect(computeDeterministicTriageFlags(e, { addressValidation: { ...outOfArea, inServiceArea: null } })).toContain('missing_unit_number');
+    });
+
     test('missing_unit_number is advisory-only: files a card, never holds the appointment', () => {
       expect(ADVISORY_TRIAGE_FLAGS.has('missing_unit_number')).toBe(true);
       expect(BLOCKING_TRIAGE_FLAGS.has('missing_unit_number')).toBe(false);

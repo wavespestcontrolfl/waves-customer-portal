@@ -178,6 +178,18 @@ describe('triage surfacing', () => {
     expect(payload.unit_ask_building).toEqual({
       street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212',
     });
+    // Google's RESOLVED building wins over the extraction's: a corrected
+    // street/ZIP can ride on a missing-subpremise verdict, and nothing
+    // downstream adopts it, so stamping the extraction would print the
+    // misheard street on the card.
+    const corrected = JSON.parse(buildTriageItem({
+      callLogId: 'c1', flag: 'missing_unit_number', extraction: unitExtraction,
+      addressValidation: {
+        status: 'ambiguous',
+        normalized: { street_line_1: '100 Example Condo Court', city: 'Bradenton', postal_code: '34212' },
+      },
+    }).payload);
+    expect(corrected.unit_ask_building.street_line_1).toBe('100 Example Condo Court');
     // The shadow bridge overrides it with the LEGACY address it holds.
     const overridden = JSON.parse(buildTriageItem({
       callLogId: 'c1', flag: 'missing_unit_number', extraction: unitExtraction,
