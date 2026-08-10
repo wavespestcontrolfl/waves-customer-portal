@@ -221,11 +221,25 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
       // engine emits versioned aliases for one catalog service
       // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
       // #3328 r2 P1.
-      const row = await sp('services')
+      //
+      // FAIL CLOSED on ambiguity (codex #3328 r3 P1): a jsonb array column
+      // cannot carry a scalar unique index, so nothing at the DB level stops an
+      // admin edit or a future migration from giving the same engine key to two
+      // ACTIVE rows. An unordered `.first()` would then pick NONDETERMINISTICALLY
+      // and could stamp the wrong billing/completion lane — strictly worse than
+      // no stamp, which merely reverts to today's behavior. Take two and resolve
+      // only on exactly one. The DB-backed contract test catches drift at CI
+      // time; this is the runtime guard that CI cannot provide.
+      const rows = await sp('services')
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
-        .first('id');
-      resolved = row?.id || null;
+        .limit(2)
+        .select('id');
+      if (rows.length === 1) {
+        resolved = rows[0].id;
+      } else if (rows.length > 1) {
+        logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
+      }
     });
   } catch (err) {
     // The savepoint rolled back; the caller's transaction is still healthy and

@@ -136,6 +136,34 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 - `db.raw()` with request-derived input must use `?` placeholders; string
   interpolation is a SQL-injection P0 (AGENTS.md).
 
+## 5b. A try/catch inside a transaction is NOT fail-open
+
+Postgres aborts the **entire transaction** after any failed statement. Catching
+the JS error and returning a default does not restore it — every later
+statement on that connection fails with `current transaction is aborted`, so a
+"best-effort" read takes down the whole operation hosting it. This has now bitten
+twice: the inspection-credit booking marker (#3178 r4 P1) and the accept-path
+catalog lookup (#3328 r1 P1), where a lookup meant to degrade gracefully during
+deploy skew would instead have failed the estimate accept itself.
+
+Any optional/best-effort query that runs on a caller's `trx` MUST be wrapped in
+a SAVEPOINT — `await trx.transaction(async (sp) => { ... })` — so a failure rolls
+back only that statement. Exemplar:
+`markBookingForInspectionCredit` in `server/services/inspection-credit.js`.
+
+Corollary for tests: a hand-rolled fake connection **cannot** reproduce this —
+it has no transaction semantics, so the broken version passes. Prove it against
+a real Postgres transaction (rename the column away inside a transaction you
+then roll back, and assert the transaction is still usable).
+
+## 5c. An array column cannot carry a scalar unique index
+
+When a lookup column is a jsonb/array (one row owning several keys), there is no
+unique index to stop two rows claiming the same key — and an unordered `.first()`
+then resolves NONDETERMINISTICALLY. Fetch up to two and resolve only on exactly
+one match (fail closed); a CI/contract test catches existing drift but cannot
+prevent the runtime write (#3328 r3 P1).
+
 ## 6. Schema truth traps (wrong-answer generators)
 
 - `customers.active` is TRUE for leads. A "real customer" =

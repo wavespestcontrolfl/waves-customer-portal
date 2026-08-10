@@ -144,7 +144,10 @@ describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
     const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
     let bindings = null;
     const conn = () => ({
-      whereRaw: (_sql, b) => { bindings = b; return { andWhere: () => ({ first: async () => null }) }; },
+      whereRaw: (_sql, b) => {
+        bindings = b;
+        return { andWhere: () => ({ limit: () => ({ select: async () => [] }) }) };
+      },
     });
     conn.transaction = async (cb) => cb(conn);
     await catalogServiceIdForProfile(conn, profile);
@@ -156,9 +159,12 @@ describe('catalogServiceIdForProfile', () => {
   // The helper runs its read inside conn.transaction(...) — a SAVEPOINT when
   // the caller already holds a transaction — so the fake connection must model
   // that, not a bare query builder.
+  // onQuery returns the ROW ARRAY the limited select would produce.
   const makeConn = (onQuery) => {
     const builder = () => ({
-      whereRaw: (_sql, b) => ({ andWhere: (w) => ({ first: async () => onQuery(b, w) }) }),
+      whereRaw: (_sql, b) => ({
+        andWhere: (w) => ({ limit: () => ({ select: async () => onQuery(b, w) }) }),
+      }),
     });
     builder.transaction = async (cb) => cb(builder);
     return builder;
@@ -166,10 +172,20 @@ describe('catalogServiceIdForProfile', () => {
 
   test('resolves the primary service key to a catalog id', async () => {
     const id = await catalogServiceIdForProfile(
-      makeConn(() => ({ id: 'svc-1' })),
+      makeConn(() => [{ id: 'svc-1' }]),
       { services: [{ service: 'pre_slab_termiticide' }] },
     );
     expect(id).toBe('svc-1');
+  });
+
+  test('FAILS CLOSED when two active rows claim the same engine key', async () => {
+    // Nondeterministic .first() could stamp the WRONG billing/completion lane;
+    // no stamp merely reverts to pre-change behavior (codex #3328 r3 P1).
+    const id = await catalogServiceIdForProfile(
+      makeConn(() => [{ id: 'svc-a' }, { id: 'svc-b' }]),
+      { services: [{ service: 'pre_slab_termiticide' }] },
+    );
+    expect(id).toBeNull();
   });
 
   test('picks the SAME primary the display label picks (pest_control wins)', async () => {
@@ -178,7 +194,7 @@ describe('catalogServiceIdForProfile', () => {
     // row would claim two different services.
     let bindings = null;
     await catalogServiceIdForProfile(
-      makeConn((b) => { bindings = b; return { id: 'svc-pest' }; }),
+      makeConn((b) => { bindings = b; return [{ id: 'svc-pest' }]; }),
       { services: [{ service: 'pre_slab_termiticide' }, { service: 'pest_control' }] },
     );
     expect(bindings).toEqual([JSON.stringify(['pest_control'])]);
@@ -187,21 +203,21 @@ describe('catalogServiceIdForProfile', () => {
   test('only ACTIVE catalog rows are eligible', async () => {
     let where = null;
     await catalogServiceIdForProfile(
-      makeConn((_b, w) => { where = w; return { id: 'x' }; }),
+      makeConn((_b, w) => { where = w; return [{ id: 'x' }]; }),
       { services: [{ service: 'pre_slab_termiticide' }] },
     );
     expect(where).toEqual({ is_active: true });
   });
 
   test('returns null when the profile carries no service key', async () => {
-    const c = makeConn(() => ({ id: 'x' }));
+    const c = makeConn(() => [{ id: 'x' }]);
     expect(await catalogServiceIdForProfile(c, { services: [] })).toBeNull();
     expect(await catalogServiceIdForProfile(c, {})).toBeNull();
   });
 
   test('returns null (never throws) when the key maps to nothing', async () => {
     expect(await catalogServiceIdForProfile(
-      makeConn(() => undefined), { services: [{ service: 'not_a_real_key' }] },
+      makeConn(() => []), { services: [{ service: 'not_a_real_key' }] },
     )).toBeNull();
   });
 
