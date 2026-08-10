@@ -592,10 +592,19 @@ const REGISTRY = {
         if (!meta.contract_id) return { eligible: true };
         const contract = await db('customer_contracts')
           .where({ id: meta.contract_id })
-          .first('status', 'signed_at');
+          .first('status', 'signed_at', 'share_token_hash');
         if (!contract) return { eligible: false, reason: 'contract-missing' };
         if (contract.signed_at || CONTRACT_TERMINAL_STATUSES.has(String(contract.status || '').toLowerCase())) {
           return { eligible: false, reason: `contract-${contract.status || 'signed'}` };
+        }
+        // Bearer-link rotation (codex r22): an admin re-send overnight mints
+        // a new share token, so the URL frozen in this row is dead — the
+        // newer delivery carries the live link, and texting the stale one
+        // sends the customer to a "link not found" page. Compared only when
+        // the row recorded its hash (legacy rows keep the old behavior).
+        if (meta.share_token_hash && contract.share_token_hash
+          && contract.share_token_hash !== meta.share_token_hash) {
+          return { eligible: false, reason: 'share-token-rotated' };
         }
         return { eligible: true };
       } catch (err) {
@@ -652,7 +661,16 @@ const REGISTRY = {
   // enqueue per the owner's same-day ruling).
   appointment_notice_contact_deferred: {
     async recheck(meta) {
-      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact');
+      // Which predicate applies depends on what the notice DESCRIBES
+      // (codex r22). Cancellation / no-show rows name the terminal status
+      // they were written for: the liveness predicate would suppress every
+      // one of them (their visit is cancelled/past by definition), and a
+      // visit RESTORED overnight must suppress rather than deliver a
+      // frozen cancellation against a now-live appointment. Everything
+      // else (confirmation, prep, reschedule) is about an upcoming visit.
+      const visit = Array.isArray(meta.required_visit_statuses) && meta.required_visit_statuses.length
+        ? await visitStillInStatus(meta.scheduled_service_id, meta.required_visit_statuses, 'notice-contact')
+        : await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact');
       if (visit.eligible === false) return visit;
       return contactSlotStillAuthorized(meta, 'notice-contact');
     },
@@ -781,6 +799,26 @@ async function visitStillUpcoming(scheduledServiceId, label) {
       : String(svc.scheduled_date || '').slice(0, 10);
     const { etDateString } = require('../../utils/datetime-et');
     if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
+    return { eligible: true };
+  } catch (err) {
+    return failClosed(label, scheduledServiceId, err);
+  }
+}
+
+// Shared: a notice ABOUT a terminal visit (cancellation, no-show) replays
+// only while the visit still holds the status it was written for. A
+// restoration or re-slot overnight makes the frozen copy wrong — "your
+// appointment was cancelled" against a live visit is worse than silence,
+// and the office lane owns the exception.
+async function visitStillInStatus(scheduledServiceId, expectedStatuses, label) {
+  try {
+    if (!scheduledServiceId) return { eligible: true };
+    const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('status');
+    if (!svc) return { eligible: false, reason: 'visit-missing' };
+    const status = String(svc.status || '').toLowerCase();
+    if (!expectedStatuses.map((s) => String(s).toLowerCase()).includes(status)) {
+      return { eligible: false, reason: `visit-${status || 'unknown'}` };
+    }
     return { eligible: true };
   } catch (err) {
     return failClosed(label, scheduledServiceId, err);

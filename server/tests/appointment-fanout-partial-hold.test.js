@@ -141,6 +141,35 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     expect(JSON.parse(db._inserts[0].metadata).entry_point).toBe('appointment_notice_contact_deferred');
   });
 
+  test('r22: terminal-visit notices stamp the status their replay must still find', async () => {
+    // A cancellation/no-show notice describes a DELIBERATELY terminal visit,
+    // so the replay must not be judged by the upcoming-visit predicate.
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Cancelled', 'appointment_cancelled', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['cancelled', 'canceled']);
+
+    db._inserts.length = 0;
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Missed you', 'appointment_no_show', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['no_show']);
+
+    // An upcoming-visit notice carries NO status pin — the liveness
+    // predicate owns it.
+    db._inserts.length = 0;
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Confirmed', 'confirmation', 'appointment_confirmation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toBeUndefined();
+  });
+
   test('a later NON-hold block (opt-out) is not misread as held — nothing queued for it', async () => {
     sendCustomerMessage
       .mockResolvedValueOnce(ACCEPTED)

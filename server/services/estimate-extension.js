@@ -318,6 +318,16 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             && smsResult.nextAllowedAt) {
             try {
               const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              // A linked estimate may legitimately hold a phone that is NOT
+              // the account phone (email-matched linkage) — the shared
+              // identity check decides refresh vs freeze so the bearer
+              // estimate link can't be retargeted at replay.
+              const { recipientRefreshStamp } = require('./messaging/deferred-recipient-identity');
+              const recipientStamp = await recipientRefreshStamp({
+                customerId: estimate.customer_id,
+                recipientPhone: estimate.customer_phone,
+                label: 'estimate-extension',
+              });
               await db('sms_log').insert({
                 customer_id: estimate.customer_id || null,
                 direction: 'outbound',
@@ -333,7 +343,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
                   original_block_code: smsResult.code,
                   replay_purpose: 'estimate_followup',
                   ...(estimate.customer_id
-                    ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                    ? { ...recipientStamp, resolve_from_by_customer: true }
                     : { consent_basis: { status: 'transactional_allowed', source: entryPoint } }),
                 }),
               });

@@ -10890,6 +10890,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
                 try {
                   const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                  // Shared identity check: a linked estimate's captured
+                  // phone may legitimately differ from the account phone
+                  // (email-matched linkage), and the queued booking link is
+                  // a bearer token — refresh only when they matched.
+                  const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
+                  const recipientStamp = await recipientRefreshStamp({
+                    customerId,
+                    recipientPhone: estimate.customer_phone,
+                    label: 'estimate-accept',
+                  });
                   await db('sms_log').insert({
                     customer_id: customerId || null,
                     direction: 'outbound',
@@ -10905,7 +10915,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                       original_block_code: sendResult.code,
                       replay_purpose: 'estimate_followup',
                       ...(customerId
-                        ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                        ? { ...recipientStamp, resolve_from_by_customer: true }
                         : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
                     }),
                   });
@@ -11068,6 +11078,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
               try {
                 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                // Same bearer-link identity rule as the one-time accept
+                // enqueue above (shared helper, never a second inline copy).
+                const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
+                const recipientStamp = await recipientRefreshStamp({
+                  customerId,
+                  recipientPhone: estimate.customer_phone,
+                  label: 'estimate-accept',
+                });
                 await db('sms_log').insert({
                   customer_id: customerId || null,
                   direction: 'outbound',
@@ -11083,7 +11101,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                     original_block_code: sendResult.code,
                     replay_purpose: 'estimate_followup',
                     ...(customerId
-                      ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                      ? { ...recipientStamp, resolve_from_by_customer: true }
                       : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
                   }),
                 });

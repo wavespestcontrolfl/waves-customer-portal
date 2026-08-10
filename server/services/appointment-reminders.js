@@ -1080,6 +1080,21 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     return;
   }
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  // Which visit state the notice DESCRIBES (codex r22). A confirmation or
+  // prep text is about an UPCOMING visit, so the shared liveness predicate
+  // is right for it. A cancellation / no-show notice is the opposite: its
+  // visit is deliberately terminal, so the liveness predicate would drop
+  // the replay outright (and, if the visit were restored overnight, would
+  // instead send a frozen cancellation for a live appointment). Stamp the
+  // statuses the replay must still find so the registry can check the
+  // right thing.
+  const TERMINAL_NOTICE_STATUSES = {
+    // Both spellings: the self-heal set treats 'canceled' as equivalent, so
+    // a row written either way must still replay.
+    appointment_cancelled: ['cancelled', 'canceled'],
+    appointment_no_show: ['no_show'],
+  };
+  const requiredVisitStatuses = TERMINAL_NOTICE_STATUSES[messageType] || null;
   for (const held of heldContacts) {
     try {
       await db('sms_log').insert({
@@ -1097,6 +1112,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
           appointment_contact_role: held.contact.role || null,
           original_block_code: 'QUIET_HOURS_HOLD',
           replay_purpose: purpose,
+          ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
           resolve_from_by_customer: true,
         }),
       });

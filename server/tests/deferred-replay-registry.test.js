@@ -524,6 +524,61 @@ describe('deferred-replay registry', () => {
     expect(release.del).toHaveBeenCalled();
   });
 
+  test('notice contact (r22): a cancellation row checks the TERMINAL status, not visit liveness', async () => {
+    const meta = {
+      scheduled_service_id: 'ss-1',
+      customer_id: 'cust-1',
+      to_phone: '+19415557777',
+      required_visit_statuses: ['cancelled', 'canceled'],
+    };
+
+    // Still cancelled → the held contact's cancellation replays (the
+    // liveness predicate would have dropped it outright).
+    db.mockReturnValueOnce(firstChain({ status: 'cancelled' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    const stillCancelled = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(stillCancelled.eligible).toBe(true);
+
+    // Restored overnight → suppress; a frozen "your appointment was
+    // cancelled" against a live visit is worse than silence.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed' }));
+    const restored = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(restored.eligible).toBe(false);
+    expect(restored.reason).toBe('visit-confirmed');
+
+    // No-show rows carry their own terminal status.
+    db.mockReturnValueOnce(firstChain({ status: 'no_show' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    const noShow = await recheckDeferredReplay('appointment_notice_contact_deferred', {
+      ...meta, required_visit_statuses: ['no_show'],
+    });
+    expect(noShow.eligible).toBe(true);
+  });
+
+  test('document reminder (r22): a rotated share token suppresses the queued dead link', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null, share_token_hash: 'hash-new' }));
+    const rotated = await recheckDeferredReplay('document_request_reminder_deferred', {
+      contract_id: 'ct-1', share_token_hash: 'hash-old',
+    });
+    expect(rotated.eligible).toBe(false);
+    expect(rotated.reason).toBe('share-token-rotated');
+
+    db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null, share_token_hash: 'hash-old' }));
+    const intact = await recheckDeferredReplay('document_request_reminder_deferred', {
+      contract_id: 'ct-1', share_token_hash: 'hash-old',
+    });
+    expect(intact.eligible).toBe(true);
+
+    // Legacy rows (queued before the hash was recorded) keep prior behavior.
+    db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null, share_token_hash: 'hash-new' }));
+    const legacy = await recheckDeferredReplay('document_request_reminder_deferred', { contract_id: 'ct-1' });
+    expect(legacy.eligible).toBe(true);
+  });
+
   test('billing notice (r21): a PI that no longer resolves to an invoice is superseded, not invoice-less', async () => {
     // Tender switch overnight repoints the invoice to a new card PI and
     // pays it — the old PI resolves to nothing, and a frozen bank-failure

@@ -677,6 +677,14 @@ async function sendSmsDelivery({
         metadata: JSON.stringify({
           entry_point: 'document_request_reminder_deferred',
           contract_id: contract.id,
+          // The signing URL frozen in the body above is a BEARER token
+          // (codex r22): an admin re-send between this hold and 8 AM runs
+          // activatePreparedDelivery, which mints a new token and replaces
+          // share_token_hash — the queued link then resolves to nothing at
+          // contracts-public. Persist the hash this body was rendered for
+          // so the replay can detect the rotation and suppress instead of
+          // texting a dead link.
+          share_token_hash: contract.share_token_hash || null,
           original_block_code: result.code,
           replay_purpose: smsPurpose,
           ...(smsConsentBasis ? { consent_basis: smsConsentBasis } : {}),
