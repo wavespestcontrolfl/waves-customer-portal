@@ -897,6 +897,37 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           };
         }
       }
+      // GENERATION fence for EVERY call-origin insert (codex P1, PR #3304
+      // — generation-rework GH round): the sid/stamp branch below
+      // re-verifies linkage, but a lead-less or phone_touched composer
+      // never compared its pass identity with the live call row — an older
+      // detached composer resuming after a newer pass finalized could
+      // insert stale identity/service/pricing content AFTER that pass's
+      // reconcile-only sweep found no committed draft to fix, leaving the
+      // wrong content live with composedGeneration as audit-only data.
+      // Fence doctrine (PR #3304): token match = in-flight me; SAME
+      // generation = no newer claim since mine (survives this pass's own
+      // finalization). The call row is already locked above
+      // (callRejectedForDrafting lockCallRow) and held through the insert,
+      // so the compare is against settled truth. A composer carrying
+      // neither identity (legacy entry points) keeps today's behavior —
+      // there is nothing to compare.
+      {
+        const { callPassStillOwned } = require('../../utils/estimate-claim-sql');
+        const stillOwned = await callPassStillOwned(trx, call.id, {
+          ownerProcToken: context?.ownerProcToken || null,
+          ownerProcGeneration: context?.ownerProcGeneration ?? null,
+        });
+        if (!stillOwned) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'stale_processing_generation',
+              message: 'A newer processing pass claimed this call while the draft was composing — that pass owns the rebuild.',
+            },
+          };
+        }
+      }
       if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
         const { staleCallLinkageReason } = require('../admin-estimate-persistence');
         // LOCK the call row and HOLD it through the INSERT (codex P1, PR

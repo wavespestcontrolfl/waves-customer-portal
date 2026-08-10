@@ -12,7 +12,11 @@
  *  - callSideBlockForEstimateData: rejects a LIVE token and compares live
  *    linkage (the estimate-side fallback guard's two markers alone miss a
  *    verdict that is mid-write);
- *  - sweepPendingReconciles: durable retry for reconcile-only failures.
+ *  - sweepPendingReconciles: durable retry for reconcile-only failures;
+ *  - callPassStillOwned: the every-call-origin-insert fence — lead-less
+ *    and phone_touched composers (residential + commercial) compare pass
+ *    identity too, and slot reservation locks the call row through its
+ *    verdict + hold commit.
  */
 
 const mockUpdates = [];
@@ -213,6 +217,50 @@ describe('sweepPendingQuarantines re-qualification clears the draft block too', 
       && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_quarantine_pending'"));
     expect(queueClear).toBeTruthy();
   });
+
+  const IDENTITY_PENDING_ROW = () => ({
+    id: 'call-1',
+    metadata: {
+      estimator_quarantine_pending: { reason: 'email_identity_conflict', at: '2026-08-10T01:00:00.000Z' },
+    },
+  });
+  const SETTLED_LIVE_ROW = () => ({
+    id: 'call-1', processing_token: null, processing_status: 'processed',
+    extraction_attempts: 0, created_at: '2026-08-01T00:00:00.000Z',
+    processing_generation: 9, metadata: {},
+  });
+
+  test('identity conflict + TRANSIENT revalidation failure DEFERS — the obsolete verdict is never replayed', async () => {
+    // A newer pass may have re-qualified the call; a context failure like
+    // customer_lookup_unavailable proves nothing about the conflict, and
+    // replaying the queued verdict would archive the valid replacement
+    // draft. The queue entry itself keeps every guard failing closed
+    // until a sweep can actually re-verify.
+    mockScanRows = [IDENTITY_PENDING_ROW()];
+    mockCallRow = SETTLED_LIVE_ROW();
+    const { buildCallContext } = require('../services/estimator-engine/context-builder');
+    buildCallContext.mockResolvedValue({ error: 'customer_lookup_unavailable' });
+
+    const cleared = await sweepPendingQuarantines();
+
+    expect(cleared).toBe(0);
+    expect(mockUpdates.filter((u) => u.table === 'call_log')).toHaveLength(0);
+  });
+
+  test('a RE-OBSERVED identity conflict still replays the forced invalidation and drains the queue', async () => {
+    mockScanRows = [IDENTITY_PENDING_ROW()];
+    mockCallRow = SETTLED_LIVE_ROW();
+    const { buildCallContext } = require('../services/estimator-engine/context-builder');
+    buildCallContext.mockResolvedValue({ error: 'email_identity_conflict', call: { id: 'call-1' } });
+
+    const cleared = await sweepPendingQuarantines();
+
+    expect(cleared).toBe(1);
+    expect(fenceUpdateFor('estimator_draft_block')).toBeTruthy();
+    const queueClear = mockUpdates.find((u) => u.table === 'call_log'
+      && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_quarantine_pending'"));
+    expect(queueClear).toBeTruthy();
+  });
 });
 
 describe('callSideBlockForEstimateData (live token + linkage compare)', () => {
@@ -309,6 +357,108 @@ describe('callSideBlockForEstimateData (live token + linkage compare)', () => {
   test('a transient error still fails closed', async () => {
     const dbc = dbcFor({ callRow: null, throwOnCall: true });
     expect(await callSideBlockForEstimateData(dbc, DATA())).toBe('call_verdict_unavailable');
+  });
+});
+
+describe('callPassStillOwned — the every-call-origin-insert fence', () => {
+  const dbcFor = (callRow) => (table) => {
+    const b = {};
+    b.where = () => b;
+    b.first = async () => (table === 'call_log' ? callRow : null);
+    return b;
+  };
+  const ROW = (generation, token = null) => ({ processing_token: token, processing_generation: generation });
+
+  test('no pass identity at all = nothing to compare — owned (legacy entry points)', async () => {
+    const { callPassStillOwned } = require('../utils/estimate-claim-sql');
+    expect(await callPassStillOwned(dbcFor(ROW(7)), 'call-1', {})).toBe(true);
+  });
+
+  test('a live token match is in-flight me — owned', async () => {
+    const { callPassStillOwned } = require('../utils/estimate-claim-sql');
+    expect(await callPassStillOwned(dbcFor(ROW(7, 'tok-a')), 'call-1', {
+      ownerProcToken: 'tok-a', ownerProcGeneration: null,
+    })).toBe(true);
+  });
+
+  test('same generation with the token gone = my own finalization — still owned', async () => {
+    const { callPassStillOwned } = require('../utils/estimate-claim-sql');
+    expect(await callPassStillOwned(dbcFor(ROW(7)), 'call-1', {
+      ownerProcToken: 'tok-gone', ownerProcGeneration: 7,
+    })).toBe(true);
+  });
+
+  test('a NEWER generation = a later pass claimed since — not owned', async () => {
+    const { callPassStillOwned } = require('../utils/estimate-claim-sql');
+    expect(await callPassStillOwned(dbcFor(ROW(8)), 'call-1', {
+      ownerProcToken: 'tok-gone', ownerProcGeneration: 7,
+    })).toBe(false);
+  });
+
+  test('a missing call row is never owned — no provenance to insert against', async () => {
+    const { callPassStillOwned } = require('../utils/estimate-claim-sql');
+    expect(await callPassStillOwned(dbcFor(null), 'call-1', {
+      ownerProcToken: 'tok-a', ownerProcGeneration: 7,
+    })).toBe(false);
+  });
+});
+
+describe('generation fence + call-lock wiring (source pins)', () => {
+  // The creators' fences and the reservation's call lock live inside heavily
+  // mocked transactions no unit suite executes end-to-end — pin the wiring in
+  // source. Full-source indexOf ordering, never slices (a 600-char slice
+  // truncated a predicate pin in a prior round and silently pinned nothing).
+  const fs = require('fs');
+  const path = require('path');
+  const src = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('createDraftEstimate fences EVERY call-origin insert, before the sid/stamp branch', () => {
+    const source = src('../services/estimator-engine/draft-builder.js');
+    const fenceAt = source.indexOf('callPassStillOwned(trx, call.id');
+    expect(fenceAt).toBeGreaterThan(-1);
+    expect(source).toContain("reason: 'stale_processing_generation'");
+    // After the rejected check (whose lockCallRow holds the row for the
+    // compare), before the sid/stamp-only linkage branch — matched FROM the
+    // fence (the same predicate string appears earlier in the guarded
+    // lead-link writer).
+    expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(fenceAt);
+    expect(source.indexOf("['sid', 'stamp'].includes(context?.leadLinkage)", fenceAt)).toBeGreaterThan(fenceAt);
+  });
+
+  test('the commercial scaffold carries the same fence', () => {
+    const source = src('../services/estimator-engine/commercial-proposal.js');
+    const fenceAt = source.indexOf('callPassStillOwned(trx, call.id');
+    expect(fenceAt).toBeGreaterThan(-1);
+    expect(source).toContain("staleLinkage: 'stale_processing_generation'");
+    expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(fenceAt);
+    expect(source.indexOf("['sid', 'stamp'].includes(context?.leadLinkage)", fenceAt)).toBeGreaterThan(fenceAt);
+  });
+
+  test('slot reservation locks the call row FOR UPDATE before its verdict and holds it through the commit', () => {
+    const source = src('../services/slot-reservation.js');
+    const lockAt = source.indexOf("trx('call_log').where({ id: eng.callLogId }).forUpdate()");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(lockAt).toBeLessThan(source.indexOf('callSideBlockForEstimateData(trx, reservationData)'));
+  });
+
+  test('the reconcile-only entry enumerates EVERY live same-call draft', () => {
+    // Historical races can leave several uninvalidated estimates carrying
+    // one callLogId; a singular lookup reconciled one arbitrary row and
+    // left the rest with live public tokens.
+    const source = src('../services/estimator-engine/index.js');
+    const entryAt = source.indexOf('async function reconcileDraftLinksForCall');
+    expect(entryAt).toBeGreaterThan(-1);
+    expect(source.indexOf('strictExistingDraftForCall(callLogId)', entryAt)).toBeGreaterThan(entryAt);
+    expect(source.indexOf('reconcileAllDraftLinks(existingRows', entryAt)).toBeGreaterThan(entryAt);
+    // ANY row's 'error' keeps the caller's durable retry marker.
+    expect(source).toContain("if (rowOutcome === 'error') outcome = 'error'");
+  });
+
+  test('the booking pre-draft delegation carries a pass identity', () => {
+    const processor = src('../services/call-recording-processor.js');
+    const hookAt = processor.indexOf('maybePreDraftForBooking(preDraftBookingId, {');
+    expect(hookAt).toBeGreaterThan(-1);
+    expect(processor.indexOf('ownerProcGeneration: procGeneration', hookAt)).toBeGreaterThan(hookAt);
   });
 });
 

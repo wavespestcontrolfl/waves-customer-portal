@@ -420,6 +420,17 @@ async function reserveSlot({
         const eng = reservationData?.estimatorEngine;
         if (eng?.callLogId) {
           const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+          // Lock the call row and HOLD it through the reservation commit
+          // (codex P1, PR #3304 — generation-rework GH round), mirroring
+          // the deposit-confirm and manual-acceptance paths: with only an
+          // awaited read, a linkage correction starting after the verdict
+          // returned could repoint the call while its estimate
+          // invalidation waited on our estimate row lock — the hold would
+          // then commit for the just-invalidated estimate and consume real
+          // capacity until expiry. Lock order holds: occupancy rung →
+          // estimates → call_log; no leads lock is taken in this txn, so
+          // no cycle with the processor's leads → call_log writers.
+          await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
           const blocked = estimate.archived_at || eng.linkage_invalidated_at
             || eng.invalidation_pending_at
             || await callSideBlockForEstimateData(trx, reservationData);

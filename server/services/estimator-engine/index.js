@@ -1076,6 +1076,18 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
         continue;
       }
+      // Only an explicitly RE-OBSERVED conflict may replay the forced
+      // invalidation (codex P1, PR #3304 — generation-rework GH round): a
+      // transient context failure (customer_lookup_unavailable,
+      // no_usable_transcript, a thrown build) proves nothing about the
+      // conflict, and replaying the OBSOLETE queued verdict would archive
+      // every current draft — including a valid replacement a newer pass
+      // composed after re-qualifying the call. DEFER instead: the queue
+      // entry itself keeps every creator and public guard failing closed
+      // ('call_quarantine_pending') until a sweep can actually re-verify.
+      const reObserved = ['email_matches_existing_customer', 'email_identity_conflict']
+        .includes(freshContext?.error);
+      if (!reObserved) continue;
     }
     const outcome = await invalidateDraftForCall(row.id, {
       reason: pending.reason,
@@ -1827,8 +1839,16 @@ function generateEstimateSafely(engineInput) {
 async function reconcileDraftLinksForCall(callLogId) {
   if (!callLogId) return null;
   try {
-    const existing = await existingDraftForCall(callLogId);
-    if (!existing) return null;
+    // EVERY live same-call row (codex P1, PR #3304 — generation-rework GH
+    // round): historical races — duplicates that predate the serialized
+    // creator — can leave several uninvalidated estimates carrying this
+    // callLogId, and the singular lookup reconciled one arbitrary row
+    // while the rest kept permanent public tokens and stale lead links.
+    // Same strict enumeration the forced-quarantine path uses; a lookup
+    // failure throws to the outer catch, whose 'error' keeps the durable
+    // retry marker.
+    const existingRows = await strictExistingDraftForCall(callLogId);
+    if (!existingRows.length) return null;
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
@@ -1861,13 +1881,27 @@ async function reconcileDraftLinksForCall(callLogId) {
       }
       const fallback = await callLinkageContext(callLogId);
       if (!fallback) return null;
-      return await reconcileExistingDraftLinks(existing, fallback);
+      return await reconcileAllDraftLinks(existingRows, fallback);
     }
-    return await reconcileExistingDraftLinks(existing, context);
+    return await reconcileAllDraftLinks(existingRows, context);
   } catch (err) {
     logger.warn(`[estimator-engine] reconcile-only pass failed for call ${callLogId}: ${err.message}`);
     return 'error';
   }
+}
+
+// Reconcile every enumerated same-call row; ANY row's 'error' makes the
+// whole pass 'error' so the caller's durable retry marker survives and the
+// full set is retried (the per-row reconcile is idempotent — a row already
+// marked by a peer returns early on its marker).
+async function reconcileAllDraftLinks(rows, context) {
+  let outcome = null;
+  for (const row of rows) {
+    const rowOutcome = await reconcileExistingDraftLinks(row, context);
+    if (rowOutcome === 'error') outcome = 'error';
+    else if (outcome !== 'error' && rowOutcome) outcome = rowOutcome;
+  }
+  return outcome;
 }
 
 // Minimal reconcile context built from the CALL ROW alone — the durable

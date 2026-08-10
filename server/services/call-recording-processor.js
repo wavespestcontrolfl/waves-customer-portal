@@ -11551,7 +11551,16 @@ const CallRecordingProcessor = {
           const preDraftBookingId = appointmentResult.scheduledServiceId;
           void (estimatorEnginePromise || Promise.resolve())
             .catch(() => {})
-            .then(() => maybePreDraftForBooking(preDraftBookingId))
+            // THIS pass's identity rides the delegation (codex P1, PR
+            // #3304 — generation-rework GH round): the hook runs after the
+            // engine promise settles — often after finalization clears the
+            // token — and without the generation the delegated pass-start
+            // clear could not retire this pass's own (or an older)
+            // generation-stamped draft block.
+            .then(() => maybePreDraftForBooking(preDraftBookingId, {
+              ownerProcToken: procToken,
+              ownerProcGeneration: procGeneration,
+            }))
             .then((outcome) => {
               if (outcome?.drafted) {
                 logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);

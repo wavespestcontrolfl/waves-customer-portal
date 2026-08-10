@@ -428,6 +428,22 @@ async function maybeBuildCommercialProposalDraft({
           const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
           if (rejected) return { staleLinkage: rejected };
         }
+        // GENERATION fence for EVERY call-origin insert — commercial
+        // scaffolds included (codex P1, PR #3304 — generation-rework GH
+        // round, mirrors the residential creator): lead-less and
+        // phone_touched contexts never reach the sid/stamp comparison
+        // below, so an older detached composer resuming after a newer
+        // pass finalized could insert a stale scaffold that pass's
+        // reconcile-only sweep had already found nothing to fix. The
+        // call row is locked above and held through the insert.
+        {
+          const { callPassStillOwned } = require('../../utils/estimate-claim-sql');
+          const stillOwned = await callPassStillOwned(trx, call.id, {
+            ownerProcToken: context?.ownerProcToken || null,
+            ownerProcGeneration: context?.ownerProcGeneration ?? null,
+          });
+          if (!stillOwned) return { staleLinkage: 'stale_processing_generation' };
+        }
         if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
           const { staleCallLinkageReason } = require('../admin-estimate-persistence');
           const staleReason = await staleCallLinkageReason(trx, {

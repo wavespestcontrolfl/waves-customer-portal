@@ -58,6 +58,26 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   return false;
 }
 
+// Pass-identity fence for CALL-ORIGIN inserts (codex P1, PR #3304 —
+// generation-rework GH round). Fence doctrine: token match = in-flight me;
+// SAME generation = no newer claim since mine (survives this pass's own
+// finalization). A composer carrying NEITHER identity (legacy entry
+// points) has nothing to compare — it keeps its caller's existing
+// behavior, so this returns owned. A MISSING call row is never owned:
+// there is no provenance left to insert against. Callers must already
+// hold the call row lock (and keep holding it through their insert) or
+// the compare proves nothing.
+async function callPassStillOwned(dbc, callLogId, { ownerProcToken = null, ownerProcGeneration = null } = {}) {
+  if (!ownerProcToken && ownerProcGeneration == null) return true;
+  const row = await dbc('call_log')
+    .where({ id: callLogId })
+    .first('processing_token', 'processing_generation');
+  if (!row) return false;
+  return (!!ownerProcToken && row.processing_token === ownerProcToken)
+    || (ownerProcGeneration != null && row.processing_generation != null
+      && Number(row.processing_generation) === Number(ownerProcGeneration));
+}
+
 // The DURABLE call-side verdict as seen from an ESTIMATE row: when a
 // quarantine could not write its estimate-side marker, the block lives on
 // the call, and the public surfaces — which only ever read the estimate —
@@ -128,5 +148,6 @@ module.exports = {
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
   callReprocessInFlight,
+  callPassStillOwned,
   callSideBlockForEstimateData,
 };
