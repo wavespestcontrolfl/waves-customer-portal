@@ -179,6 +179,23 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(aliasCity.needsConfirmation).toContain('missing_unit_number');
   });
 
+  test('the canonical record already HAS the unit (V2 dropped it) → no ask', () => {
+    // Dedicated legacy line 2.
+    const line2 = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', address_line2: 'Unit 104', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(line2.needsConfirmation).not.toContain('missing_unit_number');
+    // Unit inline on the street line.
+    const inline = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct Apt 104', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(inline.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
   test('V1 heard no street → NO unit ask even when the V2 pass flagged it (nothing on the record to attach it to)', () => {
     const out = deriveCallReviewBridge({
       addressValidation: UNIT_AV(),

@@ -425,6 +425,14 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
  */
 function unitAskCorroborated(av, extracted = {}) {
   if (!isMissingUnitNumber(av)) return false;
+  // The canonical record may already HAVE the unit — V2 simply dropped it
+  // when it built the string AV validated (codex r14 P1). Asking the office
+  // to collect a unit already on the record files a permanent, unanswerable
+  // task. Covers both shapes: a dedicated legacy line 2 and a unit peeled
+  // out of the street line itself ("100 Example Condo Ct Apt 4").
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  if (String(extracted.address_line2 || '').trim()) return false;
+  if (splitStreetLineUnit(extracted.address_line1).unit) return false;
   const avKey = streetCompareKey(av?.normalized?.street_line_1);
   const legacyKey = streetCompareKey(extracted.address_line1);
   if (!avKey || !legacyKey || avKey !== legacyKey) return false;
