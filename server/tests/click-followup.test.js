@@ -31,6 +31,7 @@ jest.mock('../services/messaging/validators/suppression', () => ({
 }));
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => null),
@@ -423,6 +424,18 @@ describe('runQueue — gate + suppression', () => {
 
   test('known-landline (cached line type) → dismissed', async () => {
     readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    enqueue('short_code_clicks as scc', { rows: [makeClick()] });
+    enqueue('estimates', { first: makeEstimate() });
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] });
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.dismissed).toBe(1);
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('known-fixedVoip (cached line type) → dismissed like a landline', async () => {
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
     enqueue('short_code_clicks as scc', { rows: [makeClick()] });
     enqueue('estimates', { first: makeEstimate() });
     enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] });

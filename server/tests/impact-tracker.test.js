@@ -146,6 +146,100 @@ describe('etDayAnchor — ET-safe window math', () => {
   });
 });
 
+describe('launchVerdict — net-new pages, no baseline to diff against', () => {
+  const { launchVerdict } = tracker;
+  const L = (impressions, clicks, position) => launchVerdict({ window: { impressions, clicks, position } });
+
+  test('a real launch that earns traffic reads as improved', () => {
+    // The prod page that exposed this: 8,283 impressions, filed as
+    // insufficient_data by the diff regime because it had no "before".
+    expect(L(8283, 120, 8).verdict).toBe('improved');
+    expect(L(166, 3, 14).verdict).toBe('improved');
+  });
+
+  test('impressions alone are enough when the page is actually ranking', () => {
+    expect(L(60, 0, 12).verdict).toBe('improved');
+  });
+
+  test('registered but going nowhere is neutral, not a failure to measure', () => {
+    expect(L(60, 0, null).verdict).toBe('neutral');   // volume, no rank, no clicks
+    expect(L(60, 0, 55).verdict).toBe('neutral');     // ranking too deep to matter
+    expect(L(10, 2, 9).verdict).toBe('neutral');      // clicks prove it is real, volume too thin to call
+  });
+
+  test('genuinely nothing yet is insufficient_data', () => {
+    expect(L(0, 0, null).verdict).toBe('insufficient_data');
+    expect(L(12, 0, null).verdict).toBe('insufficient_data');
+  });
+
+  test('NEVER regressed — pausedBuckets counts those, and a dud launch must not pause a lane', () => {
+    const matrix = [[0, 0, null], [5, 0, 90], [60, 0, null], [8283, 120, 1], [29, 0, 3], [30, 0, 21]];
+    for (const [i, c, pos] of matrix) expect(L(i, c, pos).verdict).not.toBe('regressed');
+  });
+
+  test('confidence reflects volume, and lift stays null (a diff-regime concept)', () => {
+    expect(L(200, 5, 3).confidence).toBe(1);
+    expect(L(50, 0, 10).confidence).toBe(0.25);
+    expect(L(8283, 120, 8).estimated_lift_position).toBeNull();
+    expect(L(8283, 120, 8).estimated_lift_clicks_pct).toBeNull();
+  });
+});
+
+describe('computeVerdict routing — chosen by the DATA, never by action_type', () => {
+  test('ZERO baseline presence → launch regime, so a page that earned traffic is graded', () => {
+    expect(computeVerdict({
+      baseline: { impressions: 0, clicks: 0, position: 0 },
+      window: { impressions: 900, clicks: 20, position: 6 },
+      controlDeltas: [],
+    }).verdict).toBe('improved');
+  });
+
+  test('a THIN but present baseline is NOT a launch — a decline there must not read as improved', () => {
+    // 29 impressions is thin, not absent. Grading it on absolute window
+    // traffic would call this decline (pos 5 -> 25, clicks 3 -> 1) an
+    // improvement, clear its lift, and disable regression pausing for it.
+    const r = computeVerdict({
+      baseline: { impressions: 29, clicks: 3, position: 5 },
+      window: { impressions: 40, clicks: 1, position: 25 },
+      controlDeltas: [{ position_delta: 0, clicks_pct: 0 }],
+    });
+    expect(r.verdict).toBe('insufficient_data');
+    expect(r.verdict).not.toBe('improved');
+  });
+
+  test('isEmptyBaseline is zero on EVERY axis, not just impressions', () => {
+    const { isEmptyBaseline } = tracker;
+    expect(isEmptyBaseline({ impressions: 0, clicks: 0, position: 0 })).toBe(true);
+    expect(isEmptyBaseline({})).toBe(true);
+    expect(isEmptyBaseline({ impressions: 0, clicks: 0, position: 18 })).toBe(false);
+    expect(isEmptyBaseline({ impressions: 0, clicks: 2, position: 0 })).toBe(false);
+    expect(isEmptyBaseline({ impressions: 5, clicks: 0, position: 0 })).toBe(false);
+  });
+
+  test('a page WITH a real baseline is never treated as a launch, even if it declined', () => {
+    // The trap: new_supporting_blog can UPDATE an existing slug, so routing on
+    // action_type would ignore this 2,000-impression baseline and score an
+    // obvious decline as a successful launch.
+    const r = computeVerdict({
+      baseline: { position: 6, clicks: 300, impressions: 2000 },
+      window: { position: 22, clicks: 40, position_: null, impressions: 1500 },
+      controlDeltas: [{ position_delta: 0, clicks_pct: 0 }, { position_delta: 0, clicks_pct: 2 }],
+    });
+    expect(r.verdict).toBe('regressed');
+    expect(r.estimated_lift_position).not.toBeNull();
+  });
+
+  test('a REFRESH still gets the control-adjusted diff regime', () => {
+    const r = computeVerdict({
+      baseline: { position: 15, clicks: 50, impressions: 2000 },
+      window: { position: 10, clicks: 80, impressions: 2200 },
+      controlDeltas: [{ position_delta: 0, clicks_pct: 5 }, { position_delta: 0, clicks_pct: 0 }],
+    });
+    expect(r.verdict).toBe('improved');
+    expect(r.estimated_lift_position).not.toBeNull();
+  });
+});
+
 describe('computeVerdict (diff-in-diff)', () => {
   const ctrlFlat = [{ position_delta: 0, clicks_pct: 5 }, { position_delta: 0, clicks_pct: 0 }];
 
@@ -190,7 +284,7 @@ describe('computeVerdict (diff-in-diff)', () => {
     expect(r.estimated_lift_position).toBeLessThanOrEqual(-3);
   });
 
-  test('thin baseline impressions → insufficient_data', () => {
+  test('thin baseline impressions → insufficient_data (unchanged: thin is not absent)', () => {
     const r = computeVerdict({
       baseline: { position: 15, clicks: 2, impressions: 12 },
       window: { position: 9, clicks: 5, impressions: 20 },
@@ -322,6 +416,44 @@ describe('sweepNewlyLive', () => {
     // skipped (null), never a cross-network aggregate.
     expect(cohort[0].baseline.site).toBeNull();
     expect(result).toEqual({ created: 1, scanned: 1 });
+  });
+});
+
+describe('selectControlPages — zero-baseline guard', () => {
+  // 2026-08-08: all 28 impact rows showed count:0 controls. Root cause was the
+  // 0.4x–2.5x band around a zero launch baseline — [0, 0] excludes every page
+  // by construction, so the query was a guaranteed-empty scan that read as
+  // "control selection broken". Launches never use controls; skip the work.
+  test('a launch-regime page (0 baseline impressions) returns [] without querying', async () => {
+    const database = jest.fn(() => { throw new Error('db must not be queried for a zero-impression baseline'); });
+    await expect(tracker.selectControlPages(database, {
+      pageUrl: '/blog/new-page/',
+      serviceCategory: 'pest',
+      cityTarget: null,
+      baselineImpressions: 0,
+      startDate: '2026-07-01',
+      endDate: '2026-07-28',
+    })).resolves.toEqual([]);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('a real baseline still queries, band-filters, and excludes optimized pages', async () => {
+    const sums = [
+      { page_url: '/a/', impressions: 50 },   // in band [40, 250]
+      { page_url: '/b/', impressions: 400 },  // out of band
+      { page_url: '/c/', impressions: 90 },   // in band but already optimized
+    ];
+    const database = jest.fn((table) => (table === 'gsc_pages'
+      ? chain({ sumResult: sums })
+      : chain({ selectResult: [{ page_url: '/c/' }] })));
+    await expect(tracker.selectControlPages(database, {
+      pageUrl: '/blog/target/',
+      serviceCategory: null,
+      cityTarget: null,
+      baselineImpressions: 100,
+      startDate: '2026-07-01',
+      endDate: '2026-07-28',
+    })).resolves.toEqual(['/a/']);
   });
 });
 

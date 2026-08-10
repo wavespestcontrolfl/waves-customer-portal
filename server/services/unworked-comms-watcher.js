@@ -478,7 +478,11 @@ async function loadUnansweredThreads(cutoff = new Date()) {
     -- Applied AFTER the latest-row selection (codex r34/r46): a closing
     -- "Thanks!" retires the conversation instead of being filtered
     -- pre-DISTINCT and resurfacing the older substantive message.
-    WHERE TRIM(COALESCE(l.message_body, '')) !~* '^(thanks?( you| u)?|thank you( so much| very much)?|ty|tysm|got it|perfect|great|awesome|ok(ay)?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
+    -- NOTE: regex question-mark quantifiers below are backslash-escaped
+    -- for knex, which consumes bare question marks as positional bindings
+    -- even alongside named bindings (comments included) and fed pg empty
+    -- parameters, failing this whole lane at runtime.
+    WHERE TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
     -- Answered = a HUMAN outbound after the last inbound. Automated
     -- broadcasts (reminders, receipts, review asks) must not clear a
     -- waiting customer (codex #3232 r1).
@@ -760,5 +764,11 @@ async function runUnworkedCommsWatcher(opts = {}) {
 
 module.exports = {
   runUnworkedCommsWatcher,
-  _private: { composeUnworkedCommsDigest },
+  _private: {
+    composeUnworkedCommsDigest,
+    loadCallbackCalls,
+    loadDroppedFollowUps,
+    loadUnansweredThreads,
+    loadOpenServiceRequests,
+  },
 };

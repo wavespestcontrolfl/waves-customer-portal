@@ -120,9 +120,22 @@ function detectServiceCategory(serviceType) {
   if (treeShrubToken && !lawnSurfaceToken && !s.includes('mosquito') && !s.includes('termite') && !s.includes('wdo')) return 'tree_shrub';
   if (s.includes('lawn') || s.includes('turf') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
   if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona')) return 'termite';
+  // Drill-and-foam termite forms only ("Foam Drill", "Drill-and-Foam",
+  // "Recurring Foam Treatment (Quarterly)", foam_drill / foam_recurring,
+  // Termidor Foam) — these carry no "termite" token of their own and fell
+  // through to 'pest'. Deliberately NOT a bare 'foam' substring: foam
+  // sealant is rodent-exclusion material, and "Rodent Exclusion — Foam
+  // Sealing" must reach the rodent branch below (codex 2026-08-08 P1).
+  const foamTermiteToken = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring|termidor[\s_-]*foam/.test(s);
+  if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona') || foamTermiteToken) return 'termite';
   if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole')) return 'rodent';
+  // 'bird box' / 'roof-entry' are rodent-exclusion hardware: the catalog
+  // row "Roof-entry cover / bird box" (rodent_bird_box) carries no rodent
+  // token of its own.
+  // 'trap-only' is the retainer product family ('Standard Trap-Only
+  // Retainer' carries no rodent token). Deliberately NOT bare 'trap' —
+  // that would steal Wildlife Trapping from specialty.
+  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole') || s.includes('bird box') || s.includes('roof-entry') || /trap[\s_-]*only/.test(s)) return 'rodent';
   if (s.includes('callback') || s.includes('re-treat')) return 'callback';
   return 'pest';
 }

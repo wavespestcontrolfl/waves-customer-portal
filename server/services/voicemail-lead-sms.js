@@ -41,7 +41,7 @@ const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { readCachedLineType, cacheLineType, lookupLineType } = require('./messaging/validators/line-type');
+const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 // createShortCode (NOT shortenOrPassthrough): the prefill link carries a
 // bearer token, so a shorten failure must fail closed — never fall back to
@@ -233,15 +233,26 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
       lineType = await lookupLineType(phone);
       if (lineType) await cacheLineType(phone, lineType);
     }
-    if (lineType === 'landline') {
-      await stampStatus(leadId, 'blocked');
-      await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
-      await logActivity(leadId, 'note', 'Quote-link text-back skipped — caller number is a landline', {
+    if (NON_SMS_LINE_TYPES.has(lineType)) {
+      if (lineType === 'landline') {
+        await stampStatus(leadId, 'blocked');
+        await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
+      } else {
+        // fixedVoip is a REVERSIBLE block (LINETYPE_BLOCK_FIXED_VOIP): no text
+        // was sent, so releasing BOTH claims keeps the one-text-per-phone
+        // invariant while letting a future voicemail re-evaluate under the
+        // then-current set. A 'blocked' lead stamp would wedge the reused open
+        // lead row at the claim predicate; the activity note is the audit
+        // trail instead.
+        await clearLeadClaim(leadId);
+        await releasePhoneClaim(phone);
+      }
+      await logActivity(leadId, 'note', `Quote-link text-back skipped — caller number is a ${lineType}`, {
         message_type: MESSAGE_TYPE,
-        reason: 'landline',
+        reason: lineType,
       });
-      logger.info(`[voicemail-sms] Skipping ${maskPhone(phone)} — landline`);
-      return { sent: false, skipped: 'landline' };
+      logger.info(`[voicemail-sms] Skipping ${maskPhone(phone)} — ${lineType}`);
+      return { sent: false, skipped: lineType };
     }
   } catch (e) {
     logger.warn(`[voicemail-sms] line-type pre-check failed (continuing): ${e.message}`);

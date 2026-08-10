@@ -837,7 +837,12 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // server re-derives them; these are stripped from both the transient recompute
 // input AND every stored replay shape so a later public reprice
 // (extractEngineInputs) can't restore a forged value.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer'];
+// treeShrubPricingKnobs overrides DB-authoritative pricing_config values, so
+// a browser-supplied one would let a save price off knobs the admin never
+// set (or a stale pre-flip preview). It is stripped here like every other
+// client-claimed pricing identity and re-derived server-side ONLY when the
+// caller declares a replay of an already-persisted estimate.
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -941,6 +946,25 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const storedManual = require('./estimate-manual-discount-replay')
       .storedManualDiscountForReplay(estimateData);
     if (storedManual) v1Input.manualDiscount = storedManual;
+  }
+
+  // Saved Tree & Shrub knob state (v4.7), REPLAY PATHS ONLY. This recompute
+  // is authoritative — membership-lapse reconciliation replaces the stored
+  // result and totals with it — so replaying an already-SENT quote must
+  // reuse its quote-time knobs, or an admin flip between send and reconcile
+  // would re-price it well beyond the intended membership change.
+  //
+  // But `estimateData` is browser-controlled on create/revision saves, and
+  // these knobs override DB-authoritative pricing_config: honoring a
+  // submitted snapshot there would let a save price off knobs the admin
+  // never set. So the caller must DECLARE a persisted-estimate replay
+  // (replaySavedPricingKnobs), the client-claimed value is always stripped
+  // above, and every other save prices off freshly synced live config and
+  // stamps the resulting server values afterward.
+  if (deps.replaySavedPricingKnobs === true) {
+    const tsKnobs = require('./estimate-tree-shrub-knob-replay')
+      .treeShrubKnobSignalForReplay(estimateData);
+    if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
   }
 
   try {
