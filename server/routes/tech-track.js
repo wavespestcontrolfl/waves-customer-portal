@@ -616,7 +616,16 @@ async function markLaneForService(svc) {
     const data = record?.service_data
       ? (typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data)
       : null;
-    if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) frozen = data;
+    // Frozen ONLY when the add-on lines actually froze too (codex P2 r6).
+    // Completion's add-on freezer is fail-soft, so a record can carry
+    // completedServiceKey with no completedAddonLines; treating that partial
+    // record as fully frozen left addonVerdicts empty and blocked the live
+    // fallback — reporting supported:false on a foam-add-on visit whose pins
+    // are already customer-visible, so the tech could neither edit nor clear
+    // them. report-data falls back to live add-ons in exactly this case.
+    if (data
+      && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')
+      && Array.isArray(data.completedAddonLines)) frozen = data;
   } catch { /* fall through to the live resolution below */ }
 
   let primaryKey = null;

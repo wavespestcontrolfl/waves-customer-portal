@@ -25,6 +25,24 @@ function photoMarksGateOn() {
   return process.env[GATE_ENV] === 'true';
 }
 
+/**
+ * PDF storage-key component for the marks gate (codex P2).
+ *
+ * The report PDF cache key is content-INSENSITIVE, so flipping GATE_PHOTO_MARKS
+ * off would NOT remove the card from an already-cached PDF — the kill switch
+ * would clear the live payload while direct downloads kept serving the marked
+ * document indefinitely. A revoke that doesn't revoke is worse than no gate.
+ *
+ * Empty while the gate is off, so pre-flip keys are untouched and no
+ * fleet-wide cache bust occurs; each affected record re-renders exactly once
+ * on its next open, in BOTH directions. Must ride in every composition site
+ * that builds the visibility signature (pdf-queue renderAndStore + getOrRender,
+ * reports-public expected + store), same rule as the time-on-site component.
+ */
+function photoMarksPdfSignature() {
+  return photoMarksGateOn() ? '-pm1' : '';
+}
+
 // ── Vocabulary ───────────────────────────────────────────────────────────────
 // Each kind maps to a value the lane's completion form can hold. `derivedFrom`
 // is documentation with teeth: it names the recorded value the legend label is
@@ -74,8 +92,20 @@ function markKindLabel(kind) {
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────
+// Only a real number, or a numeric STRING, is a coordinate.
+//
+// Number() is far too generous for this input (codex P2 r6): a client that
+// serializes a failed measurement as NaN sends JSON `null`, and Number(null)
+// is 0 — likewise Number('') === 0 and Number(true) === 1. Coercing those
+// would accept a fabricated point at an edge of the photo and publish it as
+// customer-facing treatment evidence at a location nobody treated. Reject
+// before coercion instead.
 function finiteNumber(value) {
-  const n = typeof value === 'number' ? value : Number(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -240,6 +270,7 @@ function buildMarkedPhotoContext({ marks = [], eligibility = null } = {}) {
 
 module.exports = {
   photoMarksGateOn,
+  photoMarksPdfSignature,
   markKindsForLane,
   defaultKindForLane,
   laneSupportsMarks,

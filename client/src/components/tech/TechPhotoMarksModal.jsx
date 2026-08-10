@@ -215,9 +215,14 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
                     boxShadow: '0 0 0 2px rgba(8,20,28,.55)',
                   }}
                   />
+                  {/* Same edge handling as the customer card (codex P2): the
+                      frame clips overflow, so a mark near the top edge lost
+                      its badge — and the tech saved it without ever seeing
+                      the final pin. The dot stays on the exact point. */}
                   <span style={{
-                    position: 'absolute', left: '50%', bottom: 13,
-                    transform: 'translateX(-50%)',
+                    position: 'absolute', left: '50%',
+                    ...(mark.y < 0.08 ? { top: 13 } : { bottom: 13 }),
+                    transform: `translateX(${mark.x < 0.04 ? '-10%' : (mark.x > 0.96 ? '-90%' : '-50%')})`,
                     minWidth: 25, height: 25, padding: '0 6px', borderRadius: 999,
                     border: '2px solid rgba(255,255,255,.94)',
                     background: KIND_COLOR[mark.kind] || DEFAULT_COLOR,

@@ -374,6 +374,45 @@ describe('a foam ADD-ON makes the visit a photo lane', () => {
   });
 });
 
+describe('coordinate validation rejects rather than coerces', () => {
+  // Number(null) is 0, Number('') is 0, Number(true) is 1 — a client that
+  // serialized a failed measurement to null would otherwise publish a
+  // fabricated point at a corner of the photo as treatment evidence
+  // (codex P2 r6).
+  test.each([null, undefined, '', '   ', true, false, [], {}, 'abc'])(
+    'rejects %p as a coordinate',
+    (bad) => {
+      const result = validateMarks([{ x: bad, y: 0.5, kind: 'foam_injection' }], { serviceKey: 'foam_drill' });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/must be numbers/);
+    },
+  );
+
+  test('still accepts numeric strings and genuine zero', () => {
+    const result = validateMarks(
+      [{ x: '0', y: '0.25', kind: 'foam_injection' }],
+      { serviceKey: 'foam_drill' },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.marks[0]).toMatchObject({ x: 0, y: 0.25 });
+  });
+});
+
+describe('the marks gate keys the PDF cache', () => {
+  const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
+
+  test('empty while dark, so pre-flip keys are untouched', () => {
+    withGate(undefined, () => expect(photoMarksPdfSignature()).toBe(''));
+    withGate('false', () => expect(photoMarksPdfSignature()).toBe(''));
+  });
+
+  test('present when live, so a revoke actually removes the card', () => {
+    // Without this the kill switch would clear the live payload while cached
+    // PDFs kept serving the marked document indefinitely (codex P2 r6).
+    withGate('true', () => expect(photoMarksPdfSignature()).toBe('-pm1'));
+  });
+});
+
 describe('traceFeedFields — the schedule/dispatch tracer affordance', () => {
   // traceEligible means "offer the SATELLITE tracer". A photo lane is mapped
   // by marking a photo, so offering the tracer is a dead end: the capture

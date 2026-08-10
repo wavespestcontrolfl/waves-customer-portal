@@ -22,6 +22,15 @@ import {
 // is present in the PDF at all: it pins against OUR photo rather than a
 // satellite basemap, so no provider-ToS reason to withhold it.
 
+// Keeps a badge inside the frame when its point sits near a side edge. The
+// badge is ~25px wide, so half of it plus breathing room is about 3% of a
+// typical card width.
+function edgeShift(x) {
+  if (x < 0.04) return '-10%';
+  if (x > 0.96) return '-90%';
+  return '-50%';
+}
+
 export default function MarkedPhotoCard({ marked, live = true }) {
   const stageRef = useRef(null);
   const [pinsLive, setPinsLive] = useState(false);
@@ -114,18 +123,27 @@ export default function MarkedPhotoCard({ marked, live = true }) {
                 boxShadow: '0 0 0 2px rgba(8,20,28,.55)',
               }}
             />
+            {mark.y >= 0.08 && (
+              <span
+                style={{
+                  position: 'absolute', left: '50%', bottom: 3,
+                  width: 2, height: 11, marginLeft: -1,
+                  background: 'rgba(255,255,255,.9)',
+                  boxShadow: '0 0 3px rgba(6,16,24,.6)',
+                }}
+              />
+            )}
+            {/* The badge sits ~38px above the point, and the frame clips
+                overflow — so a drill point near the top edge lost its number
+                entirely (codex P2). Near the top it flips BELOW the point;
+                near a side it shifts inward. The dot itself never moves, so
+                the mark still lands exactly where the technician placed it. */}
             <span
               style={{
-                position: 'absolute', left: '50%', bottom: 3,
-                width: 2, height: 11, marginLeft: -1,
-                background: 'rgba(255,255,255,.9)',
-                boxShadow: '0 0 3px rgba(6,16,24,.6)',
-              }}
-            />
-            <span
-              style={{
-                position: 'absolute', left: '50%', bottom: 13,
-                transform: 'translateX(-50%)',
+                position: 'absolute',
+                left: '50%',
+                ...(mark.y < 0.08 ? { top: 13 } : { bottom: 13 }),
+                transform: `translateX(${edgeShift(mark.x)})`,
                 minWidth: 25, height: 25, padding: '0 6px',
                 borderRadius: 999, border: '2px solid rgba(255,255,255,.94)',
                 background: markColor(mark.kind),
