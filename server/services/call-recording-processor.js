@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, recordCarriesUnit } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -6245,11 +6245,6 @@ const CallRecordingProcessor = {
     let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
-    // Did THIS pass conclude the call still needs a unit collected? Set by
-    // whichever lane ran; consumed by the same-call reconciliation below,
-    // which closes a stale card from an earlier pass when this one says the
-    // ask no longer applies.
-    let unitAskFiledThisPass = false;
     let v2ApprovedExtraction = null;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
@@ -6522,7 +6517,6 @@ const CallRecordingProcessor = {
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-          if (finalFlags.includes('missing_unit_number')) unitAskFiledThisPass = true;
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -7408,57 +7402,22 @@ const CallRecordingProcessor = {
       }
     }
 
-    // SAME-CALL unit-ask reconciliation. Evidence re-derived from THIS EXACT
-    // call IS attributable to the ask this call filed — precisely what the
-    // rejected cross-call resolver could never establish, since a later
-    // call's unit may belong to a different door. So a stale card from an
-    // earlier pass of this same call_log_id can be closed here.
+    // NOTE — no same-call auto-reconciliation of the unit ask. It was built
+    // (codex asked for it: evidence re-extracted from THIS call IS
+    // attributable to THIS call's ask, unlike a later call's) and then
+    // removed, because every version of it closed an owed task on evidence
+    // that was not yet durable: the reconciliation runs here, while the
+    // customer/lead writes and the final call persistence happen later and
+    // can still fail — leaving the task closed against a dispatch record
+    // that is still unit-less. Reconciling only after those writes would
+    // mean re-reading persisted state and clearing the lead's rolled-up
+    // reason in the same breath, which is a lot of machinery for the narrow
+    // case of an operator force-reprocessing one call.
     //
-    // It requires AFFIRMATIVE evidence, never the mere absence of the flag
-    // (codex r18 P1): this pass not re-filing proves nothing — V2 or AV may
-    // be disabled or unreachable, the extraction may have failed, or the
-    // verdict may be a PREMISE-level accept that says nothing about units.
-    // Only two things actually answer the ask: the merged canonical record
-    // now states a unit, or AV validated this call's address down to the
-    // exact door (SUB_PREMISE) — the same bar suppressAddressFlagsForAV
-    // holds a stale flag to.
-    //
-    // `open` only: an in_progress card is human-claimed and is never
-    // auto-transitioned. Shares the per-call lock + review_status re-sync
-    // contract every other triage writer uses (utils/triage-locks.js).
-    // Best-effort: a failure leaves the card open, the safe direction.
-    const unitSuppliedByThisCall = recordCarriesUnit(extracted)
-      || ((effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
-        && effectiveAddressValidation?.granularity === 'SUB_PREMISE');
-    if (unitSuppliedByThisCall
-        && !unitAskFiledThisPass
-        && !bridgeNeedsConfirmation.includes('missing_unit_number')) {
-      try {
-        await db.transaction(async (trx) => {
-          await lockTriageCall(trx, call.id);
-          const closed = await trx('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'missing_unit_number', status: 'open' })
-            .update({
-              status: 'resolved',
-              resolution_note: 'Auto-resolved: reprocessing this call supplied the unit — it is now on the record, or Address Validation confirmed the exact unit.',
-              resolved_at: new Date(),
-              updated_at: new Date(),
-            });
-          if (!closed) return;
-          const remaining = await trx('triage_items')
-            .where({ call_log_id: call.id })
-            .whereIn('status', ['open', 'in_progress'])
-            .count({ n: '*' })
-            .first();
-          if (Number(remaining?.n || 0) === 0) {
-            await trx('call_log').where({ id: call.id }).update({ review_status: 'resolved', updated_at: new Date() });
-          }
-          logger.info(`[call-proc] same-call unit ask reconciled for ${maskSid(callSid)} (${closed} card(s))`);
-        });
-      } catch (e) {
-        logger.warn(`[call-proc] same-call unit-ask reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
-      }
-    }
+    // The doctrine holds instead: this ask is closed by a human verdict
+    // (AGENTS.md call-pipeline rules). A reprocess that captures the unit
+    // leaves a stale card the office dismisses in one click — the same
+    // flow every other owed-confirmation card already uses.
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
