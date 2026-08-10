@@ -1389,11 +1389,19 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           }
           return blocked();
         }
-        const legacy = await trx('ad_service_attribution')
-          .where({ lead_id: pending.from_lead_id })
-          .whereNull('source_call_id')
-          .first('id');
-        if (legacy) return blocked(); // operator hasn't resolved it yet
+        // The legacy-row block is a FORMER-lead concern: the repoint lane
+        // suppressed its write because the old lead still held an
+        // unprovenanced row an operator must resolve. A rejection-repair
+        // marker (codex P1 r20) has no former lead — there is nothing to
+        // wait on, and an undefined binding would throw the sweep into its
+        // failure lane forever.
+        if (pending.from_lead_id) {
+          const legacy = await trx('ad_service_attribution')
+            .where({ lead_id: pending.from_lead_id })
+            .whereNull('source_call_id')
+            .first('id');
+          if (legacy) return blocked(); // operator hasn't resolved it yet
+        }
         const owner = lockedLead.customer_id || null;
         if (!owner) return blocked(); // unclaimed lead — retry once claimed
         // A marker without a funnel decision has no producer (the r17

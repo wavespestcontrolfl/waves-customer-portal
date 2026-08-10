@@ -282,6 +282,33 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(inserts[0].row).toMatchObject({ lead_id: 'lead-C', customer_id: 'cust-9' });
   });
 
+  test('a REJECTION-REPAIR marker (no from_lead_id) records without touching the legacy-row lane (codex P1 r20)', async () => {
+    // The processor arms this when it clears a no_attribution verdict on a
+    // pass that created no lead: there is no former lead to wait on, and
+    // an undefined binding on the legacy check would throw the sweep into
+    // its failure lane forever.
+    const repair = {
+      to_lead_id: 'lead-B',
+      lead_source: 'waves_website',
+      is_paid: false,
+      detail: 'Sarasota city page',
+      service_interest: 'Pest Control',
+      repair_of_rejection: true,
+    };
+    const md = { attribution_transfer_pending: repair };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    // A legacy row keyed to UNDEFINED must never be consulted.
+    legacyRowByLead[undefined] = { id: 'should-not-be-read' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.failed).toBe(0);
+    expect(s.recorded).toBe(1);
+    expect(inserts[0].row).toMatchObject({ lead_id: 'lead-B', customer_id: 'cust-1', source_call_id: 'call-1' });
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
   test('a stamp-less marker whose target lead is gone/soft-deleted clears — the lock re-applies the live predicate (codex P1 r19)', async () => {
     const pending = { ...PENDING, to_lead_id: 'lead-B' };
     scanRows = [{ id: 'call-1', metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' }];

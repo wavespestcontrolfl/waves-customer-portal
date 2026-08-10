@@ -931,6 +931,9 @@ function customerPhoneMatches(phone, customer = {}) {
 // attribution retire path mirrors this exact gate on phone-matched
 // successors; never re-inline or duplicate it.
 const { LEAD_PIPELINE_STAGES, shouldCreateCallLeadForCustomer } = require('../utils/call-lead-customer-gate');
+// Dialed-number → lead_sources resolution, shared with the finalization
+// rejection-repair branch (codex P1 PR #3303 r20).
+const { resolveCallLeadSource } = require('../utils/call-lead-source');
 
 // Terminal lead statuses (`leads.status`). Mirrors admin-leads.js's own
 // "active lead" definition (status NOT IN these). The customer-less recovery
@@ -8145,28 +8148,19 @@ const CallRecordingProcessor = {
         let leadSourceId = null;
         let leadSourceRow = null;
         try {
-          const digits = (call.to_phone || '').replace(/\D/g, '');
-          const ten = digits.length >= 10 ? digits.slice(-10) : null;
-          const variants = new Set([call.to_phone].filter(Boolean));
-          if (ten) {
-            variants.add(ten);
-            variants.add(`1${ten}`);
-            variants.add(`+1${ten}`);
-            variants.add(`(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`);
+          // Shared with the rejection-repair branch at finalization (codex
+          // P1 r20) — never re-inline the variant matching or the referral
+          // override, or a repaired row lands on a different channel than
+          // the original write.
+          const { row: ls, variants, matchedByNumber } = await resolveCallLeadSource({
+            dbc: db,
+            toPhone: call.to_phone,
+            preferReferral: !!referrerNameFromExtracted(extracted),
+          });
+          if (!matchedByNumber) {
+            logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${variants.map(maskPhone).join(', ')})`);
           }
-          const ls = await db('lead_sources')
-            .where('is_active', true)
-            .whereIn('twilio_phone_number', [...variants])
-            .first();
           if (ls) { leadSourceId = ls.id; leadSourceRow = ls; }
-          else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
-          // Explicit referral wins over the number-matched source: point the lead at
-          // the 'referral' lead_sources row so the PPC funnel attributes it to the
-          // referral channel (its per-conversion reward cost), not the dialed line.
-          if (referrerNameFromExtracted(extracted)) {
-            const refRow = await db('lead_sources').where({ source_type: 'referral', is_active: true }).first().catch(() => null);
-            if (refRow) { leadSourceId = refRow.id; leadSourceRow = refRow; }
-          }
         } catch (e) {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
@@ -12572,10 +12566,71 @@ const CallRecordingProcessor = {
         // correction — it validates no attribution, so it must not
         // reopen a definitively rejected call to the bridge.
         try {
-          const mdRaw = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+          // The LIVE row, not the in-memory snapshot: the repair decision
+          // below reads linkage state this pass may have just rewritten.
+          const liveRow = await trx('call_log')
+            .where({ id: call.id })
+            .first('metadata', 'twilio_call_sid', 'to_phone');
+          const mdRaw = typeof liveRow?.metadata === 'string'
+            ? JSON.parse(liveRow.metadata)
+            : (liveRow?.metadata || {});
           if (mdRaw && mdRaw.no_attribution) {
+            // REPAIR, not just forgiveness (codex P1 r20): the earlier
+            // rejection retired this call's funnel row, and when THIS pass
+            // created no lead (shouldCreateLead false — e.g. the customer
+            // has since advanced past the lead-pipeline stages)
+            // runCallPpcAttribution is still its default no-op. A
+            // bridge-target call gets a later rescan; a dedicated/organic
+            // one never does, so clearing the marker alone would drop the
+            // corrected inquiry's booked/completed revenue permanently.
+            // Arm the SAME durable marker the repoint lane uses — the
+            // transfer sweep already locks leads → call_log, re-verifies
+            // the target, and completes exactly this write.
+            let repairPayload = null;
+            if (!leadId && !mdRaw.attribution_transfer_pending) {
+              // Durable linkage only: the stamp this call still carries,
+              // else the lead that originated from its sid.
+              let target = mdRaw.lead_id ? String(mdRaw.lead_id) : null;
+              if (!target && liveRow?.twilio_call_sid) {
+                const sidLead = await trx('leads')
+                  .where({ twilio_call_sid: liveRow.twilio_call_sid })
+                  .whereNull('deleted_at')
+                  .first('id');
+                if (sidLead) target = String(sidLead.id);
+              }
+              if (target) {
+                const { row: repairSource } = await resolveCallLeadSource({
+                  dbc: trx,
+                  toPhone: liveRow.to_phone,
+                  preferReferral: !!referrerNameFromExtracted(extracted),
+                });
+                const repairAttr = repairSource
+                  ? require('./ads/call-attribution').attributionForSourceType(repairSource.source_type)
+                  : null;
+                // Bridge-target numbers are excluded exactly as the
+                // primary writer excludes them — the bridge owns their
+                // attribution and rescans on its own schedule.
+                const repairIsBridge = repairSource
+                  && require('./ads/google-call-bridge').isBridgeTargetNumber(repairSource.twilio_phone_number);
+                if (repairAttr && !repairIsBridge) {
+                  repairPayload = {
+                    to_lead_id: target,
+                    lead_source: repairAttr.leadSource,
+                    is_paid: repairAttr.isPaid,
+                    detail: repairSource.name || 'inbound call',
+                    service_interest: extracted.matched_service || extracted.requested_service || null,
+                    repair_of_rejection: true,
+                  };
+                }
+              }
+            }
             await trx('call_log').where({ id: call.id }).update({
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+              metadata: repairPayload
+                ? db.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution', '{attribution_transfer_pending}', ?::jsonb, true)",
+                  [JSON.stringify(repairPayload)],
+                )
+                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
             });
           }
         } catch { /* unparseable metadata: leave the marker, conservative */ }

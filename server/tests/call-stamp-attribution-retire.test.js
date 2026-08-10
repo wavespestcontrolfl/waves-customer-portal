@@ -321,3 +321,53 @@ describe('reconcileFormerLeadLinkage — stamp-less breadcrumb consumption (code
     expect(lockRead).toContain("whereNull('deleted_at')");
   });
 });
+
+// The finalization branch that forgives a previous no-attribution verdict
+// must also REPAIR it (codex P1 r20): when this pass created no lead,
+// runCallPpcAttribution is still its default no-op, and a dedicated/organic
+// call gets no later rescan — clearing alone dropped the corrected
+// inquiry's booked/completed revenue permanently. Source pins: the branch
+// lives inside the fenced finalization transaction, so a behavioural
+// harness would have to drive the whole processor.
+describe('rejection-repair marker on the no_attribution clear (codex P1 r20)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const branch = (() => {
+    const start = src.indexOf('// The non-lead verdict\'s attribution retire becomes durable HERE');
+    return src.slice(start, src.indexOf('if (written > 0 && deferredNonLeadAttributionRetire)', start));
+  })();
+
+  test('the clear reads the LIVE row, not the in-memory snapshot', () => {
+    expect(branch).toMatch(/const liveRow = await trx\('call_log'\)/);
+    expect(branch).toMatch(/liveRow\?\.metadata/);
+  });
+
+  test('the repair only arms when THIS pass created no lead and no marker already stands', () => {
+    expect(branch).toMatch(/if \(!leadId && !mdRaw\.attribution_transfer_pending\)/);
+  });
+
+  test('the target comes from DURABLE linkage only — live stamp, else the sid-originated live lead', () => {
+    expect(branch).toMatch(/mdRaw\.lead_id \? String\(mdRaw\.lead_id\) : null/);
+    expect(branch).toMatch(/twilio_call_sid: liveRow\.twilio_call_sid/);
+    expect(branch).toMatch(/whereNull\('deleted_at'\)/);
+  });
+
+  test('the channel is resolved through the SHARED resolver and bridge targets are excluded', () => {
+    expect(branch).toMatch(/resolveCallLeadSource\(\{/);
+    expect(branch).toMatch(/isBridgeTargetNumber\(repairSource\.twilio_phone_number\)/);
+    expect(branch).toMatch(/if \(repairAttr && !repairIsBridge\)/);
+  });
+
+  test('the marker is written ATOMICALLY with the clear — one jsonb expression, marker armed on the already-cleared object', () => {
+    expect(branch).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution', '\{attribution_transfer_pending\}'/);
+    // and the plain clear is still the fallback when no repair is possible
+    expect(branch).toMatch(/: db\.raw\("COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution'"\)/);
+  });
+
+  test('the shared resolver is used by the lead path too — no second copy of the variant matching', () => {
+    expect(src).not.toMatch(/variants\.add\(`\$\{ten\}`\)/);
+    expect(src).toMatch(/require\('\.\.\/utils\/call-lead-source'\)/);
+    const util = fs.readFileSync(require.resolve('../utils/call-lead-source'), 'utf8');
+    expect(util).toMatch(/source_type: 'referral'/);
+  });
+});
