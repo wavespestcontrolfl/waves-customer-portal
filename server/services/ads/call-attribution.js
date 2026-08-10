@@ -1568,6 +1568,26 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           await clearMarker();
           return 'cleared';
         }
+        // RECLAIM the row this very rejection demoted (codex P1 r25). The
+        // retire preserves history by clearing source_call_id, so a
+        // corrected pass finds a legacy row on the live lead and
+        // recordCallPpcAttribution refuses with 'unprovenanced_row' — the
+        // generic retry lane, which for a repair marker never resolves
+        // because nothing else will ever re-provenance that row. A repair
+        // marker is exactly the case where the legacy row's identity IS
+        // known: it is this call's own demoted row on this lead. Re-point
+        // it, under the lead lock already held, conditioned on it still
+        // being unprovenanced so a concurrent writer cannot be overwritten.
+        if (pending.repair_of_rejection && res && res.reason === 'unprovenanced_row') {
+          const reclaimed = await trx('ad_service_attribution')
+            .where({ lead_id: liveLeadId })
+            .whereNull('source_call_id')
+            .update({ source_call_id: row.id, updated_at: new Date() });
+          if (reclaimed) {
+            await clearMarker();
+            return 'recorded';
+          }
+        }
         return blocked();
       });
       summary[outcome] += 1;

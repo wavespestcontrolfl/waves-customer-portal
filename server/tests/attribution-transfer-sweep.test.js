@@ -313,6 +313,36 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(markerClearUpdates()).toHaveLength(1);
   });
 
+  test('a REPAIR marker RECLAIMS the legacy row this rejection demoted, instead of retrying forever (codex P1 r25)', async () => {
+    // The retire preserves history by clearing source_call_id, so the
+    // corrected pass finds a legacy row on the live lead and
+    // recordCallPpcAttribution refuses with 'unprovenanced_row' — a retry
+    // lane that for a repair marker can never resolve on its own.
+    const repair = {
+      to_lead_id: 'lead-B',
+      lead_source: 'waves_website',
+      is_paid: false,
+      detail: 'Sarasota city page',
+      repair_of_rejection: true,
+    };
+    const md = { attribution_transfer_pending: repair };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    // The lead already carries the demoted (NULL-provenance) row.
+    existingByLead['lead-B'] = { id: 'asa-legacy', lead_source: 'waves_website' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.recorded).toBe(1);
+    expect(s.blocked).toBe(0);
+    const reclaim = updates.find((u) => u.table === 'ad_service_attribution'
+      && u.patch.source_call_id === 'call-1');
+    expect(reclaim).toBeTruthy();
+    // Conditioned on the row still being unprovenanced.
+    expect(reclaim.wheres).toContainEqual(['whereNull', 'source_call_id']);
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
   test('a stamp-less marker whose target lead is gone/soft-deleted clears — the lock re-applies the live predicate (codex P1 r19)', async () => {
     const pending = { ...PENDING, to_lead_id: 'lead-B' };
     scanRows = [{ id: 'call-1', metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' }];
