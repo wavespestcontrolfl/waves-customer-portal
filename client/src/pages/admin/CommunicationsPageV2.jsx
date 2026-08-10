@@ -98,6 +98,11 @@ import {
   cn,
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import {
+  MMS_TOTAL_BUDGET_BYTES,
+  fitImagesToBudget,
+  formatBytes,
+} from "../../utils/imageCompression";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -638,6 +643,10 @@ function SmsTab() {
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  // Purely a label distinction — `uploading` gates the controls for the whole
+  // compress-then-upload span. Downscaling several phone photos takes a beat,
+  // and "Uploading…" while the network is still idle reads as a stall.
+  const [compressing, setCompressing] = useState(false);
   // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
   // Scheduled rows land in sms_log with status='scheduled' and are picked up by
   // the /5min cron in server/services/scheduler.js.
@@ -1069,21 +1078,28 @@ function SmsTab() {
     }
     const queue = files.slice(0, remaining);
     // Twilio rejects an MMS whose body + all media exceeds 5MB total, so the
-    // per-file 5MB cap isn't enough once several images are attached — guard
-    // the cumulative size up front rather than letting the /sms send bounce.
-    const MAX_TOTAL_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+    // per-file 5MB cap isn't enough once several images are attached. Rather
+    // than refuse the batch, shrink it to fit: a batch that already fits
+    // uploads untouched, and one that doesn't sheds the least quality that
+    // gets it under budget. Compressing HERE — before the upload — means the
+    // multer per-file cap, the attachment token's bound size, and the
+    // send-time aggregate check all see the final bytes.
     const existingBytes = attachments.reduce((s, a) => s + (a.size || 0), 0);
-    const queueBytes = queue.reduce((s, f) => s + (f.size || 0), 0);
-    if (existingBytes + queueBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      alert(
-        "Attachments would exceed Twilio's 5MB total limit per message. Remove or compress images and try again.",
-      );
-      return;
-    }
     setUploading(true);
+    setCompressing(true);
     try {
+      const fit = await fitImagesToBudget(queue, {
+        availableBytes: MMS_TOTAL_BUDGET_BYTES - existingBytes,
+      });
+      if (!fit.ok) {
+        alert(
+          `Attachments are ${formatBytes(fit.bestBytes)} even after compression, over Twilio's 5MB per-message limit. Remove an image and try again.`,
+        );
+        return;
+      }
+      setCompressing(false);
       const fd = new FormData();
-      for (const f of queue) fd.append("attachments", f);
+      for (const f of fit.files) fd.append("attachments", f);
       const token = localStorage.getItem("waves_admin_token");
       const r = await fetch(`${API_BASE}/admin/communications/attach`, {
         method: "POST",
@@ -1097,12 +1113,13 @@ function SmsTab() {
       const d = await r.json();
       const withPreview = d.attachments.map((a, idx) => ({
         ...a,
-        previewUrl: URL.createObjectURL(queue[idx]),
+        previewUrl: URL.createObjectURL(fit.files[idx]),
       }));
       setAttachments((prev) => [...prev, ...withPreview]);
     } catch (e) {
       alert(`Upload failed: ${e.message}`);
     } finally {
+      setCompressing(false);
       setUploading(false);
     }
   };
@@ -2081,7 +2098,11 @@ function SmsTab() {
         <div className="flex items-center justify-between text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {" "}
           <span>
-            {attachments.length > 0 ? `${attachments.length} attached` : ""}
+            {attachments.length > 0
+              ? `${attachments.length} attached · ${formatBytes(
+                  attachments.reduce((s, a) => s + (a.size || 0), 0),
+                )}`
+              : ""}
           </span>{" "}
           <span>{rewritingSms ? "Rewriting…" : `${msgBody.length} chars`}</span>{" "}
         </div>
@@ -2216,6 +2237,8 @@ function SmsTab() {
                 : "Scheduling…"
               : rewritingSms
                 ? "Rewriting…"
+              : compressing
+                ? "Compressing…"
               : uploading
                 ? "Uploading…"
                 : sendTiming === "now"
