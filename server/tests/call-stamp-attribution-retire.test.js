@@ -7,19 +7,24 @@
 
 let mockCallRow = null;
 let mockTokenMatches = true;
+let mockSuccessorRow; // the retire primitives' settled-successor scan
+let mockAttributionRows = []; // retireAll's affected-leads read
 const mockDeletes = [];
 const mockUpdates = [];
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
     const b = { _wheres: [] };
-    for (const m of ['where', 'whereNull', 'whereNot', 'whereRaw', 'forUpdate', 'orderBy', 'limit', 'select', 'modify']) {
+    for (const m of ['where', 'whereNull', 'whereNot', 'whereRaw', 'whereNotExists', 'forUpdate', 'orderBy', 'limit', 'select', 'modify']) {
       b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
     }
     b.first = async (...cols) => {
       if (table !== 'call_log') return undefined;
       const fenced = b._wheres.some((w) => w[0] === 'where' && w[1] === 'processing_token');
       if (fenced) return mockTokenMatches ? { id: 'call-1' } : undefined;
+      // The retire primitives' settled-successor scan is the only ordered
+      // call_log read (orderBy created_at desc).
+      if (b._wheres.some((w) => w[0] === 'orderBy')) return mockSuccessorRow;
       if (cols.includes('metadata')) return mockCallRow;
       return mockCallRow;
     };
@@ -28,7 +33,9 @@ jest.mock('../models/db', () => {
       return mockTokenMatches ? 1 : 0;
     };
     b.del = async () => { mockDeletes.push({ table, wheres: b._wheres.slice() }); return 1; };
-    b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+    b.then = (resolve, reject) => Promise.resolve(
+      table === 'ad_service_attribution' ? mockAttributionRows : [],
+    ).then(resolve, reject);
     return b;
   };
   const db = (table) => makeBuilder(table);
@@ -46,6 +53,8 @@ const CALL = { id: 'call-1', twilio_call_sid: 'CA-sid-linked' };
 beforeEach(() => {
   mockCallRow = { metadata: {} }; // sid-linked: NO metadata.lead_id stamp
   mockTokenMatches = true;
+  mockSuccessorRow = undefined;
+  mockAttributionRows = [{ lead_id: 'lead-9' }]; // one funnel row for the call
   mockDeletes.length = 0;
   mockUpdates.length = 0;
 });
@@ -57,9 +66,22 @@ describe('clearStampAndRestoreLead without a stamp (sid-linked call)', () => {
     expect(ok).toBe(true);
     const attributionDeletes = mockDeletes.filter((d) => d.table === 'ad_service_attribution');
     expect(attributionDeletes).toHaveLength(1);
-    // Provenance-wide: keyed on source_call_id only — no lead_id filter,
-    // because rejection means the call supports no lead at all.
-    expect(attributionDeletes[0].wheres).toContainEqual(['where', { source_call_id: 'call-1' }]);
+    // Per-lead through the shared retire primitive (pre-push P0 r19):
+    // rejection means THE CALL supports no lead — with no surviving
+    // successor the row deletes, keyed on lead + exact provenance.
+    expect(attributionDeletes[0].wheres).toContainEqual(['where', { lead_id: 'lead-9', source_call_id: 'call-1' }]);
+  });
+
+  test('a surviving settled successor INHERITS the row instead — history preserved (pre-push P0 r19)', async () => {
+    mockSuccessorRow = { id: 'call-successor' };
+
+    const ok = await clearStampAndRestoreLead(CALL, 'tok-1', 'CA-sid-linked', null, { mode: 'retire' });
+
+    expect(ok).toBe(true);
+    expect(mockDeletes.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+    const reassigned = mockUpdates.find((u) => u.table === 'ad_service_attribution'
+      && u.patch.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
   });
 
   test('the retirement is fenced — a lost claim retires nothing and reports false', async () => {

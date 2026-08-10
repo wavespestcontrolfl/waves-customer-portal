@@ -21,6 +21,8 @@ const mockDb = jest.fn((table) => {
     'where', 'whereIn', 'whereRaw', 'whereNotNull', 'whereNull', 'whereNotExists', 'whereNot',
     'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge', 'update',
   ].forEach((m) => { b[m] = jest.fn(self); });
+  // Real knex .modify invokes the callback with the builder.
+  b.modify = jest.fn((fn) => { fn(b); return b; });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.then = (res, rej) => Promise.resolve(
@@ -184,12 +186,26 @@ describe('scheduler wiring', () => {
     // genuine no-Google-Ads installs opt in explicitly.
     expect(block).toMatch(/bridgeBlockedReason = 'google_ads_unconfigured'/);
     expect(block).toMatch(/BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED/);
-    // Ambiguity blocks too (codex P1, PR #3303 r14): strong-but-non-unique
-    // paid evidence deliberately left the call unclaimed — sweeping its
-    // lead organic would be an irreversible mislabel.
-    expect(block).toMatch(/bridgeBlockedReason = 'ambiguous_matches'/);
     expect(block).toMatch(/if \(bridgeBlockedReason\)/);
     expect(block.indexOf('if (bridgeBlockedReason)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
+  });
+
+  test('ambiguous matches exclude ONLY their linked leads from the fallback — scoped, not a global block (codex P1 r14 + pre-push P1 r18)', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 12000);
+    // Candidate calls collected from the day's ambiguous matches (best +
+    // alternatives) and passed to the sweep; no global bridgeBlockedReason
+    // arm — one persistent shared-SID ambiguity must not starve every
+    // unrelated organic lead.
+    expect(block).toMatch(/skipReason === 'ambiguous'/);
+    expect(block).toMatch(/organicExclusions/);
+    expect(block).toMatch(/attributeUnclaimedBridgeLeads\(\{ olderThanDays: days, \.\.\.organicExclusions \}\)/);
+    expect(block).not.toMatch(/bridgeBlockedReason = 'ambiguous_matches'/);
+    // Sweep side: NULL-sid leads must PASS the sid exclusion arm (a bare
+    // whereNotIn silently drops NULL rows), and the stamp arm excludes too.
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
+    expect(sweep).toMatch(/whereNull\('l\.twilio_call_sid'\)\.orWhereNotIn\('l\.twilio_call_sid', excludeCallSids\)/);
+    expect(sweep).toMatch(/whereIn\('cla\.id', excludeCallIds\)/);
   });
 
   test('a bridge-pair failure is rethrown AFTER the transfer sweep (codex P2, PR #3303 r15)', () => {

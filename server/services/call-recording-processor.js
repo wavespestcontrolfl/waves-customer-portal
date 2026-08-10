@@ -9169,8 +9169,11 @@ const CallRecordingProcessor = {
               // lane) and a retire here would permanently delete
               // booked/completed history with no definitive rejection.
               // When a later pass re-attributes, provenance recovery moves
-              // the row.
-              if (currentStampedLeadId) await settleClear({ mode: 'keep' });
+              // the row. preserveFormerLeadId (pre-push P1 r18): the
+              // lead_creation_failed retry restamps with no
+              // preSettleStampedLeadId — the breadcrumb keeps the former
+              // lead recoverable for the legacy-blocker check.
+              if (currentStampedLeadId) await settleClear({ mode: 'keep', preserveFormerLeadId: true });
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
               // pointing at a different lead must not survive. The call's
@@ -9500,7 +9503,13 @@ const CallRecordingProcessor = {
       // reaches the outer extraction_failed guard directly. 'keep': the
       // retire rides finalization, not this settle (pre-push P0 r12).
       try {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep' });
+        // preserveFormerLeadId (pre-push P1 r18, same class as the
+        // pre-stamp settle): this standalone clear commits long before
+        // the fenced final verdict — if later work fails, the retry
+        // would claim an extraction_failed call with neither stamp nor
+        // breadcrumb, and a subsequent VALID retry repointing to a new
+        // lead would skip the legacy-blocker check and double-count.
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep', preserveFormerLeadId: true });
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
           lost.abortProcessing = true;

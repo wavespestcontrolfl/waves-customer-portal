@@ -521,7 +521,20 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
 // happened it would still repoint the LEAD row to paid — only the funnel row
 // would stay organic (accepted tradeoff: the window IS the decision boundary).
 // ---------------------------------------------------------------------------
-async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } = {}) {
+async function attributeUnclaimedBridgeLeads({
+  olderThanDays = 7,
+  limit = 200,
+  // Leads linked to the day's AMBIGUOUS bridge matches (pre-push P1 r18,
+  // refining codex P1 r14): strong but non-unique paid evidence
+  // deliberately left those calls unclaimed, and an organic label is
+  // irreversible — but blocking the WHOLE sweep on one persistent
+  // shared-SID ambiguity starved every unrelated lead. The caller passes
+  // the candidate calls' sids/ids; linked leads sit out until the
+  // ambiguity resolves. Both linkage arms: the lead's own sid and the
+  // durable metadata stamp.
+  excludeCallSids = [],
+  excludeCallIds = [],
+} = {}) {
   // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
   // module-scope import back at it would be a require cycle.
   const { isBridgeTargetNumber } = require('./google-call-bridge');
@@ -629,6 +642,23 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
             .orWhereRaw("cls.metadata->>'no_attribution' = 'true'");
         });
     })
+    // Ambiguous-match exclusion (see the parameter doc). NULL-sid leads
+    // must PASS the sid arm — a bare whereNotIn filters NULL rows out
+    // (NULL NOT IN (...) is SQL NULL).
+    .modify((qb) => {
+      if (excludeCallSids.length) {
+        qb.where(function sidNotAmbiguous() {
+          this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);
+        });
+      }
+      if (excludeCallIds.length) {
+        qb.whereNotExists(function stampedCallAmbiguous() {
+          this.select(1).from('call_log as cla')
+            .whereRaw("cla.metadata->>'lead_id' = l.id::text")
+            .whereIn('cla.id', excludeCallIds);
+        });
+      }
+    })
     .orderBy('l.created_at')
     .limit(cap)
     .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id', 'l.twilio_call_sid');
@@ -710,58 +740,54 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
 // never scans, and a cleared stamp there must retire its row the same
 // way). Runs on the caller's connection so it can ride a lead-locking
 // transaction.
-// Before a retire deletes a lead's only funnel row, leave a REHOME marker
-// on an eligible successor call (codex P1 r17): with multiple calls
-// reusing one lead, the first call owns the single row and every later
-// call was refused as 'other_call' — if the OWNER is then definitively
-// rejected, the delete removed the lead's booked/completed stage and
-// revenue even though a later valid call still supports it, and
-// dedicated/organic calls have no rescan to recreate it. The successor =
-// the newest OTHER settled-attributable call stamped to this lead; the
-// payload-less attribution_transfer_pending marker defers to the daily
-// sweep, which derives the funnel decision from the live lead's source
-// (see sweepPendingAttributionTransfers). A mid-flight successor is
-// deliberately skipped — its own pass re-attributes at finalization now
-// that the lead has no row. An existing marker is never overwritten (it
-// may carry a real from-lead block with a call-time decision). Best-effort
-// by design: rehome failure must never block the retire it rides.
-async function leaveRehomeMarkerForLead(dbc, leadId, rejectedCallId) {
-  try {
-    const successor = await dbc('call_log')
-      .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
-      .whereNot('id', rejectedCallId)
-      .whereNull('processing_token')
-      .whereRaw("COALESCE(processing_status, '') IN ('processed', '')")
-      .whereRaw("COALESCE(metadata->>'no_attribution', '') != 'true'")
-      .whereRaw("metadata->'attribution_transfer_pending' IS NULL")
-      .orderBy('created_at', 'desc')
-      .first('id');
-    if (!successor) return false;
-    const marked = await dbc('call_log')
-      .where({ id: successor.id })
-      .whereNull('processing_token')
-      .whereRaw("metadata->'attribution_transfer_pending' IS NULL")
-      .update({
-        metadata: db.raw(
-          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
-          [JSON.stringify({ from_lead_id: String(leadId), rehome: true })],
-        ),
-        updated_at: new Date(),
-      });
-    return marked > 0;
-  } catch (e) {
-    logger.warn(`[call-attribution] rehome marker for lead ${leadId} failed: ${e.code || e.name || 'db_error'}`);
-    return false;
-  }
+// The newest OTHER settled-attributable call stamped to this lead, eligible
+// to inherit the retiring call's funnel row (codex P1 r17 + pre-push P0
+// r19): with multiple calls reusing one lead, the first call owns the
+// single row and every later call was refused as 'other_call' — a
+// definitive rejection of the OWNER must not delete the lead's
+// booked/completed stage and revenue while a later valid call still
+// supports it. A mid-flight successor is deliberately skipped (its own
+// pass re-attributes at finalization if the lead ends up rowless), and a
+// call that already provenance-owns another row is excluded — the partial
+// UNIQUE on source_call_id forbids a second. Errors PROPAGATE: this runs
+// inside the caller's fenced transaction, and swallowing a statement
+// error would let the caller commit-continue on an aborted transaction.
+async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
+  const successor = await dbc('call_log')
+    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+    .whereNot('id', rejectedCallId)
+    .whereNull('processing_token')
+    .whereRaw("COALESCE(processing_status, '') IN ('processed', '')")
+    .whereRaw("COALESCE(metadata->>'no_attribution', '') != 'true'")
+    .whereNotExists(function alreadyProvenanced() {
+      this.select(1).from('ad_service_attribution as ap')
+        .whereRaw('ap.source_call_id = call_log.id');
+    })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  return successor?.id || null;
 }
 
 async function retireCallAttributionRow(dbc, callLogId, leadId) {
   if (!callLogId || !leadId) return 0;
-  const deleted = await dbc('ad_service_attribution')
+  // REASSIGN provenance to a settled successor instead of deleting
+  // (pre-push P0 r19): delete-and-recreate loses booked_amount /
+  // completed_revenue / every accumulated funnel field — the exact
+  // invariant the transfer primitive exists for. The row survives in
+  // place with its history; only its evidence pointer moves. Delete only
+  // when no eligible successor exists.
+  const successorId = await findSettledSuccessorCall(dbc, leadId, callLogId);
+  if (successorId) {
+    const moved = await dbc('ad_service_attribution')
+      .where({ lead_id: leadId, source_call_id: callLogId })
+      .update({ source_call_id: successorId, updated_at: new Date() });
+    if (moved) return moved;
+    // 0-row update: the row moved/vanished under us — fall through to the
+    // (equally conditioned) delete, which will no-op the same way.
+  }
+  return dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })
     .del();
-  if (deleted) await leaveRehomeMarkerForLead(dbc, leadId, callLogId);
-  return deleted;
 }
 
 // Retire EVERY funnel row a call created, whichever lead they sit on —
@@ -772,18 +798,18 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
 // stage/revenue for a rejected call.
 async function retireAllCallAttributionRows(dbc, callLogId) {
   if (!callLogId) return 0;
-  // Affected leads read BEFORE the delete so each can get a rehome marker
-  // (codex P1 r17) — a surviving successor call still supports the lead.
+  // Per-lead through the shared single-row primitive (pre-push P0 r19):
+  // each lead's row is REASSIGNED to a surviving successor when one
+  // exists, deleted only when none does — a blanket delete lost the
+  // lead's accumulated funnel history.
   const rows = await dbc('ad_service_attribution')
     .where({ source_call_id: callLogId })
     .select('lead_id');
-  const deleted = await dbc('ad_service_attribution').where({ source_call_id: callLogId }).del();
-  if (deleted) {
-    for (const leadId of new Set(rows.map((r) => String(r.lead_id)))) {
-      await leaveRehomeMarkerForLead(dbc, leadId, callLogId);
-    }
+  let affected = 0;
+  for (const leadId of new Set(rows.map((r) => String(r.lead_id)))) {
+    affected += await retireCallAttributionRow(dbc, callLogId, leadId);
   }
-  return deleted;
+  return affected;
 }
 
 // Move the funnel row a specific call created when its linkage moves to a
@@ -922,8 +948,7 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
             .where({ id: scannedLeadId })
             .whereNull('deleted_at')
             .forUpdate()
-            // lead_source_id feeds the rehome markers' channel derivation.
-            .first('id', 'customer_id', 'lead_source_id')
+            .first('id', 'customer_id')
           : null;
         const lockedCall = await trx('call_log')
           .where({ id: row.id })
@@ -1019,42 +1044,20 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         if (legacy) return blocked(); // operator hasn't resolved it yet
         const owner = lockedLead.customer_id || null;
         if (!owner) return blocked(); // unclaimed lead — retry once claimed
-        // A REHOME marker carries no call-time funnel decision (codex P1
-        // r17 — the retire that wrote it has none): derive the channel
-        // from the LIVE lead's source, the same resolution the organic
-        // sweep uses. Bridge-target leads clear instead — with the row
-        // deleted, the lead re-qualifies for the bridge/unclaimed→organic
-        // pair, which owns that number's attribution; an unmapped source
-        // can never take the write.
-        let leadSourceKey = pending.lead_source || null;
-        let isPaid = pending.is_paid !== false;
-        let detail = pending.detail || 'inbound call';
-        if (!leadSourceKey) {
-          const src = lockedLead.lead_source_id
-            ? await trx('lead_sources')
-              .where({ id: lockedLead.lead_source_id })
-              .first('source_type', 'name', 'twilio_phone_number')
-            : null;
-          const channel = src ? attributionForSourceType(src.source_type) : null;
-          // Lazy require — google-call-bridge lazily requires this module.
-          const { isBridgeTargetNumber } = require('./google-call-bridge');
-          const bridgeTarget = (() => {
-            try { return !!(src?.twilio_phone_number && isBridgeTargetNumber(src.twilio_phone_number)); } catch { return false; }
-          })();
-          if (!channel || bridgeTarget) {
-            await clearMarker();
-            return 'cleared';
-          }
-          leadSourceKey = channel.leadSource;
-          isPaid = channel.isPaid;
-          detail = src.name || 'inbound call';
+        // A marker without a funnel decision has no producer (the r17
+        // rehome markers were superseded by in-place provenance
+        // reassignment in the retire primitives — pre-push P0 r19); clear
+        // rather than guess a channel.
+        if (!pending.lead_source) {
+          await clearMarker();
+          return 'cleared';
         }
         const res = await recordCallPpcAttribution({
           customerId: owner,
           leadId: liveLeadId,
-          leadSource: leadSourceKey,
-          isPaid,
-          leadSourceDetail: detail,
+          leadSource: pending.lead_source,
+          isPaid: pending.is_paid !== false,
+          leadSourceDetail: pending.detail || 'inbound call',
           serviceInterest: pending.service_interest || null,
           leadDate: lockedCall.created_at || row.created_at || null,
           sourceCallId: row.id,

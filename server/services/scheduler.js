@@ -3827,6 +3827,9 @@ function initScheduledJobs() {
           // pass — an organic row can never be flipped to paid later, so any
           // doubt about the day's claim means the fallback waits a day.
           let bridgeBlockedReason = null;
+          // Leads tied to the day's AMBIGUOUS bridge matches are excluded
+          // from the organic fallback (scoped, see below).
+          let organicExclusions = { excludeCallSids: [], excludeCallIds: [] };
           if (googleAds.isConfigured()) {
             logger.info('Running: Google Ads call→campaign bridge');
             const callBridge = require('./ads/google-call-bridge');
@@ -3843,18 +3846,27 @@ function initScheduledJobs() {
             // Any write failure means a claim the bridge ATTEMPTED may not have
             // repointed the lead yet — the sweep must not take it organic today.
             const writeFailed = (r.skipped || []).some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
-            // Ambiguity is uncertainty, not absence (codex P1 r14): an
-            // 'ambiguous' match means the scan found STRONG but non-unique
-            // paid-call evidence and deliberately left the CRM call
-            // unclaimed — sweeping its lead organic today would
-            // irreversibly label a probably-paid lead. Same doctrine as
-            // every other doubt: the fallback waits until the ambiguity
-            // resolves (a later scan usually separates the scores).
-            const ambiguousCount = r.summary?.ambiguous || 0;
+            // Ambiguity is uncertainty, not absence (codex P1 r14) — but
+            // SCOPED, not global (pre-push P1 r18): an 'ambiguous' match
+            // means the scan found strong but non-unique paid-call
+            // evidence and deliberately left the CRM call unclaimed, and
+            // sweeping ITS lead organic would irreversibly mislabel a
+            // probably-paid lead. The bridge preserves shared-SID
+            // ambiguities indefinitely though, so blocking the WHOLE
+            // fallback on one starved every unrelated organic lead.
+            // Instead, only the leads linked to an ambiguous match's
+            // candidate calls (best + alternatives) are excluded; the
+            // exclusion lifts the day the ambiguity resolves.
+            const ambiguousCalls = (r.skipped || [])
+              .filter((m) => m?.skipReason === 'ambiguous')
+              .flatMap((m) => [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)])
+              .filter(Boolean);
+            const ambiguousExcludeSids = [...new Set(ambiguousCalls.map((c) => c.twilioCallSid).filter(Boolean))];
+            const ambiguousExcludeCallIds = [...new Set(ambiguousCalls.map((c) => c.id).filter(Boolean))];
+            organicExclusions = { excludeCallSids: ambiguousExcludeSids, excludeCallIds: ambiguousExcludeCallIds };
             if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
             else if (capHit) bridgeBlockedReason = 'row_cap_hit';
             else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
-            else if (ambiguousCount > 0) bridgeBlockedReason = 'ambiguous_matches';
             logger.info(`[google-call-bridge cron] ${JSON.stringify({
               configured: r.configured,
               scanFailed: !!r.scanFailed,
@@ -3862,7 +3874,7 @@ function initScheduledJobs() {
               skipped: r.skippedCount,
               googleCalls: r.summary?.googleCalls,
               crmMainLineCalls: r.summary?.crmMainLineCalls,
-              ambiguous: ambiguousCount,
+              ambiguous: r.summary?.ambiguous || 0,
             })}`);
           } else if (process.env.BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED !== 'true') {
             // Fail closed on an UNCONFIGURED Google Ads API: a missing/rotated
@@ -3883,7 +3895,7 @@ function initScheduledJobs() {
           } else if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED !== 'true') {
             const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
             const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
-            const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days });
+            const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days, ...organicExclusions });
             logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}`);
           }
         } catch (err) {
