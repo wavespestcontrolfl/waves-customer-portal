@@ -1165,3 +1165,35 @@ describe('retire NEVER deletes accumulated funnel history', () => {
     expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
   });
 });
+
+// codex P1 r29 — allocator-derived spend is NOT customer funnel history.
+describe('ad_cost never counts as funnel history', () => {
+  test('the metric list excludes ad_cost but keeps earned money and a real estimate', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const list = src.split('const FUNNEL_METRIC_COLS = [')[1].split('];')[0];
+    // ad_cost is repopulated for every paid lead at stage 'lead', so a
+    // rejected row would survive as legacy in the spend totals forever.
+    expect(list).not.toMatch(/'ad_cost'/);
+    expect(list).toMatch(/'estimate_amount'/);
+    expect(list).toMatch(/'booked_amount'/);
+    expect(list).toMatch(/'completed_revenue'/);
+  });
+
+  test('a rejected paid lead carrying ONLY allocated ad_cost still deletes', async () => {
+    const PHONE_LEAD = { id: 'lead-1', phone: '+19415550001', customer_id: null };
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[]]; // no successor
+    firstByTable.ad_service_attribution = {
+      id: 'asa-cost', funnel_stage: 'lead', ad_cost: '12.40',
+      estimate_amount: null, booked_amount: null, completed_revenue: null,
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});

@@ -1229,9 +1229,16 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
 // return a false negative, so this must be generous: anything past the
 // bare 'lead' default, or any populated funnel metric, is history.
 // ONE definition — both retirement paths read it.
+// ⛔ NOT ad_cost (codex P1 r29): the daily allocator populates it for EVERY
+// paid lead while still at stage 'lead', so counting it as history demoted
+// genuinely rejected spam/voicemail rows to legacy — where they sit
+// permanently in /admin/ads lead counts and spend totals and can never be
+// retired by provenance again. Allocated spend is idempotently recomputed
+// and redistributes across the surviving leads, so deleting the row loses
+// nothing; booked/completed money and a real estimate do not come back.
 const FUNNEL_METRIC_COLS = [
   'estimate_amount', 'booked_amount', 'completed_revenue', 'gross_profit',
-  'ad_cost', 'projected_ltv_12mo',
+  'projected_ltv_12mo',
 ];
 const HISTORY_ROW_COLS = ['id', 'funnel_stage', 'source_call_id', ...FUNNEL_METRIC_COLS];
 
