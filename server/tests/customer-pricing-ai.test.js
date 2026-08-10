@@ -1008,3 +1008,231 @@ describe('outdoor measurement sufficiency is per service, not one shared test', 
     expect(missing(['tree_shrub', 'mosquito'], ctx({ hasBedArea: true, hasLotSqFt: true }))).toBeNull();
   });
 });
+
+describe('an explicit zero turf measurement is preserved, never backfilled', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const missing = _private?.missingPropertyFor || null;
+  const customer = {
+    id: 'cust-zero-lawn',
+    address_line1: '9 Xeriscape Ct',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34285',
+    property_sqft: 2200, // stale mirror from before the turf profile existed
+    lot_sqft: 9000,
+  };
+
+  test('profile lawn_sqft 0 beats the stale customer.property_sqft mirror AND the satellite turf estimate', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: { lawn_sqft: 0 },
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 3400, aiConfidence: 90 } }),
+    });
+    // The zero is a measurement — the pricing engine preserves >= 0 — so
+    // neither the mirrored 2200 nor the lookup's 3400 may resurrect a lawn.
+    expect(ctx.propertyInput.lawnSqFt).toBe(0);
+    expect(ctx.hasLawnSqFt).toBe(false);
+    expect(ctx.lawnExplicitZero).toBe(true);
+  });
+
+  test('a SILENT profile (null/absent) still falls back to customer.property_sqft', async () => {
+    if (!resolve) return;
+    const fromNull = await resolve({
+      customer,
+      turfProfile: { lawn_sqft: null },
+      propertyLookup: null,
+    });
+    expect(fromNull.propertyInput.lawnSqFt).toBe(2200);
+    expect(fromNull.lawnExplicitZero).toBe(false);
+    const fromMissingProfile = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(fromMissingProfile.propertyInput.lawnSqFt).toBe(2200);
+  });
+
+  test('a measured-zero lawn blocks the lot stand-in for lawn quotes — ask, do not infer turf', () => {
+    if (!missing) return;
+    const ctx = { hasHomeSqFt: true, hasLotSqFt: true, hasLawnSqFt: false, hasBedArea: false, palmCount: 0 };
+    expect(missing(['lawn_care'], { ...ctx, lawnExplicitZero: true })).toBe('outdoor_sqft');
+    expect(missing(['one_time_lawn'], { ...ctx, lawnExplicitZero: true })).toBe('outdoor_sqft');
+    // Unmeasured lawn keeps the lot inference; other lot-based services are untouched.
+    expect(missing(['lawn_care'], { ...ctx, lawnExplicitZero: false })).toBeNull();
+    expect(missing(['mosquito'], { ...ctx, lawnExplicitZero: true })).toBeNull();
+  });
+});
+
+describe('a verify-flagged satellite property type never moves a customer quote', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-type-flag',
+    address_line1: '4 Rowhouse Ln',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34236',
+    property_type: 'single_family',
+    lot_sqft: 6000,
+  };
+
+  test('a propertyType carrying its field-verify flag is ignored — the saved type stands', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          propertyType: 'townhome',
+          aiConfidence: 85,
+          // property-lookup-v2's flag copy: confirm townhome vs
+          // single-family before pricing.
+          fieldVerifyFlags: [{ field: 'propertyType', reason: 'Satellite imagery suggests townhome — confirm before pricing', priority: 'MEDIUM' }],
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('single_family');
+  });
+
+  test('an unflagged lookup type is still adopted, and an UNKNOWN record type never overrides', async () => {
+    if (!resolve) return;
+    const adopted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { propertyType: 'townhome', aiConfidence: 85 } }),
+    });
+    expect(adopted.propertyInput.propertyType).toBe('townhome');
+    const unknownRecord = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ propertyRecord: { propertyType: 'UNKNOWN' } }),
+    });
+    // Property records normalize a missing field to the TRUTHY string
+    // 'UNKNOWN' — it must not eat the customer's saved classification.
+    expect(unknownRecord.propertyInput.propertyType).toBe('single_family');
+  });
+});
+
+describe('verify-flagged core dimensions never price a customer quote (pre-push P0s)', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-flagged-dims',
+    address_line1: '12 Verify Way',
+    city: 'Bradenton',
+    state: 'FL',
+    zip: '34205',
+    property_type: 'single_family',
+  };
+
+  test('flagged squareFootage / lotSize are not adopted — the measurement fails closed as missing', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400,
+          lotSqFt: 9500,
+          fieldVerifyFlags: [
+            { field: 'squareFootage', reason: 'conflicting AI/source evidence — verify before pricing', priority: 'HIGH' },
+            { field: 'lotSize', reason: 'came from a weak source with low confidence', priority: 'HIGH' },
+          ],
+        },
+      }),
+    });
+    // No review lane exists on this path, so a number the lookup itself said
+    // to verify first cannot become an exact price — the request routes to
+    // PROPERTY_DETAILS_NEEDED via the ordinary missing-measurement checks.
+    expect(ctx.hasHomeSqFt).toBe(false);
+    expect(ctx.hasLotSqFt).toBe(false);
+    const unflagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 9500 } }),
+    });
+    expect(unflagged.hasHomeSqFt).toBe(true);
+    expect(unflagged.hasLotSqFt).toBe(true);
+  });
+
+  test('a stored lot survives a flagged lookup lotSize, and flagged stories keeps the default', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer: { ...customer, lot_sqft: 8000 },
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          lotSqFt: 20000,
+          stories: 3,
+          fieldVerifyFlags: [
+            { field: 'lotSize', reason: 'verify', priority: 'HIGH' },
+            { field: 'stories', reason: 'verify', priority: 'HIGH' },
+          ],
+        },
+      }),
+    });
+    expect(ctx.propertyInput.lotSqFt).toBe(8000);
+    expect(ctx.propertyInput.stories).toBe(1);
+  });
+
+  test('the mutated record cannot re-introduce a rejected satellite property type', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        // applyVisionPropertyTypeEvidence mutates the RECORD in place —
+        // both the enriched and record types carry the same unverified
+        // satellite classification here, exactly as in prod.
+        enriched: {
+          propertyType: 'townhome',
+          fieldVerifyFlags: [{ field: 'propertyType', reason: 'Satellite imagery suggests townhome — confirm before pricing', priority: 'MEDIUM' }],
+        },
+        propertyRecord: {
+          propertyType: 'townhome',
+          _propertyTypeSource: 'satellite',
+          _fieldEvidence: { propertyType: { fieldVerify: true, sourceType: 'satellite' } },
+        },
+      }),
+    });
+    expect(ctx.propertyInput.propertyType).toBe('single_family');
+  });
+});
+
+describe('an untrusted satellite turf estimate never becomes a lawn price', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const customer = {
+    id: 'cust-turf-trust',
+    address_line1: '77 Palmetto Row',
+    city: 'Parrish',
+    state: 'FL',
+    zip: '34219',
+  };
+
+  test('a turf-flagged or low-confidence estimate is not adopted — the measurement fails closed', async () => {
+    if (!resolve) return;
+    const flagged = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          estimatedTurfSf: 5200,
+          aiConfidence: 88,
+          fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'obstructed imagery — verify before pricing', priority: 'HIGH' }],
+        },
+      }),
+    });
+    expect(flagged.hasLawnSqFt).toBe(false);
+    const lowConfidence = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 5200, aiConfidence: 40 } }),
+    });
+    expect(lowConfidence.hasLawnSqFt).toBe(false);
+    const trusted = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTurfSf: 5200, aiConfidence: 88 } }),
+    });
+    expect(trusted.propertyInput.lawnSqFt).toBe(5200);
+  });
+});

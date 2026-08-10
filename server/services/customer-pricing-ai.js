@@ -347,6 +347,8 @@ function lookupEnabled() {
 // Shared trust predicates — the agent draft path applies the same rule.
 const {
   lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
@@ -362,7 +364,20 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   // fails closed to PROPERTY_DETAILS_NEEDED, which asks rather than guesses.
   let homeSqFt = null;
   let lotSqFt = positiveNumber(customer.lot_sqft);
-  let lawnSqFt = positiveNumber(turfProfile?.lawn_sqft, customer.property_sqft);
+  // customer_turf_profiles.lawn_sqft is nullable and its admin route accepts
+  // an explicit 0 — "no lawn" is a real stored measurement, and the lawn
+  // pricer itself preserves any >= 0 turf figure rather than defaulting it.
+  // positiveNumber would eat that zero and resurrect the stale mirrored
+  // customer.property_sqft, quoting lawn care on a lawn the profile says
+  // does not exist. Fall back only when the profile is SILENT (null/absent).
+  const profileLawnRaw = turfProfile?.lawn_sqft;
+  const profileLawn = profileLawnRaw === null || profileLawnRaw === undefined || profileLawnRaw === ''
+    ? null
+    : Number(profileLawnRaw);
+  const lawnExplicitZero = profileLawn === 0;
+  let lawnSqFt = Number.isFinite(profileLawn) && profileLawn > 0
+    ? profileLawn
+    : (lawnExplicitZero ? 0 : positiveNumber(customer.property_sqft));
   let bedArea = positiveNumber(customer.bed_sqft);
   // Provenance is load-bearing money data, not a label: the T&S pricer
   // applies its shrub-density factor to MEASURED bed areas only, so an
@@ -415,9 +430,27 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // missing home size fails closed to PROPERTY_DETAILS_NEEDED.
       const lookupDescribesThisProperty = !hasGlobalVerifyFlag(p);
       if (lookupDescribesThisProperty) {
-      homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
-      lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
-      lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
+      // Weak or conflicting core dimensions arrive with their own
+      // fieldVerifyFlags (the flag builder marks squareFootage / lotSize /
+      // stories HIGH-priority). This path has no review lane, so a flagged
+      // dimension is not adopted at all — a missing required measurement
+      // fails closed to PROPERTY_DETAILS_NEEDED rather than pricing on a
+      // number the lookup itself said to verify first. Stored profile
+      // values still win ahead of the fill either way.
+      if (lookupDimensionIsTrustworthy(p, 'homeSqFt')) {
+        homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
+      }
+      if (lookupDimensionIsTrustworthy(p, 'lotSqFt')) {
+        lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
+      }
+      // An explicit zero is a measurement, not a gap — the satellite turf
+      // estimate must not overwrite it. And the estimate is a vision read
+      // like the bed area: a low-confidence or turf-flagged one may not
+      // become an exact self-service lawn price, so it is adopted only when
+      // the lookup trusted its own read.
+      if (!lawnExplicitZero && lookupTurfEstimateIsTrustworthy(p)) {
+        lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
+      }
       // Provenance rides WITH the value: a lookup-derived area is
       // 'estimated', never the operator-measured 'explicit'. And only a
       // CONFIDENT read is adopted — priceTreeShrub upgrades any bed area to
@@ -429,22 +462,41 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         bedAreaSource = 'estimated';
         bedArea = positiveNumber(p.estimatedBedAreaSf);
       }
-      stories = positiveNumber(stories, p.stories, record.stories);
-      propertyType = p.propertyType || record.propertyType || propertyType;
-      yearBuilt = yearBuilt || p.yearBuilt || record.yearBuilt || null;
-      // Structural facts move pest, termite/WDO and rodent prices. The
-      // county RECORD is authoritative and always applies; the merged
-      // enriched value may have been filled from vision when county data was
-      // absent, so it is adopted only when the vision read is trusted.
+      // A flagged stories read keeps the 1-story default — same doctrine as
+      // the untrusted vision features: the default stands, the flag's
+      // verification stays a human's job.
+      if (lookupDimensionIsTrustworthy(p, 'stories')) {
+        stories = positiveNumber(stories, p.stories, record.stories);
+      }
       // Property records normalize a missing field to the literal string
       // 'UNKNOWN', which is TRUTHY — a plain `record.x || enriched.x` chain
-      // would stop there and silently drop the trusted value, costing the
+      // would stop there and silently drop the trusted value (costing the
       // wood-frame multiplier, the raised/crawlspace adjustment and the
-      // tile-roof rodent adjustment on real quotes.
+      // tile-roof rodent adjustment on the structural facts below).
       const knownFact = (value) => {
         const v = String(value || '').trim();
         return v && v.toUpperCase() !== 'UNKNOWN' ? value : null;
       };
+      // Property type carries its own pricing adjustment, and a
+      // satellite-reclassified type ships with a fieldVerifyFlags entry
+      // whose copy says confirm townhome vs single-family BEFORE pricing.
+      // Now that the lookup runs even for fully populated profiles, an
+      // unconditional adopt would let that unverified reclassification
+      // override the customer's SAVED type on an exact quote — so a flagged
+      // lookup type is ignored (county record, then stored type, stand).
+      // The record fallback needs its OWN guard: the reclassifier mutates
+      // the record in place (rc.propertyType, _propertyTypeSource:
+      // 'satellite'), so a bare record read would hand the rejected
+      // satellite type straight back.
+      propertyType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
+        || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null)
+        || propertyType;
+      yearBuilt = yearBuilt || p.yearBuilt || record.yearBuilt || null;
+      // Structural facts move pest, termite/WDO and rodent prices. The
+      // county RECORD is authoritative and always applies (through the same
+      // knownFact 'UNKNOWN' guard); the merged enriched value may have been
+      // filled from vision when county data was absent, so it is adopted
+      // only when the vision read is trusted.
       const visionFactsOk = lookupFeaturesAreTrustworthy(p);
       const structuralFact = (recordValue, enrichedValue) => knownFact(recordValue)
         || (visionFactsOk ? knownFact(enrichedValue) : null)
@@ -507,7 +559,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   const propertyInput = {
     homeSqFt,
     lotSqFt,
-    lawnSqFt: lawnSqFt || undefined,
+    // An explicit zero rides through as 0 — the lawn pricer preserves >= 0,
+    // and `undefined` would invite a downstream lot-based turf inference for
+    // a lawn the profile measured as absent.
+    lawnSqFt: lawnExplicitZero ? 0 : (lawnSqFt || undefined),
     stories: stories || 1,
     propertyType,
     features,
@@ -530,6 +585,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     hasHomeSqFt: homeSqFt > 0,
     hasLotSqFt: lotSqFt > 0,
     hasLawnSqFt: lawnSqFt > 0,
+    lawnExplicitZero,
     hasBedArea: bedArea > 0,
   };
 }
@@ -557,9 +613,13 @@ function missingPropertyFor(serviceKeys, context) {
   // then quote as a real price. Tree & Shrub prices from the bed area (or a
   // lot it can infer one from), and lawn from turf (or a lot). Ask each
   // service what it actually needs.
+  // A lot can stand in for an UNMEASURED lawn (the engine infers turf from
+  // it) — but not for a lawn measured to be ZERO: inferring turf from the
+  // lot would quote lawn care on a lawn the profile says does not exist.
+  // That request routes to PROPERTY_DETAILS_NEEDED and a human instead.
   const OUTDOOR_AREA_SUFFICIENT = {
-    lawn_care: (c) => c.hasLawnSqFt || c.hasLotSqFt,
-    one_time_lawn: (c) => c.hasLawnSqFt || c.hasLotSqFt,
+    lawn_care: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnExplicitZero),
+    one_time_lawn: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnExplicitZero),
     mosquito: (c) => c.hasLotSqFt,
     one_time_mosquito: (c) => c.hasLotSqFt,
     tree_shrub: (c) => c.hasBedArea || c.hasLotSqFt,

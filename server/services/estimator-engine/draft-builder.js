@@ -159,8 +159,11 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   // WHOLE enriched payload, not one field of it. Dropping it here is the
   // only way to be sure another parcel's features, tree density,
   // construction/roof/foundation facts and mosquito multiplier can't steer
-  // an auto-generated draft. The arbitrated propertyFacts (which carry their
-  // own per-field source provenance) are untouched.
+  // an auto-generated draft. The RECORD leg of the same failure is handled
+  // upstream: runDraftPipeline strips the parcel-scoped signals
+  // (propertyRecord/parcelView) before property-fact arbitration, so the
+  // snapped parcel's county dimensions never arrive here as high-confidence
+  // facts either.
   if (hasGlobalVerifyFlag(lookupEnriched)) lookupEnriched = null;
   const featureModifiers = isCommercial ? null : lookupFeatureModifiers(lookupEnriched);
   const homeSqFt = positive(propertyFacts?.home?.value);

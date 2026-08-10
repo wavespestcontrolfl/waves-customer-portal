@@ -24,6 +24,23 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { buildCallContext, existingDraftForCall } = require('./context-builder');
 const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
+const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+
+// A global verification failure poisons the RECORD leg too, not just the
+// enriched payload buildEngineInput already rejects: an 'address' flag means
+// the geocoder snapped to a DIFFERENT premise, so the county home/lot
+// dimensions describe the SNAPPED parcel — arbitrated in as high-confidence
+// 'county' facts they would size and green-lane a draft for the wrong
+// house. Strip the parcel-scoped signals before arbitration; caller-stated
+// extraction facts and the (address-matched) profile stay, and the draft
+// falls to the fallback-source machinery that already routes to review.
+// The snappedRecord check survives an enrichment failure (flags live on the
+// enriched payload, the audit marker on the record itself).
+function parcelSignalsDescribeGatheredAddress({ enriched, propertyRecord }) {
+  if (hasGlobalVerifyFlag(enriched)) return false;
+  if (propertyRecord?._addressAudit?.snappedRecord) return false;
+  return true;
+}
 const { composeIntent } = require('./intent-composer');
 const {
   LANES,
@@ -405,10 +422,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // verifiably the caller's.
     const trustedCustomer = context.customerPhoneAmbiguous ? null : context.customer;
 
+    const initialParcelOk = parcelSignalsDescribeGatheredAddress({ enriched, propertyRecord });
     let propertyFacts = resolvePropertyFacts({
       extraction: context.extraction,
-      propertyRecord,
-      parcelView,
+      propertyRecord: initialParcelOk ? propertyRecord : null,
+      parcelView: initialParcelOk ? parcelView : null,
       customer: trustedCustomer,
       isCommercial: commercialHint(context),
       subdivisionMedian,
@@ -468,12 +486,17 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const profileDescribesQuotedProperty = !addressRegathered
       && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
 
+    // Wrong-premise parcel signals (global flag / snapped record) are
+    // stripped here exactly as in the pre-compose arbitration — the
+    // re-gathered signals carry their OWN audit, so a corrected address is
+    // judged on its own lookup, not the original one's.
+    const effectiveParcelOk = parcelSignalsDescribeGatheredAddress(effectiveSignals);
     propertyFacts = resolvePropertyFacts({
       // Caller-stated facts (extraction) describe the property discussed on
       // THIS call — they stay.
       extraction: context.extraction,
-      propertyRecord: effectiveSignals.propertyRecord,
-      parcelView: effectiveSignals.parcelView,
+      propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
+      parcelView: effectiveParcelOk ? effectiveSignals.parcelView : null,
       customer: profileDescribesQuotedProperty ? trustedCustomer : null,
       isCommercial: intent.is_commercial,
       subdivisionMedian: effectiveSignals.subdivisionMedian,
@@ -488,7 +511,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // unresolved (an arbitrary building must not auto-price).
     const { computePropertyFactsV2Shadow, propertyFactsV2Enabled, applyV2ToPropertyFacts } = require('./property-facts-shadow');
     const propertyFactsV2 = computePropertyFactsV2Shadow({
-      propertyRecord: effectiveSignals.propertyRecord,
+      // Same wrong-premise strip as V1 arbitration — with the V2 gate ON,
+      // applyV2ToPropertyFacts would otherwise re-adopt the snapped parcel.
+      propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
       extraction: context.extraction,
       intent,
       propertyFacts,
@@ -778,5 +803,8 @@ module.exports = {
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,
   notify,
-  _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality },
+  _private: {
+    addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
+    parcelSignalsDescribeGatheredAddress,
+  },
 };

@@ -76,6 +76,22 @@ function lookupBedAreaIsTrustworthy(enriched) {
   ));
 }
 
+// The satellite turf estimate is a vision read like the bed area — same
+// imagery, same self-grading. A low-confidence or turf-flagged read may not
+// satisfy the lawn measurement and become an exact self-service price; the
+// caller adopts nothing and the request fails closed to
+// PROPERTY_DETAILS_NEEDED when no other turf source exists. (Existing
+// consumption, so an absent score stays adequate — legacy payloads carried
+// none.)
+function lookupTurfEstimateIsTrustworthy(enriched) {
+  const turf = Number(enriched?.estimatedTurfSf);
+  if (!Number.isFinite(turf) || turf <= 0) return false;
+  if (!lookupConfidenceIsAdequate(enriched)) return false;
+  return !hasVerifyFlagMatching(enriched, (field) => (
+    field.includes('turf') || field.includes('lawn')
+  ));
+}
+
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
 // landscape complexity, tree count, water adjacency) all come off the same
 // imagery read. When the lookup grades that read low, none of them should
@@ -86,6 +102,52 @@ function lookupFeaturesAreTrustworthy(enriched) {
   return !hasVerifyFlagMatching(enriched, (field) => (
     field.includes('estimatedturf') || field.includes('pool') || field.includes('shrub')
     || field.includes('tree') || field.includes('landscape')
+  ));
+}
+
+// Weak or conflicting core dimensions ship with their own fieldVerifyFlags
+// entries — the flag builder marks squareFootage / lotSize / stories as
+// HIGH-priority "verify before pricing". The customer-facing pricing path
+// has no review lane, so a flagged dimension may not price a quote: the
+// caller leaves it unset and a missing required measurement fails closed to
+// PROPERTY_DETAILS_NEEDED rather than pricing on a number the lookup itself
+// said to verify first.
+const DIMENSION_FLAG_MATCHERS = {
+  homeSqFt: ['squarefootage', 'square_footage', 'homesqft', 'home_sqft'],
+  lotSqFt: ['lotsize', 'lot_size', 'lotsqft', 'lot_sqft'],
+  stories: ['stories'],
+};
+
+function lookupDimensionIsTrustworthy(enriched, dimension) {
+  const names = DIMENSION_FLAG_MATCHERS[dimension] || [String(dimension || '').toLowerCase()];
+  return !hasVerifyFlagMatching(enriched, (field) => names.some((name) => field.includes(name)));
+}
+
+// applyVisionPropertyTypeEvidence MUTATES the property record itself
+// (rc.propertyType = <satellite type>, rc._propertyTypeSource = 'satellite',
+// fieldVerify kept on rc._fieldEvidence.propertyType) — it only ever fires
+// on a weak-typed record. So when the enriched type is rejected for its
+// verify flag, a bare record fallback would hand the SAME rejected
+// classification straight back. A record type stands only when it is
+// neither satellite-sourced nor verify-flagged.
+function recordPropertyTypeIsTrustworthy(record) {
+  if (!record) return false;
+  if (String(record._propertyTypeSource || '').trim().toLowerCase() === 'satellite') return false;
+  if (record._fieldEvidence?.propertyType?.fieldVerify) return false;
+  return true;
+}
+
+// A satellite attachment reclassification deliberately ships with a
+// fieldVerifyFlags entry for propertyType whose own copy says to confirm
+// townhome vs single-family BEFORE pricing
+// (property-lookup-v2#applyVisionPropertyTypeEvidence keeps fieldVerify on
+// the evidence, and the flag builder emits field='propertyType'). Property
+// type carries its own pricing adjustment, so a flagged type must not move
+// a price — the caller keeps its stored classification instead.
+function lookupPropertyTypeIsTrustworthy(enriched) {
+  if (!enriched?.propertyType) return false;
+  return !hasVerifyFlagMatching(enriched, (field) => (
+    field.includes('propertytype') || field.includes('property_type')
   ));
 }
 
@@ -112,4 +174,8 @@ module.exports = {
   lookupConfidenceIsAdequate,
   lookupBedAreaIsTrustworthy,
   lookupFeaturesAreTrustworthy,
+  lookupPropertyTypeIsTrustworthy,
+  lookupDimensionIsTrustworthy,
+  recordPropertyTypeIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy,
 };

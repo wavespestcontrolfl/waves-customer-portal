@@ -1318,3 +1318,30 @@ describe('a global verification failure drops the whole enriched payload', () =>
     expect(input.lotSqFt).toBe(9000);
   });
 });
+
+describe('wrong-premise parcel signals are stripped before property-fact arbitration', () => {
+  const { _private: idxPriv } = require('../services/estimator-engine/index');
+  const usable = idxPriv?.parcelSignalsDescribeGatheredAddress;
+
+  test('a global verify flag or a snapped record audit disqualifies the parcel signals', () => {
+    if (!usable) return;
+    // 'address' flag: the geocoder snapped to a different premise — the
+    // county record's home/lot describe the SNAPPED parcel, and arbitrated
+    // in as 'county' facts they would green-lane a draft for the wrong house.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }] },
+      propertyRecord: { squareFootage: 2400 },
+    })).toBe(false);
+    // Audit marker on the record itself survives an enrichment failure.
+    expect(usable({
+      enriched: null,
+      propertyRecord: { squareFootage: 2400, _addressAudit: { snappedRecord: { typed: '123', record: '125' } } },
+    })).toBe(false);
+    // Clean lookups keep their record.
+    expect(usable({
+      enriched: { fieldVerifyFlags: [{ field: 'stories', reason: 'weak', priority: 'HIGH' }] },
+      propertyRecord: { squareFootage: 2400, _addressAudit: { hasExactMatch: true } },
+    })).toBe(true);
+    expect(usable({ enriched: null, propertyRecord: { squareFootage: 2400 } })).toBe(true);
+  });
+});
