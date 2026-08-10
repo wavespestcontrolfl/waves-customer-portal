@@ -2,11 +2,23 @@ import { describe, it, expect, vi } from "vitest";
 import {
   fitImagesToBudget,
   isCompressibleImage,
+  isAnimatedImage,
   formatBytes,
   totalBytes,
   MMS_TOTAL_BUDGET_BYTES,
   TWILIO_MMS_TOTAL_BYTES,
 } from "./imageCompression";
+
+// Build a fake File whose header bytes are sniffable, for animation detection.
+function fileWithHeader(name, type, headerAscii, size = 1024) {
+  const bytes = new TextEncoder().encode(headerAscii);
+  return {
+    name,
+    type,
+    size,
+    slice: () => ({ arrayBuffer: async () => bytes.buffer }),
+  };
+}
 
 const MB = 1024 * 1024;
 
@@ -67,7 +79,156 @@ describe("isCompressibleImage", () => {
   });
 });
 
+describe("isAnimatedImage", () => {
+  it("treats every GIF as animated", async () => {
+    await expect(
+      isAnimatedImage(fakeFile("a.gif", 1, "image/gif")),
+    ).resolves.toBe(true);
+  });
+
+  it("detects APNG via the acTL chunk", async () => {
+    const apng = fileWithHeader(
+      "a.png",
+      "image/png",
+      "\x89PNG\r\n\x1a\nIHDR....acTL....IDAT",
+    );
+    await expect(isAnimatedImage(apng)).resolves.toBe(true);
+  });
+
+  it("does not treat a still PNG as animated", async () => {
+    const png = fileWithHeader(
+      "a.png",
+      "image/png",
+      "\x89PNG\r\n\x1a\nIHDR....IDATacTL",
+    );
+    // "acTL" here sits AFTER IDAT — that's compressed pixel data coinciding,
+    // not an animation control chunk.
+    await expect(isAnimatedImage(png)).resolves.toBe(false);
+  });
+
+  it("detects animated WebP via the ANIM chunk", async () => {
+    const webp = fileWithHeader(
+      "a.webp",
+      "image/webp",
+      "RIFF....WEBPVP8X....ANIM",
+    );
+    await expect(isAnimatedImage(webp)).resolves.toBe(true);
+  });
+
+  it("does not treat a still WebP as animated", async () => {
+    const webp = fileWithHeader("a.webp", "image/webp", "RIFF....WEBPVP8 ....");
+    await expect(isAnimatedImage(webp)).resolves.toBe(false);
+  });
+
+  it("fails safe — an unreadable header counts as animated", async () => {
+    const broken = {
+      name: "x.png",
+      type: "image/png",
+      size: 10,
+      slice: () => ({
+        arrayBuffer: async () => {
+          throw new Error("unreadable");
+        },
+      }),
+    };
+    await expect(isAnimatedImage(broken)).resolves.toBe(true);
+  });
+
+  it("ignores formats that cannot animate", async () => {
+    await expect(
+      isAnimatedImage(fakeFile("a.jpg", 1, "image/jpeg")),
+    ).resolves.toBe(false);
+  });
+});
+
 describe("fitImagesToBudget", () => {
+  it("encodes sequentially so only one raster is live at a time", async () => {
+    // A concurrent implementation would let both calls overlap; this asserts
+    // call N finishes before call N+1 starts.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const encode = vi.fn(async (file) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { ...file, size: Math.round(file.size * 0.2) };
+    });
+
+    const files = Array.from({ length: 5 }, (_, i) =>
+      fakeFile(`p${i}.jpg`, 2 * MB),
+    );
+    const res = await fitImagesToBudget(files, {
+      availableBytes: 4.5 * MB,
+      encodeImage: encode,
+      detectAnimated: async () => false,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("passes animated PNG/WebP through instead of flattening them", async () => {
+    const encode = vi.fn(async (file) => ({
+      ...file,
+      size: Math.round(file.size * 0.1),
+    }));
+    const apng = fakeFile("loop.png", 2 * MB, "image/png");
+    const jpg = fakeFile("photo.jpg", 4 * MB);
+
+    const res = await fitImagesToBudget([apng, jpg], {
+      availableBytes: 4.5 * MB,
+      encodeImage: encode,
+      detectAnimated: async (f) => f.name === "loop.png",
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.files[0]).toBe(apng); // untouched, animation intact
+    expect(encode).not.toHaveBeenCalledWith(apng, expect.anything());
+  });
+
+  it("restores originals whose extra bytes fit the leftover headroom", async () => {
+    // Budget 5MB. Originals 3MB + 3MB = 6MB, over. At the winning rung each
+    // compresses to 1MB (total 2MB), leaving 3MB of headroom — enough to put
+    // ONE 3MB original back byte-for-byte (1 + 3 = 4MB <= 5MB).
+    const encode = vi.fn(async (file) => ({ ...file, size: 1 * MB }));
+    const a = fakeFile("a.jpg", 3 * MB);
+    const b = fakeFile("b.jpg", 3 * MB);
+
+    const res = await fitImagesToBudget([a, b], {
+      availableBytes: 5 * MB,
+      encodeImage: encode,
+      detectAnimated: async () => false,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.finalBytes).toBeLessThanOrEqual(5 * MB);
+    const restored = res.files.filter((f, i) => f === [a, b][i]);
+    expect(restored).toHaveLength(1); // one original survives losslessly
+  });
+
+  it("never restores so much that the batch goes back over budget", async () => {
+    // Reaching the ladder means the originals exceed the budget, so restoring
+    // ALL of them is by definition impossible — the invariant that matters is
+    // that greedy restoration never overshoots.
+    const encode = vi.fn(async (file) => ({ ...file, size: 1 * MB }));
+    const files = [
+      fakeFile("a.jpg", 3 * MB),
+      fakeFile("b.jpg", 3 * MB),
+      fakeFile("c.jpg", 3 * MB),
+    ];
+
+    const res = await fitImagesToBudget(files, {
+      availableBytes: 5 * MB,
+      encodeImage: encode,
+      detectAnimated: async () => false,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.finalBytes).toBeLessThanOrEqual(5 * MB);
+    expect(res.compressed).toBe(true);
+  });
+
   it("leaves a batch that already fits completely untouched", async () => {
     const encode = vi.fn();
     const files = [fakeFile("a.jpg", 1 * MB), fakeFile("b.jpg", 2 * MB)];

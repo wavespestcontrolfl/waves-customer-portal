@@ -1092,8 +1092,15 @@ function SmsTab() {
         availableBytes: MMS_TOTAL_BUDGET_BYTES - existingBytes,
       });
       if (!fit.ok) {
+        // Report the whole tray, not just this selection, and name the target
+        // we actually enforce — a 4.7MB uncompressible file is over our 4.5MB
+        // safety budget while still under Twilio's 5MB ceiling.
         alert(
-          `Attachments are ${formatBytes(fit.bestBytes)} even after compression, over Twilio's 5MB per-message limit. Remove an image and try again.`,
+          `Attachments would total ${formatBytes(
+            existingBytes + fit.bestBytes,
+          )} even after compression, over the ${formatBytes(
+            MMS_TOTAL_BUDGET_BYTES,
+          )} per-message budget. Remove an image and try again.`,
         );
         return;
       }

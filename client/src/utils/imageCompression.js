@@ -1,12 +1,17 @@
 /**
- * Client-side image compression for outbound MMS attachments.
+ * Canvas image compression — the single decode/downscale/JPEG pipeline for the
+ * client, plus the MMS attachment budget ladder layered on top of it.
  * client/src/utils/imageCompression.js
  *
- * Twilio caps a single MMS at 5MB across ALL media, not per file, so two or
- * three full-size phone photos overflow the message even though each file is
- * individually legal. Before this module the composer simply refused the batch
- * and told the operator to "compress images and try again" — advice with no
- * path to act on it.
+ * `ibImages.js` (Intelligence Bar vision parts) imports the primitive from
+ * here, so orientation handling, alpha flattening, and decode fallbacks live in
+ * ONE place rather than diverging across parallel compressors.
+ *
+ * Why the budget ladder exists: Twilio caps a single MMS at 5MB across ALL
+ * media, not per file, so two or three full-size phone photos overflow the
+ * message even though each file is individually legal. The composer used to
+ * refuse the batch and tell the operator to "compress images and try again" —
+ * advice with no path to act on it.
  *
  * Quality-preserving by design:
  *   - A batch that already fits uploads byte-for-byte untouched. No re-encode,
@@ -16,11 +21,19 @@
  *     budget demands rather than a fixed amount.
  *   - A re-encode that lands BIGGER than its original (common for small or
  *     already-optimized images) is discarded in favor of the original.
+ *   - Once a rung fits, any original that fits back into the leftover headroom
+ *     is RESTORED byte-for-byte — we never spend quality the budget didn't
+ *     actually ask for.
  *
- * Animated GIFs are never re-encoded — a canvas round-trip flattens them to a
- * single frame. They pass through at full size and still count against the
- * budget, so a GIF that can't fit reports failure instead of silently
- * shipping a still.
+ * Animated images (GIF, APNG, animated WebP) are never re-encoded — a canvas
+ * round-trip flattens them to a single frame. They pass through at full size
+ * and still count against the budget, so an animation that can't fit reports
+ * failure instead of silently shipping a still.
+ *
+ * Files are encoded SEQUENTIALLY, not with Promise.all: a 4032x3024 RGBA
+ * bitmap is ~46 MiB before its similarly sized canvas, so decoding a ten-file
+ * selection concurrently approaches a gigabyte of live raster and crashes
+ * mobile browsers before anything uploads.
  */
 
 // Twilio's hard per-message ceiling across all media.
@@ -45,12 +58,65 @@ const LADDER = [
   { maxEdge: 1024, quality: 0.65 },
 ];
 
-// Canvas flattens animation to frame one, so GIFs are passed through as-is.
-const NEVER_RECOMPRESS = new Set(["image/gif"]);
+// Formats that can carry animation. GIF always can; PNG and WebP only in their
+// APNG / animated-WebP variants, which need a byte sniff to tell apart.
+const ALWAYS_ANIMATED = new Set(["image/gif"]);
+const MAYBE_ANIMATED = new Set(["image/png", "image/webp"]);
 
+// acTL must precede IDAT in an APNG, and ANIM sits in the WebP header block,
+// so a small prefix is enough — and bounding the scan avoids matching the
+// same bytes occurring by chance inside compressed pixel data.
+const SNIFF_BYTES = 64 * 1024;
+
+function mimeOf(file) {
+  return String(file?.type || "").toLowerCase();
+}
+
+/** Type-level check only. Animation needs `isAnimatedImage` (async). */
 export function isCompressibleImage(file) {
-  const type = String(file?.type || "").toLowerCase();
-  return /^image\//.test(type) && !NEVER_RECOMPRESS.has(type);
+  const type = mimeOf(file);
+  return /^image\//.test(type) && !ALWAYS_ANIMATED.has(type);
+}
+
+function indexOfAscii(bytes, marker, end = bytes.length) {
+  const codes = Array.from(marker, (c) => c.charCodeAt(0));
+  const limit = Math.min(end, bytes.length) - codes.length;
+  outer: for (let i = 0; i <= limit; i++) {
+    for (let j = 0; j < codes.length; j++) {
+      if (bytes[i + j] !== codes[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * True when re-encoding would silently drop animation frames.
+ * Fails SAFE: an unreadable header is treated as animated so we pass the file
+ * through untouched rather than flattening something we couldn't inspect.
+ */
+export async function isAnimatedImage(file) {
+  const type = mimeOf(file);
+  if (ALWAYS_ANIMATED.has(type)) return true;
+  if (!MAYBE_ANIMATED.has(type)) return false;
+  if (typeof file?.slice !== "function") return false;
+  try {
+    const bytes = new Uint8Array(
+      await file.slice(0, SNIFF_BYTES).arrayBuffer(),
+    );
+    if (type === "image/png") {
+      // Only look ahead of the first IDAT — past that we'd be scanning
+      // compressed pixel data where "acTL" can occur by coincidence.
+      const idat = indexOfAscii(bytes, "IDAT");
+      return (
+        indexOfAscii(bytes, "acTL", idat === -1 ? bytes.length : idat) !== -1
+      );
+    }
+    // Animated WebP declares VP8X + ANIM within the first header chunks.
+    return indexOfAscii(bytes, "ANIM", 512) !== -1;
+  } catch {
+    return true;
+  }
 }
 
 export function totalBytes(files = []) {
@@ -66,44 +132,6 @@ export function formatBytes(bytes = 0) {
 
 function jpegName(name = "photo") {
   return `${String(name).replace(/\.[^.]+$/, "")}.jpg`;
-}
-
-/**
- * Decode + re-encode one File as JPEG at the given rung.
- * Resolves to null when the image can't be decoded (HEIC outside Safari, a
- * corrupt file), which the caller treats as "pass through untouched".
- */
-async function defaultEncodeImage(file, { maxEdge, quality }) {
-  let bitmap = null;
-  try {
-    bitmap = await decode(file);
-    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
-    const width = Math.max(1, Math.round(bitmap.width * scale));
-    const height = Math.max(1, Math.round(bitmap.height * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    // JPEG has no alpha: without this, transparent PNG regions composite onto
-    // the canvas's default transparent-black and arrive as solid black.
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(bitmap, 0, 0, width, height);
-
-    const blob = await new Promise((resolve) => {
-      canvas.toBlob(resolve, "image/jpeg", quality);
-    });
-    if (!blob) return null;
-    return new File([blob], jpegName(file.name), {
-      type: "image/jpeg",
-      lastModified: file.lastModified || Date.now(),
-    });
-  } catch {
-    return null;
-  } finally {
-    if (bitmap && typeof bitmap.close === "function") bitmap.close();
-  }
 }
 
 // createImageBitmap is faster and applies EXIF orientation explicitly. Safari
@@ -135,6 +163,89 @@ function decodeViaImg(file) {
 }
 
 /**
+ * THE shared canvas primitive: decode a File, downscale to fit `maxEdge`, and
+ * hand the drawn canvas to `serialize`. Every client-side JPEG re-encode goes
+ * through here — see the module header.
+ *
+ * Resolves to null when the image can't be decoded (HEIC outside Safari, a
+ * corrupt file), which callers treat as "pass through untouched".
+ */
+async function withDownscaledCanvas(file, { maxEdge }, serialize) {
+  let bitmap = null;
+  try {
+    bitmap = await decode(file);
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    // JPEG has no alpha: without this, transparent PNG regions composite onto
+    // the canvas's default transparent-black and arrive as solid black.
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
+
+    return await serialize(canvas);
+  } catch {
+    return null;
+  } finally {
+    // Release the raster before the next decode — the whole reason encoding
+    // runs sequentially.
+    if (bitmap && typeof bitmap.close === "function") bitmap.close();
+  }
+}
+
+/** Shared primitive → data URL. Used by ibImages.js for vision parts. */
+export function encodeJpegDataUrl(file, { maxEdge, quality }) {
+  return withDownscaledCanvas(file, { maxEdge }, (canvas) =>
+    canvas.toDataURL("image/jpeg", quality),
+  );
+}
+
+/** Shared primitive → File. Used by the MMS budget ladder below. */
+export function encodeJpegFile(file, { maxEdge, quality }) {
+  return withDownscaledCanvas(file, { maxEdge }, async (canvas) => {
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", quality);
+    });
+    if (!blob) return null;
+    return new File([blob], jpegName(file.name), {
+      type: "image/jpeg",
+      lastModified: file.lastModified || Date.now(),
+    });
+  });
+}
+
+/**
+ * Put back any original whose extra bytes still fit in the leftover headroom.
+ * Cheapest restores first, which maximizes how many originals come back.
+ */
+function restoreWithinHeadroom(originals, attempt, budget) {
+  const result = [...attempt];
+  let used = totalBytes(result);
+  const candidates = [];
+  for (let i = 0; i < originals.length; i++) {
+    if (result[i] !== originals[i]) {
+      candidates.push({
+        i,
+        delta: Number(originals[i].size || 0) - Number(result[i].size || 0),
+      });
+    }
+  }
+  candidates.sort((a, b) => a.delta - b.delta);
+  for (const { i, delta } of candidates) {
+    if (used + delta <= budget) {
+      result[i] = originals[i];
+      used += delta;
+    }
+  }
+  return result;
+}
+
+/**
  * Fit a batch of images into `availableBytes`, shedding as little quality as
  * possible.
  *
@@ -148,7 +259,11 @@ function decodeViaImg(file) {
  */
 export async function fitImagesToBudget(
   inputFiles,
-  { availableBytes, encodeImage = defaultEncodeImage } = {},
+  {
+    availableBytes,
+    encodeImage = encodeJpegFile,
+    detectAnimated = isAnimatedImage,
+  } = {},
 ) {
   const files = Array.from(inputFiles || []);
   const originalBytes = totalBytes(files);
@@ -183,29 +298,41 @@ export async function fitImagesToBudget(
     };
   }
 
+  // Resolved once, not per rung: the sniff reads bytes off disk.
+  const recompressible = [];
+  for (const file of files) {
+    recompressible.push(
+      isCompressibleImage(file) && !(await detectAnimated(file)),
+    );
+  }
+
   // Tracked only to report how close we got when nothing fits.
   let bestBytes = originalBytes;
 
   for (const rung of LADDER) {
-    const attempt = await Promise.all(
-      files.map(async (file) => {
-        if (!isCompressibleImage(file)) return file;
-        const encoded = await encodeImage(file, rung);
-        // Keep whichever is smaller: re-encoding an already-small or
-        // already-optimized image routinely inflates it.
-        if (!encoded || encoded.size >= file.size) return file;
-        return encoded;
-      }),
-    );
+    const attempt = [];
+    // Sequential on purpose — see the module header's memory note.
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!recompressible[i]) {
+        attempt.push(file);
+        continue;
+      }
+      const encoded = await encodeImage(file, rung);
+      // Keep whichever is smaller: re-encoding an already-small or
+      // already-optimized image routinely inflates it.
+      attempt.push(!encoded || encoded.size >= file.size ? file : encoded);
+    }
     const attemptBytes = totalBytes(attempt);
     if (attemptBytes < bestBytes) bestBytes = attemptBytes;
     if (attemptBytes <= budget) {
+      const finalFiles = restoreWithinHeadroom(files, attempt, budget);
       return {
         ok: true,
-        files: attempt,
-        compressed: true,
+        files: finalFiles,
+        compressed: finalFiles.some((f, i) => f !== files[i]),
         originalBytes,
-        finalBytes: attemptBytes,
+        finalBytes: totalBytes(finalFiles),
       };
     }
   }
