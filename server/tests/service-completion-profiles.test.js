@@ -24,6 +24,19 @@ function makeKnex({ service = null, serviceResults = null, profile = null, hasTa
         if (table === 'service_completion_profiles') return profile;
         return null;
       }),
+      // The short-name fallback now takes TWO rows and resolves only on
+      // exactly one, so an ambiguous abbreviation can never be guessed at
+      // (a shared "Lawn Care"/"Mosquito" spans one_time AND recurring rows).
+      // Consumes the same serviceResults queue as .first(), as an array.
+      limit: jest.fn(() => chain),
+      select: jest.fn(async () => {
+        if (table !== 'services') return [];
+        const next = Array.isArray(serviceResults)
+          ? serviceResults[serviceResultIndex++]
+          : service;
+        if (!next) return [];
+        return Array.isArray(next) ? next : [next];
+      }),
     };
     return chain;
   });
