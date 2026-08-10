@@ -31,6 +31,7 @@ const {
   saveVerifiedOverride,
 } = require('../services/property-lookup/lookup-cache');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
@@ -1455,6 +1456,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     delete ai.imperviosSurfacePercent;
     delete ai.estimatedBedAreaSf;
     delete ai.estimatedBedAreaPercent;
+    delete ai._bedAreaConfidence;
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1742,8 +1744,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     treeDensity: ai?.treeDensity || 'MODERATE',
     landscapeComplexity,
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
+    // Field-level confidence behind the winning palm count (stamped by
+    // mergeAiAnalyses) — same contract as tree count / bed area below.
+    palmCountConfidence: ai?._palmCountConfidence,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
+    // Field-level confidence behind the winning tree count (stamped by
+    // mergeAiAnalyses) — same contract as bedAreaConfidence below.
+    treeCountConfidence: ai?._treeCountConfidence,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
+    // Field-level confidence behind the winning bed-area value (stamped by
+    // mergeAiAnalyses) — the trust predicate requires it; the blended
+    // aiConfidence can be held above the floor by providers that never
+    // reported a bed area.
+    bedAreaConfidence: ai?._bedAreaConfidence,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
@@ -1910,6 +1923,24 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
+
+  // Palm-count prefill verdict, computed HERE so the trust rule keeps one
+  // home (services/lookup-confidence) — the estimator pages only read the
+  // boolean. Requires the fieldVerifyFlags above (wrong-premise 'address'
+  // flags veto it) and the field-level palmCountConfidence stamp; a
+  // distrusted count leaves the estimator's palm field EMPTY for the
+  // operator to count, instead of prefilling garbage that would ride the
+  // service-line override into per-palm pricing.
+  // Stamped ONLY when the field-level confidence exists: cached lookups
+  // merged before the stamp shipped rebuild through here too, and stamping
+  // their absent confidence as an explicit `false` would suppress every
+  // cached address's prefill for the cache lifetime — the exact
+  // legacy-preservation the client contract promises (`!== false`). A
+  // legacy payload simply carries NO verdict; fresh merges always stamp a
+  // positive count, so every new lookup gets one.
+  if (Number.isFinite(Number(profile.palmCountConfidence))) {
+    profile.palmCountTrusted = lookupPalmCountIsTrustworthy(profile);
+  }
 
   // The number the pricing engine will actually use on this profile if the
   // operator leaves Confirmed Sq Ft blank (codex P1 r1 + pre-push P1 r3
@@ -2896,6 +2927,123 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
+  // Multifamily/HOA master-parcel guidance: county rolls model condo and
+  // townhome communities as building-level "Multifamily" parcels, so a
+  // unit-less address (typed or geocoder-snapped) resolves to the
+  // ASSOCIATION'S whole-building parcel and flips an individual resident's
+  // lookup to Commercial (two real leads in two days: a condo flea call and
+  // a townhome spider/wasp form lead, both truly residential units).
+  // Guidance only — the classification, the commercial manual-quote gate,
+  // and every pricing path are untouched; the operator decides
+  // resident-vs-association. Distinct field key so the win/loss byFlagField
+  // slice doesn't double-count propertyType. The subtype is derived from the
+  // RECORD alone (no ai) so a satellite/AI commercial signal on a
+  // non-multifamily record can't produce copy asserting county master-parcel
+  // provenance it doesn't have — commercialSignalRecord inside these helpers
+  // already strips untrusted web-sourced type strings (the Gateway Ave
+  // guard), so "record alone" means trusted-record evidence. The copy
+  // additionally asserts COUNTY-ROLL provenance, so the TYPE FIELD itself
+  // must be county-backed: a pure county/cadastral merge, an authoritative
+  // propertyType evidence source, or the stacked-parcel aggregation. A
+  // legacy AI-cache record (no field evidence) or a hybrid whose type came
+  // from a web hit is trusted for classification but must not produce
+  // county-master copy (codex P1 ×2).
+  // County/cadastral ONLY — verified/permit/builder are authoritative for
+  // classification but are not the county roll, and this copy claims
+  // county-roll provenance (codex P1).
+  const COUNTY_ROLL_SOURCES = new Set(['county', 'cadastral']);
+  // Field evidence, WHERE IT EXISTS, is the authority on where the type
+  // came from (codex P2): applyVerifiedOverrides rewrites propertyType's
+  // evidence to sourceType 'verified' but leaves rc._source at 'county',
+  // so a record-level arm evaluated first would credit the county roll for
+  // a technician's override ('HOA Common Area', or 'Multifamily' with a
+  // multi-unit count) and tell the operator the roll classified it. Only
+  // when propertyType carries NO evidence does the record-level source —
+  // or the stacked-parcel aggregation, which is assembled from county unit
+  // parcels — stand in for it.
+  const typeEvidenceSource = rc?._fieldEvidence?.propertyType
+    ? String(rc._fieldEvidence.propertyType.sourceType || '').toLowerCase()
+    : null;
+  const countyBackedType = Boolean(rc) && (typeEvidenceSource !== null
+    ? COUNTY_ROLL_SOURCES.has(typeEvidenceSource)
+    : (COUNTY_ROLL_SOURCES.has(String(rc._source || '')) || Boolean(rc._parcel?.aggregated)));
+  if (rc && countyBackedType
+      && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
+    const masterParcelSubtype = resolveCommercialSubtype(rc, {});
+    // Positive master-parcel evidence, so a county match for ONE condo unit
+    // ("Multifamily Condominium", unitCount 1, its own parcel) is never told
+    // its correct unit dimensions are the building's (codex P1). Aggregates
+    // count via residentialUnits — the real Manatee condo-building records
+    // carry unitCount 1 with _parcel.residentialUnits 30–48. The HOA
+    // common-area subtype needs no unit count: that parcel is association
+    // property (a clubhouse/greenbelt), never a resident's own home.
+    // _parcel.residentialUnits is COUNTY GIS by construction — attachParcelMeta
+    // stamps it straight off the roll layer — so it is trusted evidence whether
+    // or not the lookup stacked unit parcels. Gating it on `aggregated` hid the
+    // only positive evidence on the commonest master shape (codex P1): county
+    // GIS returns ONE multifamily master polygon, attachParcelMeta records its
+    // 48 assessed units, `aggregated` stays unset, and buildCadastralRecord
+    // leaves unitCount at the seeded 1 — so a 48-unit building failed the
+    // evidence test and got none of this guidance, which is the exact
+    // commercial diversion the flag exists to catch. A single condo UNIT's own
+    // parcel carries residentialUnits 1, so the one-unit guard still holds.
+    // Bounded like the aggregate seeding (ai-property-lookup coerceInt 2–2000)
+    // so a bad layer response can't claim thousands of units.
+    const parcelUnits = Math.min(Number(rc._parcel?.residentialUnits) || 0, 2000);
+    const masterUnitCount = Math.max(Number(trustedUnitCount(rc)) || 0, parcelUnits);
+    const masterParcelEvidence = masterUnitCount > 1 || Boolean(rc._parcel?.aggregated);
+    if (masterParcelSubtype === 'hoa_common_area_residential'
+        || (masterParcelSubtype === 'multifamily_common_area_residential' && masterParcelEvidence)) {
+      const unitCount = masterUnitCount;
+      // The unit re-lookup is only recommended on POSITIVE evidence the
+      // community parcels each unit: condo/townhome text on the trusted
+      // record, or the stacked-parcel aggregation (which is built from
+      // exactly those unit parcels). Generic "Multifamily" labels cover
+      // rental buildings too — those units have no separate county parcels,
+      // so the safe default is customer-supplied dimensions, with a hedge
+      // for Multifamily-labeled condo communities.
+      const recordText = commercialSignalText(commercialSignalRecord(rc), {});
+      const unitsParcelled = /condo|condominium|townhome|townhouse/.test(recordText)
+        || Boolean(rc._parcel?.aggregated);
+      const unitDimensionStep = unitsParcelled
+        ? 'collect the unit number and re-run the lookup with it (condo/townhome unit parcels carry the unit\'s own dimensions), or replace home/lot sq ft and stories with the unit\'s actual figures'
+        : 'collect the unit number and get the unit\'s own sq ft and stories from the customer — rental complexes have no per-unit county parcels; if this is actually an individually parcelled condo/townhome community, running the lookup again with the unit number will pull the unit\'s own record';
+      // Dimension provenance is per FIELD: a tech-verified or builder value
+      // may have overridden the county's — only county-sourced dimensions
+      // are the master parcel's, so only claim (and warn about) those
+      // (codex P1). Absent per-field evidence on a county-backed record,
+      // the value is the county's.
+      const countyDim = (field) => {
+        // PRESENCE first, provenance second (codex P2): a value the roll
+        // never supplied cannot be "prefilled" or "the whole building's",
+        // and absent field evidence made the provenance test pass it
+        // anyway. This bit systematically — the Sarasota GIS parser always
+        // sets `stories` to null (county-parcel-gis.js), so every Sarasota
+        // master parcel warned the operator about a prefilled story count
+        // that was never there. 0 counts as absent, matching how the rest
+        // of this file reads these dimensions.
+        const value = rc[field];
+        if (value == null || value === '' || Number(value) === 0) return false;
+        const ev = rc._fieldEvidence?.[field];
+        if (!ev) return true;
+        return COUNTY_ROLL_SOURCES.has(String(ev.sourceType || '').toLowerCase());
+      };
+      const countyDimLabels = [
+        countyDim('squareFootage') ? 'sq ft' : null,
+        countyDim('lotSize') ? 'lot' : null,
+        countyDim('stories') ? 'stories' : null,
+      ].filter(Boolean);
+      const dimensionWarning = countyDimLabels.length
+        ? `, and the prefilled ${countyDimLabels.join(', ')} ${countyDimLabels.length > 1 ? 'are' : 'is'} the WHOLE BUILDING'S, not one home's. Do NOT save ${countyDimLabels.length > 1 ? 'these' : 'it'} as field-verified — that would permanently pin the building's dimensions to this address.`
+        : '.';
+      flags.push({
+        field: 'commercialSubtype',
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way${dimensionWarning} If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
+        priority: 'HIGH',
+      });
+    }
+  }
+
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
@@ -3699,12 +3847,20 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       ? 'estimated'
       : undefined,
     palmCount: positiveIntegerValue(p.palmCount),
-    palmInventory: {
-      ...(p.palmInventory || {}),
-      ...(positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) !== undefined
-        ? { palmCount: positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) }
-        : {}),
-    },
+    // The AI estimate leg honors the stamped trust verdict (same `!== false`
+    // contract as the client prefill): a distrusted count must not be
+    // promoted into palmInventory.palmCount here either — the client
+    // request spreads the whole profile, so the raw field can arrive even
+    // after the UI cleared it. A REAL stored inventory count is not an AI
+    // read and always stands.
+    palmInventory: (() => {
+      const estimateLeg = p.palmCountTrusted === false ? undefined : p.estimatedPalmCount;
+      const resolved = positiveIntegerValue(p.palmInventory?.palmCount, estimateLeg);
+      return {
+        ...(p.palmInventory || {}),
+        ...(resolved !== undefined ? { palmCount: resolved } : {}),
+      };
+    })(),
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
@@ -3959,6 +4115,125 @@ function mergeAiAnalyses(providerResults) {
       (mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0
     );
     merged._structureAttachmentSupport = supporters.length;
+  }
+
+  // Numeric field reads for the divergence sets below: null/blank means the
+  // provider DIDN'T measure (the gap-fill loop treats it as missing too) —
+  // Number(null) is 0, which would masquerade as an explicit observed zero
+  // and falsely flag divergence against a valid positive read. Only real
+  // numbers (including a genuine 0) participate.
+  const numericRead = (raw) => {
+    if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+
+  // Confidence behind the FINAL bed-area value — same rationale as
+  // structureAttachment above. estimatedBedAreaSf is not divergence-tracked
+  // and the gap-fill loop can adopt it from a lone low-confidence provider
+  // while the other providers' high scores hold the blended average above
+  // the pricing floor. The T&S bed-area trust predicate keys off this stamp
+  // so a gap-filled read can't average its way into a customer price.
+  const mergedBedArea = Number(merged.estimatedBedAreaSf);
+  if (Number.isFinite(mergedBedArea) && mergedBedArea > 0) {
+    // Divergence considers explicit ZEROS too — an observed no-beds read
+    // materially contradicts a positive one, and dropping it would leave a
+    // 2600-vs-0 disagreement looking like a single supported read (only
+    // ABSENT reads are excluded). The stamp's supporters stay keyed to the
+    // winning positive value.
+    const bedReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedBedAreaSf), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxRead = Math.max(...bedReads.map((r) => r.value));
+    const minRead = Math.min(...bedReads.map((r) => r.value));
+    // Two providers disagreeing MATERIALLY on the bed area (>25% of the
+    // larger) is a conflict no single provider's confidence can launder —
+    // the winner is whichever provider sorted first, not a measurement.
+    // Zero the stamp so the trust predicate routes the estimate to its
+    // reviewed lot-inference fallback, and record the divergence.
+    const bedAreaDivergent = bedReads.length > 1 && (maxRead - minRead) > maxRead * 0.25;
+    if (bedAreaDivergent) {
+      merged._bedAreaConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedBedAreaSf',
+          primary: primary.provider,
+          ...Object.fromEntries(bedReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._bedAreaConfidence = bedReads
+        .filter((r) => r.value === mergedBedArea)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // Same stamp for the tree count — it feeds per-tree labor minutes AND the
+  // per-tree material term, and like the bed area it can be gap-filled from
+  // a lone low-confidence provider outside divergence tracking. The
+  // absolute-difference guard (>2 trees) keeps small-count noise (4 vs 3)
+  // from flagging.
+  const mergedTreeCount = Number(merged.estimatedTreeCount);
+  if (Number.isFinite(mergedTreeCount) && mergedTreeCount > 0) {
+    // Explicit zero counts join divergence detection (same rationale as
+    // the bed area above); only absent reads are excluded.
+    const countReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedTreeCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxCount = Math.max(...countReads.map((r) => r.value));
+    const minCount = Math.min(...countReads.map((r) => r.value));
+    const treeCountDivergent = countReads.length > 1
+      && (maxCount - minCount) > 2
+      && (maxCount - minCount) > maxCount * 0.25;
+    if (treeCountDivergent) {
+      merged._treeCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedTreeCount',
+          primary: primary.provider,
+          ...Object.fromEntries(countReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._treeCountConfidence = countReads
+        .filter((r) => r.value === mergedTreeCount)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
+  }
+
+  // And the palm count — it prefills the estimator's palm field (owner
+  // ruling 2026-08-10) and, submitted, prices per-palm injection. Same
+  // gap-fill/divergence exposure, same stamp.
+  const mergedPalmCount = Number(merged.estimatedPalmCount);
+  if (Number.isFinite(mergedPalmCount) && mergedPalmCount > 0) {
+    // Explicit zero counts join divergence detection (a confident "no
+    // palms" read contradicts a confident 7); only absent reads are
+    // excluded.
+    const palmReads = sorted
+      .map((r) => ({ provider: r.provider, value: numericRead(r.analysis?.estimatedPalmCount), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => r.value !== null);
+    const maxPalm = Math.max(...palmReads.map((r) => r.value));
+    const minPalm = Math.min(...palmReads.map((r) => r.value));
+    const palmCountDivergent = palmReads.length > 1
+      && (maxPalm - minPalm) > 2
+      && (maxPalm - minPalm) > maxPalm * 0.25;
+    if (palmCountDivergent) {
+      merged._palmCountConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedPalmCount',
+          primary: primary.provider,
+          ...Object.fromEntries(palmReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._palmCountConfidence = palmReads
+        .filter((r) => r.value === mergedPalmCount)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
   }
 
   return merged;

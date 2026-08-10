@@ -52,7 +52,7 @@ const {
 } = require('./estimate-conversion-guard');
 const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
-const { readCachedLineType } = require('./messaging/validators/line-type');
+const { readCachedLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 
 // Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
 const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
@@ -144,7 +144,7 @@ async function isSuppressedContact(phone) {
   }
   try {
     const cached = await readCachedLineType(e164);
-    if (cached && cached.state === 'hit' && cached.lineType === 'landline') return true;
+    if (cached && cached.state === 'hit' && NON_SMS_LINE_TYPES.has(cached.lineType)) return true;
   } catch (e) {
     logger.warn(`[click-followup-gate] line-type cache read failed (continuing): ${e.message}`);
   }

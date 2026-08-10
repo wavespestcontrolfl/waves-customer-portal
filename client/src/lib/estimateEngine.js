@@ -2265,17 +2265,27 @@ export function calculateEstimate(inputs) {
   if (svcTs && !isCommercial && lotSqFt > 0) {
     hasRec = true;
     let eb = bedArea;
+    let inferredRawBedArea = 0;
     if (eb <= 0) {
       let bp = shrubDensity === 'HEAVY' ? 0.25 : shrubDensity === 'MODERATE' ? 0.18 : 0.10;
       // Server parity (audit 2026-07-18 P2): the pricing engine adds the
       // complexity bump for MODERATE too (property-calculator: 'complex' OR
-      // 'moderate' → +complexAdd) and caps derived bed area at BED_AREA_CAP
-      // 8,000 (constants.js:69 — the client's v1.5 12,000 cap never shipped
-      // server-side, so admin-built quotes overpriced big heavy-shrub lots
-      // by up to 4,000 sf of bed material vs. what the engine would charge).
+      // 'moderate' → +complexAdd). Owner ruling 2026-08-10: bed areas are
+      // NEVER clamped — the old 8,000 clamp priced a typed 14,000 as 8,000
+      // (~43% low). Large areas price in full and carry the review marker.
       if (landscapeComplexity === 'COMPLEX' || landscapeComplexity === 'MODERATE') bp += 0.05;
-      eb = Math.min(8000, Math.round(lotSqFt * bp));
+      eb = Math.round(lotSqFt * bp);
       fieldVerify.push('bed area');
+      inferredRawBedArea = eb;
+    }
+    // Server parity for the REVIEW SIGNAL (this client fallback runs when
+    // the V1 estimator prices without Property Lookup, and V1 saves with no
+    // replayable engineRequest — a silent large area here would be sendable
+    // with an empty Pricing Review Notes panel). Mirrors service-pricing.js:
+    // priced IN FULL, review at/above the threshold.
+    if (eb >= 8000 || inferredRawBedArea >= 8000) {
+      addManualReviewReason('bed_area_at_or_above_8000');
+      addRoutingWarning(`Tree & Shrub bed area of ${Math.round(eb).toLocaleString()} sq ft is at or above the 8,000 sq ft review threshold. It was priced IN FULL — confirm the measurement.`);
     }
     // Tree count mirrors server v4.6 semantics: an explicit count (including
     // 0) is authoritative; only a MISSING count falls back to a treeDensity

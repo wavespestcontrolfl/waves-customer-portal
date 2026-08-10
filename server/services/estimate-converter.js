@@ -12,6 +12,9 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
+// Canonical service-key tier membership (aliased: this module's local
+// serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
+const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
 const {
   customerPreservesMonthlyMembership,
   inferFrequencyKeyFromEstimateData,
@@ -499,7 +502,7 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
-  return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
+  return serviceKeyCountsTowardTier(recurringServiceKey(svc));
 }
 
 function tierQualifyingRecurringServiceKeys(services = []) {
@@ -539,7 +542,7 @@ function isMembershipTierUpgrade(previousTier, nextTier) {
 function priorQualifyingKeysFromSnapshot(estimateData) {
   const keys = estimateData?.membershipSnapshot?.existingServiceKeys;
   if (!Array.isArray(keys)) return null;
-  return keys.filter((k) => WAVEGUARD.qualifyingServices.includes(k));
+  return keys.filter((k) => serviceKeyCountsTowardTier(k));
 }
 
 // Distinct qualifying-family count across the customer's EXISTING plans plus
@@ -789,26 +792,59 @@ function estimateLineItemsFromData(estimateData = {}) {
     || [];
 }
 
-function estimateOneTimeItemsFromData(estimateData = {}) {
+function estimateOneTimeItemsFromData(estimateData = {}, { collapseMirrored = false } = {}) {
   const data = normalizeEstimateData(estimateData);
   const result = data.result && typeof data.result === 'object' ? data.result : data;
   const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
   const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  const rows = [
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
-    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
-    ...(Array.isArray(result.specItems) ? result.specItems : []),
-    ...(Array.isArray(data.one_time?.items) ? data.one_time.items : []),
-    ...(Array.isArray(data.oneTimeItems) ? data.oneTimeItems : []),
-  ].filter((item) => item && item.onProg !== true && item.includedOnProgram !== true);
+  const keepRow = (item) => item && item.onProg !== true && item.includedOnProgram !== true;
+  const containers = [
+    Array.isArray(oneTime.items) ? oneTime.items.filter(keepRow) : [],
+    Array.isArray(oneTime.specItems) ? oneTime.specItems.filter(keepRow) : [],
+    Array.isArray(nestedOneTime.items) ? nestedOneTime.items.filter(keepRow) : [],
+    Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems.filter(keepRow) : [],
+    Array.isArray(result.specItems) ? result.specItems.filter(keepRow) : [],
+    Array.isArray(data.one_time?.items) ? data.one_time.items.filter(keepRow) : [],
+    Array.isArray(data.oneTimeItems) ? data.oneTimeItems.filter(keepRow) : [],
+  ];
+  const rows = containers.flat();
   const seen = new Set();
-  return rows.filter((item) => {
+  const objectDeduped = rows.filter((item) => {
     if (seen.has(item)) return false;
     seen.add(item);
+    return true;
+  });
+  if (!collapseMirrored) return objectDeduped;
+  // Mapped estimates mirror the SAME specialty row into several containers
+  // as distinct objects (oneTime.specItems + root specItems). Collapse
+  // those mirrors by content identity WITHOUT erasing legitimate repeated
+  // charges (two identical unit treatments in ONE container): each
+  // identity's final count = the MAX occurrences seen within any single
+  // container (slice 1A-ii, codex r3c).
+  const identityOf = (item) => [
+    String(item.service || '').toLowerCase(),
+    String(item.name || item.label || '').toLowerCase(),
+    String(item.price ?? item.amount ?? item.total ?? ''),
+  ].join('|');
+  const maxPerContainer = new Map();
+  for (const container of containers) {
+    const counts = new Map();
+    for (const item of container) {
+      const key = identityOf(item);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    for (const [key, count] of counts) {
+      maxPerContainer.set(key, Math.max(maxPerContainer.get(key) || 0, count));
+    }
+  }
+  const emitted = new Map();
+  return objectDeduped.filter((item) => {
+    const key = identityOf(item);
+    const already = emitted.get(key) || 0;
+    if (already >= (maxPerContainer.get(key) || 0)) return false;
+    emitted.set(key, already + 1);
     return true;
   });
 }
@@ -1560,7 +1596,22 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // catalog — an absent key would only add lookup-warn noise.
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
-  return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
+  if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
+  // Recurring foam: key verified against the catalog 2026-08-08 — the
+  // foam_recurring row ships in the same PR (20260808070000). The seeder
+  // normalizer matches both the engine key (priceRecurringFoam returns
+  // service 'foam_recurring') and the "Recurring Foam Treatment" display
+  // name, so legacy name-only lines link too. Absent row (env not yet
+  // migrated) degrades to the existing name-only warn path.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // NOTE (2026-08-09): trap_only_retainer deliberately has NO branch
+  // here. The v1 mapper persists retainers under oneTime.specItems (not
+  // RECURRING_SERVICES) and the pricer rows carry no `annual`, so this
+  // function never receives them — a branch would be dead code. Making
+  // the retainer a first-class recurring service (cadence, monthly_rate,
+  // prepay interactions) is an owner-gated billing design queued with
+  // the link-at-write lane.
+  return null;
 }
 
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
@@ -3063,6 +3114,16 @@ const EstimateConverter = {
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
+            // Deliberately NOT filtered on is_active/is_archived (codex
+            // 2026-08-08 r5): this link is identity durability, not
+            // activation policy. An accepted estimate must schedule, and
+            // completion's name fallback resolves the SAME row (inactive
+            // or not — cf. termite_inspection, inactive in prod with
+            // name-resolved typed completions), so skipping the id here
+            // would only sever rename-safety while changing nothing else.
+            // Deactivation posture is governed where it's enforceable:
+            // the completion profile's own active flag and delivery_mode
+            // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
               .first('id', 'default_duration_minutes');
@@ -4079,6 +4140,10 @@ module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
+module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;
+module.exports.recurringLineAnnualAmount = recurringLineAnnualAmount;
+module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
+module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;

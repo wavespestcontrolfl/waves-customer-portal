@@ -27,6 +27,7 @@ jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
   cacheLineType: jest.fn(async () => {}),
   lookupLineType: jest.fn(async () => 'mobile'),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../utils/lead-prefill-token', () => ({
   mintLeadPrefillToken: jest.fn(() => '1760000000.test-signature'),
@@ -207,6 +208,22 @@ describe('voicemail lead text-back gates', () => {
     expect(phoneClaimOutcomes()).toContain('landline');
     const notes = state.inserts.filter((i) => i.table === 'lead_activities');
     expect(notes).toHaveLength(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('fixedVoip pre-check blocks the send but RELEASES both one-shot claims (reversible block)', async () => {
+    lineType.readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'fixedVoip' });
+    expect(lineType.lookupLineType).not.toHaveBeenCalled();
+    // Released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP must let
+    // a future voicemail from this phone re-evaluate under the current set —
+    // no 'blocked' lead stamp (it would wedge the reused lead at the claim
+    // predicate), lead marker removed, phone claim deleted.
+    expect(stampsFor()).not.toContain('blocked');
+    expect(leadClaimCleared()).toBe(true);
+    expect(phoneClaimReleased()).toBe(true);
+    expect(phoneClaimOutcomes()).not.toContain('fixedVoip');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

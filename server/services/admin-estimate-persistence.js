@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight } = require('../utils/estimate-claim-sql');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -41,6 +42,501 @@ function estimateViewUrl(token) {
 // to tell an operator EXTENSION (expires_at pushed beyond this window)
 // apart from the stamp every normal send writes.
 const ESTIMATE_SEND_EXPIRY_DAYS = 7;
+
+// Delivery-claim protocol (codex P0, PR #3304 r20). sendEstimateNow stamps
+// `estimatorEngine.delivering_at` (+ a per-send `delivering_token`) in the
+// SAME locked transaction as its final pre-delivery verdict read, and clears
+// it when the send finishes. The linkage reconciler and the identity-conflict
+// quarantine refuse to commit an invalidation while a claim is FRESH — that
+// closes the window where a marker could commit between the verdict and the
+// provider handoff while the delivery still runs on the former lead's
+// content. A send that crashes without clearing leaves a claim that simply
+// ages out; the TTL bounds how long a crash can defer a correction.
+const ESTIMATE_DELIVERY_CLAIM_TTL_MS = 10 * 60 * 1000;
+
+
+function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
+  const at = estimatorEngine?.delivering_at;
+  if (!at) return false;
+  const t = Date.parse(at);
+  return Number.isFinite(t) && (nowMs - t) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
+}
+
+// Complete a DEFERRED linkage invalidation on an ALREADY-LOCKED estimate
+// row: the reconciler (or the identity quarantine) recorded
+// `invalidation_pending_*` because a delivery claim was live, and this
+// applies the real transition. ONE definition, shared by the delivery-claim
+// release in admin-estimates.js and the scheduler's stale-claim sweep
+// (codex P1, PR #3304 GH r7 — a crash between the marker and the release
+// otherwise wedged the estimate forever: sends abort on the pending marker
+// with a non-matching token, the former lead stays linked, and no
+// corrected rebuild exists).
+//
+// `row` must come from a FOR UPDATE read carrying status/archived_at, and
+// `data` is its parsed estimate_data with the pending keys ALREADY removed
+// by the caller (the release also strips its claim keys in the same pass).
+// Money-bearing terminals keep status, archive state, and money fields —
+// only the marker lands, killing the public token.
+async function completePendingInvalidation(trx, estimateId, { row, data, pending }) {
+  const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
+  data.estimatorEngine = eng;
+  // A LINKAGE-REPOINT verdict can be OBSOLETE by the time it is finalized
+  // (codex P2, PR #3304 GH r8): linkage moved A→B during the claim, a
+  // second retry moved it back to A, and that later reconcile saw the
+  // draft already on its current lead and left the first marker in place.
+  // Finalizing then kills a VALID linkage. Re-resolve the call's live
+  // linkage against the draft's own: still a match ⇒ the verdict is
+  // stale, so drop the marker and keep the row.
+  //
+  // A FORCED quarantine is never obsolete this way (codex P0, PR #3304 GH
+  // r8b): an identity conflict or a spam/voicemail rejection is a verdict
+  // about the CALL, not about which lead it points at — linkage legitimately
+  // stays unchanged, and treating that as "nothing to do" would leave the
+  // wrong or rejected draft public and sendable.
+  const forcedQuarantine = !!(pending.conflict || pending.reason);
+  // A forced verdict CAN be superseded by a newer processing generation
+  // (codex P1, local audit on 3092fbbb8): the spam/identity verdict was
+  // deferred behind a delivery claim, then a force-reprocess claimed
+  // generation N+1, re-qualified the call, and cleared the call-side
+  // verdict — finalizing the stale marker here would archive the valid
+  // draft and unlink its lead. Under the call-row lock (leads first,
+  // repo-wide estimates → leads → call_log order): a NEWER settled
+  // generation whose live verdict is CLEAR downgrades the forced marker
+  // to the ordinary obsolete test below; a newer generation still
+  // IN FLIGHT defers — the marker goes back on the row and the
+  // wedged-invalidation sweep re-attempts once the call settles.
+  // Generation-less markers (written before the column deployed) and
+  // same-generation markers finalize exactly as before.
+  let forcedSuperseded = false;
+  // The live generation the supersession judgement was made against —
+  // carried to the linkage recheck below so it applies the SAME cutoff.
+  let liveGenForRecheck = null;
+  const verdictCallId = data?.estimatorEngine?.callLogId || null;
+  if (forcedQuarantine && pending.generation != null && verdictCallId) {
+    const leadLockIds = [...new Set([data.lead_id, pending.from].filter(Boolean).map(String))].sort();
+    for (const leadLockId of leadLockIds) {
+      await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
+    }
+    // created_at is REQUIRED by callReprocessInFlight (codex P1, GH round
+    // on 796026122): its extraction_failed arm mirrors the processor's
+    // eligibility as attempts-under-cap AND inside the 7-day retry window,
+    // and a MISSING timestamp reads as "within the window". Omitting the
+    // column therefore made an aged-out row — which production considers
+    // settled and will never retry — look forever in-flight, so this
+    // deferral restored the pending marker on every sweep and left the
+    // estimate and its public token permanently blocked.
+    const callRow = await trx('call_log').where({ id: verdictCallId }).forUpdate()
+      .first('processing_generation', 'processing_status', 'processing_token',
+        'extraction_attempts', 'created_at', 'metadata');
+    const liveGen = callRow?.processing_generation != null ? Number(callRow.processing_generation) : null;
+    liveGenForRecheck = liveGen;
+    if (callRow && liveGen != null && liveGen > Number(pending.generation)) {
+      if (callReprocessInFlight(callRow)) {
+        restorePendingInvalidation(data, pending);
+        await trx('estimates').where({ id: estimateId })
+          .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+        return { terminal: false, status: String(row.status || '').toLowerCase(), deferred: true };
+      }
+      // Ask whether the NEWER generation re-rejected the call — not
+      // whether generation N's own leftover marker is still lying there
+      // (codex P1, GH round on 796026122). N+1 can settle clean through a
+      // path that never clears N's estimator_draft_block (reconcile-only:
+      // gate off, or no longer quote-flavored), and counting that stale
+      // marker as a live rejection kept forcedSuperseded false — so claim
+      // release or the wedged sweep archived and unlinked the now-valid
+      // draft. Markers at/after liveGen are N+1's own verdict and still
+      // count; generation-less markers stay honored (fail closed).
+      forcedSuperseded = !(await callRejectedForDrafting(trx, verdictCallId, {
+        supersededBelowGeneration: liveGen,
+      }));
+    }
+  }
+  if (forcedSuperseded && !data.lead_id) {
+    // Superseded forced verdict on a lead-less draft: the newer settled
+    // generation's verdict is clear and there is no durable linkage left
+    // to compare — the marker is obsolete, the draft stays.
+    await trx('estimates').where({ id: estimateId })
+      .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+  }
+  if ((!forcedQuarantine || forcedSuperseded) && data.lead_id) {
+    // The obsolete-vs-apply decision is made against LOCKED state and the
+    // locks are HELD through whichever write follows (codex P1, GH round
+    // on a6c3a5c5c): a plain read could observe the call momentarily
+    // pointing back at A while another pass repoints it to B before our
+    // estimate update commits — discarding the only pending marker
+    // against a linkage that no longer holds (or, inverted, applying an
+    // invalidation to a re-validated draft). Lock order stays
+    // estimates (caller's FOR UPDATE row) → leads → call_log, matching
+    // accept/decline; both lead rows this transition can touch are locked
+    // up front, in sorted order, so concurrent finalizers can't deadlock
+    // each other.
+    const leadLockIds = [...new Set([data.lead_id, pending.from].filter(Boolean).map(String))].sort();
+    for (const leadLockId of leadLockIds) {
+      await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
+    }
+    // The recheck inherits the supersession cutoff (codex P1, GH round on
+    // fe55a83df) — without it, the marker this branch just judged stale
+    // came straight back as 'call_draft_block' and archived the draft.
+    if (!(await staleCallLinkageReason(trx, data, {
+      lockCallRow: true,
+      supersededBelowGeneration: forcedSuperseded ? liveGenForRecheck : null,
+    }))) {
+      await trx('estimates').where({ id: estimateId })
+        .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+      return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+    }
+  }
+  const status = String(row.status || '').toLowerCase();
+  const terminal = ['accepted', 'declined', 'expired'].includes(status);
+  delete data.lead_id;
+  delete data.lead_linkage;
+  eng.linkage_invalidated_at = new Date().toISOString();
+  eng.linkage_invalidated_from = pending.from || null;
+  eng.linkage_invalidated_to = pending.to || null;
+  if (pending.conflict) eng.identity_conflict = pending.conflict;
+  if (pending.reason) eng.invalidation_reason = pending.reason;
+  await trx('estimates').where({ id: estimateId })
+    .update({
+      estimate_data: JSON.stringify(data),
+      ...(terminal ? {} : {
+        archived_at: row.archived_at || new Date(),
+        status: 'draft',
+        scheduled_at: null,
+      }),
+      updated_at: trx.fn.now(),
+    });
+  if (pending.from) {
+    // Only if the OLD lead still points at this draft — a lead relinked
+    // elsewhere is not ours to touch.
+    await trx('leads').where({ id: pending.from, estimate_id: estimateId }).update({ estimate_id: null });
+  }
+  return { terminal, status };
+}
+
+// Read the pending-invalidation keys off a parsed estimate_data blob and
+// REMOVE them (the transition replaces them with the full marker).
+function takePendingInvalidation(data) {
+  const eng = data?.estimatorEngine;
+  if (!eng || typeof eng !== 'object' || !eng.invalidation_pending_at) return null;
+  const pending = {
+    at: eng.invalidation_pending_at,
+    from: eng.invalidation_pending_from || null,
+    to: eng.invalidation_pending_to || null,
+    conflict: eng.invalidation_pending_conflict || null,
+    // Forced-quarantine reason (spam/voicemail rejection and any future
+    // non-identity force) — dropping it lost both the audit trail and the
+    // signal that this verdict is not a linkage repoint (codex P0, PR
+    // #3304 GH r8b).
+    reason: eng.invalidation_pending_reason || null,
+    // The processing generation the deferring verdict OBSERVED (codex P1,
+    // local audit on 3092fbbb8) — lets the finalizer detect a forced
+    // verdict superseded by a newer pass's re-qualification.
+    generation: eng.invalidation_pending_generation != null
+      ? Number(eng.invalidation_pending_generation) : null,
+  };
+  delete eng.invalidation_pending_at;
+  delete eng.invalidation_pending_from;
+  delete eng.invalidation_pending_to;
+  delete eng.invalidation_pending_conflict;
+  delete eng.invalidation_pending_reason;
+  delete eng.invalidation_pending_generation;
+  return pending;
+}
+
+// Inverse of takePendingInvalidation — used when the finalizer must DEFER
+// (a newer processing generation is mid-flight): the marker goes back on
+// the row so the wedged-invalidation sweep re-attempts once the call
+// settles, and every send/accept guard keeps failing closed on it.
+function restorePendingInvalidation(data, pending) {
+  const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
+  data.estimatorEngine = eng;
+  eng.invalidation_pending_at = pending.at;
+  if (pending.from) eng.invalidation_pending_from = pending.from;
+  if (pending.to) eng.invalidation_pending_to = pending.to;
+  if (pending.conflict) eng.invalidation_pending_conflict = pending.conflict;
+  if (pending.reason) eng.invalidation_pending_reason = pending.reason;
+  if (pending.generation != null) eng.invalidation_pending_generation = pending.generation;
+}
+
+// Sweep estimates wedged on a pending invalidation whose delivery claim is
+// GONE or aged past the TTL — the crash case the claim release can no
+// longer reach (codex P1, PR #3304 GH r7). Runs from the scheduler's
+// stale-claim recovery. Returns the number of rows finalized.
+async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100 } = {}) {
+  let candidates = [];
+  try {
+    candidates = await db('estimates')
+      // A wedged PENDING invalidation, or a DEAD claim with no marker at
+      // all (codex P1, PR #3304 GH r8d): a process that died between
+      // stamping delivering_at and recording anything left keys that every
+      // whole-blob write refuses. The TTL arm makes those writes fall
+      // through on their own, and this clears the residue.
+      .where(function wedged() {
+        this.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') <> ''")
+          .orWhereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') <> ''");
+      })
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id');
+  } catch (err) {
+    logger.warn(`[estimates] wedged pending-invalidation scan failed: ${err.message}`);
+    return 0;
+  }
+  let finalized = 0;
+  for (const candidate of candidates) {
+    try {
+       
+      const done = await db.transaction(async (trx) => {
+        const row = await trx('estimates').where({ id: candidate.id }).forUpdate()
+          .first('id', 'status', 'archived_at', 'estimate_data');
+        if (!row) return false;
+        let data;
+        try {
+          data = typeof row.estimate_data === 'string'
+            ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+        } catch { return false; }
+        if (!data || typeof data !== 'object') return false;
+        const eng = data.estimatorEngine;
+        if (!eng || eng.linkage_invalidated_at) return false;
+        // A FRESH claim means the owning send is still running and will
+        // finalize this itself — only a dead claim is ours to complete.
+        if (deliveryClaimFresh(eng, nowMs)) return false;
+        const pending = takePendingInvalidation(data);
+        const hadDeadClaim = !!eng.delivering_at;
+        delete eng.delivering_at;
+        delete eng.delivering_token;
+        if (!pending) {
+          // Dead claim, nothing pending: just clear the residue so the
+          // ordinary edit paths unblock.
+          if (!hadDeadClaim) return false;
+          await trx('estimates').where({ id: candidate.id })
+            .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+          return false;
+        }
+        const outcome = await completePendingInvalidation(trx, candidate.id, { row, data, pending });
+        // deferred = a newer processing generation is mid-flight; the
+        // marker went back on the row and a later sweep re-attempts.
+        return !outcome.obsolete && !outcome.deferred;
+      });
+      if (done) {
+        finalized += 1;
+        logger.warn(`[estimates] finalized a wedged pending invalidation on estimate ${candidate.id} (delivery claim died before its release)`);
+      }
+    } catch (err) {
+      logger.warn(`[estimates] wedged pending-invalidation finalize failed for ${candidate.id}: ${err.message}`);
+    }
+  }
+  return finalized;
+}
+
+// call_log.processing_status values that mean a pass is RUNNING or queued
+// to run again. Everything else with a cleared processing_token is a
+// settled verdict — including the permanent failure terminals.
+//
+// 'extraction_failed' is in-flight only while the processor would actually
+// retry it (codex P1, PR #3304 GH r7b): its sweep requires
+// COALESCE(extraction_attempts,0) < CALL_EXTRACTION_MAX_ATTEMPTS, so an
+// EXHAUSTED row is settled — treating it as forever-retrying would block
+// send, accept, and decline on that draft permanently. Same env default as
+// the processor (3) so the two can't drift silently.
+// RUNNING, or QUEUED for another pass by processAllPending's sweep — which
+// re-processes 'pending' and 'no_transcription' rows as well as the active
+// 'processing' claim (codex P1, PR #3304 GH r8c). A legacy NULL status
+// stays SETTLED: those are pre-pipeline rows with no retry lane, and
+// blocking them would wedge sends on historical estimates.
+// callReprocessInFlight now lives in ../utils/estimate-claim-sql (the ONE
+// dependency-free in-flight verdict, shared with the public money guard —
+// pre-push P0, PR #3304) and is imported above; this module keeps
+// re-exporting it so every existing consumer is unchanged.
+
+// Shared live call-linkage revalidation for engine-drafted rows: re-resolve
+// the call's current lead with the pipeline's own precedence (sid-owned
+// lead first, then the settled stamp) and require it to still be the
+// draft's linked lead. Plain reads — no extra locks, and the same
+// estimates→(leads/call_log) order the reconciler uses. Returns null when
+// the linkage stands (or the row carries no durable linkage), else the
+// abort reason.
+// A call whose pipeline verdict REJECTED it (spam / non-workable
+// voicemail / the durable no-attribution marker) must not receive a new
+// draft (codex P0, PR #3304 GH r8e): the terminal path invalidates the
+// drafts that exist, but a detached composer can still be running and
+// would insert AFTER terminalization — and the linkage check alone permits
+// that, because a settled rejection is "not running" and the sid linkage
+// is unchanged. Creators call this inside their serialized insert with the
+// call row LOCKED, so a rejection either committed first (seen here) or
+// waits and its own invalidation pass catches what landed.
+// `supersededBelowGeneration`: ignore a DERIVED marker whose recorded
+// writer generation is OLDER than this (codex P1, GH round on 796026122).
+// The queued/draft-block markers are verdicts of a specific pass, and
+// generation N's marker can still be sitting on the row when N+1 settles
+// CLEAN through a path that never clears it (the reconcile-only lane: gate
+// off, or the call no longer quote-flavored). A caller asking "did the
+// NEWER generation re-reject this?" must not read N's leftovers as N+1's
+// answer. A marker written AT or AFTER the live generation is N+1's own
+// verdict and still counts; a marker with NO generation (pre-column, or
+// generation-less maintenance) cannot be proven stale, so it is honored —
+// fail closed, matching every other guard on this path.
+async function callRejectedForDrafting(dbc, callLogId, {
+  lockCallRow = false, ignoreQueuedMarkers = false, supersededBelowGeneration = null,
+} = {}) {
+  if (!callLogId) return null;
+  const q = dbc('call_log').where({ id: callLogId });
+  if (lockCallRow) q.forUpdate();
+  const row = await q.first('processing_status', 'metadata');
+  // A missing row is not a REJECTION verdict — absence is handled by the
+  // linkage fence, which fails closed on it for durably linked drafts.
+  if (!row) return null;
+  const status = String(row.processing_status || '').toLowerCase();
+  if (['spam', 'voicemail'].includes(status)) return `call_rejected_${status}`;
+  try {
+    const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (md?.no_attribution === true) return 'call_rejected_no_attribution';
+    // A live IDENTITY-CONFLICT verdict blocks drafting too (codex P0, PR
+    // #3304 GH r8f): a detached composer that built its context before the
+    // conflict appeared would otherwise insert a wrong-identity draft
+    // right after the quarantine swept the existing ones.
+    // The queued markers are DERIVED verdicts: the drafting fences must
+    // honor them, but the sweep that owns them must NOT read them as
+    // proof of the underlying verdict (codex P1, PR #3304 GH r9) — that
+    // made its own re-qualification cleanup unreachable.
+    if (!ignoreQueuedMarkers) {
+      const markerCurrent = (marker) => {
+        if (supersededBelowGeneration == null) return true;
+        const g = marker?.generation;
+        if (g == null) return true;
+        return Number(g) >= Number(supersededBelowGeneration);
+      };
+      if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) {
+        return String(md.estimator_draft_block.reason);
+      }
+      // A QUEUED quarantine that has not landed yet is equally
+      // disqualifying — its estimate-side marker is what failed to write.
+      if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
+        return String(md.estimator_quarantine_pending.reason);
+      }
+    }
+  } catch { /* unparseable metadata: not a rejection signal */ }
+  return null;
+}
+
+// `supersededBelowGeneration` has the same meaning here as in
+// callRejectedForDrafting, and the linkage recheck needs it for the same
+// reason (codex P1, GH round on fe55a83df): once the caller has
+// established that a forced verdict was superseded, this recheck must not
+// resurrect the very marker that was just judged stale — it would return
+// 'call_draft_block', the obsolete test would fail, and the valid draft
+// would be archived anyway. Only LEAD-LESS drafts took the caller's early
+// return, so the linked-draft path — the production shape — still lost.
+async function staleCallLinkageReason(dbc, data, {
+  lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null,
+  supersededBelowGeneration = null,
+} = {}) {
+  const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
+  const draftCallLogId = data?.estimatorEngine?.callLogId || null;
+  // The CALL-SIDE verdict applies to EVERY engine draft (codex P0, PR
+  // #3304 GH r9b) — legacy rows and lead-less drafts carry only a
+  // callLogId, and returning early on the missing durable linkage skipped
+  // the quarantine markers entirely, leaving those drafts sendable. Only
+  // the linkage COMPARISON below needs lead_id + lead_linkage.
+  if (!draftCallLogId) return null;
+  const durableLinkage = ['sid', 'stamp'].includes(data?.lead_linkage) && !!linkedLeadId;
+  // lockCallRow (codex P1, PR #3304 GH r6): inside a money-bearing
+  // transaction (accept/decline) the call row is locked FOR UPDATE and
+  // HELD through the terminal write — a processor correction (which
+  // token-fences under this same row lock) either committed first and is
+  // seen here, or waits until the terminal commit and its reconcile then
+  // applies the marker-only terminal invalidation. Callers must lock the
+  // linked LEAD first (repo-wide leads → call_log order).
+  const callQuery = dbc('call_log').where({ id: draftCallLogId });
+  if (lockCallRow) callQuery.forUpdate();
+  const callRow = await callQuery
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
+  if (!callRow) return 'invalidated_before_delivery';
+  // A reprocess IN FLIGHT means the linkage verdict is about to change —
+  // abort; the row is sendable again once the call settles. In-flight is a
+  // held claim token or one of the two retry lanes (codex P1, PR #3304 GH
+  // r7) — NOT every non-'processed' status: the processor also finishes
+  // PERMANENTLY as customer_creation_failed / lead_creation_failed / spam
+  // / voicemail / no_transcription with the token cleared, and treating
+  // those as forever-reprocessing wedged every send, accept, and decline
+  // for a draft the earlier quote-flavored pass had legitimately created.
+  // A settled REJECTION still blocks — via the resolution comparison
+  // below, which finds no live lead — rather than via this gate.
+  // The OWNING pass is not "someone else reprocessing" (codex P1, PR #3304
+  // GH r8e): the estimator engine is launched by the call processor while
+  // that pass still holds processing_token, so a composition finishing
+  // before finalization would otherwise have its own legitimate draft
+  // blocked — with no automatic retry, since the call finalizes as
+  // processed. A caller that owns the claim passes its token here.
+  // CALL-SIDE verdicts FIRST, and for every engine draft (codex P0, PR
+  // #3304 GH r8f/r9b): when a quarantine could not write its estimate
+  // marker it queues on the CALL, and these paths inspect the estimate
+  // only — so the known wrong-identity draft stayed sendable until a
+  // scheduler sweep succeeded. Legacy and lead-less drafts carry only a
+  // callLogId, so this must precede the durable-linkage bail.
+  try {
+    const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+    const markerCurrent = (marker) => {
+      if (supersededBelowGeneration == null) return true;
+      const g = marker?.generation;
+      if (g == null) return true;
+      return Number(g) >= Number(supersededBelowGeneration);
+    };
+    if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) return 'call_draft_block';
+    if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
+      return 'call_quarantine_pending';
+    }
+  } catch { /* unparseable metadata: fall through to the linkage compare */ }
+  // The REPROCESSING fence applies to every engine draft too (codex P1,
+  // PR #3304 GH r10): a legacy or lead-less draft is just as unsafe to
+  // send while a retry is actively clearing or repointing its call — the
+  // retry has not published its block marker yet, so nothing else would
+  // stop it.
+  // Owned = the caller's claim token is still live, OR the call is still
+  // on the caller's GENERATION — the detached composer's pass finalizes
+  // (token cleared) before the composition lands, and the generation is
+  // what proves no newer pass has claimed since (PR #3304 — replaces
+  // token-NULL interpretation).
+  const ownedByCaller = (!!ownerProcToken && callRow.processing_token === ownerProcToken)
+    || (ownerProcGeneration != null && callRow.processing_generation != null
+      && Number(callRow.processing_generation) === Number(ownerProcGeneration));
+  if (!ownedByCaller && callReprocessInFlight(callRow)) {
+    return 'call_reprocessing_before_delivery';
+  }
+  // Everything below is the LINKAGE comparison, which needs a durable
+  // linkage to compare against.
+  if (!durableLinkage) return null;
+  const liveStamp = (() => {
+    try {
+      const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+      return md?.lead_id ? String(md.lead_id) : null;
+    } catch { return null; }
+  })();
+  let resolvedLeadId = null;
+  if (callRow.twilio_call_sid) {
+    const sidLead = await dbc('leads')
+      .where({ twilio_call_sid: callRow.twilio_call_sid })
+      .whereNull('deleted_at')
+      // leads.twilio_call_sid carries no unique index — mirror the
+      // CANONICAL estimator loader's ordering (context-builder
+      // loadLeadForCall: created_at DESC) so this revalidation and the
+      // draft's own linkage always name the same owner (codex P1, PR
+      // #3304 GH r7). An unordered .first() could pick an older row and
+      // either block a valid draft or bless a stale one.
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (sidLead) resolvedLeadId = String(sidLead.id);
+  }
+  if (!resolvedLeadId && liveStamp) {
+    const stampLead = await dbc('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
+    if (stampLead) resolvedLeadId = liveStamp;
+  }
+  if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
+  return null;
+}
+
 
 function estimateExpiresAt(now = () => new Date()) {
   const expiresAt = new Date(now().getTime());
@@ -485,7 +981,12 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // server re-derives them; these are stripped from both the transient recompute
 // input AND every stored replay shape so a later public reprice
 // (extractEngineInputs) can't restore a forged value.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer'];
+// treeShrubPricingKnobs overrides DB-authoritative pricing_config values, so
+// a browser-supplied one would let a save price off knobs the admin never
+// set (or a stale pre-flip preview). It is stripped here like every other
+// client-claimed pricing identity and re-derived server-side ONLY when the
+// caller declares a replay of an already-persisted estimate.
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -589,6 +1090,25 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const storedManual = require('./estimate-manual-discount-replay')
       .storedManualDiscountForReplay(estimateData);
     if (storedManual) v1Input.manualDiscount = storedManual;
+  }
+
+  // Saved Tree & Shrub knob state (v4.7), REPLAY PATHS ONLY. This recompute
+  // is authoritative — membership-lapse reconciliation replaces the stored
+  // result and totals with it — so replaying an already-SENT quote must
+  // reuse its quote-time knobs, or an admin flip between send and reconcile
+  // would re-price it well beyond the intended membership change.
+  //
+  // But `estimateData` is browser-controlled on create/revision saves, and
+  // these knobs override DB-authoritative pricing_config: honoring a
+  // submitted snapshot there would let a save price off knobs the admin
+  // never set. So the caller must DECLARE a persisted-estimate replay
+  // (replaySavedPricingKnobs), the client-claimed value is always stripped
+  // above, and every other save prices off freshly synced live config and
+  // stamps the resulting server values afterward.
+  if (deps.replaySavedPricingKnobs === true) {
+    const tsKnobs = require('./estimate-tree-shrub-knob-replay')
+      .treeShrubKnobSignalForReplay(estimateData);
+    if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
   }
 
   try {
@@ -1486,7 +2006,33 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // it for send/view/acceptance advancement) and the schedule-stitch pointer
 // the pipeline list + booking flows resolve appointments through. A revise
 // replaces estimate_data wholesale, so these must be carried across.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'scheduled_service_id'];
+// lead_linkage rides with lead_id (codex P0, PR #3304): it is the durable
+// provenance the estimator's existing-draft reconciliation needs to judge
+// whether an unlink may invalidate the draft — dropping it on revise made
+// a later stamp-clear skip invalidation and leave the former lead's draft
+// sendable to the wrong recipient.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
+// Nested estimatorEngine keys preserved across a revise — the call
+// provenance every linkage consumer resolves through, plus the
+// invalidation markers a revise must never clear.
+const REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = [
+  'callLogId',
+  'callSid',
+  'linkage_invalidated_at',
+  'linkage_invalidated_from',
+  'linkage_invalidated_to',
+  'invalidation_pending_at',
+  'invalidation_pending_from',
+  'invalidation_pending_to',
+  'invalidation_pending_conflict',
+  // The forced reason and the observed generation ride the same marker —
+  // a revise clearing either downgrades a deferred forced quarantine to a
+  // plain linkage repoint (the r8c bug class) or strips the supersession
+  // evidence the finalizer needs.
+  'invalidation_pending_reason',
+  'invalidation_pending_generation',
+  'identity_conflict',
+];
 
 // Revise an existing estimate in place: same body + pricing pipeline as
 // create, but the row keeps its id, token, status, expiry, creator, and
@@ -1599,6 +2145,31 @@ async function reviseAdminEstimate({
           nextData[key] = existingData[key];
           preserved = true;
         }
+      }
+      // Durable CALL PROVENANCE survives a revise even though the rest of
+      // the estimator metadata is deliberately replaced (codex P1, PR
+      // #3304 GH r8): the V2 client sends a fresh blob carrying only
+      // inputs/result/summary/engineRequest, and dropping
+      // estimatorEngine.callLogId orphaned the row — existingDraftForCall
+      // could no longer find it for a later reprocess, and send/accept
+      // revalidation returned early with no call id, leaving the revised
+      // draft and its public token on the former lead. The invalidation
+      // markers ride along for the same reason: a revise must never
+      // resurrect a row the reconcile killed.
+      for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
+        const priorValue = existingData?.estimatorEngine?.[key];
+        if (priorValue === undefined) continue;
+        const nextEngine = nextData.estimatorEngine && typeof nextData.estimatorEngine === 'object'
+          ? nextData.estimatorEngine : {};
+        // FORCED from the stored row, not merely filled when absent (codex
+        // P1, PR #3304 GH r8c): these keys are immutable provenance and
+        // invalidation verdicts, so a stale or malformed admin payload
+        // carrying null — or a different call id — must not erase or
+        // repoint them and orphan the draft from later call corrections.
+        if (nextEngine[key] === priorValue) continue;
+        nextEngine[key] = priorValue;
+        nextData.estimatorEngine = nextEngine;
+        preserved = true;
       }
       if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
     }
@@ -1755,10 +2326,48 @@ async function reviseAdminEstimate({
       .forUpdate()
       .first();
     if (!lockedPrior) return null;
+    // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
+    // r8c): writeFields.estimate_data was built from the pre-read
+    // snapshot, so a delivery claim or an invalidation marker recorded
+    // during payload resolution would be overwritten by this whole-blob
+    // write — after which clearEstimateDeliveryClaim finds no matching
+    // token and the wrong-lead content stays public. The UPDATE also
+    // refuses outright when either is present (predicates below); this
+    // rebuild is the belt to that suspenders, and is what guarantees
+    // callLogId survives a payload that never carried it.
+    const revisedFields = { ...writeFields };
+    if (typeof revisedFields.estimate_data === 'string') {
+      try {
+        const lockedData = typeof lockedPrior.estimate_data === 'string'
+          ? JSON.parse(lockedPrior.estimate_data) : (lockedPrior.estimate_data || {});
+        const pendingData = JSON.parse(revisedFields.estimate_data);
+        if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
+          for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
+            if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+          }
+          for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
+            const lockedValue = lockedData?.estimatorEngine?.[key];
+            if (lockedValue === undefined) continue;
+            pendingData.estimatorEngine = {
+              ...(pendingData.estimatorEngine && typeof pendingData.estimatorEngine === 'object'
+                ? pendingData.estimatorEngine : {}),
+              [key]: lockedValue,
+            };
+          }
+          revisedFields.estimate_data = JSON.stringify(pendingData);
+        }
+      } catch { /* unparseable on either side: fall through to the predicates */ }
+    }
     const [row] = await trx('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
       .whereNull('archived_at')
+      // A revise NEVER lands on an invalidated row or inside a live
+      // delivery claim (codex P0, PR #3304 GH r8c) — 0 rows becomes the
+      // caller's 409 "refresh and retry".
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       .whereNotIn('status', REVISE_BLOCKED_STATUSES)
       .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
       // Mirrors the pre-read's date-expiry verdict: the payload resolution
@@ -1767,7 +2376,7 @@ async function reviseAdminEstimate({
       // saved while the public link already serves the expired page.
       .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
       .update({
-        ...writeFields,
+        ...revisedFields,
         updated_at: now(),
       })
       .returning('*');
@@ -1799,6 +2408,17 @@ module.exports = {
   resolveEstimatePropertyLinkage,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
+  REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS,
+  ESTIMATE_DELIVERY_CLAIM_TTL_MS,
+  DELIVERY_CLAIM_NOT_LIVE_SQL,
+  deliveryClaimFresh,
+  staleCallLinkageReason,
+  callRejectedForDrafting,
+  callReprocessInFlight,
+  callSideBlockForEstimateData,
+  completePendingInvalidation,
+  takePendingInvalidation,
+  sweepWedgedPendingInvalidations,
   estimateViewUrl,
   estimateReviseBlock,
   normalizeClientPestFloorMetadata,

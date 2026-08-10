@@ -265,6 +265,62 @@ describe('semantic compliance gate', () => {
     expect(SYSTEM_PROMPT).toMatch(/GOVERNS THE SAFETY PREDICATE/i);
   });
 
+  test('the prompt pins the compliant minimal pair of the r23 sentence (calibration FP: the approved idiom itself was blocked)', () => {
+    const { SYSTEM_PROMPT } = load()._internals;
+    // The 2026-08-08 activation run blocked "The treatment is safe after it
+    // dries. Your technician confirms the timing." — the exact structure the
+    // rule endorses — because "after it dries" appeared only inside the r23
+    // VIOLATION example. The compliant twin must stay pinned next to it.
+    expect(SYSTEM_PROMPT).toMatch(/ACCEPTABLE\s+"The treatment is safe after it dries\. Your technician confirms the timing\."/);
+    expect(SYSTEM_PROMPT).toMatch(/only its attachment is/i);
+  });
+
+  test('the prompt scopes the rules to rendered, treatment-linked copy (calibration FP families)', () => {
+    const { SYSTEM_PROMPT } = load()._internals;
+    // Each assertion pins one false-positive family from the 2026-08-08
+    // --document --all run (37 false blocks, specificity 66%).
+    expect(SYSTEM_PROMPT).toMatch(/never renders/i); // HTML/MDX comments
+    expect(SYSTEM_PROMPT).toMatch(/ties it to a pesticide, treatment, application, or treated surface\/area/i);
+    expect(SYSTEM_PROMPT).toMatch(/Allow the caulk to dry for 30 minutes/i); // non-treatment substance
+    expect(SYSTEM_PROMPT).toMatch(/You may re-enter the treated room after 30 minutes/i); // linked contrast pair still violates
+    expect(SYSTEM_PROMPT).toMatch(/The repaired screen is safe for pets/i); // non-treatment object
+    expect(SYSTEM_PROMPT).toMatch(/door-to-door inspections\s+for condo associations/i); // operations vs solicitation
+    expect(SYSTEM_PROMPT).toMatch(/We sell pest control door to door/i); // sales side still named as violation
+    // The scope limits must not become a jailbreak: linkage doubt goes to P1,
+    // and treatment-naming copy is never rescued.
+    expect(SYSTEM_PROMPT).toMatch(/never rescue copy that itself names the treatment/i);
+    expect(SYSTEM_PROMPT).toMatch(/use P1, not P0/);
+  });
+
+  test('the prompt exempts referral/third-party CTAs and insulation-as-location (run-2 FP family)', () => {
+    const { SYSTEM_PROMPT } = load()._internals;
+    // Run 2 of the 2026-08-08 calibration blocked the SANCTIONED referral
+    // patterns — copy the rule text itself declares legal. Each pin below is
+    // one of those false blocks, kept with its violating twin.
+    expect(SYSTEM_PROMPT).toMatch(/Call Waves for a wildlife removal referral/i);
+    expect(SYSTEM_PROMPT).toMatch(/licensed\s+structural fumigator/i);
+    expect(SYSTEM_PROMPT).toMatch(/consultation with our team/i); // violating twin stays named
+    expect(SYSTEM_PROMPT).toMatch(/install traps above attic\s+insulation/i);
+    expect(SYSTEM_PROMPT).toMatch(/EPA approval is not required for\s+minimum-risk products/i);
+    // The treated-area subject variant of the approved idiom must stay pinned.
+    expect(SYSTEM_PROMPT).toMatch(/The area is safe after it dries\. Your technician confirms re-entry timing\./);
+  });
+
+  test('the comment exemption is scoped to body markup and withdrawn for metadata field values (Codex #3302 r1)', () => {
+    const mod = load();
+    const { SYSTEM_PROMPT } = mod._internals;
+    // "<!-- The pesticide is EPA-approved -->" in an alt text or meta
+    // description is LITERAL rendered copy — an unscoped comment exemption
+    // told the model to ignore it while the deterministic guard blanks
+    // comment-shaped spans, leaving no layer covering the field-value case.
+    expect(SYSTEM_PROMPT).toMatch(/applies ONLY to body\s+markup/i);
+    expect(SYSTEM_PROMPT).toMatch(/EDITABLE METADATA\s+FIELDS/);
+    // The marker is exported so astro-publisher, codex-remediation, and the
+    // calibration harness all build the same payload shape.
+    expect(mod.META_SECTION_MARKER).toContain('EDITABLE METADATA FIELDS');
+    expect(mod.META_SECTION_MARKER).toMatch(/comment delimiters here are customer-visible/i);
+  });
+
   test('the prompt qualifies the negation exemption so negated FIGURES still block', () => {
     const { SYSTEM_PROMPT } = load()._internals;
     // "Do not re-enter until 30 minutes have passed" is negated AND carries a

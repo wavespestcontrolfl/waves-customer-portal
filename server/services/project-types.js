@@ -820,6 +820,21 @@ const PROJECT_TYPES = {
       { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
       { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
       { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, placeholder: 'Front bed near driveway…' },
+      // Pricing-calibration capture (T&S reprice lane, owner-approved
+      // 2026-08-08): the engine's cost drivers as observed on site, feeding
+      // estimate_actuals. internal — costing data, never customer report
+      // content; optional + detail — the owner's 2026-07-21 closeout
+      // simplification (only scope + condition required) stays intact.
+      // bed sqft is measurement, not count: count's 4-digit ceiling would
+      // clip exactly the >9,999 sqft outliers the 8,000 cap review needs to
+      // see, and measurement validates numerically at entry (free text would
+      // silently vanish at the reconcile parse). The client renders unknown
+      // types as a plain text input — no client change needed.
+      { key: 'bed_sqft_serviced', label: 'Ornamental bed area serviced (sq ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 2400' },
+      { key: 'palm_count_total', label: 'Palms on property', type: 'count', section: 'Property measurements', detail: true, internal: true },
+      { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
+      { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },
+      { key: 'access_difficulty', label: 'Access difficulty', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Easy', 'Moderate', 'Difficult'] },
       // Ported closeout compliance (internal-only; see tree-shrub-closeout
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance

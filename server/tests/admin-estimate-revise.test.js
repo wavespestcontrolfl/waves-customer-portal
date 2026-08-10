@@ -367,6 +367,7 @@ describe('reviseAdminEstimate', () => {
       estimate_data: JSON.stringify({
         ...JSON.parse(sentEstimate.estimate_data),
         lead_id: 'lead-7',
+        lead_linkage: 'stamp',
         scheduled_service_id: 'svc-3',
       }),
     };
@@ -385,6 +386,10 @@ describe('reviseAdminEstimate', () => {
     });
     const data = JSON.parse(updates[0].estimate_data);
     expect(data.lead_id).toBe('lead-7');
+    // The linkage CLASS survives too (codex P0, PR #3304): without it a
+    // later stamp-clear cannot judge durability and skips invalidating
+    // the former lead's draft.
+    expect(data.lead_linkage).toBe('stamp');
     expect(data.scheduled_service_id).toBe('svc-3');
     // Still a full rewrite otherwise — stale snapshot stays dropped.
     expect(data.sendSnapshot).toBeUndefined();

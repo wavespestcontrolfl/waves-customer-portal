@@ -19,7 +19,10 @@ function buildPhotoAnalysisPrompt({ schema, values = {}, photoCount = 0, service
   // Typed completions ground the prompt in the findings form; basic
   // completions pass free-form context lines (notes/observations) instead.
   const fieldLines = [
+    // internal fields are tech-facing data (compliance entries, pricing
+    // calibration) — they must not steer customer-facing captions.
     ...(schema?.fields || [])
+      .filter((field) => !field.internal)
       .map((field) => {
         const value = values?.[field.key];
         if (value == null || String(value).trim() === '') return null;

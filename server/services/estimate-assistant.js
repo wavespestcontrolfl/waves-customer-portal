@@ -2,6 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
+const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-engine');
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
 
@@ -143,7 +144,7 @@ function waveGuardDiscountForTier(value) {
 function waveGuardDiscountAppliesToService(service = {}) {
   const key = cleanText(service.service || service.key).toLowerCase();
   if (key === 'palm_injection' || key === 'rodent_bait' || service.waveGuardDiscountEligible === false) return false;
-  if (key && WAVEGUARD.qualifyingServices.includes(key)) return true;
+  if (key && serviceCountsTowardWaveGuardTier(key)) return true;
   const rawLabel = cleanText(service.label || service.name || service.service).toLowerCase();
   if ((/\bpalms?\b|\bpalm injection\b/.test(rawLabel)) || (rawLabel.includes('rodent') && rawLabel.includes('bait'))) return false;
   const label = normalizeServiceName(service.label || service.name || service.service);

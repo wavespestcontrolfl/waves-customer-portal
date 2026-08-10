@@ -7,7 +7,7 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2421,11 +2421,9 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
 
   const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
-  return {
-    bedArea: Math.min(rawBedArea, BED_AREA_CAP),
-    rawBedArea,
-    capped: rawBedArea >= BED_AREA_CAP,
-  };
+  // Owner ruling 2026-08-10: never clamped — the pricer routes large areas
+  // (>= BED_AREA_REVIEW_SQFT) to manual review instead.
+  return { bedArea: rawBedArea, rawBedArea };
 }
 
 function resolveTreeShrubBedArea(property = {}, warnings = []) {
@@ -2439,17 +2437,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       requiresManualReview: true,
     };
   }
-
-  // Upstream cap metadata: calculatePropertyProfile may have already capped
-  // an oversized estimated/lot-derived bed area down to BED_AREA_CAP and set
-  // property.bedAreaCapped = true (+ optionally uncappedBedAreaEstimate).
-  // Without this, the explicit-bedArea branch below would discard the cap
-  // signal and silently miss bed_area_cap_reached for inputs like
-  // estimatedBedAreaSf: 9000 routed through generateEstimate.
-  const upstreamCapped = property.bedAreaCapped === true;
-  const upstreamUncapped = hasPositivePricingNumber(property.uncappedBedAreaEstimate)
-    ? Number(property.uncappedBedAreaEstimate)
-    : undefined;
 
   if (hasPositivePricingNumber(property.bedArea)) {
     // Resolve source from the upstream hint so the lot-derived label from
@@ -2466,10 +2453,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       bedAreaSource,
       pricingConfidence,
       requiresManualReview: false,
-      ...(upstreamCapped ? { capped: true } : {}),
-      ...(upstreamCapped && upstreamUncapped !== undefined
-        ? { uncappedBedAreaEstimate: upstreamUncapped }
-        : {}),
     };
   }
 
@@ -2477,21 +2460,13 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     ? property.estimatedBedArea
     : property.estimatedBedAreaSf;
   if (hasPositivePricingNumber(estimatedBedAreaValue)) {
-    const rawBedArea = Number(estimatedBedAreaValue);
-    const localCapped = rawBedArea >= BED_AREA_CAP;
-    const capped = localCapped || upstreamCapped;
-    // Prefer upstream uncapped (the true raw input) when present, else the
-    // raw value seen on this call.
-    const uncapped = upstreamUncapped !== undefined
-      ? upstreamUncapped
-      : (localCapped ? rawBedArea : undefined);
+    // Owner ruling 2026-08-10: no clamp — priced in full; large areas route
+    // to review via bed_area_at_or_above_8000 in priceTreeShrub.
     return {
-      bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+      bedArea: Number(estimatedBedAreaValue),
       bedAreaSource: 'estimated',
       pricingConfidence: 'medium',
       requiresManualReview: false,
-      capped,
-      ...(capped && uncapped !== undefined ? { uncappedBedAreaEstimate: uncapped } : {}),
     };
   }
 
@@ -2502,8 +2477,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       bedAreaSource: 'lot_based',
       pricingConfidence: 'medium',
       requiresManualReview: false,
-      capped: lotEstimate.capped,
-      ...(lotEstimate.capped ? { uncappedBedAreaEstimate: lotEstimate.rawBedArea } : {}),
     };
   }
 
@@ -2636,10 +2609,115 @@ function priceTreeShrub(property, options = {}) {
 
   const bedAreaInfo = resolveTreeShrubBedArea(property, warnings);
   const bedArea = bedAreaInfo.bedArea;
-  const bedAreaCapped = !!bedAreaInfo.capped;
+
+  // v4.7: shrub density now multiplies the MEASURED-bed terms (per-sqft
+  // material + the bedArea-derived minutes) — previously it only shaped the
+  // lot-based bed estimate, so a known bed area erased the difference
+  // between sparse and packed plantings. Ships neutral (all factors 1).
+  // MEASURED sources only: lot_based bed area is ALREADY density-scaled by
+  // estimateTreeShrubBedAreaFromLot (10/18/25% of lot), so a factor there
+  // would apply density twice; the 2,000 fallback is a guess, not a
+  // measurement, and gets no adjustment either.
+  // Quote-time knob snapshot (options.knobs) beats the live config. These
+  // knobs mutate global constants, and estimate-public replays stored engine
+  // inputs through generateEstimate on every view/accept — without an
+  // input-level override an admin flip would re-price an ALREADY-SENT quote
+  // and then lock/bill the new amount. Same input-first replay mechanism the
+  // lawn/pest floor state uses (estimate-public#savedFloorReplayOverrides).
+  const knobs = (options.knobs && typeof options.knobs === 'object') ? options.knobs : {};
+  const knobNumber = (value, min, max) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= min && n <= max ? n : null;
+  };
+
+  const shrubDensity = getTreeShrubShrubDensity(property);
+  const densityEligibleSource = bedAreaInfo.bedAreaSource === 'explicit'
+    || bedAreaInfo.bedAreaSource === 'estimated';
+  const snapshotDensityFactor = knobNumber(knobs.densityFactor, 0.5, 2);
+  const densityFactor = snapshotDensityFactor !== null
+    ? snapshotDensityFactor
+    : (densityEligibleSource ? (TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1) : 1);
+
+  // v4.7 routine palm-care reserve. The service-line option wins (the
+  // estimator's T&S line carries what the caller actually said), then the
+  // property record. This is palms-on-property for the recurring program —
+  // NOT palm_injection's treated-palm count with its mandatory-measurement
+  // override machinery (resolvePalmCount); that stays palm_injection
+  // semantics. Absent / invalid reads as 0 palms, zeroing both reserve
+  // terms. treeCount is NON-palm trees wherever both are supplied — the
+  // per-tree material term and this reserve must never both bill one palm.
+  const palmCountRaw = options.palmCount
+    ?? property.palmCount ?? property.palmInventory?.palmCount ?? property.features?.palmCount;
+  const palmCountParsed = Number(palmCountRaw);
+  // Engine-side defense matching the intent/public contracts' 1–200 bound:
+  // an oversized count from any producer clamps (with a warning) instead of
+  // scaling reserve dollars without limit.
+  let palmCount = Number.isInteger(palmCountParsed) && palmCountParsed > 0 ? palmCountParsed : 0;
+  if (palmCount > 200) {
+    warnings.push(`Palm count ${palmCount} exceeds the 200-palm residential bound; clamped to 200.`);
+    palmCount = 200;
+  }
+  const palmCountSource = palmCount > 0
+    ? (options.palmCount !== undefined && options.palmCount !== null && String(options.palmCount).trim() !== ''
+      ? 'service_line' : 'property')
+    : 'none';
+  const liveReserve = TREE_SHRUB.routinePalmCareReserve || {};
+  const snapshotPerPalmAnnual = knobNumber(knobs.perPalmAnnual, 0, 200);
+  const snapshotPalmMinutes = knobNumber(knobs.minutesPerPalmVisit, 0, 10);
+  const palmReserve = {
+    perPalmAnnual: snapshotPerPalmAnnual !== null ? snapshotPerPalmAnnual : (liveReserve.perPalmAnnual ?? 0),
+    minutesPerPalmVisit: snapshotPalmMinutes !== null ? snapshotPalmMinutes : (liveReserve.minutesPerPalmVisit ?? 0),
+  };
+  // Neutral-rollout bridge (pre-push P0): before v4.7 the intent prompt
+  // classified stated palms INTO treeCount, so they priced the generic
+  // per-tree material + 1.5 min/visit. The producers now split the counts,
+  // and with a reserve term unarmed those palms would price as NOTHING —
+  // an immediate underprice. While a term is unarmed, SERVICE-LINE palms
+  // fold back into the matching legacy term (byte-identical to the
+  // pre-split quote, tier factors included). Property-level palm counts
+  // stay out while unarmed — they never fed T&S pricing, so folding them
+  // in would be the opposite un-neutrality.
+  //
+  // The two legs arm INDEPENDENTLY (P0 r7): arming only perPalmAnnual must
+  // not silently delete the legacy palm LABOR, and arming only
+  // minutesPerPalmVisit must not delete the legacy palm MATERIAL. Each leg
+  // is either reserve-priced or legacy-priced, never neither.
+  const palmMaterialArmed = (palmReserve.perPalmAnnual ?? 0) > 0;
+  const palmLaborArmed = (palmReserve.minutesPerPalmVisit ?? 0) > 0;
+  const palmReserveActive = palmMaterialArmed || palmLaborArmed;
+  const foldablePalmCount = palmCountSource === 'service_line' ? palmCount : 0;
+  // De-duplicated NON-PALM tree base. A density-INFERRED treeCount cannot
+  // be trusted to exclude palms — treeDensity describes woody plants
+  // generally, so those inferred trees may BE the palms being counted
+  // separately. It is suppressed whenever palms are actually PRICED:
+  //  - unarmed: only service-line palms price (folded into the legacy
+  //    term), so only they suppress — property palms don't price at all
+  //    while unarmed, leaving the inferred trees as the sole (pre-v4.7,
+  //    unchanged) charge (P0 r8).
+  //  - armed: every palm prices through the reserve, so a property-lookup
+  //    shape (property palmCount + treeDensity) must not ALSO bill those
+  //    plants as inferred trees (P0 r9/r10).
+  // A caller-stated non-palm treeCount is real signal and always survives.
+  // The suppression is PER LEG (P0 r11): with only the material knob armed,
+  // labor palms still ride the legacy minutes, so the labor leg must keep
+  // its inferred trees — suppressing both legs off either knob deleted the
+  // unarmed leg's cost, the same class of bug as r7.
+  const inferredTrees = treeCountSource === 'density_estimate';
+  const suppressFor = (legArmed) => inferredTrees
+    && (foldablePalmCount > 0 || (legArmed && palmCount > 0));
+  const materialBaseTreeCount = suppressFor(palmMaterialArmed) ? 0 : treeCount;
+  const laborBaseTreeCount = suppressFor(palmLaborArmed) ? 0 : treeCount;
+  // Per-leg counts: palms ride the legacy per-tree term only where their
+  // replacement is still unarmed.
+  const materialTreeCount = materialBaseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
+  const laborTreeCount = laborBaseTreeCount + (palmLaborArmed ? 0 : foldablePalmCount);
+  const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
-  const onSiteMin = Math.max(25, 20 + Math.round(bedArea / 500) + Math.round(treeCount * 1.5) + accessMin);
+  const onSiteMin = Math.max(
+    25,
+    20 + Math.round((bedArea / 500) * densityFactor) + Math.round(laborTreeCount * 1.5) + palmMinutesPerVisit + accessMin,
+  );
 
   const frequency = tierConfig.frequency;
   // Protocol-derived ANNUAL material model (v4.6); every term is already
@@ -2649,17 +2727,31 @@ function priceTreeShrub(property, options = {}) {
   const tierMaterialFactor = tier === 'light' ? (materialModel.lightFactor ?? 0.75)
     : tier === 'enhanced' ? (materialModel.enhancedFactor ?? 1.25)
     : 1;
+  // Palm reserve material sits OUTSIDE the tier factor: it budgets the
+  // annual palm nutrition/systemic calendar, which doesn't grow with extra
+  // foliar visits — the per-visit palm labor already scales with frequency.
+  // While the MATERIAL leg is unarmed, service-line palms ride the per-tree
+  // term inside the tier factor instead (materialTreeCount — pre-split).
+  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * (palmMaterialArmed ? palmCount : 0);
   const modeledMaterialCost = (
     (materialModel.fixedAnnual ?? 15)
-    + (materialModel.perTreeAnnual ?? 4) * treeCount
-    + (materialModel.perSqFtAnnual ?? 0.055) * bedArea
-  ) * tierMaterialFactor;
+    + (materialModel.perTreeAnnual ?? 4) * materialTreeCount
+    + (materialModel.perSqFtAnnual ?? 0.055) * bedArea * densityFactor
+  ) * tierMaterialFactor + palmReserveAnnual;
   const materialCost = Math.max(frequency * 10, modeledMaterialCost);
 
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + 10) / 60);
   const laborAnnual = laborPerVisit * frequency;
 
-  const annualDirectCost = materialCost + laborAnnual;
+  // Callback reserve mirrors the commercial pricers' knob; 0 until real
+  // residential callback data earns a value (Phase-1 audit found zero).
+  const snapshotCallbackReserve = knobNumber(knobs.callbackReservePerVisit, 0, 50);
+  const callbackReservePerVisit = snapshotCallbackReserve !== null
+    ? snapshotCallbackReserve
+    : (TREE_SHRUB.callbackReservePerVisit ?? 0);
+  const callbackReserveAnnual = callbackReservePerVisit * frequency;
+
+  const annualDirectCost = materialCost + laborAnnual + callbackReserveAnnual;
   // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
   // The displayed margin below equals marginTarget exactly when no floor binds.
   const marginTarget = TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.45;
@@ -2681,17 +2773,29 @@ function priceTreeShrub(property, options = {}) {
   if (bedAreaInfo.bedAreaSource === 'fallback' || bedAreaInfo.requiresManualReview) {
     manualReviewReasonsSet.add('missing_bed_area_fallback');
   }
-  if (bedAreaCapped) {
-    manualReviewReasonsSet.add('bed_area_cap_reached');
-    warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
-  }
-  if (bedArea >= BED_AREA_CAP) {
+  // Owner ruling 2026-08-10: bed areas are never clamped. Large areas price
+  // IN FULL and carry a review marker — the routing (draft-builder,
+  // lead-estimate-automation, public-quote) refuses to auto-send a line
+  // with manualReviewReasons, so a big measurement gets human eyes without
+  // being silently underpriced.
+  const bedSqFtText = (value) => `${Math.round(Number(value)).toLocaleString()} sq ft`;
+  if (bedArea >= BED_AREA_REVIEW_SQFT) {
     manualReviewReasonsSet.add('bed_area_at_or_above_8000');
-    if (!bedAreaCapped) {
-      warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
-    }
+    warnings.push(
+      `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_REVIEW_SQFT)} review threshold.`
+      + ' It was priced IN FULL — confirm the measurement.',
+    );
   }
-  if (treeCount >= 15) {
+  // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
+  // exactly what the pre-split classification counted (property palms never
+  // reached T&S pricing, so counting them would change neutral behavior).
+  // Armed: property palms drive real material/labor too, so a property with
+  // 20 known palms must trip the gate rather than auto-price a big job.
+  // Same de-duplicated base, taking the LARGER leg count so a half-armed
+  // config errs toward review rather than away from it.
+  const gatePlantCount = Math.max(materialBaseTreeCount, laborBaseTreeCount)
+    + (palmReserveActive ? palmCount : foldablePalmCount);
+  if (gatePlantCount >= 15) {
     manualReviewReasonsSet.add('tree_count_at_or_above_15');
     warnings.push('High tree count; manual review recommended.');
   }
@@ -2719,14 +2823,28 @@ function priceTreeShrub(property, options = {}) {
     bedArea,
     bedAreaUsed: bedArea,
     bedAreaSource: bedAreaInfo.bedAreaSource,
-    bedAreaCapped,
-    ...(bedAreaInfo.uncappedBedAreaEstimate !== undefined
-      ? { uncappedBedAreaEstimate: bedAreaInfo.uncappedBedAreaEstimate }
-      : {}),
     pricingConfidence: bedAreaInfo.pricingConfidence,
     bedAreaConfidence: bedAreaInfo.pricingConfidence,
     treeCount,
     treeCountSource,
+    materialTreeCount,
+    laborTreeCount,
+    shrubDensity,
+    densityFactor,
+    palmCount,
+    palmCountSource,
+    palmReserveActive,
+    palmMaterialArmed,
+    palmLaborArmed,
+    // Quote-time knob snapshot. Persisted with the estimate so a later
+    // admin flip cannot re-price an already-sent quote on replay
+    // (estimate-public#savedFloorReplayOverrides injects these back).
+    pricingKnobs: {
+      densityFactor,
+      perPalmAnnual: palmReserve.perPalmAnnual ?? 0,
+      minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
+      callbackReservePerVisit,
+    },
     access,
     onSiteMin,
     materialModel: {
@@ -2734,6 +2852,9 @@ function priceTreeShrub(property, options = {}) {
       perTreeAnnual: materialModel.perTreeAnnual ?? 4,
       perSqFtAnnual: materialModel.perSqFtAnnual ?? 0.055,
       tierFactor: tierMaterialFactor,
+      densityFactor,
+      perPalmAnnual: palmReserve.perPalmAnnual ?? 0,
+      minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
     },
     monthly,
     annual,
@@ -2742,6 +2863,8 @@ function priceTreeShrub(property, options = {}) {
     costs: {
       materialCost: roundMoney(materialCost),
       laborCost: roundMoney(laborAnnual),
+      palmReserveCost: roundMoney(palmReserveAnnual),
+      callbackReserveCost: roundMoney(callbackReserveAnnual),
       adminCost: GLOBAL.ADMIN_ANNUAL,
       directCost: roundMoney(annualDirectCost),
       totalWithAdmin: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
@@ -3351,21 +3474,10 @@ function priceCommercialRodentBait(property = {}, options = {}) {
 // ============================================================
 // COMMERCIAL TREE & SHRUB — cost-buildup auto-pricer (COMMERCIAL_TREE_SHRUB)
 // ============================================================
-// Bed area is resolved UNCAPPED for commercial (explicit → estimated → lot
-// density), unlike residential which caps at BED_AREA_CAP, because commercial
-// auto-pricing has no size cap.
+// Bed area resolves explicit → estimated → lot density. (Since the owner
+// ruling 2026-08-10 removed the residential clamp, no upstream cap-recovery
+// is needed here — every path already carries the full area.)
 function resolveCommercialBedArea(property = {}) {
-  // No size cap for commercial: when calculatePropertyProfile already capped a
-  // lot-derived/estimated bed area at BED_AREA_CAP (preserving the true value
-  // as uncappedBedAreaEstimate), recover the uncapped figure — otherwise large
-  // commercial beds would be underquoted at the 8,000 sqft residential cap.
-  if (property.bedAreaCapped === true && Number(property.uncappedBedAreaEstimate) > 0) {
-    return {
-      bedArea: Number(property.uncappedBedAreaEstimate),
-      bedBasis: property.bedAreaSource || 'lot_based',
-      estimated: true,
-    };
-  }
   // Respect an explicit numeric bed area. A ZERO bed area is authoritative ONLY
   // when it's a deliberate/explicit measurement (all-hardscape lot, beds
   // measured as absent) — NOT an inferred/estimated zero. The admin V2 form
@@ -4797,8 +4909,10 @@ function priceTrapOnlyRetainer(options = {}) {
     warrantyEligible: false,
     rodentExclusionDeclined: true,
     discountEligible: false,
+    // WaveGuard exclusion rides discountEligible:false (read by the
+    // estimate-public line predicates) — there is no separate
+    // excludedFromWaveGuardDiscounts flag; nothing ever read one.
     excludedFromCoupons: true,
-    excludedFromWaveGuardDiscounts: true,
     excludedFromBundleDiscounts: true,
     lineItems: [
       {

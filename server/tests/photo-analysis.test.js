@@ -30,6 +30,30 @@ describe('buildPhotoAnalysisPrompt', () => {
     expect(prompt).toContain('NEVER use these words');
     expect(prompt).toContain('pest-proof/rodent-proof');
   });
+
+  test('internal fields never reach the prompt — tech-facing compliance/calibration data must not steer customer captions', () => {
+    const schema = findingsSchemaForType('tree_shrub');
+    const prompt = buildPhotoAnalysisPrompt({
+      schema,
+      values: {
+        plant_groups: 'Palms,Shrubs',
+        bed_sqft_serviced: '2400',
+        palm_count_total: '8',
+        shrub_density: 'Heavy',
+        access_difficulty: 'Difficult',
+        irac_frac_logged: 'Yes',
+      },
+      photoCount: 1,
+      serviceType: 'Tree & Shrub Service',
+    });
+    expect(prompt).toContain('Plant groups serviced: Palms,Shrubs');
+    expect(prompt).not.toContain('2400');
+    expect(prompt).not.toContain('bed area');
+    expect(prompt).not.toContain('Palms on property');
+    expect(prompt).not.toContain('Shrub density');
+    expect(prompt).not.toContain('Access difficulty');
+    expect(prompt).not.toContain('IRAC');
+  });
 });
 
 describe('parsePhotoAnalysisResponse', () => {

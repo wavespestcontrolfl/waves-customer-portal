@@ -155,6 +155,21 @@ const SERVICE_KEY_RULES = {
   // WaveGuard's actual stops book as the mosquito programs above (codex
   // P2 r4).
   waveguard_membership: { eligible: false, reason: 'billing_rider' },
+  // Estimate-gap batch (20260808080000). The three mechanical lawn
+  // add-ons apply no treatment — a spray/coverage trace would imply
+  // application work that never happened (compliance: never suggest
+  // treatment where none occurred). Bora-Care treats individual wood
+  // members/attic surfaces, not a perimeter or lawn. The guarantee is a
+  // payment-only billing rider.
+  dethatching: { eligible: false, reason: 'mechanical_lawn_lane' },
+  plugging: { eligible: false, reason: 'mechanical_lawn_lane' },
+  top_dressing: { eligible: false, reason: 'mechanical_lawn_lane' },
+  bora_care: { eligible: false, reason: 'localized_treatment_lane' },
+  rodent_guarantee: { eligible: false, reason: 'billing_rider' },
+  // Reactivation batch (20260809000000): German roach work is interior
+  // gel/IGR treatment — no exterior perimeter or lawn trace.
+  german_roach: { eligible: false, reason: 'interior_only_lane' },
+  german_roach_initial: { eligible: false, reason: 'interior_only_lane' },
   // lawn programs — coverage outline/highlight, not a spray-mist replay
   lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
@@ -162,6 +177,28 @@ const SERVICE_KEY_RULES = {
   lawn_care_recurring: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_fertilization: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_tree_shrub_combo: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  // Drill-and-foam (catalog identity shipped in #3306). Foam goes into wall
+  // voids and block cells — a point application with no line and no area, so
+  // neither the spray band nor the lawn outline can depict it honestly. It
+  // gets the 'photo' variant: treated points marked on a PHOTO of the area
+  // actually treated (see service-report/photo-marks.js).
+  //
+  // overridesSnapshot is required, not decorative: foam completes as the
+  // typed `termite_treatment` findings type, which it SHARES with liquid
+  // perimeter and trenching, and typed lanes are evaluated first. Without the
+  // override a foam visit would inherit that lane's 'spray' variant. This is
+  // the same precedence fire_ant and tick_control already rely on — the
+  // catalog key's geometry is more specific than a shared typed pointer.
+  //
+  // The shared lane's requiresPerimeterMethod condition still suppresses a
+  // SPRAY map on these visits; this rule decides what they may publish
+  // instead, and nothing renders unless GATE_PHOTO_MARKS is on.
+  foam_drill: {
+    eligible: true, variant: 'photo', captionKey: 'foamPoints', overridesSnapshot: true,
+  },
+  foam_recurring: {
+    eligible: true, variant: 'photo', captionKey: 'foamPoints', overridesSnapshot: true,
+  },
   // liquid termite keys (typed — listed for callers that only have the key)
   // pointerRequired (codex P2 r27): these keys' spray verdicts are only
   // valid WITH their termite_treatment pointer — its perimeter-method
@@ -444,6 +481,41 @@ function traceEligibilityGateOn() {
 }
 
 /**
+ * The `{ traceEligible, traceVariant }` pair the schedule/dispatch feeds hand
+ * to the field UI, where traceEligible means "offer the SATELLITE tracer".
+ *
+ * A 'photo' lane is eligible for a marked-photo card and never for the tracer,
+ * so it must report traceEligible:false — otherwise the tech is shown a
+ * workflow whose save the capture block then rejects with trace_photo_lane, a
+ * dead end discoverable only by doing the work twice (codex P2).
+ *
+ * Gate-aware on purpose: with GATE_TRACE_ELIGIBILITY off, ONLY a photo lane
+ * may suppress the button. Every other lane keeps pre-gate behavior, so
+ * turning on marks cannot start hiding tracers across unrelated services.
+ */
+function traceFeedFields(verdict, addonVerdicts = []) {
+  // Order-independent, like capture and render (codex P1 r6): a mixed visit
+  // whose foam line precedes its trenching line must still be offered the
+  // tracer, and combineLineVerdicts would have answered 'photo' purely
+  // because of insertion order.
+  const { satellite, photo } = resolveLaneCapabilities(
+    verdict || { eligible: false },
+    addonVerdicts,
+  );
+  // Only a PHOTO-ONLY visit hides the tracer. A satellite line alongside the
+  // foam keeps the button — the tech traces the trenching and marks the foam.
+  if (photo && !satellite) return { traceEligible: false, traceVariant: 'photo' };
+  // With the eligibility gate off, every non-photo lane keeps pre-gate
+  // behavior: enabling marks must not start publishing variants (or hiding
+  // tracers) across unrelated services.
+  if (!traceEligibilityGateOn() || !verdict) {
+    return { traceEligible: true, traceVariant: null };
+  }
+  if (satellite) return { traceEligible: true, traceVariant: satellite.variant };
+  return { traceEligible: verdict.eligible, traceVariant: verdict.eligible ? verdict.variant : null };
+}
+
+/**
  * Capture-side block payload for the tech write routes (403), or null.
  * Gate-off keeps today's behavior; resolver errors FAIL OPEN — capture is
  * an internal tool and the render-side suppression is the customer-facing
@@ -451,7 +523,14 @@ function traceEligibilityGateOn() {
  * in the field.
  */
 async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = undefined } = {}) {
-  if (!traceEligibilityGateOn()) return null;
+  // Two independent gates reach this helper (codex P1). The eligibility gate
+  // governs the full registry; GATE_PHOTO_MARKS governs only the photo-lane
+  // block below. The rollout allows the photo gate to go on FIRST, and under
+  // that ordering an eligibility-gated early return would let a foam visit
+  // save a satellite trace — so the photo block must stand on its own gate.
+  const { photoMarksGateOn } = require('./photo-marks');
+  const photoGateOn = photoMarksGateOn();
+  if (!traceEligibilityGateOn() && !photoGateOn) return null;
   let eligibility;
   try {
     const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
@@ -484,18 +563,63 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
       },
     };
   };
-  if (eligibility.eligible) {
-    return modeMismatchBlock(eligibility.variant);
-  }
-  // An eligible ADD-ON line rescues the capture too (codex P2 r11) —
-  // fail-open on lookup errors, same posture as the rest of this helper.
+  // The 'photo' variant is eligible for a treated-point map but NOT for the
+  // satellite tracer — foam has no perimeter and no area to trace. Without
+  // this branch modeMismatchBlock would read 'photo' as "not lawn" and wave a
+  // perimeter trace through, which is exactly the false exterior claim the
+  // registry exists to prevent.
+  const photoLaneBlock = (variant) => (variant === 'photo' ? {
+    status: 403,
+    payload: {
+      error: 'This service is mapped by marking the treated points on a photo, not by tracing the property.',
+      code: 'trace_photo_lane',
+      reason: variant,
+    },
+  } : null);
+  // Capabilities are resolved INDEPENDENTLY of line order (codex P1 r6).
+  // combineLineVerdicts returns the primary, or the FIRST eligible add-on, so
+  // a mixed visit whose foam line happens to sit before its trenching line
+  // produced trace_photo_lane and blocked a trace the trenching line
+  // legitimately earns — the mirror of the render-side drop fixed in r5.
+  let capabilities;
   try {
-    const combined = combineLineVerdicts(
+    capabilities = resolveLaneCapabilities(
       eligibility,
       await resolveAddonVerdicts(scheduledService?.id, knex),
     );
-    if (combined.eligible) return modeMismatchBlock(combined.variant);
-  } catch { return null; }
+  } catch {
+    // Fail-open on lookup errors, same posture as the rest of this helper:
+    // capture is the internal surface, render is the customer-facing guard.
+    return null;
+  }
+
+  // A satellite-capable line wins: the visit may trace, and the posted mode
+  // must match THAT line's geometry. The photo card rides alongside.
+  if (capabilities.satellite) {
+    // ...but geometry validation is the WIDER REGISTRY's rule, so it waits for
+    // the registry's own gate (codex P1 r10). Running it under GATE_PHOTO_MARKS
+    // alone broke capture for typed lawn visits in exactly the rollout order
+    // this feature ships in (marks first, eligibility later): with the
+    // eligibility gate off traceFeedFields reports traceVariant:null, and
+    // SchedulePage then falls back to `isLawn`, which isTypedFindings forces
+    // FALSE for aeration/fungicide/insect-control. The modal posts 'perimeter',
+    // the registry says 'outline', and the save died on
+    // trace_capture_mode_mismatch — a 400 that could not happen before the
+    // marks gate was flipped. The feed (traceFeedFields) and render
+    // (resolveTraceRenderVerdict) surfaces already hold this line; capture was
+    // the one that leaked.
+    if (!traceEligibilityGateOn()) return null;
+    return modeMismatchBlock(capabilities.satellite.variant);
+  }
+  // Photo-only: nothing on this visit supports a trace. This block is what the
+  // marks gate legitimately introduces, so it stands on the photo gate alone.
+  if (capabilities.photo) return photoLaneBlock('photo');
+
+  // Photo gate on, eligibility gate off: nothing else is in force, so every
+  // non-photo verdict keeps pre-gate behavior — turning on marks cannot
+  // silently activate the wider registry.
+  if (!traceEligibilityGateOn()) return null;
+
   return {
     status: 403,
     payload: {
@@ -519,6 +643,31 @@ function combineLineVerdicts(primaryVerdict, addonVerdicts = []) {
   if (primaryVerdict.eligible) return primaryVerdict;
   const rescued = addonVerdicts.find((v) => v && v.eligible);
   return rescued || primaryVerdict;
+}
+
+/**
+ * The two capabilities a visit can hold at once, resolved INDEPENDENTLY of
+ * line order (codex P1 r6).
+ *
+ * combineLineVerdicts answers "which single verdict represents this visit",
+ * which is the wrong question once a visit can be both a satellite lane and a
+ * photo lane: it returns the primary, or the FIRST eligible add-on, so whether
+ * a mixed trenching+foam visit read as 'spray' or 'photo' depended on the
+ * order the lines happened to be inserted. That order-dependence produced a
+ * false block in one direction (a 403 on a visit that legitimately traces) and
+ * a silent drop in the other (a saved trace omitted from the report).
+ *
+ * Callers ask for the capability they actually need:
+ *   satellite → may this visit trace, and with which geometry
+ *   photo     → may this visit publish a marked-photo card
+ */
+function resolveLaneCapabilities(primaryVerdict, addonVerdicts = []) {
+  const lines = [primaryVerdict, ...(Array.isArray(addonVerdicts) ? addonVerdicts : [])]
+    .filter(Boolean);
+  return {
+    photo: lines.find((v) => v.eligible && v.variant === 'photo') || null,
+    satellite: lines.find((v) => v.eligible && v.variant !== 'photo') || null,
+  };
 }
 
 // Resolve the add-on lines' verdicts for a scheduled service: catalog key
@@ -581,12 +730,18 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
   }
   return addons.map((addon) => {
       if (addon.frozen) {
-        return resolveTraceEligibility({
+        // serviceKey rides the verdict (codex P1 r3): a photo-lane add-on
+        // supplies the mark vocabulary, and the tech route only has the
+        // PRIMARY profile's key to work from otherwise.
+        return {
+          ...resolveTraceEligibility({
+            serviceKey: addon.frozen.key,
+            findingsType: addon.frozen.pointer,
+            displayName: addon.service_name || '',
+            ...(renderSide ? { typedValues: null } : {}),
+          }),
           serviceKey: addon.frozen.key,
-          findingsType: addon.frozen.pointer,
-          displayName: addon.service_name || '',
-          ...(renderSide ? { typedValues: null } : {}),
-        });
+        };
       }
       // A SUPPLIED catalog id that cannot be resolved — transient lookup
       // failure, or the row no longer exists — must not fall to the
@@ -599,7 +754,8 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
           ? `unresolved:${addon.service_id}`
           : (keyById.get(addon.service_id) || `unresolved:${addon.service_id}`))
         : null;
-      return resolveTraceEligibility({
+      return {
+        ...resolveTraceEligibility({
         serviceKey: key,
         // A successful pointer query that returned NO row for a resolved
         // key is a cutover/deactivation, not "untyped" (codex P2 r26):
@@ -619,7 +775,11 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
         // at render (typedValues null fails their conditions closed) and
         // permissive at capture (codex P1 r13).
         ...(renderSide ? { typedValues: null } : {}),
-      });
+        }),
+        // Same reason as the frozen branch: a photo-lane add-on carries the
+        // key its mark vocabulary is drawn from (codex P1 r3).
+        serviceKey: key,
+      };
   });
 }
 
@@ -758,7 +918,16 @@ function renderAreasFromRecord(record) {
  * across surfaces.
  */
 async function resolveTraceRenderVerdict(record, knex) {
-  if (!traceEligibilityGateOn()) {
+  // Engages under EITHER gate (codex P1 r6). This verdict governs the
+  // SATELLITE artifact and the exterior re-entry scope that rides on it, and
+  // independent callers (reentry.js → resolveTracedExteriorZone, dynamic
+  // context, email delivery) trust it. An eligible 'photo' verdict returning
+  // suppressed:false therefore let a point-localized foam treatment publish an
+  // exterior ready-at target on those surfaces, bypassing the local fix in the
+  // report payload.
+  const { photoMarksGateOn: renderPhotoMarksGateOn } = require('./photo-marks');
+  const marksGateOn = renderPhotoMarksGateOn();
+  if (!traceEligibilityGateOn() && !marksGateOn) {
     return { suppressed: false, eligibility: null };
   }
   let serviceKey = null;
@@ -814,7 +983,13 @@ async function resolveTraceRenderVerdict(record, knex) {
     serviceKey, findingsType, displayName: names, typedValues,
     renderAreas: renderAreasFromRecord(record),
   });
-  if (!eligibility.eligible) {
+  // Hoisted so the capability resolution below can see them. Also resolved
+  // when the primary IS eligible but is a PHOTO lane (codex P1 r6): the
+  // question "does any line support a satellite trace" cannot be answered
+  // from a foam primary alone. An eligible satellite primary still short-
+  // circuits, so this adds no lookup to the common path.
+  let addonVerdicts = [];
+  if (!eligibility.eligible || eligibility.variant === 'photo') {
     // Add-on identities FROZEN with the completion win over the mutable
     // schedule rows (codex P2 r14): a spray add-on added after completion
     // must not republish a suppressed trace, and one removed must not
@@ -829,15 +1004,31 @@ async function resolveTraceRenderVerdict(record, knex) {
         frozenLines = serviceData.completedAddonLines;
       }
     } catch { /* live-row fallback */ }
-    let addonVerdicts = [];
     try {
       addonVerdicts = frozenLines !== null
         ? await addonVerdictsFromLines(frozenLines, knex, { renderSide: true })
         : await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true });
     } catch { /* render fails closed: the primary verdict stands */ }
-    eligibility = combineLineVerdicts(eligibility, addonVerdicts);
+    if (!eligibility.eligible) eligibility = combineLineVerdicts(eligibility, addonVerdicts);
   }
-  return { suppressed: !eligibility.eligible, eligibility };
+  const renderCapabilities = resolveLaneCapabilities(eligibility, addonVerdicts);
+  if (!traceEligibilityGateOn()) {
+    // Marks gate only: suppress a PHOTO-ONLY visit and nothing else, so
+    // enabling marks cannot start suppressing unrelated lanes. A visit that
+    // also holds a satellite line keeps its trace and its exterior scope.
+    const photoOnly = Boolean(renderCapabilities.photo) && !renderCapabilities.satellite;
+    return {
+      suppressed: photoOnly,
+      eligibility: photoOnly ? renderCapabilities.photo : null,
+    };
+  }
+  // Satellite capability is what this verdict answers. Reporting the
+  // satellite line (rather than whichever line combineLineVerdicts happened
+  // to pick first) also keeps the geometry callers read order-independent.
+  return {
+    suppressed: !renderCapabilities.satellite,
+    eligibility: renderCapabilities.satellite || eligibility,
+  };
 }
 
 module.exports = {
@@ -851,6 +1042,7 @@ module.exports = {
   pointerRequiredForKey,
   primaryIdentityFreezable,
   traceEligibilityGateOn,
+  traceFeedFields,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
 };

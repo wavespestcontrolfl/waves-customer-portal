@@ -2292,24 +2292,33 @@ router.get('/:date?', async (req, res, next) => {
       // validator. Same shared helpers as the schedule feeds; fail-soft
       // (absent flags = eligible; capture stays the fail-open surface).
       let dispatchTraceVerdict = null;
+      let dispatchAddonVerdicts = [];
+      // Required at THIS scope, not inside the try below: the feed fields are
+      // spread into the row far outside that block.
+      const { traceFeedFields } = require('../services/service-report/trace-eligibility');
       try {
         const {
           resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
         } = require('../services/service-report/trace-eligibility');
+        const { photoMarksGateOn } = require('../services/service-report/photo-marks');
         // A profile OUTAGE omits the verdict (fail open, codex P2 r28)
         // instead of classifying a typed primary from its editable label
         // — the save route catches the same outage and fails open.
-        if (traceEligibilityGateOn() && !dispatchProfileLookupFailed) {
-          dispatchTraceVerdict = combineLineVerdicts(
-            resolveTraceEligibility({
-              serviceKey: completionProfile?.serviceKey || null,
-              findingsType: completionProfile?.findingsType || null,
-              displayName: s.service_type || '',
-            }),
-            await resolveAddonVerdicts(s.id, db),
-          );
+        // Also needed with only the marks gate on, so a photo lane hides the
+        // satellite tracer (codex P2).
+        if ((traceEligibilityGateOn() || photoMarksGateOn()) && !dispatchProfileLookupFailed) {
+          // Primary and add-ons stay SEPARATE for traceFeedFields (codex P1
+          // r7): collapsing first makes the tracer affordance depend on line
+          // order. dispatchTraceVerdict keeps the collapsed value for any
+          // other consumer.
+          dispatchAddonVerdicts = await resolveAddonVerdicts(s.id, db);
+          dispatchTraceVerdict = resolveTraceEligibility({
+            serviceKey: completionProfile?.serviceKey || null,
+            findingsType: completionProfile?.findingsType || null,
+            displayName: s.service_type || '',
+          });
         }
-      } catch { dispatchTraceVerdict = null; }
+      } catch { dispatchTraceVerdict = null; dispatchAddonVerdicts = []; }
       // Only fan out the series-context lookup for visits that are actually
       // prepaid — most rows aren't, and we don't want N extra family-fetches
       // per day on the dispatch list.
@@ -2371,8 +2380,8 @@ router.get('/:date?', async (req, res, next) => {
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        traceEligible: !dispatchTraceVerdict || dispatchTraceVerdict.eligible,
-        traceVariant: dispatchTraceVerdict?.eligible ? dispatchTraceVerdict.variant : null,
+        // A photo lane must not offer the satellite tracer (codex P2).
+        ...traceFeedFields(dispatchTraceVerdict, dispatchAddonVerdicts),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
@@ -9518,6 +9527,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               });
             } catch (e) { /* log-only */ }
           }
+          // Full-balance sweep (owner ruling 2026-08-08): the visit's own
+          // charge just SETTLED on this method — collect the customer's
+          // other open DELIVERED self-pay invoices through the same
+          // chargeInvoiceWithSavedCard rail, one capped charge per invoice,
+          // oldest first, stop on first failure. 'paid' ONLY (pre-push r2
+          // P0): an ACH debit in 'processing' is money in flight, not proof
+          // the tender is good — sweeping behind it would stack debits that
+          // can all still fail. Detached so the tech's completion response
+          // never waits on N Stripe round-trips; every outcome lands in
+          // autopay_log. Dark behind GATE_COMPLETION_BALANCE_SWEEP
+          // (re-checked inside the service).
+          if (freshStatus === 'paid') {
+            const sweepArgs = {
+              customerId: svc.customer_id,
+              excludeInvoiceId: invoice.id,
+              paymentMethodId: autopayPm.id,
+              triggerScheduledServiceId: svc.id,
+            };
+            // Resolved BEFORE the tick is scheduled — a deferred require
+            // would run outside the request (and after teardown in tests).
+            const { runCompletionBalanceSweep } = require('../services/completion-balance-sweep');
+            setImmediate(() => {
+              runCompletionBalanceSweep(sweepArgs)
+                .catch((sweepErr) => logger.error(`[dispatch] balance sweep crashed for customer ${sweepArgs.customerId}: ${sweepErr.message}`));
+            });
+          }
         }
       } catch (chargeErr) {
         const suppressAlternateCollection = StripeService.savedCardChargeSuppressesAlternateCollection(chargeErr);
@@ -11053,7 +11088,11 @@ function findingsDraftProductLines(products) {
 }
 
 function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [], visitContext = '' }) {
+  // internal fields are tech-facing data (compliance entries, pricing
+  // calibration) that must never influence customer-facing copy — the same
+  // contract buildTypedReportSnapshot enforces on the persisted findings.
   const fieldLines = (schema.fields || [])
+    .filter((field) => !field.internal)
     .map((field) => {
       const value = values?.[field.key];
       if (value == null || String(value).trim() === '') return null;
@@ -13416,4 +13455,5 @@ module.exports._test = {
   BACKFILL_RECORD_END_FIELDS,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
+  buildFindingsRecapPrompt,
 };
