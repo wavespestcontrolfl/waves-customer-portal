@@ -18,10 +18,19 @@ jest.mock('../models/db', () => {
       where() { return builder; },
       whereIn() { return builder; },
       whereNull() { return builder; },
+      orWhere() { return builder; },
+      whereExists() { return builder; },
       whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
+      forUpdate() { return builder; },
       select() { return builder; },
-      first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : null),
+      // call_log reads (the rejected-call fence + linkage revalidation)
+      // answer from their own slot so they never consume the estimates
+      // queue this suite sequences on.
+      first: async () => {
+        if (table === 'call_log') return mockState.callLogRow || null;
+        return mockState.firstQueue.length ? mockState.firstQueue.shift() : null;
+      },
       insert: (payload) => ({
         returning: async () => {
           if (mockState.insertError) { const e = mockState.insertError; mockState.insertError = null; throw e; }
@@ -140,7 +149,7 @@ const buildArgs = (overrides = {}) => ({
 });
 
 beforeEach(() => {
-  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], whereRaws: [], insertError: null };
+  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], whereRaws: [], insertError: null, callLogRow: { processing_status: 'processing', metadata: {}, twilio_call_sid: 'CA-1' } };
   mockEngineEnabled.mockReset().mockReturnValue(true);
   mockDispatch.mockReset().mockResolvedValue({ ok: true, json: GOOD_BRIEF(), provider: 'anthropic', model: 'test-model' });
   mockListOpen.mockReset().mockResolvedValue([]);

@@ -304,6 +304,37 @@ async function recoverStaleScheduledEstimateClaims(now) {
   if (immediateRows.length > 0) {
     logger.warn(`[scheduled-estimates] Recovered ${immediateRows.length} stale immediate send claim(s) to send_failed`);
   }
+
+  // Wedged DEFERRED invalidations (codex P1, PR #3304): when a linkage
+  // correction lands during a live delivery claim, the reconciler records
+  // `invalidation_pending_*` and the send's claim release completes it. A
+  // crash between the two leaves the estimate permanently stuck — every
+  // send aborts on the pending marker with a non-matching claim token, the
+  // former lead stays linked, and no corrected rebuild exists. The status
+  // recoveries above don't touch estimate_data, so finish the transition
+  // here once the claim is past its TTL. Best-effort: a failure logs and
+  // the next sweep retries.
+  try {
+    const { sweepWedgedPendingInvalidations } = require('./admin-estimate-persistence');
+    await sweepWedgedPendingInvalidations(now.getTime());
+  } catch (err) {
+    logger.warn(`[scheduled-estimates] wedged pending-invalidation sweep failed: ${err.message}`);
+  }
+
+  // Queued draft QUARANTINES (codex P0, PR #3304): when an identity
+  // conflict or a rejected-call verdict could not persist its invalidation
+  // — a transient DB outage during a fire-and-forget estimator pass — the
+  // processor stamps the call and this drains the queue until the marker
+  // lands. Without it the unmarked draft keeps a live public token.
+  try {
+    const { sweepPendingQuarantines, sweepPendingReconciles } = require('./estimator-engine');
+    await sweepPendingQuarantines();
+    // Reconcile-retry queue (local audit P0, PR #3304): reconcile-only
+    // failures on settled calls have no other retry path.
+    await sweepPendingReconciles();
+  } catch (err) {
+    logger.warn(`[scheduled-estimates] pending-quarantine sweep failed: ${err.message}`);
+  }
 }
 
 async function claimDueScheduledEstimates(now) {
@@ -324,6 +355,10 @@ async function claimDueScheduledEstimates(now) {
       FROM estimates AS c
       WHERE status = 'scheduled'
         AND scheduled_at IS NOT NULL
+        -- Archived rows never send (codex P0, PR #3304): linkage
+        -- invalidation archives stale wrong-lead drafts, and the cron
+        -- must not claim one scheduled before that commit.
+        AND archived_at IS NULL
         AND scheduled_at <= ?
         -- Cross-process guard (codex #3244 r3): once any member of a group is
         -- mid-send (another pod's batch), the whole group is spoken for — its
@@ -341,6 +376,12 @@ async function claimDueScheduledEstimates(now) {
       JOIN ranked r ON r.id = e.id AND r.rn = 1
       WHERE e.status = 'scheduled'
         AND e.scheduled_at IS NOT NULL
+        -- Repeated at every stage (codex P1, PR #3304): ranked's snapshot
+        -- can predate a concurrent archive, and EvalPlanQual re-evaluates
+        -- the locked row against THIS stage's predicate — without the
+        -- guard here (and on the final UPDATE) an archiving that landed
+        -- mid-claim would still deliver the invalidated content.
+        AND e.archived_at IS NULL
         AND e.scheduled_at <= ?
       ORDER BY e.scheduled_at ASC, e.created_at ASC
       FOR UPDATE OF e SKIP LOCKED
@@ -353,6 +394,7 @@ async function claimDueScheduledEstimates(now) {
         updated_at = ?
     FROM due
     WHERE e.id = due.id
+      AND e.archived_at IS NULL
     RETURNING e.*
   `, [now, now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
 

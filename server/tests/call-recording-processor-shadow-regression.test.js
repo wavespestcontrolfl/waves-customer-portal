@@ -40,6 +40,9 @@ function mockDb(firstResults) {
     };
     return builder;
   });
+  // The claim write uses db.raw for the processing_generation bump; the
+  // count-shaped update above exercises the no-RETURNING tolerance path.
+  db.raw = jest.fn((sql) => sql);
 }
 
 describe('processRecording isOutboundCall shadowing (TDZ) regression', () => {

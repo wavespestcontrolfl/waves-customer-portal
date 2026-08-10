@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+// TTL-aware "no LIVE delivery claim" predicate + marker fragments,
+// shared with the admin routes so every whole-blob write applies the same
+// rule (dependency-free module: partial test mocks can't blank a guard).
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -386,6 +390,12 @@ function verifyEstimateAskToken(req, estimate) {
 function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   if (!estimate) return false;
   if (estimate.archived_at) return false;
+  // A previously issued ask token must die with the estimate (codex P0,
+  // PR #3304 GH r9b): while a live delivery claim defers invalidation into
+  // invalidation_pending_at the row is not yet archived, and this endpoint
+  // would keep answering questions about — and disclosing — the wrong
+  // lead's estimate content.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -8041,7 +8051,14 @@ async function handleEstimateView(req, res, next) {
     // page below (the customer once legitimately held that link).
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
-      || estimate.status === 'send_failed') {
+      || estimate.status === 'send_failed'
+      || estimateLinkageInvalidated(estimate)
+      // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
+      // when the estimate-side marker could not be written, the block
+      // lives on the CALL — and this page would otherwise keep serving a
+      // wrong-identity estimate's name, address, and pricing until the
+      // scheduler drained the queue.
+      || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -8427,6 +8444,14 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
@@ -9528,6 +9553,49 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
         acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
+      // LIVE call-linkage + marker revalidation INSIDE the money-bearing
+      // transaction (codex P0, PR #3304 r26): the call processor can have
+      // committed a corrected lead linkage while its detached estimator
+      // reconcile hasn't written either estimate marker yet — the CAS and
+      // marker predicates below can't see that window, and an old token
+      // accepting a wrong-lead row creates conversion/invoice state for
+      // the wrong identity. Fresh in-transaction read + the same
+      // resolution the send verdict uses.
+      {
+        const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+        // ESTIMATE row FIRST (codex P1, PR #3304 GH r7b). The reconciler
+        // locks the estimate and then updates the lead; taking the lead
+        // first here inverted that and could deadlock a customer accept
+        // against a linkage correction. One order everywhere:
+        // estimates → leads → call_log. This lock also removes the
+        // read-then-update gap on the verdict below.
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+        let freshLinkData = null;
+        try {
+          freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
+            ? JSON.parse(freshLinkRow.estimate_data) : (freshLinkRow?.estimate_data || null);
+        } catch { freshLinkData = null; }
+        const eng = freshLinkData?.estimatorEngine;
+        if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
+          const err = new Error('Estimate is no longer active');
+          err.status = 409;
+          throw err;
+        }
+        // The call row is locked FOR UPDATE and HELD through the
+        // acceptance write (codex P1, PR #3304 GH r6): an ordinary
+        // SELECT would not serialize against the processor's concurrent
+        // correction, and the estimate marker predicates cannot see a
+        // not-yet-written marker. Linked LEAD locked first — repo-wide
+        // leads → call_log order against the processor's stamp writers.
+        if (freshLinkData?.lead_id && ['sid', 'stamp'].includes(freshLinkData?.lead_linkage)) {
+          await trx('leads').where({ id: String(freshLinkData.lead_id) }).forUpdate().first('id');
+        }
+        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true })) {
+          const err = new Error('Estimate is no longer active');
+          err.status = 409;
+          throw err;
+        }
+      }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
@@ -9537,6 +9605,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // not run conversion and invoicing again. Nothing ever clears
         // price_locked_at; its only writers are the two accept flows.
         .whereNull('price_locked_at')
+        // Archive + linkage-marker absence mirrored on the money-bearing
+        // UPDATE itself (codex P0, PR #3304 r25): the accept-active check
+        // ran on a stale pre-read, and the ms-truncated CAS below cannot
+        // exclude a same-millisecond invalidation — a stale token
+        // accepting a wrong-lead row would mint the exact terminal state
+        // the deferred-invalidation release must then preserve.
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         // Freshness compare-and-swap (pre-push P0 on #2915): acceptedUpdates
         // was built from this handler's earlier estimate read — a bond-term
@@ -10537,9 +10614,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           try { base = JSON.parse(base); } catch { base = null; }
         }
         if (base && typeof base === 'object' && base.recurringCardLaneAccepted === true) {
-          await db('estimates').where({ id: estimate.id }).update({
-            estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
-          });
+          await db('estimates').where({ id: estimate.id })
+            // Marker-absent predicates on this POST-COMMIT whole-blob write
+            // (codex P1, PR #3304 GH r7): the accept transaction released
+            // its call-row lock, so a processor correction can commit its
+            // marker-only terminal invalidation between the read above and
+            // this write — and a blind rewrite would erase
+            // linkage_invalidated_at, restoring public access to a
+            // wrong-lead accepted estimate. 0 rows here just leaves the
+            // lane stamp set on a row that is already invalidated.
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+            .update({
+              estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
+            });
         }
       } catch (stampErr) {
         logger.warn(`[estimate-public] lane-stamp clear failed for estimate ${estimate.id} (retry may hide the payer pay step): ${stampErr.message}`);
@@ -11283,6 +11371,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     // Reconcile before this handler recomputes + persists, so a stale
@@ -11364,6 +11460,24 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Same rails as the /preferences write (codex P0, PR #3304 r25):
+      // this can persist the whole estimate_data blob from a pre-read —
+      // an invalidation marker or delivery claim committed since would be
+      // silently erased, leaving the wrong-lead draft public and the
+      // claim release with nothing to consume. CAS on updated_at plus
+      // explicit marker/claim-absent predicates; 0-row → 409 → reload.
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
       .update(writes);
     if (!tierUpdateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
@@ -11608,6 +11722,14 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -11630,6 +11752,16 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Same marker/claim rails as the select-tier and preferences writes
+      // (codex P0, PR #3304 GH r7b): this is a whole-blob estimate_data
+      // write from a pre-read, and the ms-truncated CAS below cannot
+      // exclude a same-millisecond delivery claim or pending invalidation
+      // — erasing either makes claim cleanup a no-op and leaves wrong-lead
+      // content publicly accessible and sendable.
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -11668,6 +11800,14 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
 router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     // Reconcile before this handler recomputes + persists, so a stale
@@ -11770,6 +11910,24 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Whole-blob write over a pre-read snapshot (codex P1, PR #3304 GH
+      // r5): a linkage-invalidation marker or delivery claim committing
+      // between the read and this UPDATE would be silently erased —
+      // leaving the wrong-lead draft public and the claim release with
+      // nothing to consume. Same CAS as the bond/select-tier writes (any
+      // concurrent write bumps updated_at → 0-row → 409 reload), plus
+      // explicit marker/claim-absent predicates as the direct guard.
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
       .update({
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
@@ -11872,6 +12030,14 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -12099,22 +12265,67 @@ async function transferGroupFollowupOwnership(estimate) {
 router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
-
-    const declinedCount = await db('estimates')
-      .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
-      // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
-      // archive committed between the pre-read and this write must not be
-      // mutated back to life as a decline.
-      .whereNull('archived_at')
-      .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
-      .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
+    // LIVE call-linkage revalidation ATOMIC with the decline write (codex
+    // P0 r26, P1 GH r6): the whole transition runs in ONE transaction
+    // with the call row locked FOR UPDATE and held through the UPDATE — a
+    // correction committing after a plain pre-check could otherwise still
+    // interleave, and the marker predicates cannot see the detached
+    // reconciler's not-yet-written marker. Linked LEAD locked first
+    // (repo-wide leads → call_log order). Stale linkage → same generic
+    // 404 as the marker path: the row is dead to this token.
+    const declineTxn = await db.transaction(async (trx) => {
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      // ESTIMATE row first — one lock order everywhere (estimates → leads
+      // → call_log), or a decline racing a linkage reconcile (which locks
+      // the estimate then updates the lead) can deadlock (codex P1, PR
+      // #3304 GH r7b).
+      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      if (!declineLocked) return { staleLinkage: false, declinedCount: 0 };
+      let declineLinkData = null;
+      try {
+        declineLinkData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || null);
+      } catch { declineLinkData = null; }
+      if (declineLinkData?.lead_id && ['sid', 'stamp'].includes(declineLinkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(declineLinkData.lead_id) }).forUpdate().first('id');
+      }
+      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true })) {
+        return { staleLinkage: true, declinedCount: 0 };
+      }
+      const declinedCount = await trx('estimates')
+        .where({ id: estimate.id })
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
+        // archive committed between the pre-read and this write must not be
+        // mutated back to life as a decline. Same for the linkage markers
+        // (codex P1, PR #3304 GH r5): a pending invalidation recorded during
+        // an active send must not let the stale token flip the wrong-lead
+        // row to a money-bearing 'declined' the release then preserves.
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
+        .update({ status: 'declined', declined_at: trx.fn.now(), updated_at: trx.fn.now() });
+      return { staleLinkage: false, declinedCount };
+    });
+    if (declineTxn.staleLinkage) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const declinedCount = declineTxn.declinedCount;
     if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
-      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
+      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at', 'estimate_data');
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
       // Honor the guard's own status: a row archived mid-flight must return
@@ -13811,6 +14022,10 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
+  // A pending or full linkage invalidation kills acceptance the moment the
+  // marker lands — accepting wrong-lead content creates the money-bearing
+  // terminal state the deferred-invalidation finalizer must then preserve.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -13832,8 +14047,23 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
 // else (sending/sent/viewed) is gated only by a real, past expiry — a missing
 // expiry during the brief mid-send window does NOT 404. Admin previews bypass
 // this at the call site so staff can still review drafts.
+// Linkage-invalidation fail-closed (codex P0, PR #3304 r23): a full OR
+// pending invalidation marker means this row's composed content — name,
+// address, pricing — belongs to a lead the call no longer links to. The
+// public token dies the moment either marker lands: the PENDING marker is
+// checked precisely because it precedes the archive (the reconciler defers
+// the archive behind a live delivery claim), so a message that slips out
+// mid-correction, or a crashed claim cleanup, still leaves nothing servable.
+function estimateLinkageInvalidated(estimate = {}) {
+  const eng = parseEstimateDataSafe(estimate)?.estimatorEngine;
+  return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
+}
+
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // Before the accepted/declined early-allow: acceptance does not change
+  // whose data the row was composed from — an invalidated row never renders.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -13856,6 +14086,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -13874,6 +14105,16 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // contract as an unknown token; checked BEFORE alreadyDeclined so an
   // archived declined row doesn't confirm its own existence.
   if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // A pending or full linkage invalidation kills the decline too (codex
+  // P1, PR #3304 GH r5): a stale token declining a wrong-lead row would
+  // mint a money-bearing terminal the deferred-invalidation release then
+  // has to preserve — the archive/unlink would never happen. Same generic
+  // 404 as archived: the row is dead to this token holder. Both callers
+  // (pre-read and post-UPDATE re-read) pass estimate_data; the UPDATE
+  // itself carries matching marker predicates for the TOCTOU window.
+  if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   if (estimate.status === 'declined') {
@@ -19589,6 +19830,14 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -19664,6 +19913,14 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -19695,6 +19952,14 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -19912,6 +20177,14 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
       return notFound();
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return notFound();
     }
@@ -20023,7 +20296,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
     const docPinViewBypass = docRenderPin !== null
       && !estimate.archived_at
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && !estimateLinkageInvalidated(estimate);
+    // Call-side verdict check runs alongside the estimate-side gate (codex
+    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
+    // a pinned document render of a blocked estimate is the same
+    // disclosure.
+    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
+    if (callSideBlock) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
@@ -20674,6 +20956,14 @@ async function handleEstimateAsk(req, res, next) {
     const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
 
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
@@ -20792,6 +21082,7 @@ module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
+module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;

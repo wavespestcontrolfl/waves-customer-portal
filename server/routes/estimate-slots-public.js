@@ -154,6 +154,26 @@ function rejectGatedSuppressionEstimate(res, estimate = {}) {
   return null;
 }
 
+// The DURABLE call-side verdict (codex P1, PR #3304 GH r10): when a
+// quarantine could not write its estimate-side marker, the block lives on
+// the CALL — and every route in this router (slots, holds, card intents,
+// deposit finalize) reads the estimate only, so a quarantined wrong-lead
+// estimate could still expose availability, reserve a scheduled service,
+// mint a payment intent, and take money. Same generic 404 as an
+// unviewable estimate.
+async function rejectCallSideBlockedEstimate(res, estimate = {}) {
+  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { data = null; }
+  }
+  if (!data || typeof data !== 'object') return null;
+  if (await callSideBlockForEstimateData(db, data)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return null;
+}
+
 function rejectIneligibleEstimate(res, estimate = {}) {
   // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
   // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
@@ -210,6 +230,8 @@ router.get('/:token/available-slots', async (req, res) => {
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
     const ineligible = rejectIneligibleEstimate(res, estimate);
     if (ineligible) return ineligible;
     if (isCommercialAutoEstimate(estimate)) {
@@ -375,6 +397,8 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
     const ineligible = rejectIneligibleEstimate(res, estimate);
     if (ineligible) return ineligible;
     if (isCommercialAutoEstimate(estimate)) {
@@ -469,6 +493,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
     const ineligible = rejectIneligibleEstimate(res, estimate);
     if (ineligible) return ineligible;
     if (isCommercialAutoEstimate(estimate)) {
@@ -578,6 +604,8 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
     const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
     if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
@@ -683,6 +711,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
   try {
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
     const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
     if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
