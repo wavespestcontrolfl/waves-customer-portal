@@ -19,6 +19,10 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 // Shared with the web lead path so call + web leads bucket identically.
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../../utils/service-line-infer');
+// The SAME content veto the call processor's linkage decision runs on —
+// shared so the successor-inheritance gate can never drift from it (codex
+// P1 PR #3303 r18).
+const { isNonLeadCallContent } = require('../../utils/non-lead-call-content');
 
 // Map a lead_sources.source_type to the ad_service_attribution channel key +
 // paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
@@ -530,8 +534,12 @@ async function attributeUnclaimedBridgeLeads({
   // irreversible — but blocking the WHOLE sweep on one persistent
   // shared-SID ambiguity starved every unrelated lead. The caller passes
   // the candidate calls' sids/ids; linked leads sit out until the
-  // ambiguity resolves. Both linkage arms: the lead's own sid and the
-  // durable metadata stamp.
+  // ambiguity resolves. ALL THREE linkage arms the processor supports:
+  // the lead's own sid, the durable metadata stamp, and phone reuse
+  // (codex P1 r18 — findReusableCallLead links a phone-bearing call to an
+  // existing lead WITHOUT touching the lead's sid or writing a stamp, so
+  // the sid/stamp arms alone let the sweep organically classify a lead
+  // whose only linked call carries strong-but-ambiguous paid evidence).
   excludeCallSids = [],
   excludeCallIds = [],
 } = {}) {
@@ -657,6 +665,24 @@ async function attributeUnclaimedBridgeLeads({
             .whereRaw("cla.metadata->>'lead_id' = l.id::text")
             .whereIn('cla.id', excludeCallIds);
         });
+        // PHONE-reuse linkage arm (codex P1 r18): a phone-bearing call the
+        // processor linked via findReusableCallLead left neither a sid nor
+        // a stamp on the lead — the only durable linkage is the caller's
+        // number, so a lead whose phone matches an ambiguous call's CALLER
+        // leg (from_phone; the dialed leg is the shared office number and
+        // would over-exclude every bridge-target lead) sits out until the
+        // ambiguity resolves. Deliberately broader than the retire arm's
+        // ownership gating: this exclusion only DELAYS an irreversible
+        // organic label and lifts the day the ambiguity clears, so
+        // shared-number over-match costs a day of waiting, never a wrong
+        // row. NULL/short lead phones must PASS (same rule as the NULL-sid
+        // arm): the length guard empties the subquery for them.
+        qb.whereNotExists(function phoneLinkedCallAmbiguous() {
+          this.select(1).from('call_log as clp')
+            .whereIn('clp.id', excludeCallIds)
+            .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
+            .whereRaw("RIGHT(regexp_replace(COALESCE(clp.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)");
+        });
       }
     })
     .orderBy('l.created_at')
@@ -754,6 +780,29 @@ async function attributeUnclaimedBridgeLeads({
 // error would let the caller commit-continue on an aborted transaction.
 const SUCCESSOR_COLS = ['id', 'to_phone', 'created_at', 'google_ads_call_resource_name', 'metadata'];
 
+// Durable lead-content evidence for the PHONE successor arm (codex P1 r18):
+// an ordinary support/billing/scheduling call from the lead's number
+// finishes 'processed' with no no_attribution marker, but the processor
+// never linked it to any lead (shouldCreateLead was false) — inheriting the
+// lead's booked/completed revenue onto it reassigns funnel history to a
+// call that owns none. The call's own durable extraction
+// (call_log.ai_extraction, written before the linkage decision) is judged
+// by the SAME content veto that decision ran on. ai_extraction is a TEXT
+// column (legacy migration) holding JSON.stringify output — parsed here,
+// never with SQL json operators, which would abort the whole retire
+// transaction on one malformed row. FAIL CLOSED: an absent or unparseable
+// extraction proves nothing, so the call cannot inherit.
+function callCarriesDurableLeadEvidence(aiExtractionRaw) {
+  if (aiExtractionRaw == null) return false;
+  let extracted = aiExtractionRaw;
+  if (typeof aiExtractionRaw === 'string') {
+    try { extracted = JSON.parse(aiExtractionRaw); } catch { return false; }
+  }
+  if (!extracted || typeof extracted !== 'object') return false;
+  if (extracted.is_spam === true) return false;
+  return !isNonLeadCallContent(extracted);
+}
+
 // EVERY durable linkage mode (pre-push P0 r20): the stamp arm covers
 // phone-less reuse, but the processor equally supports stamp-less
 // phone/sid-linked reuse — a valid sid-linked successor whose attribution
@@ -762,7 +811,7 @@ const SUCCESSOR_COLS = ['id', 'to_phone', 'created_at', 'google_ads_call_resourc
 // (the explicit link), then the lead's own sid, which YIELDS to a settled
 // dissenting stamp per repo precedence.
 async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
-  const eligibility = (qb) => qb
+  const eligibilityFilters = (qb) => qb
     .whereNot('id', rejectedCallId)
     .whereNull('processing_token')
     .whereRaw("COALESCE(processing_status, '') IN ('processed', '')")
@@ -770,7 +819,8 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
     .whereNotExists(function alreadyProvenanced() {
       this.select(1).from('ad_service_attribution as ap')
         .whereRaw('ap.source_call_id = call_log.id');
-    })
+    });
+  const eligibility = (qb) => eligibilityFilters(qb)
     .orderBy('created_at', 'desc')
     // LOCKED selection (pre-push P1 r19): without FOR UPDATE a concurrent
     // force-reprocess could reject and finalize the successor between
@@ -824,21 +874,56 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
     .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
     .first('id');
   if (sharedNumber) return null;
-  return eligibility(
-    dbc('call_log')
-      .where(function phoneLegs() {
-        this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
-          .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
-      })
-      .whereNot(settledDissentingStamp)
-      .modify((qb) => {
-        if (lead.customer_id) {
-          qb.where(function ownershipGate() {
-            this.whereNull('customer_id').orWhere('customer_id', lead.customer_id);
-          });
-        }
-      }),
-  ) || null;
+  const phoneArm = () => dbc('call_log')
+    .where(function phoneLegs() {
+      this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+        .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+    })
+    .whereNot(settledDissentingStamp)
+    // Durable-evidence restriction (codex P1 r18): a number match alone
+    // proves the CALLER, not the linkage. An OUTBOUND call (the office
+    // dialing this number back) never creates or reuses a lead, and a call
+    // whose sid is a DIFFERENT live lead's originating sid is that lead's
+    // call (sid dissent — the same precedence rule the settled stamp
+    // carries). Both are excluded on durable columns; the content gate on
+    // ai_extraction is applied in JS below.
+    .whereRaw("LOWER(COALESCE(direction, '')) NOT LIKE 'outbound%'")
+    .whereNotExists(function sidLinkedToAnotherLead() {
+      this.select(1).from('leads as lo')
+        .whereRaw('lo.twilio_call_sid = call_log.twilio_call_sid')
+        .whereNot('lo.id', leadId)
+        .whereNull('lo.deleted_at');
+    })
+    .modify((qb) => {
+      if (lead.customer_id) {
+        qb.where(function ownershipGate() {
+          this.whereNull('customer_id').orWhere('customer_id', lead.customer_id);
+        });
+      }
+    });
+  // Two-step selection, unlike the stamp/sid arms: the content gate reads
+  // ai_extraction (TEXT) in JS, so candidates are scanned WITHOUT locks
+  // first — locking rows that then fail the gate would widen contention
+  // for nothing — and only the chosen candidate is re-selected under the
+  // r19 FOR UPDATE eligibility, which re-evaluates every predicate against
+  // the locked row's current version. The evidence is re-judged from the
+  // LOCKED row too: a full force-reprocess cycle (claim → re-extract →
+  // settle) can land between the scan and the lock. Newest-first, bounded:
+  // a lead with 10+ settled, unprovenanced, evidence-failing calls on its
+  // own number is not a real shape — the bound only guards the scan.
+  const candidates = await eligibilityFilters(phoneArm())
+    .orderBy('created_at', 'desc')
+    .limit(10)
+    .select([...SUCCESSOR_COLS, 'ai_extraction']);
+  for (const cand of (candidates || [])) {
+    if (!callCarriesDurableLeadEvidence(cand.ai_extraction)) continue;
+    const locked = await eligibilityFilters(phoneArm().where('call_log.id', cand.id))
+      .orderBy('created_at', 'desc')
+      .forUpdate()
+      .first(...SUCCESSOR_COLS, 'ai_extraction');
+    if (locked && callCarriesDurableLeadEvidence(locked.ai_extraction)) return locked;
+  }
+  return null;
 }
 
 async function retireCallAttributionRow(dbc, callLogId, leadId) {
@@ -1251,5 +1336,5 @@ module.exports = {
   retireAllCallAttributionRows,
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
-  _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
+  _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },
 };

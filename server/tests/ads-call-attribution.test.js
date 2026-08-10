@@ -2,6 +2,7 @@
 // the PPC funnel (ad_service_attribution), keyed by lead_id.
 
 let firstByTable = {};
+let firstQueueByTable = {};
 let listQueueByTable = {};
 const insertCalls = [];
 const updateCalls = [];
@@ -11,7 +12,16 @@ const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
   ['where', 'whereNot', 'whereRaw', 'whereNull', 'whereNotExists', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
-  b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
+  // Real knex .modify invokes the callback with the builder.
+  b.modify = jest.fn((fn) => { fn(b); return b; });
+  // Ordered .first reads consume a per-table queue when one is set (the
+  // successor scan's arms hit the same table several times with different
+  // results); the static firstByTable stays the fallback.
+  b.first = jest.fn(() => {
+    const q = firstQueueByTable[table];
+    if (q && q.length) return Promise.resolve(q.shift());
+    return Promise.resolve(firstByTable[table]);
+  });
   b.del = jest.fn(() => { deleteCalls.push({ table }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
@@ -41,6 +51,7 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 beforeEach(() => {
   jest.clearAllMocks();
   firstByTable = {};
+  firstQueueByTable = {};
   listQueueByTable = {};
   insertCalls.length = 0;
   updateCalls.length = 0;
@@ -715,5 +726,153 @@ describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + p
     expect(n).toBe(1);
     expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
     expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
+describe('phone successor arm requires durable lead evidence (codex P1 r18)', () => {
+  // The lead is phone-linked only: no sid, unshared number, owned customer.
+  const PHONE_LEAD = { twilio_call_sid: null, phone: '+19415551234', customer_id: 'cust-1' };
+  const evidence = (extra) => JSON.stringify({ call_type: 'new_inquiry', is_lead: true, ...extra });
+
+  test("a settled billing call from the lead's number can NOT inherit — the row deletes", async () => {
+    // An ordinary support/billing call finishes 'processed' with no
+    // no_attribution marker, but the processor never linked it to any lead
+    // (shouldCreateLead was false) — reassigning booked/completed revenue
+    // onto it moved funnel history to a call that owns none.
+    firstQueueByTable.call_log = [undefined]; // stamp arm misses
+    firstQueueByTable.leads = [PHONE_LEAD, undefined]; // lead read; number not shared
+    listQueueByTable.call_log = [[{
+      id: 'call-billing',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: JSON.stringify({ call_type: 'billing' }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('absent ai_extraction proves nothing — fail closed, the row deletes', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[
+      { id: 'call-legacy', created_at: '2026-08-09T12:00:00Z', ai_extraction: null },
+      { id: 'call-garbage', created_at: '2026-08-08T12:00:00Z', ai_extraction: '{not json' },
+    ]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a lead-evidence call inherits — evidence re-judged from the LOCKED re-read', async () => {
+    const successor = {
+      id: 'call-successor',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor]; // stamp arm miss; FOR UPDATE re-select hit
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a newer evidence-less call does not shadow an older valid successor', async () => {
+    const older = {
+      id: 'call-older-valid',
+      to_phone: '+19415550001',
+      created_at: '2026-08-08T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, older];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[
+      { id: 'call-newer-billing', created_at: '2026-08-09T12:00:00Z', ai_extraction: JSON.stringify({ call_type: 'billing' }) },
+      older,
+    ]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-older-valid');
+    expect(reassigned).toBeTruthy();
+  });
+
+  test('evidence that DEGRADED between the scan and the lock is re-judged and refused', async () => {
+    // A full force-reprocess cycle (claim → re-extract → settle) can land
+    // between the unlocked candidate scan and the FOR UPDATE re-select —
+    // the locked row's extraction is the authority.
+    const scanned = {
+      id: 'call-flipped',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, { ...scanned, ai_extraction: JSON.stringify({ call_type: 'wrong_number' }) }];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[scanned]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('the phone arm excludes outbound calls and sid-dissenting calls in SQL (durable columns)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const arm = src.split('const phoneArm = ()')[1].split('const candidates')[0];
+    // The office dialing the number back never creates or reuses a lead.
+    expect(arm).toMatch(/NOT LIKE 'outbound%'/);
+    // A call whose sid is a DIFFERENT live lead's originating sid is that
+    // lead's call — sid dissent mirrors the settled-stamp precedence.
+    expect(arm).toMatch(/lo\.twilio_call_sid = call_log\.twilio_call_sid/);
+    expect(arm).toMatch(/whereNot\('lo\.id', leadId\)/);
+    expect(arm).toMatch(/whereNull\('lo\.deleted_at'\)/);
+  });
+});
+
+describe('callCarriesDurableLeadEvidence (codex P1 r18)', () => {
+  const { callCarriesDurableLeadEvidence } = CallAttribution._private;
+
+  test('accepts a durable lead-flavored extraction (string or object)', () => {
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ call_type: 'new_inquiry' }))).toBe(true);
+    expect(callCarriesDurableLeadEvidence({ is_lead: true })).toBe(true);
+    // Omitted signals mirror isNonLeadCallContent's legacy behavior: the
+    // veto only fires on an explicit non-lead classification.
+    expect(callCarriesDurableLeadEvidence('{}')).toBe(true);
+  });
+
+  test('fails CLOSED on absent or unparseable extraction', () => {
+    expect(callCarriesDurableLeadEvidence(null)).toBe(false);
+    expect(callCarriesDurableLeadEvidence(undefined)).toBe(false);
+    expect(callCarriesDurableLeadEvidence('')).toBe(false);
+    expect(callCarriesDurableLeadEvidence('{broken')).toBe(false);
+    expect(callCarriesDurableLeadEvidence('"a string"')).toBe(false);
+  });
+
+  test('refuses every explicit non-lead classification the processor vetoes on', () => {
+    for (const t of ['existing_customer_scheduling', 'existing_customer_service', 'complaint', 'billing', 'wrong_number']) {
+      expect(callCarriesDurableLeadEvidence(JSON.stringify({ call_type: t }))).toBe(false);
+    }
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ is_lead: false }))).toBe(false);
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ is_spam: true }))).toBe(false);
   });
 });

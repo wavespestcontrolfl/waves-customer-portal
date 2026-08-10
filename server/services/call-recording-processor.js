@@ -1161,28 +1161,12 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
   };
 }
 
-// Call types that are NOT new sales leads. spam/voicemail are handled by their
-// own booleans + early return; these are the existing-customer/non-sales calls
-// the classifier now labels so they stop spawning leads. Kept narrow on purpose:
-// a genuine new prospect is `new_inquiry`, so vetoing on these never drops a real
-// lead, it only stops re-triaging people who already bought or aren't buying.
-const NON_LEAD_CALL_TYPES = new Set([
-  'existing_customer_scheduling',
-  'existing_customer_service',
-  'complaint',
-  'billing',
-  'wrong_number',
-]);
-
-// Content-based veto: the call is not a new lead when the model explicitly says
-// so (is_lead === false) or labels it a non-lead call_type. Both signals are
-// optional — when the model omits them (or extraction fell back), this returns
-// false so behavior matches the legacy pipeline-stage-only gate.
-function isNonLeadCallContent(extracted = {}) {
-  if (extracted && extracted.is_lead === false) return true;
-  const callType = String(extracted?.call_type || '').trim().toLowerCase();
-  return NON_LEAD_CALL_TYPES.has(callType);
-}
+// Non-lead call-content classification — shared with the attribution retire
+// path's durable-evidence gate (codex P1 PR #3303 r18), so the linkage
+// decision and the successor-inheritance gate can never drift apart. The
+// definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
+// the util; semantics unchanged.
+const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
 // merge first-touch holds (Codex #3084 r44): the peer that reclaimed the
@@ -2770,6 +2754,119 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     return true;
   };
   return existingTrx ? run(existingTrx) : db.transaction(run);
+}
+
+// Former-lead linkage reconciliation for a STAMP-LESS successful relink
+// (codex P1 PR #3303 r18): a standalone keep-settle persisted
+// metadata.attribution_former_lead_id, and only the in-loop stamp path
+// consumed it — a retry that gained a phone (or selected a sid-linked
+// lead) settles stamp-less, skipped the former lead's legacy-blocker check
+// and the pending-transfer marker, and runCallPpcAttribution then inserted
+// a SECOND row for the new lead while the former lead's unresolved row
+// stood. Also covers a live-stamp maintenance TRANSFER
+// (transferredFormerLeadId), whose reconcile outcome
+// clearStampAndRestoreLead cannot surface: a 'none' there with a stranded
+// legacy row is the same double-count.
+//
+// One transaction in the repo-wide lock order (leads → call_log), fenced
+// on the processing token; the authoritative breadcrumb is re-read under
+// the lock, so a breadcrumb the stamp transaction already consumed reads
+// back cleared and the whole call no-ops. Returns { conflictRetired } —
+// true suppresses this pass's funnel write, exactly like the in-stamp
+// moved-link branch. Fence loss throws abortProcessing.
+async function reconcileFormerLeadLinkage({
+  call, procToken, callSid, leadId, transferredFormerLeadId = null,
+  leadSourceRow = null, extracted = {}, customerId = null,
+}) {
+  let conflictRetired = false;
+  await db.transaction(async (trx) => {
+    // The final lead's row lock serializes this with concurrent stampers
+    // and rejections; the fenced call-row lock makes the breadcrumb read
+    // authoritative.
+    await trx('leads').where({ id: leadId }).forUpdate().first('id');
+    const owned = await trx('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .forUpdate()
+      .first('id', 'metadata');
+    if (!owned) {
+      const lost = new Error('processing claim lost during former-lead linkage reconciliation');
+      lost.abortProcessing = true;
+      throw lost;
+    }
+    let ownedMd = {};
+    try {
+      ownedMd = typeof owned.metadata === 'string' ? (JSON.parse(owned.metadata) || {}) : (owned.metadata || {});
+    } catch { ownedMd = {}; }
+    const breadcrumb = ownedMd.attribution_former_lead_id ? String(ownedMd.attribution_former_lead_id) : null;
+    const formerLeadId = breadcrumb || (transferredFormerLeadId ? String(transferredFormerLeadId) : null);
+    let markerPayload = null;
+    if (formerLeadId && formerLeadId !== String(leadId)) {
+      const attrMod = require('./ads/call-attribution');
+      // The transfer-settle path already moved the row when it could —
+      // re-running is a no-op there ('none': the source row is gone) and
+      // the BREADCRUMB path's actual move. Outcome semantics mirror the
+      // in-stamp moved-link branch.
+      const moveOutcome = await attrMod.reconcileMovedCallAttributionRow(
+        trx, call.id, formerLeadId, leadId, new Date(),
+      );
+      if (moveOutcome === 'retired_conflict') conflictRetired = true;
+      if (moveOutcome === 'none') {
+        // 'none' is ambiguous: the former row may be gone (a completed
+        // transfer — fine) or LEGACY NULL-provenance (frozen — another
+        // call may own it). Only the stranded legacy shape suppresses
+        // this pass's funnel write and arms the durable retry marker,
+        // exactly like the stamped path (codex P1 r11/r12).
+        const stranded = await trx('ad_service_attribution')
+          .where({ lead_id: formerLeadId })
+          .whereNull('source_call_id')
+          .first('id');
+        if (stranded) {
+          conflictRetired = true;
+          const markerAttr = leadSourceRow
+            ? attrMod.attributionForSourceType(leadSourceRow.source_type)
+            : null;
+          const markerBridgeTarget = leadSourceRow
+            && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+          if (customerId && markerAttr && !markerBridgeTarget) {
+            markerPayload = {
+              from_lead_id: String(formerLeadId),
+              lead_source: markerAttr.leadSource,
+              is_paid: markerAttr.isPaid,
+              detail: leadSourceRow.name || 'inbound call',
+              service_interest: extracted.matched_service || extracted.requested_service || null,
+            };
+          }
+          logger.warn(`[call-proc] stamp-less relink of ${callSid} left a legacy unprovenanced row on lead ${formerLeadId} — funnel write suppressed to avoid double-counting`);
+        }
+      }
+    }
+    // Consume the breadcrumb (and arm the marker) in ONE fenced write; the
+    // same-lead breadcrumb (linkage returned home) clears without
+    // reconciliation — its row already sits on this lead and the funnel
+    // write dedupes by lead. Nothing to write when only the transfer path
+    // ran breadcrumb-less and found no stranded row.
+    if (breadcrumb || markerPayload) {
+      const cleared = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          metadata: markerPayload
+            ? db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'attribution_former_lead_id', '{attribution_transfer_pending}', ?::jsonb, true)",
+              [JSON.stringify(markerPayload)],
+            )
+            : db.raw("COALESCE(metadata, '{}'::jsonb) - 'attribution_former_lead_id'"),
+          updated_at: new Date(),
+        });
+      if (!cleared) {
+        const lost = new Error('processing claim lost during former-lead breadcrumb consumption');
+        lost.abortProcessing = true;
+        throw lost;
+      }
+    }
+  });
+  return { conflictRetired };
 }
 
 // New-lead admin surfacing for a lead minted by call processing — the fresh
@@ -9121,6 +9218,12 @@ const CallRecordingProcessor = {
             break;
           }
 
+          // Set when the maintenance settle below TRANSFERRED this call's
+          // linkage off a live stamp — the former lead may still hold a
+          // legacy (NULL-provenance) row this call cannot move, and the
+          // breadcrumb-consumption block after the settle owns that check
+          // (codex P1 r18).
+          let maintenanceFormerLeadId = null;
           // Call→lead linkage maintenance for the phone-less path, WITHOUT
           // rolling the lead's twilio_call_sid (rolling it destroyed the
           // older call's identity — audit P1 r16): a reused lead keeps its
@@ -9179,16 +9282,71 @@ const CallRecordingProcessor = {
               // pointing at a different lead must not survive. The call's
               // linkage MOVED: its funnel row transfers to the final lead,
               // stages intact (codex P0, PR #3303).
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+                maintenanceFormerLeadId = currentStampedLeadId;
+              }
             } else if (phone) {
               // Retry GAINED a phone and selected a phone-linked lead: its
               // linkage is the phone, not the stamp — a stale stamp pointing
               // at a different lead must not survive (audit P1 r22); a stamp
               // already pointing at this lead stays accurate. The funnel row
               // follows the moved linkage.
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+                maintenanceFormerLeadId = currentStampedLeadId;
+              }
             }
             phoneLessLinkagePending = false;
+          }
+
+          // Former-lead linkage reconciliation for EVERY successful
+          // replacement linkage, not only stamped ones (codex P1 r18): a
+          // standalone keep-settle persisted attribution_former_lead_id,
+          // and only the in-loop stamp path consumed it — a retry that
+          // GAINED a phone (or selected a sid-linked lead) settles
+          // stamp-less, skipped the former lead's legacy-blocker check and
+          // the pending-transfer marker, and runCallPpcAttribution then
+          // inserted a SECOND row for the new lead while the former lead's
+          // unresolved row stood. Also runs after a live-stamp maintenance
+          // TRANSFER, whose reconcile outcome clearStampAndRestoreLead
+          // cannot surface: a 'none' there with a stranded legacy row is
+          // the same double-count. Idempotent — a breadcrumb the stamp
+          // transaction already consumed reads back cleared under the lock
+          // and the block no-ops. Gated on a SUCCESSFUL linkage (leadId):
+          // a lead-less exit keeps the breadcrumb for the next retry, by
+          // design. Cheap pre-check on claim-time metadata only decides
+          // whether to open the transaction; the authoritative breadcrumb
+          // is re-read fenced under the lock.
+          const claimTimeBreadcrumb = (() => {
+            try {
+              const cmd = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+              return cmd.attribution_former_lead_id ? String(cmd.attribution_former_lead_id) : null;
+            } catch { return null; }
+          })();
+          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb)) {
+            try {
+              const recon = await reconcileFormerLeadLinkage({
+                call,
+                procToken,
+                callSid,
+                leadId,
+                transferredFormerLeadId: maintenanceFormerLeadId,
+                leadSourceRow,
+                extracted,
+                customerId,
+              });
+              if (recon.conflictRetired) attributionConflictRetired = true;
+            } catch (reconErr) {
+              if (reconErr.abortProcessing) throw reconErr;
+              // REQUIRED reconciliation — swallowing this would finalize
+              // the call with an unconsumed breadcrumb AND fire the funnel
+              // write, the exact double-count this block closes. Same
+              // retry lane as the settle failures above.
+              const wrapped = new Error(`former-lead linkage reconciliation failed: ${reconErr.code || reconErr.name || 'db_error'}`);
+              wrapped.abortProcessing = true;
+              throw wrapped;
+            }
           }
 
           // Log AI triage activity — gated on the enrichment write landing, so
@@ -12802,6 +12960,7 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  reconcileFormerLeadLinkage,
   recheckCallBookingConflicts,
   scrubTranscriptArtifacts,
   scrubStructuredTranscript,

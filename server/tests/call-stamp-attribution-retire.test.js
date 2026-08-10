@@ -9,6 +9,7 @@ let mockCallRow = null;
 let mockTokenMatches = true;
 let mockSuccessorRow; // the retire primitives' settled-successor scan
 let mockAttributionRows = []; // retireAll's affected-leads read
+let mockAttrFirstQueue = []; // ordered ad_service_attribution .first reads
 const mockDeletes = [];
 const mockUpdates = [];
 
@@ -19,9 +20,17 @@ jest.mock('../models/db', () => {
       b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
     }
     b.first = async (...cols) => {
+      // reconcileMovedCallAttributionRow's ordered row reads (old row →
+      // conflict → stranded-legacy) consume a queue; default undefined
+      // preserves the legacy no-row behavior.
+      if (table === 'ad_service_attribution') {
+        return mockAttrFirstQueue.length ? mockAttrFirstQueue.shift() : undefined;
+      }
       if (table !== 'call_log') return undefined;
       const fenced = b._wheres.some((w) => w[0] === 'where' && w[1] === 'processing_token');
-      if (fenced) return mockTokenMatches ? { id: 'call-1' } : undefined;
+      // Fenced ownership reads carry the row's live metadata too (the
+      // former-lead reconciliation re-reads the breadcrumb under the lock).
+      if (fenced) return mockTokenMatches ? { id: 'call-1', ...(mockCallRow || {}) } : undefined;
       // The retire primitives' settled-successor scan is the only ordered
       // call_log read (orderBy created_at desc).
       if (b._wheres.some((w) => w[0] === 'orderBy')) return mockSuccessorRow;
@@ -44,9 +53,14 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Bridge-target semantics (last-10 match on the shared Bradenton number) —
+// mocked so the former-lead marker gating is deterministic here.
+jest.mock('../services/ads/google-call-bridge', () => ({
+  isBridgeTargetNumber: (p) => String(p || '').replace(/\D/g, '').endsWith('9413187612'),
+}));
 
 const CallRecordingProcessor = require('../services/call-recording-processor');
-const { clearStampAndRestoreLead } = CallRecordingProcessor._test;
+const { clearStampAndRestoreLead, reconcileFormerLeadLinkage } = CallRecordingProcessor._test;
 
 const CALL = { id: 'call-1', twilio_call_sid: 'CA-sid-linked' };
 
@@ -55,6 +69,7 @@ beforeEach(() => {
   mockTokenMatches = true;
   mockSuccessorRow = undefined;
   mockAttributionRows = [{ lead_id: 'lead-9' }]; // one funnel row for the call
+  mockAttrFirstQueue = [];
   mockDeletes.length = 0;
   mockUpdates.length = 0;
 });
@@ -128,5 +143,138 @@ describe('pre-stamp settle persists the former lead atomically with its clear (c
     const clear = findClear();
     expect(clear).toBeTruthy();
     expect(clear.patch.metadata).not.toContain('attribution_former_lead_id');
+  });
+});
+
+describe('reconcileFormerLeadLinkage — stamp-less breadcrumb consumption (codex P1 r18)', () => {
+  const SOURCE = { source_type: 'main_site', name: 'Sarasota city page', twilio_phone_number: '+19415550001' };
+  const baseArgs = () => ({
+    call: CALL,
+    procToken: 'tok-1',
+    callSid: 'CA-sid-linked',
+    leadId: 'lead-new',
+    leadSourceRow: SOURCE,
+    extracted: { matched_service: 'Pest Control' },
+    customerId: 'cust-1',
+  });
+  const callLogMetaUpdates = () => mockUpdates.filter((u) => u.table === 'call_log'
+    && typeof u.patch.metadata === 'string');
+
+  test('a stranded legacy row on the breadcrumb lead suppresses the write, arms the marker, and consumes the breadcrumb — one fenced update', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    // reconcile: no provenanced row on the former lead ('none'), then the
+    // stranded NULL-provenance read finds the frozen legacy row.
+    mockAttrFirstQueue = [undefined, { id: 'legacy-row' }];
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(true);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).toContain('attribution_transfer_pending');
+    expect(writes[0].patch.metadata).toContain("- 'attribution_former_lead_id'");
+    expect(writes[0].wheres).toContainEqual(['where', 'processing_token', 'tok-1']);
+  });
+
+  test('marker gating matches the stamped path — no customer, no marker; the breadcrumb still clears and the write stays suppressed', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    mockAttrFirstQueue = [undefined, { id: 'legacy-row' }];
+
+    const res = await reconcileFormerLeadLinkage({ ...baseArgs(), customerId: null });
+
+    expect(res.conflictRetired).toBe(true);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).not.toContain('attribution_transfer_pending');
+    expect(writes[0].patch.metadata).toContain("- 'attribution_former_lead_id'");
+  });
+
+  test("the breadcrumb's row MOVES to the new lead when nothing blocks it, and the breadcrumb clears", async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    // reconcile: the former lead's provenanced row exists, the target slot
+    // is empty → transferred.
+    mockAttrFirstQueue = [{ id: 'row-1' }, undefined];
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(false);
+    const moved = mockUpdates.find((u) => u.table === 'ad_service_attribution'
+      && u.patch.lead_id === 'lead-new');
+    expect(moved).toBeTruthy();
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).toContain("- 'attribution_former_lead_id'");
+    expect(writes[0].patch.metadata).not.toContain('attribution_transfer_pending');
+  });
+
+  test('a same-lead breadcrumb (linkage returned home) clears without reconciliation', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-new' } };
+    mockAttrFirstQueue = [{ id: 'row-should-not-be-read' }];
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(false);
+    // No reconcile reads consumed, no funnel-row mutations.
+    expect(mockAttrFirstQueue).toHaveLength(1);
+    expect(mockUpdates.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).toContain("- 'attribution_former_lead_id'");
+  });
+
+  test('a breadcrumb the stamp transaction already consumed no-ops under the lock', async () => {
+    mockCallRow = { metadata: {} }; // fresh fenced read: breadcrumb gone
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(false);
+    expect(callLogMetaUpdates()).toHaveLength(0);
+    expect(mockUpdates.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test("a live-stamp TRANSFER's former lead is re-checked breadcrumb-less — clean 'none' writes nothing", async () => {
+    mockCallRow = { metadata: {} }; // transfer settle already cleared the stamp
+    mockAttrFirstQueue = [undefined, undefined]; // row already moved; no stranded legacy
+
+    const res = await reconcileFormerLeadLinkage({ ...baseArgs(), transferredFormerLeadId: 'lead-old' });
+
+    expect(res.conflictRetired).toBe(false);
+    expect(callLogMetaUpdates()).toHaveLength(0);
+  });
+
+  test("a live-stamp TRANSFER blocked by a legacy row still suppresses and arms the marker", async () => {
+    mockCallRow = { metadata: {} };
+    mockAttrFirstQueue = [undefined, { id: 'legacy-row' }];
+
+    const res = await reconcileFormerLeadLinkage({ ...baseArgs(), transferredFormerLeadId: 'lead-old' });
+
+    expect(res.conflictRetired).toBe(true);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).toContain('attribution_transfer_pending');
+  });
+
+  test('fence loss aborts into the retry lane — nothing reconciled', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    mockTokenMatches = false;
+
+    await expect(reconcileFormerLeadLinkage(baseArgs())).rejects.toMatchObject({ abortProcessing: true });
+    expect(mockUpdates.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(callLogMetaUpdates()).toHaveLength(0);
+  });
+
+  test('the bridge-target number never gets a marker (its own rescan owns the story)', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    mockAttrFirstQueue = [undefined, { id: 'legacy-row' }];
+
+    const res = await reconcileFormerLeadLinkage({
+      ...baseArgs(),
+      leadSourceRow: { ...SOURCE, twilio_phone_number: '+19413187612' },
+    });
+
+    expect(res.conflictRetired).toBe(true);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].patch.metadata).not.toContain('attribution_transfer_pending');
   });
 });

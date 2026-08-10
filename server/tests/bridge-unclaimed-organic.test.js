@@ -208,6 +208,24 @@ describe('scheduler wiring', () => {
     expect(sweep).toMatch(/whereIn\('cla\.id', excludeCallIds\)/);
   });
 
+  test('the PHONE-reuse linkage arm excludes ambiguous-linked leads too (codex P1 r18)', () => {
+    // findReusableCallLead links a phone-bearing call to an existing lead
+    // WITHOUT touching the lead's sid or writing a stamp — the sid/stamp
+    // arms alone let the sweep organically classify a lead whose only
+    // linked call carries strong-but-ambiguous paid evidence.
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1].split('.orderBy(')[0];
+    const phoneArm = sweep.split('function phoneLinkedCallAmbiguous')[1];
+    expect(phoneArm).toBeTruthy();
+    expect(phoneArm).toMatch(/whereIn\('clp\.id', excludeCallIds\)/);
+    // CALLER leg only — the dialed leg is the shared office number and
+    // would exclude every bridge-target lead.
+    expect(phoneArm).toMatch(/clp\.from_phone/);
+    expect(phoneArm).not.toMatch(/clp\.to_phone/);
+    // NULL/short lead phones must PASS the arm (same rule as NULL-sid).
+    expect(phoneArm).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\)/);
+  });
+
   test('a bridge-pair failure is rethrown AFTER the transfer sweep (codex P2, PR #3303 r15)', () => {
     const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
     // Captured, not swallowed: the sweep still runs, then the failure
