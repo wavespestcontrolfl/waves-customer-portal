@@ -40,16 +40,67 @@ function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-// Tier discount applies to qualifying recurring services. Lawn tier variants
-// resolve to dedicated service keys but share lawn_care's WaveGuard policy.
-const TIER_DISCOUNT_ELIGIBLE = new Set([
-  ...WAVEGUARD.qualifyingServices,
-  'lawn_care_enhanced',
-  'lawn_care_premium',
-]);
+// ── Canonical per-service discount eligibility ────────────────
+// The ONE home for "which services receive which discount benefit".
+// Before 2026-08-10 this truth was scattered across five modules (a frozen
+// Set here, MANUAL_RECURRING_DISCOUNT_ELIGIBLE in estimate-engine, three
+// hand-rolled predicate helpers in estimate-public, and direct
+// qualifyingServices reads in estimate-converter / estimate-assistant) —
+// every new exclusion had to be added in several places or it silently
+// applied in some paths and not others. Policy data stays in
+// constants.WAVEGUARD (qualifyingServices + excludedFromPercentDiscount);
+// these predicates are the only sanctioned readers. All of them read the
+// live WAVEGUARD object at CALL time — db-bridge mutates it in place, and
+// a module-load snapshot is exactly the staleness class this section
+// exists to prevent.
 
+// Lawn tier variants resolve to dedicated service keys (resolveDiscountKey
+// emits lawn_care_enhanced / lawn_care_premium) but share lawn_care's
+// discount policy everywhere.
+const LAWN_TIER_VARIANTS = new Set(['lawn_care_enhanced', 'lawn_care_premium']);
+
+function normalizeEligibilityKey(serviceKey) {
+  return LAWN_TIER_VARIANTS.has(serviceKey) ? 'lawn_care' : serviceKey;
+}
+
+// Counts toward the WaveGuard tier (Bronze/Silver/Gold/Platinum service
+// count). Callers pass canonical keys (recurringServiceKey /
+// resolveDiscountKey output); lawn variants share lawn_care's membership.
+function serviceCountsTowardWaveGuardTier(serviceKey) {
+  return WAVEGUARD.qualifyingServices.includes(normalizeEligibilityKey(serviceKey));
+}
+
+// Excluded from ALL percentage discounts (tier %, recurring-customer perk,
+// bundle %). Flat credits only where explicitly allowed (palm_injection).
+function serviceExcludedFromPercentDiscount(serviceKey) {
+  return WAVEGUARD.excludedFromPercentDiscount[serviceKey] === true;
+}
+
+// Receives the automatic WaveGuard tier % on recurring lines.
 function isTierDiscountEligible(serviceKey) {
-  return TIER_DISCOUNT_ELIGIBLE.has(serviceKey);
+  return serviceCountsTowardWaveGuardTier(serviceKey);
+}
+
+// Manual (admin-entered) recurring % discounts apply to the four core
+// recurring programs only — termite_bait takes the automatic tier % but is
+// NOT manually discountable.
+const MANUAL_RECURRING_DISCOUNT_SERVICES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'];
+
+function serviceManualRecurringDiscountEligible(serviceKey) {
+  return MANUAL_RECURRING_DISCOUNT_SERVICES.includes(normalizeEligibilityKey(serviceKey));
+}
+
+// Line-level override interpreter. Pricers and the V1 legacy mapper stamp
+// per-line flags (discountable / discount.discountable / discountEligible /
+// waveGuardDiscountEligible / excludeFromPctDiscount) to pull an individual
+// quote line out of percentage discounts regardless of service policy —
+// this is the single reading of those override semantics.
+function lineFlagsBlockPercentDiscount(svc = {}) {
+  return svc.discountable === false ||
+    svc.discount?.discountable === false ||
+    svc.waveGuardDiscountEligible === false ||
+    svc.discountEligible === false ||
+    svc.excludeFromPctDiscount === true;
 }
 
 // ── Determine WaveGuard tier from active services ─────────────
@@ -339,4 +390,12 @@ module.exports = {
   pestProgramFloorPerVisit,
   pestProgramFloorAnnual,
   validateEstimateDiscounts,
+  // Canonical per-service discount eligibility (single source — see the
+  // section comment above; consumers must not re-derive these from
+  // WAVEGUARD directly).
+  serviceCountsTowardWaveGuardTier,
+  serviceExcludedFromPercentDiscount,
+  isTierDiscountEligible,
+  serviceManualRecurringDiscountEligible,
+  lineFlagsBlockPercentDiscount,
 };
