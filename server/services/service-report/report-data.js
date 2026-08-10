@@ -542,7 +542,14 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
   // codex P2 r16). Fail-soft: helper errors fall through to the lookup.
   try {
     const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
-    if (traceEligibilityGateOn()) {
+    const { photoMarksGateOn: exteriorPhotoMarksGateOn } = require('./photo-marks');
+    // EITHER gate (codex P1 r7). The shared verdict learned to suppress a
+    // photo-only visit, but this choke point only called it under the
+    // eligibility gate — so in the marks-first rollout a foam-only visit with
+    // a legacy trace still handed an exterior ready-at target to reentry.js,
+    // dynamic context, and email delivery. Fixing the callee was not enough;
+    // the caller had to stop gating the call.
+    if (traceEligibilityGateOn() || exteriorPhotoMarksGateOn()) {
       // The report-payload caller passes its ALREADY-COMBINED verdict
       // (codex P2 r24): recomputing here meant a transient failure in
       // the second add-on pass could strip exterior re-entry guidance
@@ -2694,7 +2701,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // had successfully recorded. The two artifacts coexist: the marked photo
   // shows the drill points, the trace shows the trenched perimeter.
   let satelliteLineEligible = traceEligibility.eligible && traceEligibility.variant !== 'photo';
-  if (photoMarksGateOn() && (!photoLaneVerdict || !satelliteLineEligible)) {
+  if ((photoMarksGateOn() || traceEligibilityGateOn())
+    && (!photoLaneVerdict || !satelliteLineEligible)) {
     try {
       const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
       const lineVerdicts = Array.isArray(frozenPhotoLines)
@@ -2715,8 +2723,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoLaneSuppressed = photoMarksGateOn()
     && Boolean(photoLaneVerdict)
     && !satelliteLineEligible;
-  const traceSuppressed = (traceEligibilityGateOn()
-    && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
+  // Gate-on suppression keys on the independently resolved SATELLITE
+  // capability (codex P1 r7): keying it on the primary verdict's variant
+  // meant a foam primary suppressed a trace that a satellite-capable add-on
+  // legitimately earned — the mixed-visit bug fixed for the marks gate in r6
+  // but left standing on this branch.
+  const traceSuppressed = (traceEligibilityGateOn() && !satelliteLineEligible)
     || photoLaneSuppressed;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);

@@ -1162,7 +1162,13 @@ export default function ServiceReportDocument({ data, token }) {
             image inside a taller box would leave every pin offset from the
             point it marks. Natural aspect keeps the percentages honest.
             Static by nature — no animation in print. States no count. */}
-        {(data.markedPhotos || []).map((marked) => (
+        {/* A failed image must take its whole block with it (codex P2): the
+            gallery has an explicit `unavailable` placeholder, but a marked
+            block left "Where we treated", the caption, and positioned pins
+            floating over a broken image. The failure counter only blocks
+            CACHING — the malformed document would still be served on each
+            download. Nothing marked is better than pins over nothing. */}
+        {(data.markedPhotos || []).filter((m) => !failedImages.has(m.url)).map((marked) => (
           <div key={marked.photoId} className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>

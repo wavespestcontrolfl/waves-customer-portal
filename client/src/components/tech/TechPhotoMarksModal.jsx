@@ -53,6 +53,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   const [errorMsg, setErrorMsg] = useState('');
   const imgRef = useRef(null);
   const pressRef = useRef(null);
+  const removedRef = useRef(false);
 
   const authHeaders = () => {
     const token = getAdminAuthToken();
@@ -98,6 +99,8 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   }, []);
 
   const addMark = useCallback((event) => {
+    // Swallow exactly one click after a long-press removal.
+    if (removedRef.current) { removedRef.current = false; return; }
     if (!activeKind) return;
     const point = pointToNormalized(event);
     if (!point) return;
@@ -108,9 +111,16 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
 
   // Long-press a mark to remove it. Held on the mark itself so a stray press
   // on open photo area can never delete a point the tech placed.
+  //
+  // removedRef suppresses the click that follows the removal (codex P2): once
+  // the timer deletes the mark, the pointer-up is hit-tested against the photo
+  // container underneath, whose onClick would immediately add a NEW mark at
+  // the same spot — so holding a pin to delete it silently replaced it, and
+  // with whichever kind happened to be selected.
   const startPress = (index) => {
     clearTimeout(pressRef.current);
     pressRef.current = setTimeout(() => {
+      removedRef.current = true;
       setMarks((prev) => prev.filter((_, i) => i !== index));
     }, LONG_PRESS_MS);
   };

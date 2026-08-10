@@ -1016,4 +1016,15 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     );
     expect(container.textContent).not.toMatch(/Where we treated/);
   });
+
+  it('drops the whole marked block when its image fails', () => {
+    // A failed image must not leave "Where we treated" and positioned pins
+    // floating over a broken image in a permanent document (codex P2).
+    const { container } = render(
+      <ServiceReportDocument data={{ ...BASE_DATA, markedPhotos: [MARKED] }} token="tok123" />,
+    );
+    expect(container.textContent).toMatch(/Where we treated/);
+    fireEvent.error(container.querySelector('img[src="https://cdn.example.com/wall.jpg"]'));
+    expect(container.textContent).not.toMatch(/Where we treated/);
+  });
 });

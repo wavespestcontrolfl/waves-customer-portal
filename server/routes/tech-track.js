@@ -616,22 +616,23 @@ async function markLaneForService(svc) {
     const data = record?.service_data
       ? (typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data)
       : null;
-    // Frozen ONLY when the add-on lines actually froze too (codex P2 r6).
+    // The primary and the add-on snapshot freeze INDEPENDENTLY (codex P2 r7).
     // Completion's add-on freezer is fail-soft, so a record can carry
-    // completedServiceKey with no completedAddonLines; treating that partial
-    // record as fully frozen left addonVerdicts empty and blocked the live
-    // fallback — reporting supported:false on a foam-add-on visit whose pins
-    // are already customer-visible, so the tech could neither edit nor clear
-    // them. report-data falls back to live add-ons in exactly this case.
-    if (data
-      && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')
-      && Array.isArray(data.completedAddonLines)) frozen = data;
+    // completedServiceKey with no completedAddonLines. Requiring both
+    // discarded a perfectly good frozen primary and fell back to the mutable
+    // schedule row — so after an admin repoint the report still resolved the
+    // frozen foam key and showed its pins while this route reported marks
+    // unsupported. Mirrors report-data: frozen primary wins, absent add-on
+    // snapshot falls back to live rows.
+    if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) frozen = data;
   } catch { /* fall through to the live resolution below */ }
 
   let primaryKey = null;
-  let addonVerdicts = [];
+  let addonVerdicts = null;   // null = not yet resolved
   if (frozen) {
     primaryKey = frozen.completedServiceKey || null;
+    // Only when the add-on snapshot actually froze; otherwise leave null so
+    // the live fallback below still runs (codex P2 r7).
     if (Array.isArray(frozen.completedAddonLines)) {
       addonVerdicts = await addonVerdictsFromLines(frozen.completedAddonLines, db).catch(() => []);
     }
@@ -646,7 +647,7 @@ async function markLaneForService(svc) {
     // Scan every line for a photo lane — not combineLineVerdicts, which stops
     // at the primary or the first eligible add-on (codex P1 r4). Must match
     // the report's scan or the two disagree about whether marks may exist.
-    if (!frozen) addonVerdicts = await resolveAddonVerdicts(svc.id, db);
+    if (addonVerdicts === null) addonVerdicts = await resolveAddonVerdicts(svc.id, db);
     const photoLine = (addonVerdicts || []).find(
       (v) => v?.eligible && v.variant === 'photo' && laneSupportsMarks(v.serviceKey),
     );
