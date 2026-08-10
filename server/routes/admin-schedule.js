@@ -932,6 +932,12 @@ function recurringTemplateTechnicianId(parent) {
 // already paid through.
 const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed'];
 
+// Ceiling on an operator-set plan length (Edit appointment's Count field and
+// the create modal's Visits field share it). A finite plan is materialised as
+// real rows, so the cap is what keeps one typo from putting two years of
+// billable visits on the calendar.
+const MAX_SERIES_VISIT_COUNT = 24;
+
 // Count the still-upcoming visits of a BASE recurring series. Boosters share
 // recurring_parent_id but live on the calendar with is_recurring=false —
 // without that filter they inflate the count and block auto-extend. Only
@@ -4893,6 +4899,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       assignmentScope,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       spawnRecurringChildren,
+      // Exact plan length for a series that ALREADY exists — the Edit
+      // appointment Count field. Distinct from recurringCount (which seeds a
+      // brand-new series on the make-this-recurring path) because the server
+      // has to tell "cap this running plan at N" apart from "no opinion":
+      // every save from the modal carries recurrence config, so an absent
+      // field is the only way to say don't touch the length.
+      recurringPlannedCount,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
@@ -5369,6 +5382,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
     const spawnedRecurringChildren = [];
+    // Visit-count reconcile (Edit appointment's Count on an existing plan).
+    // Requested length, and the outcome the post-commit steps need: the
+    // cancelled ids to finalize reminders for, under the claim token their
+    // in-trx claims were minted with.
+    const parsedPlannedCount = Number.parseInt(recurringPlannedCount, 10);
+    const wantsVisitCountReconcile = Number.isInteger(parsedPlannedCount) && parsedPlannedCount > 0;
+    let visitCountResult = null;
+    const visitCountClaimToken = wantsVisitCountReconcile
+      ? require('../services/job-status').nextClaimTs()
+      : null;
     // Prior scheduled_date, captured inside the trx when the edit moves the
     // visit — drives the call-created follow-up shift after commit.
     let callFollowUpShiftFrom = null;
@@ -5383,7 +5406,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // spawn recurring children (scheduled_services inserts) — lock
       // customer-comms off an unlocked peek BEFORE any row lock in the trx
       // (assignment updates below take visit row locks).
-      const commsPeek = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+      const commsPeek = await trx('scheduled_services')
+        .where({ id: req.params.id })
+        .first('customer_id', 'recurring_parent_id');
+      // A visit-count reconcile inserts and cancels series rows, so it has to
+      // serialize against the completion auto-extend and the dispatch series
+      // cancel on the SAME per-parent lock they use. Taken BEFORE the comms
+      // lock: runRecurringAlertAction acquires maintenance→comms, and the
+      // reverse order here would let an alert action and an edit save on one
+      // customer deadlock on each other's held key.
+      if (wantsVisitCountReconcile && commsPeek) {
+        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
+      }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
@@ -6040,7 +6074,94 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+
+      // ——— Ongoing ↔ fixed, and the visit count, on a plan that already runs ———
+      // Both are newly reachable from Edit appointment: the modal used to hide
+      // "End repeating" and "Count" on a series template, so a running plan's
+      // length could not be changed from the appointment at all.
+      if (isRecurring && !shouldSpawnRecurringChildren
+        && (wantsVisitCountReconcile || recurringOngoing !== undefined)) {
+        const self = await trx('scheduled_services').where({ id: req.params.id }).first();
+        const parentId = self?.recurring_parent_id || self?.id;
+        const parent = self?.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: self.recurring_parent_id }).first()
+          : self;
+        const seriesCols = await trx('scheduled_services').columnInfo();
+        // recurring_ongoing lives on every row of the series, and several
+        // readers (cancellation eligibility, follow-up planning) scan children
+        // rather than the parent — so a flip has to reach the whole series or
+        // it leaves the plan in a half-ongoing state. Mirrors the let-lapse
+        // and convert-ongoing flag writes.
+        if (parent?.is_recurring && seriesCols.recurring_ongoing && recurringOngoing !== undefined) {
+          await trx('scheduled_services')
+            .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+            .where('is_recurring', true)
+            .whereNot('recurring_ongoing', !!recurringOngoing)
+            .update({ recurring_ongoing: !!recurringOngoing, updated_at: new Date() });
+        }
+        // The count itself. Runs LAST inside the trx so it reconciles against
+        // the cadence, anchor date and weekend rule this same save applied — a
+        // save that moves a plan to every-14-days AND caps it at 2 must place
+        // the second visit 14 days out, not on the old cadence. Skipped when
+        // the spawn branch above ran: that path is the make-this-recurring
+        // conversion, which seeds from recurringCount and owns the row count.
+        if (wantsVisitCountReconcile) {
+          if (!parent?.is_recurring || !parent.recurring_pattern) {
+            throw httpError(400, 'This appointment is not part of a recurring plan, so it has no visit count to set.');
+          }
+          visitCountResult = await reconcileRecurringSeriesVisitCount(trx, {
+            parentId,
+            parent,
+            cols: seriesCols,
+            targetCount: parsedPlannedCount,
+            actorId: req.technicianId,
+            claimToken: visitCountClaimToken,
+            protectedVisitId: req.params.id,
+          });
+          recurringCreated += visitCountResult.added.length;
+          for (const child of visitCountResult.added) {
+            spawnedRecurringChildren.push(child);
+            recurringUpdatedJobIds.push(child.id);
+          }
+          for (const id of visitCountResult.cancelledIds) recurringUpdatedJobIds.push(id);
+        }
+      }
     });
+
+    // Trimmed visits: finalize their cancellation-notice claims SILENTLY.
+    // The claims were minted suppressed inside the trx, so this closes them
+    // out and cancels the visits' 72h/24h reminders without texting anyone —
+    // shortening a plan is an office decision, not a customer notification
+    // (house rule: the owner sends all customer comms). Best-effort: the
+    // cancels are already committed and must not be undone by a reminder
+    // bookkeeping failure.
+    if (visitCountResult?.cancelledIds.length) {
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleSeriesCancellation(
+          visitCountResult.cancelledIds,
+          visitCountResult.cancelledIds[0],
+          { sendNotification: false, scope: 'following', claimToken: visitCountClaimToken },
+        );
+      } catch (e) {
+        logger.error(`[schedule/visit-count] reminder cleanup failed for trimmed visits (${visitCountResult.cancelledIds.join(', ')}): ${e.message}`);
+      }
+    }
+
+    // Audit line for a plan whose length the office changed — the row moves
+    // themselves are stamped per visit by transitionJobStatus; this records
+    // the decision behind them.
+    if (visitCountResult && (visitCountResult.added.length || visitCountResult.cancelledIds.length)) {
+      try {
+        const audited = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_type');
+        await db('activity_log').insert({
+          admin_user_id: req.technicianId || null,
+          customer_id: audited?.customer_id || null,
+          action: 'recurring_plan_count_set',
+          description: `${audited?.service_type || 'Recurring'} plan set to ${visitCountResult.target} upcoming visit(s) from Edit appointment — ${visitCountResult.added.length} added, ${visitCountResult.cancelledIds.length} cancelled (was ${visitCountResult.before})`,
+        });
+      } catch (e) { logger.warn(`[schedule/visit-count] audit line failed (non-blocking): ${e.message}`); }
+    }
 
     // Keep a call-created follow-up (visit 2) spaced from its parent when the
     // edit modal moves the primary — shared with the rebooker path; best-effort
@@ -6158,6 +6279,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       recurringCreated,
       assignmentScope: normalizedAssignmentScope,
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
+      // Present only when the save set a plan length — lets the modal report
+      // what actually moved ("2 visits cancelled") instead of the operator
+      // having to re-open the calendar to find out.
+      ...(visitCountResult ? {
+        visitCount: {
+          target: visitCountResult.target,
+          before: visitCountResult.before,
+          added: visitCountResult.added.length,
+          cancelled: visitCountResult.cancelledIds.length,
+        },
+      } : {}),
       ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
     });
   } catch (err) {
@@ -7051,6 +7183,232 @@ async function loadActiveSeriesDates(conn, parentId) {
   return new Set(rows
     .map((r) => dateOnly(r.scheduled_date) || '')
     .filter(Boolean));
+}
+
+// The live (upcoming, non-terminal) BASE visits of a series, earliest first.
+// This is the set the Edit-appointment visit count reconciles against and the
+// same population countUpcomingSeriesVisits counts — boosters excluded
+// (is_recurring=false), cancelled/rescheduled excluded, past dates excluded.
+// Returns full rows because the reconcile needs status (transitionJobStatus'
+// fromStatus) and the billing-coverage columns its refusal guard reads.
+async function liveUpcomingSeriesVisits(conn, parentId) {
+  const cols = await conn('scheduled_services').columnInfo();
+  const selected = ['id', 'status', 'scheduled_date', 'recurring_parent_id'];
+  if (cols.annual_prepay_term_id) selected.push('annual_prepay_term_id');
+  return conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .where('is_recurring', true)
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .where('scheduled_date', '>=', etDateString())
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('created_at', 'asc')
+    .select(selected);
+}
+
+// Which of these visits are covered by money already taken or promised, and
+// so must never be silently trimmed off a plan. Annual prepay is a column on
+// the visit; one-time card holds live in estimate_card_holds keyed by
+// scheduled_service_id. Both are read INSIDE the reconcile transaction and a
+// hit REFUSES the whole save — a partially applied trim would leave the
+// office believing a plan was capped while paid visits stayed on the books.
+//
+// Fail-CLOSED on the card-hold read (unlike the tolerant preloads elsewhere
+// in this file): this query gates a destructive action, so an unreadable
+// table must block the trim rather than wave it through. A pre-migration env
+// without the table is the one tolerated case — hasTable is checked first.
+async function findBillingCoveredVisits(conn, visits) {
+  const covered = new Map();
+  for (const v of visits) {
+    if (v.annual_prepay_term_id) covered.set(v.id, 'covered by an annual prepay term');
+  }
+  const ids = visits.map((v) => v.id);
+  if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
+    const holds = await conn('estimate_card_holds')
+      .whereIn('scheduled_service_id', ids)
+      .whereNotIn('status', ['released', 'cancelled', 'charged', 'failed'])
+      .select('scheduled_service_id');
+    for (const h of holds) {
+      if (!covered.has(h.scheduled_service_id)) covered.set(h.scheduled_service_id, 'holding a card for a late-cancel fee');
+    }
+  }
+  return covered;
+}
+
+// Reconcile a recurring series to an exact number of upcoming visits — the
+// write behind the Edit-appointment "Count" field on a plan that already
+// exists ("make this concourse treatment two visits, not an open cadence").
+//
+// The count is NOT stored anywhere: a fixed plan IS recurring_ongoing=false
+// plus exactly N live rows, so changing the number means moving rows, not
+// updating a field. Short → extend from the series' latest live visit (the
+// same anchor + dedupe + financial-copy rules as the auto-extend and the
+// recurring-alert extend, so a topped-up visit is indistinguishable from a
+// refilled one). Long → cancel the FARTHEST-OUT surplus, which is also what
+// protects the anchor: the rows nearest today are the ones kept.
+//
+// Callers MUST already hold the per-parent maintenance lock, and MUST run
+// inside the transaction whose commit publishes the change — a completion's
+// auto-extend interleaving here would re-add exactly what was trimmed.
+//
+// Cancels go through transitionJobStatus so the rows get their normal status
+// history and cancellation-notice claims; the claims are minted SUPPRESSED
+// and finalized silently post-commit by the caller (house rule: the office
+// sends all customer messages, and a plan the office shortened is not news
+// the customer asked for).
+async function reconcileRecurringSeriesVisitCount(trx, {
+  parentId, parent, cols, targetCount, actorId, claimToken, protectedVisitId = null,
+}) {
+  const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
+  const live = await liveUpcomingSeriesVisits(trx, parentId);
+  const result = { target, before: live.length, added: [], cancelledIds: [] };
+  if (live.length === target) return result;
+
+  if (live.length > target) {
+    // Keep the earliest `target` visits; the rest come off the calendar.
+    // The series parent and the visit being edited are never candidates —
+    // the parent carries the cadence config the remaining rows inherit, and
+    // cancelling the row the operator has open would make Save silently
+    // delete the appointment they were editing.
+    const surplus = live
+      .slice(target)
+      .filter((v) => v.id !== parentId && String(v.id) !== String(protectedVisitId || ''));
+    if (surplus.length === 0) return result;
+    const covered = await findBillingCoveredVisits(trx, surplus);
+    if (covered.size > 0) {
+      const [firstId, reason] = [...covered.entries()][0];
+      const when = surplus.find((v) => v.id === firstId);
+      throw httpError(409, `Can't shorten this plan to ${target} visit${target === 1 ? '' : 's'}: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Handle the billing first, then set the count.`);
+    }
+    const { transitionJobStatus } = require('../services/job-status');
+    for (const visit of surplus) {
+      await transitionJobStatus({
+        jobId: visit.id,
+        fromStatus: visit.status,
+        toStatus: 'cancelled',
+        transitionedBy: actorId,
+        notes: `Recurring plan shortened to ${target} visit${target === 1 ? '' : 's'} from Edit appointment`,
+        trx,
+        // Caller-owned and silent: the post-commit finalize adopts exactly
+        // these claims with sendNotification:false.
+        notifyCustomer: 'caller_suppress',
+        cancelNoticeToken: claimToken,
+      });
+      result.cancelledIds.push(visit.id);
+    }
+    return result;
+  }
+
+  // Short of the target — extend from the series' latest live visit. Anchoring
+  // on the parent's own date instead would recompute the whole cadence from
+  // the series start and, on a series whose early visits were cancelled, drop
+  // fresh visits into the past.
+  const need = target - live.length;
+  const rOpts = {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, {
+      nth: parent.recurring_nth,
+      weekday: parent.recurring_weekday,
+    }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+  const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
+  const latest = await latestLiveSeriesVisit(trx, parentId);
+  const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+  const seen = await loadActiveSeriesDates(trx, parentId);
+  seen.add(baseDateStr);
+  let parentAddons = [];
+  try {
+    // Savepoint, not a bare try/catch: a missing scheduled_service_addons
+    // table (pre-migration env) must not abort the caller's transaction.
+    parentAddons = await trx.transaction((sp) =>
+      sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
+  } catch { parentAddons = []; }
+  const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
+  const seriesCioc = cols.create_invoice_on_complete
+    ? await resolveSeriesCreateInvoiceOnComplete(trx, parentId, parent)
+    : undefined;
+
+  const maxAttempts = need * 4 + 30;
+  let attempt = 1;
+  while (result.added.length < need && attempt < maxAttempts) {
+    const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
+    attempt++;
+    const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
+    if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
+    if (seen.has(nd)) continue;
+    // The anchor can itself be in the past on a stalled series; a top-up must
+    // still only ever land on future dates.
+    if (nd <= etDateString()) continue;
+    seen.add(nd);
+    const data = {
+      customer_id: parent.customer_id,
+      technician_id: recurringTemplateTechnicianId(parent),
+      scheduled_date: nd,
+      window_start: parent.window_start,
+      window_end: parent.window_end,
+      service_type: parent.service_type,
+      status: 'pending',
+      time_window: parent.time_window,
+      zone: parent.zone,
+      estimated_duration_minutes: parent.estimated_duration_minutes,
+      is_recurring: true,
+      recurring_pattern: parent.recurring_pattern,
+      recurring_parent_id: parentId,
+    };
+    // A counted plan is by definition not ongoing — the rows it adds must not
+    // carry the flag that would auto-extend past the count just set.
+    if (cols.recurring_ongoing) data.recurring_ongoing = false;
+    if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+    if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
+    if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
+    if (cols.recurring_interval_days && parent.recurring_interval_days != null) data.recurring_interval_days = parent.recurring_interval_days;
+    if (cols.skip_weekends) data.skip_weekends = skipParent;
+    if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+    if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+    if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
+    copyLineDiscountFields(data, parent, cols);
+    copyAppointmentDiscountFields(data, parent, cols);
+    copyBillToFields(data, parent, cols);
+    copyStampedServiceAddressFields(data, parent, cols);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+    applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+    const [row] = await trx('scheduled_services').insert(data).returning('*');
+    if (!row?.id) continue;
+    // Mirror the parent's add-on lines onto the new visit — a multi-service
+    // recurring appointment would otherwise top up with the primary only.
+    try {
+      const addonCols = await trx('scheduled_service_addons').columnInfo();
+      for (const addon of dueAddons) {
+        const addonData = {
+          scheduled_service_id: row.id,
+          service_id: addon.service_id || null,
+          service_name: addon.service_name,
+          estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+        };
+        if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+        if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
+        if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
+        if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
+        if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
+        if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
+        if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
+        if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
+        copyAddonDiscountFields(addonData, addon, addonCols);
+        await trx('scheduled_service_addons').insert(addonData);
+      }
+    } catch (e) { logger.warn(`[schedule/visit-count] add-on mirror failed for ${row.id} (non-blocking): ${e.message}`); }
+    result.added.push({
+      id: row.id,
+      customerId: parent.customer_id,
+      date: nd,
+      windowStart: parent.window_start,
+      serviceType: parent.service_type,
+    });
+  }
+  if (result.added.length < need) {
+    logger.warn(`[schedule/visit-count] parent=${parentId} wanted ${need} more visit(s), placed ${result.added.length} — every candidate within ${maxAttempts} cadence steps was already booked`);
+  }
+  return result;
 }
 
 // Post-completion recurring-series maintenance: auto-extend an Ongoing plan
@@ -8076,6 +8434,48 @@ router.get('/:id/wdo-brief', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
     res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/:id/series-summary
+// What the Edit appointment recurrence panel needs to describe the plan this
+// visit belongs to: how many visits are still ahead of it, and when the last
+// one falls. The Count field seeds from upcomingCount — before this existed
+// the modal opened on a hardcoded 4, so saving an untouched panel would have
+// resized a running plan to four visits.
+//
+// A one-off (or a visit whose series parent has vanished) answers
+// { series: false } rather than 404ing: the panel renders either way and a
+// missing plan is a normal answer, not an error.
+router.get('/:id/series-summary', async (req, res, next) => {
+  try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    const self = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'is_recurring', 'recurring_parent_id');
+    if (!self || (!self.is_recurring && !self.recurring_parent_id)) {
+      return res.json({ series: false });
+    }
+    const parentId = self.recurring_parent_id || self.id;
+    const cols = await db('scheduled_services').columnInfo();
+    const parentSelect = ['id', 'recurring_pattern', 'scheduled_date'];
+    if (cols.recurring_ongoing) parentSelect.push('recurring_ongoing');
+    if (cols.booster_months) parentSelect.push('booster_months');
+    const parent = await db('scheduled_services').where({ id: parentId }).first(parentSelect);
+    if (!parent) return res.json({ series: false });
+    const upcoming = await liveUpcomingSeriesVisits(db, parentId);
+    res.json({
+      series: true,
+      parentId,
+      isParent: String(parentId) === String(req.params.id),
+      pattern: parent.recurring_pattern || null,
+      ongoing: cols.recurring_ongoing ? !!parent.recurring_ongoing : null,
+      upcomingCount: upcoming.length,
+      upcomingDates: upcoming.map((v) => dateOnly(v.scheduled_date)).filter(Boolean),
+      maxCount: MAX_SERIES_VISIT_COUNT,
+    });
   } catch (err) { next(err); }
 });
 
@@ -10364,6 +10764,10 @@ router._test = {
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  liveUpcomingSeriesVisits,
+  findBillingCoveredVisits,
+  reconcileRecurringSeriesVisitCount,
+  MAX_SERIES_VISIT_COUNT,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,

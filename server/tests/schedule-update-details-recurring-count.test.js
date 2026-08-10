@@ -1,0 +1,334 @@
+/**
+ * Edit-appointment visit count on a recurring plan that already exists.
+ *
+ * The modal could change a plan's cadence but never its length: "End
+ * repeating" and "Count" were hidden on a series template, the save dropped
+ * recurringCount for anything with a series, and the server's edit path only
+ * ever REWROTE existing children's dates. So a 14-day concourse plan could not
+ * be capped at two treatments from the appointment.
+ *
+ * The count is not a stored field — a fixed plan IS recurring_ongoing=false
+ * plus exactly N live rows — so setting it means reconciling rows:
+ * reconcileRecurringSeriesVisitCount extends from the series' latest live
+ * visit when short and cancels the furthest-out visits when long.
+ *
+ * Unit tests drive the extracted function with a scripted fake connection
+ * (harness mirrors recurring-series-maintenance.test.js); source-pattern
+ * guards pin the route wiring the unit tests can't reach — lock ordering, the
+ * spawn-path exclusion, and the silent post-commit reminder finalize.
+ */
+jest.mock('../services/job-status', () => ({
+  nextClaimTs: jest.fn(() => 'claim-token-1'),
+  transitionJobStatus: jest.fn().mockResolvedValue(undefined),
+}));
+
+const fs = require('fs');
+const path = require('path');
+
+const adminScheduleRouter = require('../routes/admin-schedule');
+const {
+  reconcileRecurringSeriesVisitCount,
+  MAX_SERIES_VISIT_COUNT,
+} = adminScheduleRouter._test;
+const { transitionJobStatus } = require('../services/job-status');
+const { etDateString } = require('../utils/datetime-et');
+
+const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+
+const COLS = {
+  recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
+  create_invoice_on_complete: {}, estimated_price: {}, appointment_type: {},
+  recurring_nth: {}, recurring_weekday: {}, recurring_interval_days: {},
+  annual_prepay_term_id: {}, payer_id: {}, po_number: {}, self_pay_override: {},
+};
+
+// Dates relative to "today" so the reconcile's future-only filter behaves the
+// way it will in production — a fixture pinned to a past calendar year would
+// make every candidate look stale and hide real regressions.
+const TODAY = etDateString();
+function daysOut(n) {
+  const d = new Date(`${TODAY}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Scriptable fake knex connection (same shape as the maintenance suite's).
+// `.transaction(cb)` models a SAVEPOINT — the reconcile only opens one for the
+// abort-tolerant add-on preload — and `.schema.hasTable` backs the card-hold
+// refusal guard.
+function makeConn(handler, { hasCardHoldTable = true } = {}) {
+  const buildTable = (table) => {
+    const calls = [];
+    const b = {};
+    const record = (name) => (...args) => {
+      if (name === 'where' && typeof args[0] === 'function') {
+        const nested = [];
+        const sub = {
+          where(...a) { nested.push(['where', ...a]); return sub; },
+          orWhere(...a) { nested.push(['orWhere', ...a]); return sub; },
+        };
+        args[0].call(sub, sub);
+        calls.push(['whereFn', nested]);
+      } else {
+        calls.push([name, ...args]);
+      }
+      return b;
+    };
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+      b[m] = record(m);
+    }
+    b.first = (...args) => {
+      calls.push(['first', ...args]);
+      return Promise.resolve(handler({ table, calls, op: 'first' }));
+    };
+    b.columnInfo = () => Promise.resolve(handler({ table, calls, op: 'columnInfo' }));
+    b.insert = (data) => {
+      calls.push(['insert', data]);
+      return {
+        returning: () => Promise.resolve(handler({ table, calls, op: 'insertReturning', data })),
+        then: (res, rej) => Promise.resolve(handler({ table, calls, op: 'insert', data })).then(res, rej),
+      };
+    };
+    b.then = (res, rej) => Promise.resolve(handler({ table, calls, op: 'await' })).then(res, rej);
+    return b;
+  };
+  const fn = (table) => buildTable(table);
+  fn.isTransaction = true;
+  fn.raw = () => Promise.resolve();
+  fn.fn = { now: () => new Date() };
+  fn.schema = { hasTable: () => Promise.resolve(hasCardHoldTable) };
+  fn.transaction = (cb) => Promise.resolve().then(() => cb(fn));
+  return fn;
+}
+
+// A biweekly plan anchored 28 days ago, with `upcoming` live visits still on
+// the calendar. Ids ascend with the date so assertions can name them.
+function scenario({
+  upcoming,
+  parentOverrides = {},
+  coveredVisitIds = [],
+  cardHoldVisitIds = [],
+  hasCardHoldTable = true,
+}) {
+  const parent = {
+    id: 10,
+    customer_id: 5,
+    is_recurring: true,
+    recurring_pattern: 'custom',
+    recurring_interval_days: 14,
+    recurring_ongoing: true,
+    scheduled_date: daysOut(-28),
+    window_start: '09:00',
+    window_end: '11:00',
+    service_type: 'Concourse Treatment',
+    time_window: 'morning',
+    zone: 'A',
+    estimated_duration_minutes: 120,
+    skip_weekends: false,
+    technician_id: 'tech-1',
+    create_invoice_on_complete: true,
+    ...parentOverrides,
+  };
+  // Live upcoming rows, earliest first, 14 days apart starting tomorrow.
+  const live = Array.from({ length: upcoming }, (_, i) => ({
+    id: 100 + i,
+    status: 'pending',
+    scheduled_date: daysOut(1 + i * 14),
+    recurring_parent_id: 10,
+    annual_prepay_term_id: coveredVisitIds.includes(100 + i) ? 'term-1' : null,
+  }));
+  const inserted = [];
+  const handler = ({ table, calls, op, data }) => {
+    if (table === 'scheduled_services') {
+      if (op === 'columnInfo') return COLS;
+      if (op === 'first') return parent; // latestLiveSeriesVisit
+      if (op === 'await') {
+        // loadActiveSeriesDates selects scheduled_date only.
+        const selectCall = calls.find((c) => c[0] === 'select');
+        if (Array.isArray(selectCall?.[1])) return live;
+        if (selectCall?.[1] === 'scheduled_date') {
+          return [{ scheduled_date: parent.scheduled_date }, ...live];
+        }
+        return live;
+      }
+      if (op === 'insertReturning') { inserted.push(data); return [{ id: 900 + inserted.length, ...data }]; }
+      if (op === 'insert') { inserted.push(data); return [1]; }
+    }
+    if (table === 'scheduled_service_addons') {
+      if (op === 'columnInfo') return {};
+      return [];
+    }
+    if (table === 'estimate_card_holds') {
+      if (op === 'await') {
+        return cardHoldVisitIds.map((id) => ({ scheduled_service_id: id }));
+      }
+      return [];
+    }
+    return null;
+  };
+  return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };
+}
+
+// latestLiveSeriesVisit and the live-visit read both call .first()/.then() on
+// scheduled_services; the scenario handler distinguishes them by the select
+// shape, so pin that assumption once here rather than in every test.
+function reconcile(conn, parent, targetCount, extra = {}) {
+  return reconcileRecurringSeriesVisitCount(conn, {
+    parentId: 10,
+    parent,
+    cols: COLS,
+    targetCount,
+    actorId: 'admin-1',
+    claimToken: 'claim-token-1',
+    ...extra,
+  });
+}
+
+describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('capping a running plan at 2 cancels the furthest-out visits and keeps the nearest', async () => {
+    const { conn, parent, live, inserted } = scenario({ upcoming: 5 });
+    const result = await reconcile(conn, parent, 2);
+
+    expect(result.before).toBe(5);
+    expect(result.target).toBe(2);
+    expect(inserted).toHaveLength(0);
+    // Visits 3, 4 and 5 come off — the two nearest today stay.
+    expect(result.cancelledIds).toEqual([live[2].id, live[3].id, live[4].id]);
+    expect(transitionJobStatus).toHaveBeenCalledTimes(3);
+    const first = transitionJobStatus.mock.calls[0][0];
+    expect(first.jobId).toBe(live[2].id);
+    expect(first.toStatus).toBe('cancelled');
+    // Silent by contract: the claim is minted suppressed and finalized
+    // post-commit with sendNotification:false. Anything else texts a customer
+    // about an office-side plan change.
+    expect(first.notifyCustomer).toBe('caller_suppress');
+    expect(first.cancelNoticeToken).toBe('claim-token-1');
+    expect(first.trx).toBe(conn);
+  });
+
+  test('the series parent and the visit being edited are never cancelled', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 4 });
+    // Target 1 would otherwise take out everything after the first visit;
+    // protect the third, and make the parent itself one of the live rows.
+    live[0].id = 10; // parent is also an upcoming visit
+    const result = await reconcile(conn, parent, 1, { protectedVisitId: live[2].id });
+
+    expect(result.cancelledIds).not.toContain(10);
+    expect(result.cancelledIds).not.toContain(live[2].id);
+    expect(result.cancelledIds).toEqual([live[1].id, live[3].id]);
+  });
+
+  test('refuses the whole save when a surplus visit is covered by an annual prepay term', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 4, coveredVisitIds: [103] });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('annual prepay term'),
+    });
+    // Nothing partially applied — the refusal happens before the first cancel.
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(live).toHaveLength(4);
+  });
+
+  test('refuses when a surplus visit still holds a card for a late-cancel fee', async () => {
+    const { conn, parent } = scenario({ upcoming: 4, cardHoldVisitIds: [103] });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('late-cancel fee'),
+    });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a pre-migration env without the card-hold table still trims (prepay guard stands alone)', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3, hasCardHoldTable: false });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('raising the count tops up from the latest live visit on the plan cadence', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 2 });
+    const result = await reconcile(conn, parent, 4);
+
+    expect(result.added).toHaveLength(2);
+    expect(inserted).toHaveLength(2);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    for (const row of inserted) {
+      expect(row.recurring_parent_id).toBe(10);
+      expect(row.is_recurring).toBe(true);
+      expect(row.status).toBe('pending');
+      expect(row.service_type).toBe('Concourse Treatment');
+      expect(row.estimated_duration_minutes).toBe(120);
+      // A counted plan is fixed — a top-up row carrying the ongoing flag
+      // would let the next completion auto-extend straight past the count.
+      expect(row.recurring_ongoing).toBe(false);
+      // Never in the past, even though the series anchor is.
+      expect(row.scheduled_date > TODAY).toBe(true);
+    }
+    // Placed on the 14-day cadence, not the anchor's original schedule.
+    const dates = inserted.map((r) => r.scheduled_date).sort();
+    expect(new Set(dates).size).toBe(2);
+  });
+
+  test('does not double-book a date the series already occupies', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 3 });
+    await reconcile(conn, parent, 5);
+    const occupied = new Set([daysOut(1), daysOut(15), daysOut(29)]);
+    for (const row of inserted) expect(occupied.has(row.scheduled_date)).toBe(false);
+  });
+
+  test('an unchanged count writes nothing at all', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 3 });
+    const result = await reconcile(conn, parent, 3);
+    expect(result.added).toHaveLength(0);
+    expect(result.cancelledIds).toHaveLength(0);
+    expect(inserted).toHaveLength(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('the count is clamped to the series cap, so one typo cannot fill a calendar', async () => {
+    const { conn, parent } = scenario({ upcoming: 2 });
+    const result = await reconcile(conn, parent, 9999);
+    expect(result.target).toBe(MAX_SERIES_VISIT_COUNT);
+  });
+});
+
+describe('update-details wiring (source guards)', () => {
+  test('the reconcile takes the per-parent maintenance lock BEFORE the comms lock', () => {
+    // Reverse order deadlocks against runRecurringAlertAction, which acquires
+    // maintenance→comms on the same two keys.
+    const trxStart = src.indexOf("const commsPeek = await trx('scheduled_services')");
+    const maintenanceLock = src.indexOf('acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id', trxStart);
+    const commsLock = src.indexOf('await lockCustomerComms(trx, commsPeek.customer_id)', trxStart);
+    expect(trxStart).toBeGreaterThan(-1);
+    expect(maintenanceLock).toBeGreaterThan(-1);
+    expect(commsLock).toBeGreaterThan(maintenanceLock);
+  });
+
+  test('the reconcile is skipped when the make-this-recurring spawn path ran', () => {
+    expect(src).toContain('if (wantsVisitCountReconcile) {');
+    expect(src).toMatch(/isRecurring && !shouldSpawnRecurringChildren\s*\n\s*&& \(wantsVisitCountReconcile \|\| recurringOngoing !== undefined\)/);
+  });
+
+  test('a counted plan clears recurring_ongoing across the whole series', () => {
+    // Parent-only would leave children flagged, and several readers
+    // (cancellation eligibility, follow-up planning) scan children.
+    const block = src.slice(src.indexOf('recurring_ongoing lives on every row of the series'));
+    expect(block.slice(0, 900)).toContain("this.where('id', parentId).orWhere('recurring_parent_id', parentId)");
+    expect(block.slice(0, 900)).toContain('update({ recurring_ongoing: !!recurringOngoing');
+  });
+
+  test('trimmed visits finalize their reminders silently', () => {
+    const finalize = src.indexOf('AppointmentReminders.handleSeriesCancellation(\n          visitCountResult.cancelledIds');
+    expect(finalize).toBeGreaterThan(-1);
+    expect(src.slice(finalize, finalize + 400)).toContain('sendNotification: false');
+  });
+
+  test('the plan-length change is audited', () => {
+    expect(src).toContain("action: 'recurring_plan_count_set'");
+  });
+});

@@ -241,11 +241,13 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
 
   test('alert-route extend/convert_ongoing inserts inherit Bill-To + stamped address too (source guard)', () => {
     // The recurring-alert action route builds its extension rows through the
-    // same applyStoredVisitFinancials pipeline — both spawn loops must carry
+    // same applyStoredVisitFinancials pipeline — every spawn loop must carry
     // the Bill-To and address stamps or a payer-billed / secondary-property
-    // series degrades when the operator extends it from an alert.
+    // series degrades when the operator extends it. Three legs today: the
+    // alert route's extend and convert_ongoing, plus the Edit-appointment
+    // visit-count top-up.
     const alertLegs = src.match(/copyBillToFields\(data, parent, cols\);\n\s*copyStampedServiceAddressFields\(data, parent, cols\);/g) || [];
-    expect(alertLegs.length).toBe(2);
+    expect(alertLegs.length).toBe(3);
     expect(src).toContain('copyBillToFields(nextData, parent, cols);');
     expect(src).toContain('copyStampedServiceAddressFields(nextData, parent, cols);');
   });
@@ -361,11 +363,13 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(inserted[0].scheduled_date).toBe('2026-10-15');
   });
 
-  test('the latest-anchor query pins the cancelled/rescheduled exclusion — one shared helper, both consumers (source guard)', () => {
-    // The anchor now lives in latestLiveSeriesVisit, consumed by BOTH the
-    // maintenance auto-extend and the alert-action route — so the alert
-    // route can never regrow the unfiltered anchor that pushed manual
-    // extensions a cadence past a cancelled future visit.
+  test('the latest-anchor query pins the cancelled/rescheduled exclusion — one shared helper, every consumer (source guard)', () => {
+    // The anchor lives in latestLiveSeriesVisit, consumed by EVERY writer that
+    // extends a series — the maintenance auto-extend, the alert-action route,
+    // and the Edit-appointment visit-count reconcile — so none of them can
+    // regrow the unfiltered anchor that pushed extensions a cadence past a
+    // cancelled future visit. Bump these counts when a fourth writer appears;
+    // do not let one hand-roll its own anchor query.
     const helper = src.indexOf('function latestLiveSeriesVisit(');
     const helperEnd = src.indexOf('async function loadActiveSeriesDates(');
     expect(helper).toBeGreaterThan(-1);
@@ -374,9 +378,9 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
     expect(helperBody).toContain(".orderBy('scheduled_date', 'desc')");
     expect(helperBody).toContain(".where('is_recurring', true)");
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(2);
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(3);
     // The occupied-dates preload is shared the same way.
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(2);
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(3);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
@@ -481,6 +485,23 @@ describe('runRecurringSeriesMaintenance — fixed plan end-of-plan alert', () =>
       last_visit_date: '2026-07-15',
       remaining_visits: 0,
     });
+  });
+
+  test('a plan capped from Edit appointment stops extending — the last visit completing adds nothing', async () => {
+    // Setting a visit count in the Edit appointment modal clears
+    // recurring_ongoing series-wide and trims the surplus rows. The plan is
+    // then a FIXED plan, so the auto-extend branch must not fire even though
+    // it is below the 2-ahead window a live ongoing plan would refill at —
+    // otherwise the capped visits reappear on the next completion.
+    const { conn, inserted, alertInserts } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      parentOverrides: { recurring_ongoing: false },
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    expect(inserted).toHaveLength(0);
+    // One visit still ahead, so it is not end-of-plan yet either.
+    expect(alertInserts).toHaveLength(0);
   });
 
   test('no-ops on a non-recurring row', async () => {
