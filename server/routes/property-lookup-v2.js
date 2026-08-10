@@ -2942,15 +2942,23 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // provenance it doesn't have — commercialSignalRecord inside these helpers
   // already strips untrusted web-sourced type strings (the Gateway Ave
   // guard), so "record alone" means trusted-record evidence. The copy
-  // asserts COUNTY-ROLL provenance, so it additionally requires
-  // hasCountyEvidence — a legacy AI-cache record with no field evidence is
-  // trusted for classification but must not produce county-master copy.
-  if (rc && hasCountyEvidence(rc)
+  // additionally asserts COUNTY-ROLL provenance, so the TYPE FIELD itself
+  // must be county-backed: a pure county/cadastral merge, an authoritative
+  // propertyType evidence source, or the stacked-parcel aggregation. A
+  // legacy AI-cache record (no field evidence) or a hybrid whose type came
+  // from a web hit is trusted for classification but must not produce
+  // county-master copy (codex P1 ×2).
+  const countyBackedType = rc && (
+    ['county', 'cadastral'].includes(String(rc._source || ''))
+    || AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(String(rc._fieldEvidence?.propertyType?.sourceType || '').toLowerCase())
+    || Boolean(rc._parcel?.aggregated)
+  );
+  if (rc && countyBackedType
       && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
     const masterParcelSubtype = resolveCommercialSubtype(rc, {});
     if (masterParcelSubtype === 'multifamily_common_area_residential'
         || masterParcelSubtype === 'hoa_common_area_residential') {
-      const unitCount = Number(rc.unitCount) || 0;
+      const unitCount = Number(trustedUnitCount(rc)) || 0;
       // The unit re-lookup is only recommended on POSITIVE evidence the
       // community parcels each unit: condo/townhome text on the trusted
       // record, or the stacked-parcel aggregation (which is built from

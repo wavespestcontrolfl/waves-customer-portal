@@ -419,6 +419,44 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
   });
 
+  test('hybrid whose Multifamily type came from an unverified web hit → no county-master copy (codex P1)', () => {
+    // County evidence exists on OTHER fields, but the type field itself is
+    // web-sourced (and not fieldVerify-flagged, so classification trusts it).
+    const hybrid = countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _parcel: undefined,
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'listing', fieldVerify: false, score: 40 },
+        lotSize: { value: 93940, sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    });
+    expect(detectCategory(hybrid, {})).toBe('COMMERCIAL');
+    const flags = buildFieldVerifyFlags(hybrid, null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('hybrid whose type evidence IS county-sourced → guidance fires', () => {
+    const hybrid = countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    });
+    expect(buildFieldVerifyFlags(hybrid, null, null).find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+
+  test('untrusted web-sourced unit count is not echoed in the copy (trustedUnitCount)', () => {
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
+        unitCount: { value: 8, sourceType: 'listing', fieldVerify: true, score: 30 },
+      },
+    }), null, null).find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/8-unit/);
+  });
+
   test('satellite-AI multifamily signal on a county single-family record → no master-parcel guidance (codex P1)', () => {
     // The AI signal may legitimately flip the CATEGORY, but the guidance copy
     // asserts county master-parcel provenance — it must only fire when the
