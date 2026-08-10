@@ -412,10 +412,11 @@ describe("collectMarginReviewNotes — report-only low-margin signals for the es
   });
 });
 
-describe('client fallback mirrors the Tree & Shrub bed-area cap signals', () => {
+describe('client fallback mirrors the Tree & Shrub large-bed review signals', () => {
   // This path runs when the V1 estimator prices without Property Lookup, and
-  // V1 saves with no replayable engineRequest — so a silent cap here means an
-  // underpriced quote sendable with an empty Pricing Review Notes panel.
+  // V1 saves with no replayable engineRequest — so a silent large area here
+  // means a quote sendable with an empty Pricing Review Notes panel. Owner
+  // ruling 2026-08-10: nothing clamps — priced IN FULL, flagged for review.
   const bigHeavyLot = {
     lotSqFt: 60000,
     homeSqFt: 2400,
@@ -424,21 +425,20 @@ describe('client fallback mirrors the Tree & Shrub bed-area cap signals', () => 
     svcTs: true,
   };
 
-  test('a lot-derived area above the cap carries the reason codes and the prose', () => {
+  test('a lot-derived area above the threshold prices IN FULL and carries the reason code + prose', () => {
     const result = calculateEstimate(bigHeavyLot);
     const meta = result.pricingMetadata || {};
-    expect(meta.manualReviewReasons).toEqual(
-      expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
-    );
-    const warning = (meta.warnings || []).find((w) => w.includes('estimator cap'));
-    expect(warning).toContain('clamped');
-    expect(warning).toContain('UNDER-priced');
+    expect(meta.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    const warning = (meta.warnings || []).find((w) => w.includes('review threshold'));
+    expect(warning).toContain('priced IN FULL');
+    // Nothing clamps anymore — no warning may claim otherwise.
+    expect((meta.warnings || []).join(' ')).not.toContain('clamped');
   });
 
   test('a small lot stays quiet', () => {
     const result = calculateEstimate({ ...bigHeavyLot, lotSqFt: 8000, shrubDensity: 'LIGHT', landscapeComplexity: 'SIMPLE' });
     const meta = result.pricingMetadata || {};
-    expect(meta.manualReviewReasons || []).not.toContain('bed_area_cap_reached');
+    expect(meta.manualReviewReasons || []).not.toContain('bed_area_at_or_above_8000');
   });
 });
 
@@ -449,8 +449,6 @@ describe('client fallback flags an EXPLICIT oversized bed area too', () => {
     });
     const meta = result.pricingMetadata || {};
     expect(meta.manualReviewReasons).toContain('bed_area_at_or_above_8000');
-    // Nothing was clamped, so it must not claim otherwise.
-    expect(meta.manualReviewReasons || []).not.toContain('bed_area_cap_reached');
     const warning = (meta.warnings || []).find((w) => w.includes('14,000 sq ft'));
     expect(warning).toContain('priced IN FULL');
   });

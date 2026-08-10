@@ -333,7 +333,26 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
             : b))
         : null;
       const patchBuildings = !!(patchedBuildings && JSON.stringify(patchedBuildings) !== JSON.stringify(buildings));
-      if (patchPropertyAddress || patchBuildings) {
+      // Service programs (slice 1A-ii) demote buildings to DISPLAY-ONLY
+      // subdivisions under proposal.programs[*].buildings — the same
+      // address-as-name pattern, rendered in "Covers" on the proposal page
+      // and every PDF, so the same match-guarded patch applies (codex
+      // 1A-ii r20). Truly custom subdivision names are left alone.
+      const programs = Array.isArray(data?.proposal?.programs) ? data.proposal.programs : null;
+      const patchedPrograms = programs
+        ? programs.map((p) => {
+          if (!p || !Array.isArray(p.buildings)) return p;
+          const patched = p.buildings.map((b) => (
+            b && typeof b.name === 'string'
+              && matchesCustomerAddress(b.name)
+              && proposalTargetKey(b.name) !== proposalTargetKey(proposalTarget)
+              ? { ...b, name: proposalTarget }
+              : b));
+          return JSON.stringify(patched) !== JSON.stringify(p.buildings) ? { ...p, buildings: patched } : p;
+        })
+        : null;
+      const patchPrograms = !!(patchedPrograms && JSON.stringify(patchedPrograms) !== JSON.stringify(programs));
+      if (patchPropertyAddress || patchBuildings || patchPrograms) {
         let expr = "COALESCE(estimate_data, '{}'::jsonb)";
         const bindings = [];
         if (patchPropertyAddress) {
@@ -343,6 +362,10 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
         if (patchBuildings) {
           expr = `jsonb_set(${expr}, '{proposal,buildings}', ?::jsonb)`;
           bindings.push(JSON.stringify(patchedBuildings));
+        }
+        if (patchPrograms) {
+          expr = `jsonb_set(${expr}, '{proposal,programs}', ?::jsonb)`;
+          bindings.push(JSON.stringify(patchedPrograms));
         }
         patch.estimate_data = conn.raw(`${expr} - 'proposalDelivery'`, bindings);
       }
@@ -365,6 +388,14 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           // proposal save that edits buildings/line-items WITHOUT moving the
           // property address must not have its fresh array overwritten.
           guarded = guarded.whereRaw("estimate_data #> '{proposal,buildings}' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(buildings)]);
+        }
+        if (patchPrograms) {
+          // Same stale-read rule for the programs array — a concurrent save
+          // changing program pricing/taxability/scope without moving the
+          // address must not be rewritten from this SELECT; losing the race
+          // falls back to the address-column-only update below (codex 1A-ii
+          // r21).
+          guarded = guarded.whereRaw("estimate_data #> '{proposal,programs}' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(programs)]);
         }
         const n = await guarded.update(patch);
         counts.estimates += n;

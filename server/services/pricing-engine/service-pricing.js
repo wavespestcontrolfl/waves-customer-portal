@@ -7,7 +7,7 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2421,11 +2421,9 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
 
   const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
-  return {
-    bedArea: Math.min(rawBedArea, BED_AREA_CAP),
-    rawBedArea,
-    capped: rawBedArea >= BED_AREA_CAP,
-  };
+  // Owner ruling 2026-08-10: never clamped — the pricer routes large areas
+  // (>= BED_AREA_REVIEW_SQFT) to manual review instead.
+  return { bedArea: rawBedArea, rawBedArea };
 }
 
 function resolveTreeShrubBedArea(property = {}, warnings = []) {
@@ -2439,17 +2437,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       requiresManualReview: true,
     };
   }
-
-  // Upstream cap metadata: calculatePropertyProfile may have already capped
-  // an oversized estimated/lot-derived bed area down to BED_AREA_CAP and set
-  // property.bedAreaCapped = true (+ optionally uncappedBedAreaEstimate).
-  // Without this, the explicit-bedArea branch below would discard the cap
-  // signal and silently miss bed_area_cap_reached for inputs like
-  // estimatedBedAreaSf: 9000 routed through generateEstimate.
-  const upstreamCapped = property.bedAreaCapped === true;
-  const upstreamUncapped = hasPositivePricingNumber(property.uncappedBedAreaEstimate)
-    ? Number(property.uncappedBedAreaEstimate)
-    : undefined;
 
   if (hasPositivePricingNumber(property.bedArea)) {
     // Resolve source from the upstream hint so the lot-derived label from
@@ -2466,10 +2453,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       bedAreaSource,
       pricingConfidence,
       requiresManualReview: false,
-      ...(upstreamCapped ? { capped: true } : {}),
-      ...(upstreamCapped && upstreamUncapped !== undefined
-        ? { uncappedBedAreaEstimate: upstreamUncapped }
-        : {}),
     };
   }
 
@@ -2477,21 +2460,13 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     ? property.estimatedBedArea
     : property.estimatedBedAreaSf;
   if (hasPositivePricingNumber(estimatedBedAreaValue)) {
-    const rawBedArea = Number(estimatedBedAreaValue);
-    const localCapped = rawBedArea >= BED_AREA_CAP;
-    const capped = localCapped || upstreamCapped;
-    // Prefer upstream uncapped (the true raw input) when present, else the
-    // raw value seen on this call.
-    const uncapped = upstreamUncapped !== undefined
-      ? upstreamUncapped
-      : (localCapped ? rawBedArea : undefined);
+    // Owner ruling 2026-08-10: no clamp — priced in full; large areas route
+    // to review via bed_area_at_or_above_8000 in priceTreeShrub.
     return {
-      bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+      bedArea: Number(estimatedBedAreaValue),
       bedAreaSource: 'estimated',
       pricingConfidence: 'medium',
       requiresManualReview: false,
-      capped,
-      ...(capped && uncapped !== undefined ? { uncappedBedAreaEstimate: uncapped } : {}),
     };
   }
 
@@ -2502,8 +2477,6 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       bedAreaSource: 'lot_based',
       pricingConfidence: 'medium',
       requiresManualReview: false,
-      capped: lotEstimate.capped,
-      ...(lotEstimate.capped ? { uncappedBedAreaEstimate: lotEstimate.rawBedArea } : {}),
     };
   }
 
@@ -2636,7 +2609,6 @@ function priceTreeShrub(property, options = {}) {
 
   const bedAreaInfo = resolveTreeShrubBedArea(property, warnings);
   const bedArea = bedAreaInfo.bedArea;
-  const bedAreaCapped = !!bedAreaInfo.capped;
 
   // v4.7: shrub density now multiplies the MEASURED-bed terms (per-sqft
   // material + the bedArea-derived minutes) — previously it only shaped the
@@ -2801,37 +2773,18 @@ function priceTreeShrub(property, options = {}) {
   if (bedAreaInfo.bedAreaSource === 'fallback' || bedAreaInfo.requiresManualReview) {
     manualReviewReasonsSet.add('missing_bed_area_fallback');
   }
-  // These two warnings describe DIFFERENT situations and must not share copy
-  // now that the operator panel renders them (codex P2 ×2): a CAPPED area was
-  // clamped and is underpriced until reviewed — the reader needs the number
-  // it was clamped from — while an oversized EXPLICIT measurement was priced
-  // in full and needs only a sanity check. Saying "hit the estimator cap" for
-  // the second would send the operator hunting for a clamp that never
-  // happened.
+  // Owner ruling 2026-08-10: bed areas are never clamped. Large areas price
+  // IN FULL and carry a review marker — the routing (draft-builder,
+  // lead-estimate-automation, public-quote) refuses to auto-send a line
+  // with manualReviewReasons, so a big measurement gets human eyes without
+  // being silently underpriced.
   const bedSqFtText = (value) => `${Math.round(Number(value)).toLocaleString()} sq ft`;
-  if (bedAreaCapped) {
-    manualReviewReasonsSet.add('bed_area_cap_reached');
-    const uncapped = bedAreaInfo.uncappedBedAreaEstimate;
-    // The capped FLAG is set at >= the cap, but Math.min only reduces above
-    // it — an inferred area of exactly 8,000 is flagged yet loses nothing.
-    // Only a genuine clamp may claim the quote is under-priced (codex P2);
-    // equality gets the ordinary at-cap review note.
-    const clampedDown = hasPositivePricingNumber(uncapped) && Number(uncapped) > BED_AREA_CAP;
-    warnings.push(clampedDown
-      ? `Tree & Shrub bed area was clamped to the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
-        + ` from an estimated ${bedSqFtText(uncapped)} — this quote prices the capped area,`
-        + ' so it is UNDER-priced until reviewed.'
-      : `Tree & Shrub bed area reached the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
-        + ' — nothing was clamped off, but confirm the measurement.');
-  }
-  if (bedArea >= BED_AREA_CAP) {
+  if (bedArea >= BED_AREA_REVIEW_SQFT) {
     manualReviewReasonsSet.add('bed_area_at_or_above_8000');
-    if (!bedAreaCapped) {
-      warnings.push(
-        `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_CAP)} estimator cap.`
-        + ' It was priced IN FULL — confirm the measurement.',
-      );
-    }
+    warnings.push(
+      `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_REVIEW_SQFT)} review threshold.`
+      + ' It was priced IN FULL — confirm the measurement.',
+    );
   }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
   // exactly what the pre-split classification counted (property palms never
@@ -2870,10 +2823,6 @@ function priceTreeShrub(property, options = {}) {
     bedArea,
     bedAreaUsed: bedArea,
     bedAreaSource: bedAreaInfo.bedAreaSource,
-    bedAreaCapped,
-    ...(bedAreaInfo.uncappedBedAreaEstimate !== undefined
-      ? { uncappedBedAreaEstimate: bedAreaInfo.uncappedBedAreaEstimate }
-      : {}),
     pricingConfidence: bedAreaInfo.pricingConfidence,
     bedAreaConfidence: bedAreaInfo.pricingConfidence,
     treeCount,
@@ -3525,21 +3474,10 @@ function priceCommercialRodentBait(property = {}, options = {}) {
 // ============================================================
 // COMMERCIAL TREE & SHRUB — cost-buildup auto-pricer (COMMERCIAL_TREE_SHRUB)
 // ============================================================
-// Bed area is resolved UNCAPPED for commercial (explicit → estimated → lot
-// density), unlike residential which caps at BED_AREA_CAP, because commercial
-// auto-pricing has no size cap.
+// Bed area resolves explicit → estimated → lot density. (Since the owner
+// ruling 2026-08-10 removed the residential clamp, no upstream cap-recovery
+// is needed here — every path already carries the full area.)
 function resolveCommercialBedArea(property = {}) {
-  // No size cap for commercial: when calculatePropertyProfile already capped a
-  // lot-derived/estimated bed area at BED_AREA_CAP (preserving the true value
-  // as uncappedBedAreaEstimate), recover the uncapped figure — otherwise large
-  // commercial beds would be underquoted at the 8,000 sqft residential cap.
-  if (property.bedAreaCapped === true && Number(property.uncappedBedAreaEstimate) > 0) {
-    return {
-      bedArea: Number(property.uncappedBedAreaEstimate),
-      bedBasis: property.bedAreaSource || 'lot_based',
-      estimated: true,
-    };
-  }
   // Respect an explicit numeric bed area. A ZERO bed area is authoritative ONLY
   // when it's a deliberate/explicit measurement (all-hardscape lot, beds
   // measured as absent) — NOT an inferred/estimated zero. The admin V2 form
@@ -4971,8 +4909,10 @@ function priceTrapOnlyRetainer(options = {}) {
     warrantyEligible: false,
     rodentExclusionDeclined: true,
     discountEligible: false,
+    // WaveGuard exclusion rides discountEligible:false (read by the
+    // estimate-public line predicates) — there is no separate
+    // excludedFromWaveGuardDiscounts flag; nothing ever read one.
     excludedFromCoupons: true,
-    excludedFromWaveGuardDiscounts: true,
     excludedFromBundleDiscounts: true,
     lineItems: [
       {

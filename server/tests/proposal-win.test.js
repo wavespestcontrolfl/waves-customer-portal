@@ -101,6 +101,45 @@ describe('buildProposalFirstInvoice', () => {
     expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
   });
 
+  test('bills each service program\'s first application, with per-program tax (slice 1A-ii)', () => {
+    const built = buildProposalFirstInvoice({
+      taxRate: 0.07,
+      buildings: [],
+      programs: [
+        { service: 'pest', label: 'Quarterly pest program', frequencyPerYear: 4, pricePerApplication: 117, annual: 468, taxable: true },
+        { service: 'mosquito', label: 'Mosquito program', frequencyPerYear: 9, pricePerApplication: 65, annual: 585, taxable: false },
+      ],
+      correctiveWork: [{ label: 'Cleanout', amount: 450, taxable: true }],
+    });
+    expect(built.lineItems).toEqual([
+      { description: 'Quarterly pest program (first application)', quantity: 1, unit_price: 117 },
+      { description: 'Mosquito program (first application)', quantity: 1, unit_price: 65 },
+      { description: 'Cleanout', quantity: 1, unit_price: 450 },
+    ]);
+    expect(built.subtotal).toBe(632);
+    expect(built.taxableSubtotal).toBe(567);        // 117 recurring + 450 one-time
+    expect(built.taxAmount).toBe(39.69);            // round(117*.07)=8.19 + round(450*.07)=31.5
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
+  test('program tax rounds per application, matching ongoing invoices and the displayed annual (r15b)', () => {
+    // $100.07 at 7% → each application collects $7.00; two such programs on
+    // ONE acceptance invoice must collect $14.00 (per-line rounding), never
+    // a bucket-rounded $14.01 the agreement and later invoices don't show.
+    const built = buildProposalFirstInvoice({
+      taxRate: 0.07,
+      buildings: [],
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100.07, annual: 400.28, taxable: true },
+        { service: 'mosquito', label: 'Mosquito', frequencyPerYear: 9, pricePerApplication: 100.07, annual: 900.63, taxable: true },
+      ],
+    });
+    expect(built.subtotal).toBe(200.14);
+    expect(built.taxAmount).toBe(14);
+    expect(built.total).toBe(214.14);
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
   test('rounds recurring and one-time tax buckets separately, matching computeProposalTotals (codex 1A-i r3 P0)', () => {
     // Two $100.07 taxable amounts at 7%: each bucket's tax is $7.0049 →
     // $7.00 rounded per bucket = $14.00 total. A merged bucket would round

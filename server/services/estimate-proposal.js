@@ -157,6 +157,24 @@ function normalizeCustomerResponsibilities(raw) {
   return cleaned.length ? cleaned : null;
 }
 
+// Per-proposal provenance of GENERATED responsibility lines, keyed by
+// program family — the builder prunes a removed/switched family's lines
+// only when THIS proposal's generation actually installed them, never by
+// static-catalog membership (a hand-authored line that happens to match a
+// stock sentence must survive — codex 1A-ii r15). Builder-consumed
+// metadata: written by generation, read by pruning, deliberately rendered
+// on no customer surface. Legacy proposals without it simply never prune.
+function normalizeGeneratedResponsibilities(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [family, lines] of Object.entries(raw).slice(0, 12)) {
+    const key = cleanString(family, 40);
+    const cleaned = cleanStringList(lines, { maxItems: 16, maxLen: 200 });
+    if (key && cleaned.length) out[key] = cleaned;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Canonical payment-terms vocabulary — CONSUMED from the payer mechanism
 // (payer.js PAYMENT_TERMS), never a local copy: proposals, payer statements,
 // and acceptance invoicing must speak one term language (codex #3297
@@ -170,6 +188,60 @@ function normalizePaymentTerms(value) {
   if (!t) return null;
   const candidate = t === 'dueonreceipt' ? 'due_on_receipt' : t;
   return PROPOSAL_PAYMENT_TERMS.includes(candidate) ? candidate : null;
+}
+
+// §2/§9 Service programs (slice 1A-ii) — the per-service cards a generated
+// commercial agreement is built from. When programs are authored they ARE
+// the recurring itemization: computeProposalTotals sums recurring from them
+// and the PUT route rejects top-level building line items beside them (one
+// source of recurring truth — never two lists that can disagree). Buildings
+// demote to DISPLAY-ONLY subdivisions inside a program (name/note, no
+// pricing) for multi-building properties.
+const PROGRAM_FAMILIES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent', 'other'];
+
+function normalizeProgram(raw = {}) {
+  const family = PROGRAM_FAMILIES.includes(String(raw.service || '').trim()) ? String(raw.service).trim() : 'other';
+  const frequencyPerYear = (() => {
+    const n = Number(raw.frequencyPerYear ?? raw.visitsPerYear);
+    return Number.isFinite(n) && n >= 1 && n <= 52 ? Math.round(n) : 0;
+  })();
+  const pricePerApplication = Math.max(0, roundMoney(num(raw.pricePerApplication ?? raw.perApplication, 0)));
+  // annual is DERIVED (per-application × frequency), never trusted from the
+  // payload — a caller-supplied annual that disagrees with its own factors
+  // would let the rendered per-visit math contradict the billed total.
+  const annual = roundMoney(pricePerApplication * frequencyPerYear);
+  return {
+    service: family,
+    label: cleanString(raw.label ?? raw.name, 120) || 'Recurring service program',
+    frequencyPerYear,
+    pricePerApplication,
+    annual,
+    taxable: raw.taxable === true,
+    note: cleanString(raw.note, 300),
+    inclusions: cleanStringList(raw.inclusions, { maxItems: 12, maxLen: 200 }),
+    exclusions: cleanStringList(raw.exclusions, { maxItems: 8, maxLen: 160 }),
+    // Per-program provenance of GENERATED narrative lines — the builder's
+    // family-change resync prunes ONLY lines this program's generation
+    // installed, never catalog membership (a hand-authored line matching a
+    // stock sentence must survive — codex 1A-ii r17, same doctrine as
+    // generatedResponsibilities). Builder-consumed metadata: written by
+    // generation, read on reload, rendered on no customer surface.
+    generatedInclusions: cleanStringList(raw.generatedInclusions, { maxItems: 12, maxLen: 200 }),
+    generatedExclusions: cleanStringList(raw.generatedExclusions, { maxItems: 8, maxLen: 160 }),
+    buildings: (Array.isArray(raw.buildings) ? raw.buildings : [])
+      .map((b) => ({ name: cleanString(b?.name, 120), note: cleanString(b?.note, 300) }))
+      .filter((b) => b.name)
+      .slice(0, 12),
+  };
+}
+
+function normalizePrograms(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = raw
+    .map(normalizeProgram)
+    .filter((program) => program.frequencyPerYear > 0 && program.pricePerApplication > 0)
+    .slice(0, 10);
+  return cleaned.length ? cleaned : null;
 }
 
 function cleanBoundedInt(value, { min, max }) {
@@ -542,7 +614,15 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
-  const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
+  // A stored proposal is authoritative when it carries ANY itemization:
+  // legacy building line items, (1A-ii) service programs, or corrective
+  // work alone — a one-time-only commercial proposal is corrective-work-
+  // only by design. None of these may fall through to the synthesized
+  // fallback (which would double the charge beside them).
+  const storedHasBuildings = stored && Array.isArray(stored.buildings) && stored.buildings.length;
+  const storedHasPrograms = stored && Array.isArray(stored.programs) && stored.programs.length;
+  const storedHasCorrective = stored && Array.isArray(stored.correctiveWork) && stored.correctiveWork.length;
+  const base = storedHasBuildings || storedHasPrograms || storedHasCorrective
     ? stored
     : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 
@@ -566,8 +646,10 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     // saves to preserve dead state; it lands with its authoring + rendering
     // slice (codex #3297 r3, same rule as validDays).
     propertyScope: normalizePropertyScope(base.propertyScope),
+    programs: normalizePrograms(base.programs),
     correctiveWork: normalizeCorrectiveWork(base.correctiveWork),
     customerResponsibilities: normalizeCustomerResponsibilities(base.customerResponsibilities),
+    generatedResponsibilities: normalizeGeneratedResponsibilities(base.generatedResponsibilities),
     commercialTerms: normalizeCommercialTerms(base.commercialTerms),
   };
 }
@@ -589,6 +671,7 @@ function computeProposalTotals(proposal) {
   let annualRecurring = 0;
   let oneTime = 0;
   let taxableAnnualRecurring = 0;
+  let taxableBuildingsAnnual = 0;
   let taxableOneTime = 0;
 
   for (const building of proposal.buildings || []) {
@@ -599,7 +682,10 @@ function computeProposalTotals(proposal) {
       } else {
         const annual = annualizedAmount(item);
         annualRecurring += annual;
-        if (item.taxable) taxableAnnualRecurring += annual;
+        if (item.taxable) {
+          taxableAnnualRecurring += annual;
+          taxableBuildingsAnnual += annual;
+        }
       }
     }
   }
@@ -613,10 +699,29 @@ function computeProposalTotals(proposal) {
     if (work.taxable) taxableOneTime += work.amount;
   }
 
+  // Service programs (slice 1A-ii) are the recurring itemization when
+  // authored — the PUT route rejects top-level building line items beside
+  // them, so this never double-counts a legacy buildings list.
+  // Program tax rounds PER APPLICATION × cadence, exactly how billing
+  // collects it (proposal-win's acceptance invoice and every ongoing
+  // per-application invoice each round that application's tax) — an
+  // annual-bucket rounding can display tax the invoices never collect
+  // ($100.07 × 4 at 7%: bucket says $28.02, four invoices collect $28.00)
+  // (pre-push codex r15b P0). Buildings keep the bucket (their invoices
+  // bill periods, and programs never coexist with them).
+  let programTax = 0;
+  for (const program of proposal.programs || []) {
+    annualRecurring += program.annual;
+    if (program.taxable) {
+      taxableAnnualRecurring += program.annual;
+      programTax += roundMoney(program.pricePerApplication * taxRate) * program.frequencyPerYear;
+    }
+  }
+
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   const monthlyEquivalent = roundMoney(annualRecurring / 12);
-  const recurringTax = roundMoney(taxableAnnualRecurring * taxRate);
+  const recurringTax = roundMoney(roundMoney(taxableBuildingsAnnual * taxRate) + programTax);
   const oneTimeTax = roundMoney(taxableOneTime * taxRate);
   const totalTax = roundMoney(recurringTax + oneTimeTax);
 
@@ -648,6 +753,8 @@ module.exports = {
   normalizeCorrectiveWork,
   normalizeCustomerResponsibilities,
   normalizeCommercialTerms,
+  normalizePrograms,
+  PROGRAM_FAMILIES,
   normalizePaymentTerms,
   PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,

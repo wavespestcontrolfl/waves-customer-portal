@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -579,6 +579,82 @@ function proposalStructuredScenario() {
   };
 }
 
+// Programs-mode proposal (slice 1A-ii): generated service programs replace
+// building line items as the recurring itemization. Fictional numbers.
+function proposalProgramsScenario() {
+  const base = proposalScenario();
+  return {
+    ...base,
+    proposal: {
+      ...base.proposal,
+      buildings: [],
+      // Mixed pest+mosquito programs — the server's truth-scope classifier
+      // returns false for any non-pest program, so the fixture mirrors it
+      // (terms line renders neutral, no pest-plan claims).
+      pestRecurringOnly: false,
+      propertyScope: {
+        items: [
+          { label: 'Building', value: '2,446 sq ft · 2 stories' },
+          { label: 'Units', value: '4 residential units, tenant-occupied' },
+        ],
+      },
+      programs: [
+        {
+          service: 'pest',
+          label: 'Quarterly pest program',
+          frequencyPerYear: 4,
+          pricePerApplication: 120,
+          annual: 480,
+          taxable: true,
+          note: null,
+          inclusions: [
+            '4 scheduled applications per year',
+            'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
+            'Interior treatment included on request — no extra charge, no surprise fees',
+            'Tenant-reported pests handled between visits — re-service requests are included in the plan',
+            'Every visit documented — time on site, areas treated, and products applied',
+          ],
+          exclusions: [
+            'Termite treatment or monitoring — separate program, quoted on inspection',
+            'German cockroach cleanouts — quoted separately as one-time corrective work',
+          ],
+          buildings: [{ name: 'Main building' }, { name: 'Shared courtyard' }],
+        },
+        {
+          service: 'mosquito',
+          label: 'Mosquito program',
+          frequencyPerYear: 9,
+          pricePerApplication: 65,
+          annual: 585,
+          taxable: true,
+          note: null,
+          inclusions: [
+            '9 scheduled applications per year',
+            'Every visit documented — time on site, areas treated, and products applied',
+          ],
+          exclusions: ['One-time event sprays — quoted separately'],
+          buildings: [],
+        },
+      ],
+      customerResponsibilities: [
+        'Provide unit or interior access with reasonable notice when interior service is requested',
+        'Empty or report standing water (plant saucers, gutters, containers) between visits',
+      ],
+      totals: {
+        annualRecurring: 1065,
+        monthlyEquivalent: 88.75,
+        oneTime: 0,
+        taxRate: 0.07,
+        taxableAnnualRecurring: 1065,
+        totalTax: 74.55,
+        firstYearTotal: 1139.55,
+        hasTax: true,
+        isMultiBuilding: false,
+      },
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
@@ -589,6 +665,7 @@ const PAYLOADS = {
   proposal: proposalScenario,
   proposal_terms: proposalTermsScenario,
   proposal_structured: proposalStructuredScenario,
+  proposal_programs: proposalProgramsScenario,
 };
 
 // ── canned endpoint responses ───────────────────────────────────────────

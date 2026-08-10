@@ -208,8 +208,27 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.propertyScope).toBeNull();
     expect(p.correctiveWork).toBeNull();
     expect(p.customerResponsibilities).toBeNull();
+    expect(p.generatedResponsibilities).toBeNull();
     expect(p.commercialTerms).toBeNull();
     expect(p.accountManager).toBeUndefined();
+  });
+
+  it('round-trips generatedResponsibilities provenance (r15): builder-consumed metadata, bounded, null when absent/hostile', () => {
+    const p = normalizeProposal(authored({
+      generatedResponsibilities: {
+        pest: ['Report pest activity between visits through the Waves app or office line', '  '],
+        lawn: [],
+        '': ['orphan'],
+      },
+    }));
+    // Empty families and blank lines drop; the map itself survives the
+    // PUT round-trip so a reopened proposal prunes exactly what its
+    // generation installed — never static-catalog membership.
+    expect(p.generatedResponsibilities).toEqual({
+      pest: ['Report pest activity between visits through the Waves app or office line'],
+    });
+    const hostile = normalizeProposal(authored({ generatedResponsibilities: ['not-an-object'] }));
+    expect(hostile.generatedResponsibilities).toBeNull();
   });
 
   it('keeps a BLANK initial term unset — Number(null)/Number("") must never coerce to the month-to-month claim', () => {
@@ -239,6 +258,82 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.propertyScope).toBeNull();          // label without value drops the row
     expect(p.customerResponsibilities).toBeNull();
     expect(p.commercialTerms).toBeNull();        // every field invalid → whole block null
+  });
+
+  it('normalizes service programs: derived annual, family enum, caps, unpriced rows dropped (slice 1A-ii)', () => {
+    const p = normalizeProposal(authored({
+      buildings: [],
+      programs: [
+        {
+          service: 'pest', label: 'Quarterly pest program', frequencyPerYear: 4, pricePerApplication: 120.005,
+          taxable: true, annual: 999999, // caller-supplied annual is IGNORED — derived from factors
+          inclusions: ['4 visits', ''], exclusions: ['Termite — separate'],
+          buildings: [{ name: 'Tower A' }, { name: '' }],
+        },
+        { service: 'not_a_family', label: 'Mystery', frequencyPerYear: 2, pricePerApplication: 50 },
+        { service: 'lawn', label: 'Unpriced row', frequencyPerYear: 0, pricePerApplication: 100 },
+      ],
+    }));
+    expect(p.programs).toHaveLength(2); // unpriced row dropped
+    expect(p.programs[0]).toMatchObject({
+      service: 'pest',
+      label: 'Quarterly pest program',
+      frequencyPerYear: 4,
+      pricePerApplication: 120.01,
+      annual: 480.04,               // 120.01 × 4, never the caller's number
+      taxable: true,
+      inclusions: ['4 visits'],
+      buildings: [{ name: 'Tower A', note: null }],
+    });
+    expect(p.programs[1].service).toBe('other'); // unknown family demotes
+    // Per-program provenance round-trips (r17): absent → [], present →
+    // cleaned — the builder prunes ONLY these lines on a family switch.
+    expect(p.programs[0].generatedInclusions).toEqual([]);
+    const withProv = normalizeProposal(authored({
+      buildings: [],
+      programs: [{
+        service: 'pest', label: 'P', frequencyPerYear: 4, pricePerApplication: 100,
+        generatedInclusions: ['4 scheduled applications per year', '  '],
+        generatedExclusions: ['Termite treatment or monitoring — separate program, quoted on inspection'],
+      }],
+    }));
+    expect(withProv.programs[0].generatedInclusions).toEqual(['4 scheduled applications per year']);
+    expect(withProv.programs[0].generatedExclusions).toHaveLength(1);
+    // A programs-only stored proposal is authoritative — it must NOT fall
+    // through to the synthesized fallback.
+    expect(p.synthesized).toBe(false);
+    expect(p.enabled).toBe(true);
+  });
+
+  it('folds program annuals into recurring totals with per-program tax', () => {
+    const t = computeProposalTotals(normalizeProposal(authored({
+      buildings: [],
+      taxRate: 0.07,
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100, taxable: true },   // 400 taxable
+        { service: 'lawn', label: 'Lawn', frequencyPerYear: 9, pricePerApplication: 50 },                    // 450 exempt
+      ],
+    })));
+    expect(t.annualRecurring).toBe(850);
+    expect(t.taxableAnnualRecurring).toBe(400);
+    expect(t.totalTax).toBe(28);
+    expect(t.firstYearTotal).toBe(878);
+  });
+
+  it('program tax rounds per application × cadence, matching what invoices collect (r15b)', () => {
+    // $100.07 × 4 at 7%: annual-bucket rounding would display $28.02, but
+    // each application invoice collects round(100.07 × .07) = $7.00 — the
+    // agreement must show the $28.00 billing actually charges.
+    const t = computeProposalTotals(normalizeProposal(authored({
+      buildings: [],
+      taxRate: 0.07,
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100.07, taxable: true },
+      ],
+    })));
+    expect(t.annualRecurring).toBe(400.28);
+    expect(t.recurringTax).toBe(28);
+    expect(t.totalTax).toBe(28);
   });
 
   it('never authors structured sections onto a synthesized fallback', () => {

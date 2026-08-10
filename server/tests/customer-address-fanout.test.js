@@ -464,6 +464,43 @@ describe('propagateCustomerAddressChange', () => {
     expect(patched[1].name).toBe('North Warehouse');
   });
 
+  test('program subdivisions named with the old address are patched too; custom names are not (slice 1A-ii, codex r20)', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-prog',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: {
+          proposal: {
+            propertyAddress: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+            programs: [{
+              service: 'pest', label: 'Quarterly pest', frequencyPerYear: 4, pricePerApplication: 120,
+              buildings: [
+                { name: '4867 Tobermorey Way, Lakewood Ranch, FL 34211', note: null },
+                { name: 'Clubhouse', note: 'custom' },
+              ],
+            }],
+          },
+        },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
+    const patch = estUpdate.patch;
+    expect(patch.estimate_data.__raw).toContain("'{proposal,programs}'");
+    const patchedPrograms = JSON.parse(patch.estimate_data.bindings[patch.estimate_data.bindings.length - 1]);
+    expect(patchedPrograms[0].buildings[0].name).toBe('4857 Tobermory Way, Bradenton, FL 34211');
+    expect(patchedPrograms[0].buildings[1].name).toBe('Clubhouse');
+    // Concurrency guard: the update re-asserts the SELECTed programs array
+    // so a racing proposal save (pricing/tax/scope edits without an address
+    // move) is never overwritten from the stale read (codex 1A-ii r21).
+    const guard = estUpdate.whereRaw.find((w) => w.sql.includes("#> '{proposal,programs}'"));
+    expect(guard).toBeTruthy();
+    expect(JSON.parse(guard.bindings[0])[0].pricePerApplication).toBe(120);
+  });
+
   test('punctuated unit designators (Apt. 2 / Ste. 200) are distinct units too', () => {
     const contact = { address_line1: '123 Main St', city: 'Bradenton', zip: '34205' };
     expect(snapshotMatchesContact('123 Main St, Apt. 2, Bradenton, FL 34205', contact)).toBe(false);
