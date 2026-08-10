@@ -1402,62 +1402,28 @@ function deriveEmailReview(extracted = {}) {
  * snapshot, so a quick follow-up call was wiping address_unverified /
  * email_unverified off the lead). Union of both, with two supersede rules: an
  * address recovered-and-validated on the newer call replaces the stale
- * address_unverified, and a newer call whose AV verdict AFFIRMATIVELY
- * validated down to the unit (accept/corrected at SUB_PREMISE granularity —
- * the caller finally supplied the unit and Google confirmed that exact door)
- * IN THE SAME BUILDING the ask was filed for answers the prior call's
- * standing missing_unit_number. Same-building corroboration compares the
- * accepted normalized address against `priorLeadAddress` ({street, city,
- * zip} — the lead's on-file address BEFORE this call's writes, i.e. the
- * building the ask was standing for): street with unit designators
- * stripped, suffix-insensitively, PLUS a place check (ZIP when both sides
- * have one, else city — postal-city aliases; no corroborating pair fails
- * closed). Fail closed when anything is missing, so a later SUB_PREMISE
- * accept for a DIFFERENT property — even an identically-numbered street in
- * another city/ZIP — never clears this building's ask (pre-push audit P1
- * r2/r4). A PREMISE-level accept proves only the building and clears
- * nothing, and a recovery-produced accept that still carries the original
- * missing-subpremise evidence is PREMISE-level by construction — recovery
- * fixes a garbled street, not a missing unit.
+ * address_unverified, and `opts.unitAskAnswered` — an explicit license from
+ * the caller — drops the rolled-up missing_unit_number. The license is
+ * deliberately a boolean, not address evidence to re-judge here: the string
+ * reason can stand for asks about SEVERAL buildings at once, so the only
+ * thing that proves it fully answered is the customer's call-scoped unit-card
+ * ledger going to zero via a trusted SUB_PREMISE acceptance — which is
+ * exactly what the call processor verifies (resolveOpenUnitNumberCards:
+ * resolved > 0 && remainingOpen === 0, behind the shadow-trust and
+ * granularity gates) before passing true. Re-checking the lead's fill-only
+ * current address here would strand the reason forever once the cards are
+ * terminal (pre-push audit P1 r7).
  */
-function mergeNeedsConfirmation(prior, next, addressValidation = null, priorLeadAddress = null) {
+function mergeNeedsConfirmation(prior, next, { unitAskAnswered = false } = {}) {
   const nextArr = Array.isArray(next) ? next : [];
   let merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
   if (nextArr.includes('address_recovered')) {
     merged = merged.filter((r) => r !== 'address_unverified');
   }
-  const avStatus = addressValidation?.status;
-  if ((avStatus === 'validated_accept' || avStatus === 'corrected')
-      && addressValidation?.granularity === 'SUB_PREMISE'
-      && sameBuildingAddress(addressValidation?.normalized, priorLeadAddress)) {
+  if (unitAskAnswered) {
     merged = merged.filter((r) => r !== 'missing_unit_number');
   }
   return merged;
-}
-
-// Same-building comparison for the unit-ask supersede above: unit-stripped
-// suffix-insensitive street equality + place corroboration (ZIP if both
-// sides carry one, else city). Fail closed: missing streets or no
-// corroborating place pair prove nothing and must not clear the ask.
-function sameBuildingAddress(acceptedNormalized, priorLeadAddress) {
-  const { splitStreetLineUnit } = require('../utils/address-normalizer');
-  const accepted = acceptedNormalized || {};
-  const prior = priorLeadAddress || {};
-  const key = (line) => {
-    const street = splitStreetLineUnit(line).street;
-    return street ? streetCompareKey(street) : '';
-  };
-  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
-  const acceptedKey = key(accepted.street_line_1);
-  const priorKey = key(prior.street);
-  if (!acceptedKey || !priorKey || acceptedKey !== priorKey) return false;
-  const az = zip5(accepted.postal_code);
-  const pz = zip5(prior.zip);
-  if (az && pz) return az === pz;
-  const ac = placeKey(accepted.city);
-  const pc = placeKey(prior.city);
-  return !!ac && !!pc && ac === pc;
 }
 
 /**

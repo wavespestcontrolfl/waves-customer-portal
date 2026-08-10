@@ -2456,7 +2456,7 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, addressValidation = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, unitAskAnswered = false } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -2499,8 +2499,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
       const remergedNeedsConfirmation = mergeNeedsConfirmation(
         lockedPriorNeedsConfirmation,
         bridgeNeedsConfirmation,
-        addressValidation,
-        { street: lockedLead.address, city: lockedLead.city, zip: lockedLead.zip },
+        { unitAskAnswered },
       );
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
@@ -8322,18 +8321,16 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // The AV verdict rides along ONLY when this call's SUB_PREMISE
-            // acceptance resolved the customer's LAST outstanding unit card
-            // (leadUnitAskAnswered): the rolled-up string reason can stand
-            // for several buildings, so the card ledger — not the lead's
-            // fill-only current address — is what proves the ask is fully
-            // answered. The building guard inside mergeNeedsConfirmation
-            // stays as belt-and-braces.
+            // The unit-ask license rides along ONLY when this call's
+            // SUB_PREMISE acceptance resolved the customer's LAST
+            // outstanding unit card (leadUnitAskAnswered): the rolled-up
+            // string reason can stand for several buildings, so the card
+            // ledger — never the lead's fill-only current address — is what
+            // proves the ask is fully answered.
             const mergedNeedsConfirmation = mergeNeedsConfirmation(
               priorNeedsConfirmation,
               bridgeNeedsConfirmation,
-              leadUnitAskAnswered ? effectiveAddressValidation : null,
-              { street: current?.address, city: current?.city, zip: current?.zip },
+              { unitAskAnswered: leadUnitAskAnswered },
             );
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
@@ -8614,10 +8611,10 @@ const CallRecordingProcessor = {
                   {
                     bridgeNeedsConfirmation,
                     leadQuality: extracted.lead_quality,
-                    // Same license as the pre-lock merge: the verdict may
-                    // clear the rolled-up unit reason only when this call's
-                    // resolution emptied the customer's unit-card ledger.
-                    addressValidation: leadUnitAskAnswered ? effectiveAddressValidation : null,
+                    // Same license as the pre-lock merge: the rolled-up unit
+                    // reason clears only when this call's resolution emptied
+                    // the customer's unit-card ledger.
+                    unitAskAnswered: leadUnitAskAnswered,
                   },
                 );
                 if (reconciled.serviceInterestDropped) {
