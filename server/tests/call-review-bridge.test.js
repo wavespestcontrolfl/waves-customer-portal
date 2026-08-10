@@ -118,6 +118,24 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     }
   );
 
+  test('ambiguous PREMISE missing its subpremise → missing_unit_number rides with address_unverified', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: { address_line1: '100 Harbour Isle Ct', city: 'Bradenton', lead_quality: 'warm' },
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).toContain('missing_unit_number');
+  });
+
+  test('ambiguous without a missing subpremise → no unit-number ask', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [] },
+      extracted: { address_line1: '100 Harbour Isle Ct', city: 'Bradenton', lead_quality: 'warm' },
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
   test('out_of_service_area with a street → out_of_service_area reason', () => {
     const out = deriveCallReviewBridge({
       addressValidation: { status: 'out_of_service_area' },
@@ -221,6 +239,16 @@ describe('deriveCallReviewBridge — garbled-street recovery (addressRecovery)',
     expect(out.normalizedAddress).toMatchObject({ address_line1: '5039 Seafoam Trail', city: 'Lakewood Ranch', zip: '34211-1407' });
     expect(out.needsConfirmation).toContain('address_recovered');
     expect(out.needsConfirmation).not.toContain('address_unverified');
+  });
+
+  test('unit-number ask survives a successful street recovery (recovery fixes the street, not the unit)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { ...unverifiable, granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: jimenez,
+      addressRecovery: { attempted: true, recovered: { address_line1: '5039 Seafoam Trail', city: 'Lakewood Ranch', state: 'FL', zip: '34211-1407' }, candidates: ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], method: 'phonetic' },
+    });
+    expect(out.needsConfirmation).toContain('address_recovered');
+    expect(out.needsConfirmation).toContain('missing_unit_number');
   });
 
   test('recovery attempted but nothing confirmed → address_unverified unchanged', () => {

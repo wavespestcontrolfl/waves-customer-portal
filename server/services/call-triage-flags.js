@@ -159,6 +159,11 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('out_of_service_area');
     } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
       flags.push('address_unverified');
+      // AV resolved the BUILDING but Google reports the unit designator
+      // missing (condo/townhome address given without a unit). The generic
+      // hold above stays authoritative; this names the specific ask.
+      // Advisory by construction — deliberately NOT in BLOCKING_TRIAGE_FLAGS.
+      if (isMissingUnitNumber(av)) flags.push('missing_unit_number');
     } else if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
       // AV accepted a REAL premise — but the model wasn't sure it heard the
       // right street. "Palm Ave" misheard as "Park Ave" validates cleanly at
@@ -297,6 +302,11 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // (possible valid-but-wrong-street mishear) — read the street back on the
   // confirmation call; never blocks the AV-approved routing.
   'address_readback',
+  // AV resolved a multi-unit building given without its unit (missing
+  // subpremise) — names the specific ask for the callback. The call is
+  // already held by the address_unverified hard flag; this must not add a
+  // second block.
+  'missing_unit_number',
   // Caller discussed more than one property — the extra addresses are recorded
   // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
   'multi_property_call',
@@ -379,7 +389,19 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
   'address_validation_unavailable',  // deterministic (AV api error)
   'out_of_service_area',             // model + deterministic
   'address_unverifiable',            // MODEL flag (schema enum / prompt). The model marks nearly every call address_unverifiable; AV accept/correct authoritatively resolves the address, so this must clear too or clean addresses never auto-route.
+  'missing_unit_number',             // deterministic (AV premise w/ missing subpremise) — an accept/correct means the exact premise (incl. any unit) validated, so the stale ask clears.
 ]);
+
+// AV resolved a real building (PREMISE) but Google lists the unit designator
+// (subpremise) as the missing input — a multi-unit condo/townhome building
+// address given without the unit number. County rolls model these communities
+// as building-level master parcels, so without the unit nothing downstream
+// (parcel match, dispatch, interior treatment) can target the right home.
+function isMissingUnitNumber(av) {
+  return !!(av && av.granularity === 'PREMISE'
+    && Array.isArray(av.missingComponents)
+    && av.missingComponents.includes('subpremise'));
+}
 
 function suppressAddressFlagsForAV(flags, addressValidation) {
   const s = addressValidation?.status;
@@ -1258,6 +1280,10 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     } else {
       needsConfirmation.push('address_unverified');
     }
+    // Building resolved but the unit designator is the missing piece — the
+    // ask survives recovery too (recovery fixes a garbled street, not a
+    // missing unit) and persists across calls until the office collects it.
+    if (isMissingUnitNumber(av)) needsConfirmation.push('missing_unit_number');
   } else if (hadStreet && status === 'out_of_service_area') {
     needsConfirmation.push('out_of_service_area');
   }
@@ -1407,6 +1433,7 @@ module.exports = {
   dispatchesToOnFileAddress,
   mergeTriageFlags,
   suppressAddressFlagsForAV,
+  isMissingUnitNumber,
   deriveCallReviewBridge,
   deriveEmailReview,
   mergeNeedsConfirmation,

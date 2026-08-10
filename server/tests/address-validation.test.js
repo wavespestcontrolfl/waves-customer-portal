@@ -20,7 +20,7 @@ describe('buildAddressLines', () => {
 });
 
 // Minimal Google AV `result` shapes for the pure status mapper.
-function result({ complete = true, granularity = 'PREMISE', inferred = false, replaced = false, unconfirmed = false } = {}) {
+function result({ complete = true, granularity = 'PREMISE', inferred = false, replaced = false, unconfirmed = false, missing = undefined } = {}) {
   return {
     verdict: {
       addressComplete: complete,
@@ -30,6 +30,7 @@ function result({ complete = true, granularity = 'PREMISE', inferred = false, re
       hasUnconfirmedComponents: unconfirmed,
     },
     address: {
+      ...(missing ? { missingComponentTypes: missing } : {}),
       addressComponents: [
         { componentType: 'street_number', componentName: { text: '17451' } },
         { componentType: 'route', componentName: { text: 'Florida 62' } },
@@ -89,6 +90,16 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
   test('incomplete / garbage geocoded out-of-area → missing_component, not out_of_service_area', () => {
     const r = deriveStatus(result({ complete: false, granularity: 'OTHER' }), 'Gunnison County');
     expect(r.status).toBe(STATUSES.MISSING_COMPONENT);
+  });
+
+  test('missingComponentTypes surfaces as missingComponents (condo building without a unit)', () => {
+    const r = deriveStatus(result({ complete: false, granularity: 'PREMISE', missing: ['subpremise'] }), 'Manatee County');
+    expect(r.status).toBe(STATUSES.AMBIGUOUS);
+    expect(r.missingComponents).toEqual(['subpremise']);
+  });
+
+  test('no missingComponentTypes in the provider payload → missingComponents []', () => {
+    expect(deriveStatus(result(), 'Manatee County').missingComponents).toEqual([]);
   });
 
   test('county normalization handles "X County" and case', () => {

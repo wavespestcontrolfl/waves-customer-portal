@@ -146,6 +146,9 @@ function buildTriageItem({
     missing_service_address: 'address_review',
     low_confidence_address: 'address_review',
     address_unverified: 'address_review',
+    // Specific companion to address_unverified: AV resolved the building but
+    // the unit number is missing (condo/townhome) — same review lane.
+    missing_unit_number: 'address_review',
     address_validation_unavailable: 'address_review',
     // MODEL flag — fail-open books past it for a known customer, so its
     // advisory card must land in the address-review lane, not service_unknown.

@@ -9,6 +9,8 @@ const {
   hasCanonicalWriteBlock,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasNameEmailMismatch,
+  ADVISORY_TRIAGE_FLAGS,
+  BLOCKING_TRIAGE_FLAGS,
 } = require('../services/call-triage-flags');
 
 // Auto-routing requires a positively validated address (AGENTS.md: "auto-create
@@ -201,6 +203,33 @@ describe('computeDeterministicTriageFlags', () => {
         const flags = computeDeterministicTriageFlags(e, { addressValidation: { status } });
         expect(flags).toContain('address_unverified');
       }
+    });
+
+    test('ambiguous PREMISE with missing subpremise → missing_unit_number alongside address_unverified', () => {
+      const e = validV2Extraction();
+      const av = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: av });
+      expect(flags).toContain('address_unverified');
+      expect(flags).toContain('missing_unit_number');
+    });
+
+    test('ambiguous without a missing subpremise → no missing_unit_number', () => {
+      const e = validV2Extraction();
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [] } });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('missing_unit_number');
+    });
+
+    test('missing subpremise below premise granularity → no unit flag (street itself unresolved)', () => {
+      const e = validV2Extraction();
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: { status: 'missing_component', granularity: 'ROUTE', missingComponents: ['subpremise'] } });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('missing_unit_number');
+    });
+
+    test('missing_unit_number is advisory-only: files a card, never holds the appointment', () => {
+      expect(ADVISORY_TRIAGE_FLAGS.has('missing_unit_number')).toBe(true);
+      expect(BLOCKING_TRIAGE_FLAGS.has('missing_unit_number')).toBe(false);
     });
 
     test('api_unavailable holds for review (address_validation_unavailable) and still applies model signals', () => {
