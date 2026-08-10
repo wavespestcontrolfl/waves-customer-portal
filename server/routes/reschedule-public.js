@@ -795,6 +795,52 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             if (!(msg?.blocked || msg?.sent === false)) {
               seriesNoticeSent = true;
               await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
+            } else if (msg?.code === 'QUIET_HOURS_HOLD' && msg?.deferred && msg?.nextAllowedAt) {
+              // Send-window hold on a customer self-serve series move
+              // (codex r23): nothing re-fires this confirmation — the
+              // re-arm below only restores the ordinary 72h/24h reminder
+              // windows, which can be DAYS away, so the customer would
+              // never be told their series actually moved. Queue the exact
+              // rendered body on the scheduled rail for the window open,
+              // under the shared visit-anchored replay entry (its recheck
+              // re-validates the visit is still upcoming and the number is
+              // still an authorized contact). A successful enqueue OWNS
+              // delivery, so the covered windows stay covered exactly as
+              // they would after an immediate send; a failed enqueue falls
+              // through to the re-arm so the customer is never left silent.
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
+                const recipientStamp = await recipientRefreshStamp({
+                  customerId: svc.customer_id,
+                  recipientPhone: customer.phone,
+                  customerRow: customer,
+                  label: 'reschedule-public',
+                });
+                await db('sms_log').insert({
+                  customer_id: svc.customer_id,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: customer.phone,
+                  message_body: body,
+                  status: 'scheduled',
+                  scheduled_for: new Date(msg.nextAllowedAt),
+                  message_type: 'reschedule_series_confirmation',
+                  metadata: JSON.stringify({
+                    entry_point: 'appointment_notice_contact_deferred',
+                    scheduled_service_id: svc.id,
+                    original_block_code: msg.code,
+                    replay_purpose: 'appointment',
+                    ...recipientStamp,
+                    resolve_from_by_customer: true,
+                  }),
+                });
+                seriesNoticeSent = true;
+                await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
+                logger.info(`[reschedule-public] series confirmation for ${svc.id} held outside the 8AM-8PM ET send window — queued for ${msg.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[reschedule-public] held series confirmation requeue failed for ${svc.id}: ${queueErr.message} — re-arming reminder windows instead`);
+              }
             }
           }
         }

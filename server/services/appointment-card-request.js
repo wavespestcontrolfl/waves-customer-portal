@@ -234,11 +234,10 @@ async function planInviteApplies(visitId, request = null) {
   }
 }
 
-// Last-10-digit comparison for recipient identity (US numbers with/without
-// the +1 prefix must compare equal).
-function last10Digits(v) {
-  return String(v || '').replace(/\D/g, '').slice(-10);
-}
+// Recipient identity for deferred rows (last-10 comparison, refresh vs
+// freeze) lives in services/messaging/deferred-recipient-identity.js — a
+// single owner for the rule so bearer links can't diverge between the
+// secure-card and estimate paths.
 
 // Check 1 — policy exemption. Payer check fails toward EXEMPT (never risk
 // securing the homeowner's card for invoices that route to a third-party
@@ -714,6 +713,13 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       if (result?.code === 'QUIET_HOURS_HOLD' && result?.deferred && result?.nextAllowedAt) {
         try {
           const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          const { recipientRefreshStamp } = require('./messaging/deferred-recipient-identity');
+          const recipientStamp = await recipientRefreshStamp({
+            customerId: visit.customer_id,
+            recipientPhone: smsTo,
+            customerRow: customer || null,
+            label: 'appt-card-request',
+          });
           await db('sms_log').insert({
             customer_id: visit.customer_id,
             direction: 'outbound',
@@ -729,18 +735,19 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
               trigger,
               original_block_code: result.code,
               replay_purpose: 'card_request',
-              // The send-time primary-phone refresh only applies when the
-              // recipient IS the account holder's number — an explicit
-              // recipientPhone (the consented inbound caller when the saved
-              // customer phone is a spouse/alternate slot, Codex #2771) is
-              // a per-send recipient DECISION, and swapping it for
-              // customers.phone at replay would text the bearer link to a
-              // different person than the immediate path chose. The frozen
-              // number still passes the full send-time validator chain
-              // (opt-out, suppressions, line type) at replay.
-              ...(recipientPhone && last10Digits(recipientPhone) !== last10Digits(customer?.phone)
-                ? { explicit_recipient: true }
-                : { refresh_customer_phone: true }),
+              // Refresh-vs-freeze is decided by the SHARED classifier
+              // (codex r23) so the secure-card link and the estimate links
+              // can never diverge on phone normalization or lookup-failure
+              // behavior. The rule it encodes is the one this path has
+              // always needed: an explicit recipientPhone (the consented
+              // inbound caller when the saved customer phone is a
+              // spouse/alternate slot, Codex #2771) is a per-send recipient
+              // DECISION, and swapping it for customers.phone at replay
+              // would text the bearer link to a different person than the
+              // immediate path chose. The frozen number still passes the
+              // full send-time validator chain (opt-out, suppressions,
+              // line type) at replay.
+              ...recipientStamp,
               resolve_from_by_customer: true,
               card_claim_stamp: stamp.toISOString(),
               // For the finalize's email twin (both-channels rule). The

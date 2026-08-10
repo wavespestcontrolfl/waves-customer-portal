@@ -159,6 +159,17 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     );
     expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['no_show']);
 
+    // r23: the SERIES cancellation is the same class of notice — without
+    // its own entry its held contacts fall to the liveness predicate and
+    // are dropped while the series claim finalizes as sent.
+    db._inserts.length = 0;
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Series cancelled', 'appointment_series_cancelled', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['cancelled', 'canceled']);
+
     // An upcoming-visit notice carries NO status pin — the liveness
     // predicate owns it.
     db._inserts.length = 0;

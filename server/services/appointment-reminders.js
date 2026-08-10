@@ -1092,6 +1092,11 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     // Both spellings: the self-heal set treats 'canceled' as equivalent, so
     // a row written either way must still replay.
     appointment_cancelled: ['cancelled', 'canceled'],
+    // The SERIES cancellation is the same class of notice, anchored to the
+    // representative visit (codex r23) — without this entry its held
+    // contacts fall through to the liveness predicate and are dropped
+    // while the series claim finalizes as sent.
+    appointment_series_cancelled: ['cancelled', 'canceled'],
     appointment_no_show: ['no_show'],
   };
   const requiredVisitStatuses = TERMINAL_NOTICE_STATUSES[messageType] || null;
