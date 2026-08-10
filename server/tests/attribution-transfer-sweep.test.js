@@ -6,6 +6,7 @@
 // clears the marker when the write is positively impossible.
 
 let scanRows = [];
+let scanRejects = false;
 let leadRows = {};
 let lockedCallRow = null;
 let provenancedRow = null; // ad_service_attribution first for {source_call_id}
@@ -46,6 +47,7 @@ const mockDb = jest.fn((table) => {
   b.onConflict = () => b;
   b.ignore = () => b;
   b.then = (res, rej) => {
+    if (table === 'call_log' && scanRejects) return Promise.reject(new Error('db down')).then(res, rej);
     const val = table === 'call_log' ? scanRows : [1];
     return Promise.resolve(val).then(res, rej);
   };
@@ -76,6 +78,7 @@ const markerClearUpdates = () => updates.filter((u) => u.table === 'call_log'
 
 beforeEach(() => {
   jest.clearAllMocks();
+  scanRejects = false;
   scanRows = [{ id: 'call-1', metadata: { lead_id: 'lead-B', attribution_transfer_pending: PENDING }, created_at: '2026-08-09T12:00:00Z' }];
   leadRows = { 'lead-B': { id: 'lead-B', customer_id: 'cust-1' } };
   lockedCallRow = { id: 'call-1', processing_token: null, metadata: { lead_id: 'lead-B', attribution_transfer_pending: PENDING }, created_at: '2026-08-09T12:00:00Z' };
@@ -212,6 +215,19 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(s.blocked).toBe(1);
     expect(inserts).toHaveLength(0);
     expect(markerClearUpdates()).toHaveLength(0);
+  });
+
+  test('a scan failure reports scanFailed so the cron can surface degradation in job health', async () => {
+    // codex P2 r16: the internal catch returned a zeroed summary the cron
+    // read as a healthy tick with zero work.
+    scanRejects = true;
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.scanFailed).toBe(true);
+    expect(s.scanned).toBe(0);
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
   });
 
   test('a durable no_attribution verdict clears the marker — the non-lead call can never take the write', async () => {

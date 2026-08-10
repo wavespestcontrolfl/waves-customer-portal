@@ -420,6 +420,20 @@ async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid })
         && String(callOwner.customer_id) !== String(leadOwner.customer_id)) {
         return { refusedReason: 'lead_owner_conflict' };
       }
+      // The owner test's ANONYMOUS blind spot (codex P1 r16, the same
+      // shape the bridge closes with sidJoinAttributionElsewhere): a
+      // stamp-less repoint of a customer-less call leaves no owner to
+      // conflict with — but the provenanced funnel row on the NEW lead
+      // records the move. A row already residing on a DIFFERENT lead
+      // means this sid candidate is not ours: claiming it would let
+      // provenance recovery transfer the history-bearing row back to the
+      // obsolete lead.
+      const prov = await trx('ad_service_attribution')
+        .where({ source_call_id: locked.id })
+        .first('id', 'lead_id');
+      if (prov && String(prov.lead_id) !== String(leadId)) {
+        return { refusedReason: 'call_repointed' };
+      }
     }
   }
   return { sourceCallId: locked.id };
@@ -649,6 +663,11 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
           // a lead soft-deleted between selection and lock must not gain
           // an organic funnel row.
           .whereNull('deleted_at')
+          // Terminal-status exclusion re-applied too (codex P2 r16): an
+          // admin marking the lead duplicate/disqualified/spam while this
+          // transaction waited must not receive the irreversible organic
+          // row off the stale candidate snapshot.
+          .whereRaw("COALESCE(status,'') NOT IN ('duplicate','disqualified','spam')")
           .forUpdate()
           .first('id', 'customer_id', 'lead_source_id', 'service_interest', 'first_contact_at', 'created_at', 'twilio_call_sid');
         if (!locked) return { recorded: false, reason: 'lead_gone' };
@@ -800,7 +819,7 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
 // refuses a NULL owner), leaves the marker for the next run. Failures keep
 // the marker too — this IS the retry lane.
 async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
-  const summary = { scanned: 0, recorded: 0, cleared: 0, blocked: 0, skipped: 0, failed: 0 };
+  const summary = { scanned: 0, recorded: 0, cleared: 0, blocked: 0, skipped: 0, failed: 0, scanFailed: false };
   const parseMd = (raw) => {
     if (!raw) return {};
     if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return {}; } }
@@ -825,6 +844,10 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
       .select('id', 'metadata', 'created_at');
   } catch (e) {
     logger.warn(`[attribution-transfer-sweep] scan failed: ${e.code || e.name || 'db_error'}`);
+    // Reported, not just logged (codex P2 r16): the caller inspects this
+    // so a persistent scan failure surfaces in the cron's job health
+    // instead of counting as a healthy tick with zero work.
+    summary.scanFailed = true;
     return summary;
   }
   for (const row of rows) {

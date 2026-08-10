@@ -3898,16 +3898,26 @@ function initScheduledJobs() {
         // completes it against the live stamped lead. Self-guarded and
         // independent of the day's bridge health — it repairs calls the
         // bridge never scans, so a blocked bridge pass must not starve it.
+        let sweepError = null;
         try {
           const { sweepPendingAttributionTransfers } = require('./ads/call-attribution');
-          await sweepPendingAttributionTransfers({ limit: 100 });
+          const s = await sweepPendingAttributionTransfers({ limit: 100 });
+          // The sweep degrades internally (scan catch → zeroed summary,
+          // per-row catches → summary.failed), so a stalled retry lane
+          // never throws on its own (codex P2 r16) — inspect the summary
+          // and surface degradation in the job-health record.
+          if (s.scanFailed) sweepError = new Error('[attribution-transfer-sweep] scan failed');
+          else if (s.failed > 0) sweepError = new Error(`[attribution-transfer-sweep] ${s.failed} transfer(s) failed`);
         } catch (err) {
+          sweepError = err;
           logger.warn(`[attribution-transfer-sweep] failed: ${err.message}`);
         }
 
-        // The sweep ran — now surface the captured bridge failure so the
-        // outer catch logs it and the lease records a failed tick.
+        // Both halves ran — now surface any failure so the outer catch
+        // logs it and the lease records a failed tick (bridge error takes
+        // precedence; a swallowed throw cleared last_error on outages).
         if (bridgePairError) throw bridgePairError;
+        if (sweepError) throw sweepError;
       });
     } catch (err) {
       logger.error(`Google Ads call bridge / unclaimed-organic sweep failed: ${err.message}`);

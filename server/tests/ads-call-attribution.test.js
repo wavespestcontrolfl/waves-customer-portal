@@ -559,6 +559,37 @@ describe('resolveSourceCallProvenanceLocked — settled dissenting stamp (GH P1 
   });
 });
 
+describe('resolveSourceCallProvenanceLocked — anonymous stamp-less repoint (codex P1, PR #3303 r16)', () => {
+  test("a stamp-less CUSTOMER-LESS sid candidate whose provenanced row sits on ANOTHER lead refuses — 'call_repointed'", async () => {
+    // The owner-conflict test is unreachable when call_log.customer_id is
+    // NULL (anonymous caller) — but the funnel row on the new lead records
+    // the repoint; claiming the sid candidate would transfer it back.
+    firstByTable.leads = {
+      id: 'lead-old',
+      customer_id: 'cust-1',
+      lead_source_id: 'src-1',
+      service_interest: 'pest control',
+      created_at: '2026-08-01T12:00:00.000Z',
+      twilio_call_sid: 'CAy',
+    };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: '{}', // stamp-less: the phone-matched repoint writes no stamp
+      customer_id: null, // anonymous — no owner to conflict with
+    };
+    firstByTable.ad_service_attribution = { id: 'row-1', lead_id: 'lead-new' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
 describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock (codex P1, PR #3303 r8)', () => {
   const LEAD3 = {
     id: 'lead-1',

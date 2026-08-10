@@ -201,6 +201,26 @@ describe('scheduler wiring', () => {
     expect(block.indexOf('sweepPendingAttributionTransfers')).toBeLessThan(block.indexOf('if (bridgePairError) throw bridgePairError'));
   });
 
+  test('transfer-sweep degradation surfaces in job health too (codex P2, PR #3303 r16)', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
+    // The sweep degrades internally (scan catch → scanFailed, per-row
+    // catches → summary.failed) — the cron inspects the summary and throws
+    // so a stalled retry lane cannot masquerade as a healthy tick.
+    expect(block).toMatch(/s\.scanFailed/);
+    expect(block).toMatch(/s\.failed > 0/);
+    expect(block).toMatch(/if \(sweepError\) throw sweepError/);
+  });
+
+  test('organic-candidate eligibility is re-applied under the lead lock (codex P1+P2, PR #3303 r14/r16)', () => {
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
+    const lockedRead = sweep.split('const locked = await trx')[1].slice(0, 1200);
+    expect(lockedRead).toMatch(/whereNull\('deleted_at'\)/);
+    // Terminal-status exclusion under the lock: an admin marking the lead
+    // duplicate/disqualified/spam mid-wait must not receive the row.
+    expect(lockedRead).toMatch(/COALESCE\(status,''\) NOT IN \('duplicate','disqualified','spam'\)/);
+  });
+
   test('selection excludes deleted and customer-less leads (codex P1+P2, PR #3303 r14)', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
