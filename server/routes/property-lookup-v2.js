@@ -2974,7 +2974,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
         : 'collect the unit number and get the unit\'s own sq ft and stories from the customer — rental complexes have no per-unit county parcels; if this is actually an individually parcelled condo/townhome community, running the lookup again with the unit number will pull the unit\'s own record';
       flags.push({
         field: 'commercialSubtype',
-        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way, and the prefilled sq ft, lot, and stories are the WHOLE BUILDING'S, not one home's. If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way, and the prefilled sq ft, lot, and stories are the WHOLE BUILDING'S, not one home's. Do NOT save these as field-verified — that would permanently pin the building's dimensions to this address. If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
         priority: 'HIGH',
       });
     }

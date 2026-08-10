@@ -478,6 +478,10 @@ describe('multifamily master-parcel guidance flag', () => {
     // unit-specific dimensions before the resident path is priced (codex P0).
     expect(flag.reason).toMatch(/WHOLE BUILDING/);
     expect(flag.reason).toMatch(/sq ft and stories from the customer|replace home\/lot/i);
+    // The flag renders directly above the "Save … as field-verified" button
+    // (EstimateToolViewV2) — the copy must defuse that footgun explicitly
+    // (codex P1): saving would pin the building's dimensions to the address.
+    expect(flag.reason).toMatch(/Do NOT save these as field-verified/);
   });
 
   test('generic Multifamily and apartment records → customer-supplied unit dimensions, no re-lookup recommendation (codex P1)', () => {
