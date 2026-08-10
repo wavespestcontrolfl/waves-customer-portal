@@ -7399,16 +7399,24 @@ const CallRecordingProcessor = {
     // accept, PREMISE-level by construction. Same-building corroboration +
     // fail-closed matching (incl. the multi-property guard) live in the
     // resolver.
+    // leadUnitAskAnswered licenses the lead-merge sites below to drop the
+    // rolled-up missing_unit_number reason. That single string can stand for
+    // asks about SEVERAL buildings at once (each call unions it in), so it
+    // only clears when the call-scoped cards — the per-building ledger —
+    // went to ZERO via this resolution (pre-push audit P1 r6: never key the
+    // clearing off the lead's current fill-only address).
+    let leadUnitAskAnswered = false;
     if (customerId
         && v2AddressTrustedForUnitAsk
         && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
         && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
         && effectiveAddressValidation?.normalized?.street_line_1) {
       try {
-        await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
+        const unitResolution = await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
           customerId,
           acceptedAddress: effectiveAddressValidation.normalized,
         });
+        leadUnitAskAnswered = unitResolution.resolved > 0 && unitResolution.remainingOpen === 0;
       } catch (e) {
         logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
       }
@@ -8314,17 +8322,17 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // The effective AV verdict + the lead's PRIOR address ride along
-            // so a call that finally supplied the unit (SUB_PREMISE accept
-            // for the SAME building) clears the standing missing_unit_number
-            // ask instead of unioning it back in forever — `current` is the
-            // pre-write row, i.e. the building the ask was filed for. The
-            // verdict is withheld entirely when the V2 address is untrusted
-            // (shadow mode without bridge adoption).
+            // The AV verdict rides along ONLY when this call's SUB_PREMISE
+            // acceptance resolved the customer's LAST outstanding unit card
+            // (leadUnitAskAnswered): the rolled-up string reason can stand
+            // for several buildings, so the card ledger — not the lead's
+            // fill-only current address — is what proves the ask is fully
+            // answered. The building guard inside mergeNeedsConfirmation
+            // stays as belt-and-braces.
             const mergedNeedsConfirmation = mergeNeedsConfirmation(
               priorNeedsConfirmation,
               bridgeNeedsConfirmation,
-              v2AddressTrustedForUnitAsk ? effectiveAddressValidation : null,
+              leadUnitAskAnswered ? effectiveAddressValidation : null,
               { street: current?.address, city: current?.city, zip: current?.zip },
             );
             leadUpdates.extracted_data = JSON.stringify({
@@ -8606,10 +8614,10 @@ const CallRecordingProcessor = {
                   {
                     bridgeNeedsConfirmation,
                     leadQuality: extracted.lead_quality,
-                    // Same trust gate as the pre-lock merge: an uncorroborated
-                    // shadow-mode V2 verdict must not clear the unit ask here
-                    // either.
-                    addressValidation: v2AddressTrustedForUnitAsk ? effectiveAddressValidation : null,
+                    // Same license as the pre-lock merge: the verdict may
+                    // clear the rolled-up unit reason only when this call's
+                    // resolution emptied the customer's unit-card ledger.
+                    addressValidation: leadUnitAskAnswered ? effectiveAddressValidation : null,
                   },
                 );
                 if (reconciled.serviceInterestDropped) {

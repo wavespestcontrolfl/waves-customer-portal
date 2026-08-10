@@ -403,7 +403,11 @@ function unitCardBuildingIdentity(row) {
   if (v2 === undefined) return null;
   const v1 = parse(row.call_extraction_v1);
   if (v1 === undefined) return null;
-  if (Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0) {
+  // Multi-property evidence from EITHER extraction shape — the pipeline
+  // prefers legacy V1 additional_properties when present, so V1-only
+  // evidence is just as disqualifying (pre-push audit P1 r6).
+  if ((Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0)
+      || (Array.isArray(v1?.additional_properties) && v1.additional_properties.length > 0)) {
     return { multiProperty: true };
   }
   const v2Addr = v2?.property?.service_address || {};
@@ -460,11 +464,17 @@ function selectUnitCardsToResolve(candidates, acceptedAddress) {
   return match ? [match] : [];
 }
 
-// Never throws on a no-op; returns the number of cards resolved. Shares the
-// per-call lock contract (utils/triage-locks.js) and the review_status
-// re-sync with the sweep, admin-triage, and the email resolver.
+// Never throws on a no-op. Returns { resolved, remainingOpen }: how many
+// cards this call resolved, and how many missing_unit_number cards are STILL
+// open/in_progress for the customer afterwards (null when nothing ran) — the
+// caller may clear the lead's rolled-up needs_confirmation reason only when
+// remainingOpen is 0, because that single string can stand for asks about
+// SEVERAL buildings at once and the cards are the per-building ledger.
+// Shares the per-call lock contract (utils/triage-locks.js) and the
+// review_status re-sync with the sweep, admin-triage, and the email resolver.
 async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source = 'later call validated the full unit address' }, conn = db) {
-  if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return 0;
+  const none = { resolved: 0, remainingOpen: null };
+  if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return none;
   const now = new Date();
   const candidates = await conn('triage_items as t')
     .join('call_log as cl', 'cl.id', 't.call_log_id')
@@ -477,7 +487,7 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source 
       'cl.ai_extraction as call_extraction_v1',
     );
   const answered = selectUnitCardsToResolve(candidates, acceptedAddress);
-  if (!answered.length) return 0;
+  if (!answered.length) return none;
   const resolveCards = async (trx) => {
     const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
     for (const callId of callIds) await lockTriageCall(trx, callId);
@@ -500,7 +510,16 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source 
         .where({ id: callId })
         .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
     }
-    return updated;
+    // How many unit asks are STILL outstanding for this customer — the
+    // caller's license (or not) to clear the lead's rolled-up reason.
+    const remaining = await trx('triage_items as t')
+      .join('call_log as cl', 'cl.id', 't.call_log_id')
+      .where('t.reason_code', 'missing_unit_number')
+      .whereIn('t.status', ['open', 'in_progress'])
+      .where('cl.customer_id', customerId)
+      .count('* as n')
+      .first();
+    return { resolved: updated, remainingOpen: parseInt(remaining?.n || 0, 10) };
   };
   return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
 }

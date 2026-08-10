@@ -409,6 +409,17 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     });
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: multi, call_extraction_v1: null }, accepted('100 Example Condo Ct'))).toBe(false);
   });
+
+  test('V1-only multi-property evidence is just as disqualifying (pipeline prefers legacy additional_properties)', () => {
+    const v1Multi = JSON.stringify({
+      address_line1: '100 Example Condo Ct', city: 'Bradenton', zip: '34212',
+      additional_properties: [{ address: '100 Example Condo Ct, another unit' }],
+    });
+    const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: v1Multi };
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct'))).toBe(false);
+    const ordinary = { id: 'a', call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
+    expect(selectUnitCardsToResolve([ordinary, row], accepted('100 Example Condo Ct'))).toEqual([]);
+  });
 });
 
 describe('runTriageAutoResolve — gate', () => {
