@@ -1926,13 +1926,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // say what happened rather than closing on a silent change. The count
       // itself may fall short of the target when the cadence has nowhere left
       // to place a visit, so report the real outcome, not the request.
-      if (result?.visitCount && (result.visitCount.added || result.visitCount.cancelled)) {
+      // `shortfall` is in the condition, not just the message: a top-up that
+      // places NOTHING reports 0 added and 0 cancelled, and without it the
+      // modal closed silently as though the requested length had been reached
+      // (Codex #3337 r6 P1).
+      if (result?.visitCount
+        && (result.visitCount.added || result.visitCount.cancelled || result.visitCount.shortfall)) {
         const { added, cancelled, target, achieved, shortfall } = result.visitCount;
         const now = achieved != null ? achieved : target;
         const moves = [
           added ? `${added} visit${added === 1 ? "" : "s"} added` : null,
           cancelled ? `${cancelled} visit${cancelled === 1 ? "" : "s"} cancelled` : null,
         ].filter(Boolean);
+        if (moves.length === 0) moves.push("nothing could be scheduled");
         // Report what the plan HAS, not what was asked for — the server can
         // place fewer than requested when the cadence runs out of open dates,
         // and silently claiming the target hides missing service.

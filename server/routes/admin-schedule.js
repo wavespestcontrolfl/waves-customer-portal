@@ -5431,14 +5431,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
-      // Read from the PARENT when the edited row is a child — the flag the
-      // transition is measured against is the plan's, not this visit's.
-      const ongoingBeforeRow = commsPeek?.recurring_parent_id
-        ? await trx('scheduled_services')
-          .where({ id: commsPeek.recurring_parent_id })
-          .first('recurring_ongoing')
-        : commsPeek;
-      const wasOngoingBeforeSave = ongoingBeforeRow?.recurring_ongoing === true;
+      // NOTE: the plan's ongoing flag is deliberately NOT read here — see the
+      // locked read below. An unlocked read taken now can be overwritten by a
+      // concurrent series mutation that already holds the maintenance lock,
+      // and comparing the operator's baseline against a stale snapshot lets
+      // this save reverse their change (Codex #3337 r6 P1).
       // Any save that can mutate an EXISTING plan — the visit-count reconcile
       // or the series-wide recurring_ongoing flip, which can itself top up —
       // has to serialize against the completion auto-extend and the dispatch
@@ -5454,6 +5451,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
+      // The plan's ongoing flag, read UNDER the maintenance lock (Codex #3337
+      // r6 P1). A concurrent series mutation can hold that lock and commit the
+      // opposite value while this request waits for it, so a pre-lock read is
+      // stale by construction — and comparing the operator's baseline against
+      // a stale snapshot is exactly what lets this save reverse their change.
+      // Reads the PARENT when the edited row is a child: the transition is a
+      // property of the plan, not of this visit.
+      const ongoingBeforeRow = commsPeek?.recurring_parent_id
+        ? await trx('scheduled_services')
+          .where({ id: commsPeek.recurring_parent_id })
+          .first('recurring_ongoing')
+        : (commsPeek && await trx('scheduled_services')
+          .where({ id: req.params.id })
+          .first('recurring_ongoing'));
+      const wasOngoingBeforeSave = ongoingBeforeRow?.recurring_ongoing === true;
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
@@ -6311,7 +6323,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           admin_user_id: req.technicianId || null,
           customer_id: audited?.customer_id || null,
           action: 'recurring_plan_count_set',
-          description: `${audited?.service_type || 'Recurring'} plan set to ${visitCountResult.target} upcoming visit(s) from Edit appointment — ${visitCountResult.added.length} added, ${visitCountResult.cancelledIds.length} cancelled (was ${visitCountResult.before})`,
+          // Records what the plan HAS, with the request noted separately when
+          // they differ — an audit row claiming a length that was never
+          // reached is worse than no row (Codex #3337 r6 P2).
+          description: `${audited?.service_type || 'Recurring'} plan now has ${visitCountResult.achieved} upcoming visit(s) from Edit appointment — ${visitCountResult.added.length} added, ${visitCountResult.cancelledIds.length} cancelled (was ${visitCountResult.before})${visitCountResult.shortfall ? `; ${visitCountResult.target} requested, ${visitCountResult.shortfall} could not be placed on the cadence` : ''}`,
         });
       } catch (e) { logger.warn(`[schedule/visit-count] audit line failed (non-blocking): ${e.message}`); }
     }
@@ -7420,13 +7435,27 @@ async function findBillingCoveredVisits(conn, visits) {
   // a visit whose fee is still undecided must be refused here rather than
   // reaching the cancellation follow-through (Codex #3337 r5 P1).
   //
-  // fee_status IS NULL is exactly "no terminal fee event yet" — the set that
-  // can still be charged or waived. A row already charged / waived / released
-  // is settled, and trimming it is safe.
+  // Mirrors the canonical chargeability check (appointment-card-request.js:
+  // 1464-1481) rather than refusing on any null fee stamp: an abandoned
+  // `pending` request or an auto-secured `satisfied` one also has fee_status
+  // NULL but carries no agreed fee, and refusing those would block trims that
+  // have no money exposure at all (Codex #3337 r6 P2). A row only blocks when
+  // it could actually produce a charge — completed, with frozen positive
+  // terms, recorded consent and a charge target — and its fee event is either
+  // absent or still in flight (charging / charge_review are unsettled, not
+  // benign absence).
   if (ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
     const requests = await conn('appointment_card_requests')
       .whereIn('scheduled_service_id', ids)
-      .whereNull('fee_status')
+      .where('status', 'completed')
+      .where('no_show_fee_amount', '>', 0)
+      .where('cancel_window_hours', '>', 0)
+      .whereNotNull('fee_agreed_at')
+      .whereNotNull('stripe_payment_method_id')
+      .whereNotNull('customer_id')
+      .where(function () {
+        this.whereNull('fee_status').orWhereIn('fee_status', ['charging', 'charge_review']);
+      })
       .select('scheduled_service_id');
     for (const r of requests) mark(r.scheduled_service_id, 'secured with a card whose late-cancel fee has not been settled');
   }

@@ -63,10 +63,10 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
     const record = (name) => (...args) => {
       if (name === 'where' && typeof args[0] === 'function') {
         const nested = [];
-        const sub = {
-          where(...a) { nested.push(['where', ...a]); return sub; },
-          orWhere(...a) { nested.push(['orWhere', ...a]); return sub; },
-        };
+        const sub = {};
+        for (const m of ['where', 'orWhere', 'whereIn', 'orWhereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'whereNot']) {
+          sub[m] = (...a) => { nested.push([m, ...a]); return sub; };
+        }
         args[0].call(sub, sub);
         calls.push(['whereFn', nested]);
       } else {
@@ -74,7 +74,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -389,10 +389,36 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
-  test('the guard queries only UNSETTLED card requests (fee_status IS NULL)', () => {
-    const guard = src.slice(src.indexOf('The /secure rail is a SEPARATE fee lane'), src.indexOf('return covered;'));
+  test('the card-request guard mirrors canonical chargeability, not every null fee stamp (Codex #3337 r6 P2)', () => {
+    // An abandoned `pending` request or an auto-secured `satisfied` one also
+    // has fee_status NULL but carries no agreed fee — refusing those would
+    // block trims with no money exposure at all.
+    const guard = src.slice(src.indexOf('Mirrors the canonical chargeability check'), src.indexOf('return covered;'));
     expect(guard).toContain("conn('appointment_card_requests')");
-    expect(guard).toContain(".whereNull('fee_status')");
+    expect(guard).toContain("where('status', 'completed')");
+    expect(guard).toContain("where('no_show_fee_amount', '>', 0)");
+    expect(guard).toContain("where('cancel_window_hours', '>', 0)");
+    expect(guard).toContain("whereNotNull('fee_agreed_at')");
+    expect(guard).toContain("whereNotNull('stripe_payment_method_id')");
+    // In-flight fee events are unsettled too, not benign absence.
+    expect(guard).toContain("orWhereIn('fee_status', ['charging', 'charge_review'])");
+  });
+
+  test('the ongoing baseline is read UNDER the maintenance lock (Codex #3337 r6 P1)', () => {
+    // A pre-lock read is stale by construction: a concurrent mutation holding
+    // the lock commits the opposite value while this request waits for it.
+    const lockLine = src.indexOf('acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id');
+    const baselineRead = src.indexOf('const wasOngoingBeforeSave = ongoingBeforeRow?.recurring_ongoing === true;');
+    expect(lockLine).toBeGreaterThan(-1);
+    expect(baselineRead).toBeGreaterThan(lockLine);
+    // And it must not have been left behind before the lock as well.
+    expect((src.match(/const wasOngoingBeforeSave =/g) || []).length).toBe(1);
+  });
+
+  test('the resize audit records the achieved length, not the request (Codex #3337 r6 P2)', () => {
+    const audit = src.slice(src.indexOf("action: 'recurring_plan_count_set'") - 700, src.indexOf("action: 'recurring_plan_count_set'") + 900);
+    expect(audit).toContain('plan now has ${visitCountResult.achieved}');
+    expect(audit).toContain('could not be placed on the cadence');
   });
 
   test('a pre-migration env without the card-hold table still trims (prepay guard stands alone)', async () => {
