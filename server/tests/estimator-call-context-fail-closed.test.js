@@ -46,6 +46,7 @@ jest.mock('../models/db', () => {
       return this;
     },
     orWhere() { return this; },
+    whereIn() { return this; },
     whereNull() { return this; },
     whereNot() { return this; },
     orderBy() { return this; },
@@ -915,5 +916,83 @@ describe('buildSmsThreadContext isExistingCustomer requires active (gate on)', (
     mockCustomerRows = [{ ...ROW, active: false }];
     const context = await buildSmsThreadContext(SMS_ARGS);
     expect(context.isExistingCustomer).toBe(true);
+  });
+});
+
+describe('email-owner guard covers every customer email slot (PR #3275)', () => {
+  // A blocked-ID spouse/tenant/property manager stating an email held in
+  // service_contact{,2,3}_email is an existing account's caller. Matching
+  // the primary `email` column alone let that call reach the estimator and
+  // draft a PROSPECT-priced estimate for a live customer.
+  // ENRICHED (V2 valid) shape — the guard deliberately ignores the
+  // unvalidated V1 fallback (codex P1, PR #3304), so the fixtures must
+  // carry the email at caller.email under a valid enriched payload.
+  const ANON_CALL = (caller) => CALL({
+    from_phone: 'Anonymous',            // suppressed caller ID → no phone key
+    to_phone: '+19413187612',           // a Waves line, so it is never the caller
+    v2_extraction_status: 'valid',
+    ai_extraction_enriched: JSON.stringify({ property: {}, caller }),
+  });
+
+  test('the guard queries all four email columns', async () => {
+    mockCallRow = ANON_CALL({ email: 'spouse@example.com' });
+    mockCustomerRows = [];
+
+    await buildCallContext('call-1');
+
+    const joined = mockCustomerWhereSql.join('\n');
+    expect(joined).toContain('service_contact_email');
+    expect(joined).toContain('service_contact2_email');
+    expect(joined).toContain('service_contact3_email');
+    expect(joined).toContain('LOWER(TRIM(email))');
+  });
+
+  test('an anonymous caller stating a slot email fails CLOSED to identity review', async () => {
+    mockCallRow = ANON_CALL({ email: 'spouse@example.com' });
+    mockCustomerRows = [{ id: 'cust-7' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).toBe('email_matches_existing_customer');
+  });
+
+  test('no email in the extraction leaves the guard dormant', async () => {
+    mockCallRow = ANON_CALL({ first_name: 'Dana' });
+    mockCustomerRows = [];
+
+    await buildCallContext('call-1');
+
+    expect(mockCustomerWhereSql.join('\n')).not.toContain('service_contact_email');
+  });
+
+  test('a shared manager email across several accounts is not a phantom conflict', async () => {
+    // One email legitimately sits on many accounts (a property manager in
+    // each building's contact slots). Taking only the first owner would
+    // red-lane a phone match that IS one of them.
+    mockCallRow = CALL({ ai_extraction: JSON.stringify({ email: 'manager@acme.com' }) });
+    mockCustomerRows = [{ id: 'cust-1' }, { id: 'cust-2' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).not.toBe('email_identity_conflict');
+  });
+});
+
+describe('email-owner guard ignores the unvalidated V1 shape (PR #3304)', () => {
+  test('a V1-only email never triggers the veto', async () => {
+    // The V1 blob is a raw text-parse fallback — a stale or hallucinated
+    // email matching an active customer must not red-lane an otherwise
+    // draftable call; V1 calls keep their normal review path.
+    mockCallRow = CALL({
+      from_phone: 'Anonymous',
+      to_phone: '+19413187612',
+      ai_extraction: JSON.stringify({ email: 'spouse@example.com' }),
+    });
+    mockCustomerRows = [{ id: 'cust-7' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).not.toBe('email_matches_existing_customer');
+    expect(context.error).not.toBe('email_identity_conflict');
   });
 });

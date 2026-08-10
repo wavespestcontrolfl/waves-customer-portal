@@ -216,7 +216,37 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first();
-      if (byCall) return { lead: byCall, forThisCall: true };
+      if (byCall) return { lead: byCall, forThisCall: true, linkage: 'sid' };
+    }
+    // Phone-less reuse linkage: when a phone-less caller's later call reuses
+    // a prior lead, the processor stamps call_log.metadata.lead_id instead
+    // of restamping the lead's sid (the lead keeps its ORIGINAL call's sid —
+    // rolling it would destroy that call's identity). Follow the stamp
+    // before the phone fallback; with no phone there is nothing else to
+    // follow, and without this the current call's estimator draft could not
+    // link to its lead (codex P1, PR #3275).
+    const stampedLeadId = (() => {
+      try {
+        const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+        return md?.lead_id || null;
+      } catch { return null; }
+    })();
+    // NO settled-stamp (processing_token) condition here, deliberately —
+    // unlike the out-of-band consumers (admin card, bridge, agent pack).
+    // The estimator draft runs IN-PIPELINE from the call processor while
+    // this call's own token is still set: its Step 4b just wrote this
+    // stamp, and gating on token-null would skip it for exactly the
+    // phone-less reused-lead case the stamp exists for — the draft would
+    // lose the lead link entirely, since a phone-less call has no
+    // last-10 fallback (codex P1, PR #3304). A stamp later cleared or
+    // repointed by a retry re-runs the draft with the corrected linkage.
+    if (stampedLeadId) {
+      const byStamp = await db('leads')
+        .select(LEAD_COLS)
+        .where({ id: stampedLeadId })
+        .whereNull('deleted_at')
+        .first();
+      if (byStamp) return { lead: byStamp, forThisCall: true, linkage: 'stamp' };
     }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
@@ -257,7 +287,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
       if (reused) {
         const ownSid = reused.twilio_call_sid && call?.twilio_call_sid
           && reused.twilio_call_sid === call.twilio_call_sid;
-        if (ownSid) return { lead: reused, forThisCall: true };
+        if (ownSid) return { lead: reused, forThisCall: true, linkage: 'sid' };
         // ANY reused row not stamped with THIS call's sid — an older
         // foreign-sid lead or an unstamped web/manual lead — was most
         // likely touched by this call's processing, but on a shared line a
@@ -281,7 +311,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         if (call?.twilio_call_sid) concurrentQ = concurrentQ.whereNot('twilio_call_sid', call.twilio_call_sid);
         if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
         const concurrentCall = await concurrentQ.first();
-        if (!concurrentCall) return { lead: reused, forThisCall: true };
+        if (!concurrentCall) return { lead: reused, forThisCall: true, linkage: 'phone_touched' };
         // Ambiguous attribution on an actively-shared line: demoting the
         // lead to the byPhone fallback is not enough — addressFromContext
         // still lets a history lead supply the quote address for a new
@@ -318,7 +348,11 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     return { lead: byPhone || null, forThisCall: false };
   } catch (err) {
     logger.warn(`[estimator-engine] lead load failed: ${err.message}`);
-    return { lead: null, forThisCall: false };
+    // `unavailable` distinguishes a FAILED lookup from an established
+    // absence (pre-push P1 r2): the existing-draft reconciliation clears
+    // a draft's lead links when the call has no current linkage, and a
+    // transient DB error must not masquerade as that verdict.
+    return { lead: null, forThisCall: false, unavailable: true };
   }
 }
 
@@ -441,6 +475,87 @@ async function buildCallContext(callLogId) {
   if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
   }
+  // Email identity guard (codex P1 ×3, PR #3275): the stated email is
+  // checked against REAL, active customers whenever the extraction carries
+  // one — not only when phone resolution found nobody. The failure modes it
+  // closes: (a) blocked caller ID with no usable number, (b) a stated
+  // new/spouse callback number that matches NO account (phone truthy but
+  // unmatched), and (c) a callback number that matches a DIFFERENT
+  // customer — where drafting would link and price against the phone
+  // owner's property and membership instead of the stated email's owner.
+  // The email is matched against EVERY customer email slot — primary plus
+  // service_contact{,2,3}_email — because a blocked-ID spouse, tenant or
+  // property manager stating a slot email is just as much an existing
+  // account's caller (codex P1 r18). This guard only ever fails CLOSED to
+  // identity review; it never links a customer, so the call path's
+  // phone-slot exclusion is untouched.
+  // "Real, active" = the canonical whereLiveCustomer predicate
+  // (customer-stages.js) — stage and active are independently editable,
+  // and a deactivated former customer calling as a new prospect must stay
+  // draft-eligible, matching the grounded-customer loader's own
+  // active===true requirement (codex P2). Lead-stage rows are NOT members
+  // and stay draft-eligible. Lookup failure fails closed like the phone
+  // path.
+  {
+    // ENRICHED (V2 valid) extractions only (codex P1, PR #3304): the V1
+    // fallback blob is unvalidated — a stale or hallucinated V1 email that
+    // happens to match an active customer's contact would red-lane an
+    // otherwise draftable call. A V1-only call keeps its normal review
+    // path; the transcript still carries the address for a human read.
+    // (Within V2, caller.email is the shape — reading only the top level
+    // made this guard a no-op for every valid extraction; codex P1, PR
+    // #3275.)
+    const extractionEmailLc = extractionSource === 'enriched'
+      ? String(extraction?.caller?.email || '').trim().toLowerCase()
+      : '';
+    if (extractionEmailLc) {
+      try {
+        // EVERY customer email slot, not just the primary (codex P1 r18):
+        // service_contact{,2,3}_email are established contacts on the
+        // account (see customer-contact.js), so a blocked-ID spouse, tenant
+        // or property manager stating one of them is an existing customer's
+        // caller — matching on `email` alone let that call draft a
+        // prospect-priced estimate for a live account.
+        // Two EXACT questions instead of a capped owner list (codex P2, PR
+        // #3275): "does anyone own this email" and, separately, "does the
+        // phone match own it". One email legitimately sits on many accounts
+        // (a property manager in the service-contact slots of every building
+        // they run), so a bounded, unordered fetch could omit the very owner
+        // the phone matched and raise a phantom conflict against a
+        // legitimate draft. Scoping the second query by id keeps both cheap
+        // however many accounts share the address.
+        // The CANONICAL live-customer predicate (codex P1, PR #3304) —
+        // active=true + not-deleted + the canonical stage list, one
+        // definition with every other estimator guard, so a lifecycle
+        // change can never make this veto classify a different
+        // population than its siblings.
+        const { whereLiveCustomer } = require('../customer-stages');
+        const emailOwnerQuery = () => whereLiveCustomer(db('customers'))
+          .whereRaw(
+            '(LOWER(TRIM(email)) = ? OR LOWER(TRIM(service_contact_email)) = ?'
+            + ' OR LOWER(TRIM(service_contact2_email)) = ? OR LOWER(TRIM(service_contact3_email)) = ?)',
+            [extractionEmailLc, extractionEmailLc, extractionEmailLc, extractionEmailLc],
+          );
+        const anyEmailOwner = await emailOwnerQuery().first('id');
+        if (anyEmailOwner && !customerMatch.customer) {
+          logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');
+          return { error: 'email_matches_existing_customer', call };
+        }
+        if (anyEmailOwner && customerMatch.customer) {
+          const matchOwnsEmail = await emailOwnerQuery()
+            .where('id', customerMatch.customer.id)
+            .first('id');
+          if (!matchOwnsEmail) {
+            logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
+            return { error: 'email_identity_conflict', call };
+          }
+        }
+      } catch (emailErr) {
+        logger.warn(`[estimator-engine] email-owner check failed — failing closed: ${emailErr.code || emailErr.name || 'db_error'}`);
+        return { error: 'customer_lookup_unavailable', call };
+      }
+    }
+  }
   // Fail CLOSED on lookup failure, exactly like the SMS-origin path: a
   // failed query is not a no-match — an existing member could be hiding
   // behind the error, and continuing would quote them as a new prospect
@@ -487,6 +602,15 @@ async function buildCallContext(callLogId) {
     // processing) from prior phone history — the current lead's address
     // outranks the saved profile for second-property quotes.
     leadIsForThisCall: leadMatch.forThisCall,
+    // The lead lookup FAILED (as opposed to finding nothing) — reconcilers
+    // that treat absence as a verdict must skip (pre-push P1 r2).
+    leadLookupUnavailable: leadMatch.unavailable === true,
+    // HOW this call's lead resolved — 'sid' and 'stamp' are durable
+    // linkage; 'phone_touched' is bounded to the call's processing window
+    // and reads as history once anything later touches the lead, so
+    // reconcilers must not treat its absence as an unlink (pre-push P1
+    // r3).
+    leadLinkage: leadMatch.linkage || null,
     smsThread,
     priorEstimates,
     // An AMBIGUOUS shared-phone match must never unlock member pricing
