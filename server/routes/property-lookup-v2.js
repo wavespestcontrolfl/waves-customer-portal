@@ -2948,9 +2948,13 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // legacy AI-cache record (no field evidence) or a hybrid whose type came
   // from a web hit is trusted for classification but must not produce
   // county-master copy (codex P1 ×2).
+  // County/cadastral ONLY — verified/permit/builder are authoritative for
+  // classification but are not the county roll, and this copy claims
+  // county-roll provenance (codex P1).
+  const COUNTY_ROLL_SOURCES = new Set(['county', 'cadastral']);
   const countyBackedType = rc && (
-    ['county', 'cadastral'].includes(String(rc._source || ''))
-    || AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(String(rc._fieldEvidence?.propertyType?.sourceType || '').toLowerCase())
+    COUNTY_ROLL_SOURCES.has(String(rc._source || ''))
+    || COUNTY_ROLL_SOURCES.has(String(rc._fieldEvidence?.propertyType?.sourceType || '').toLowerCase())
     || Boolean(rc._parcel?.aggregated)
   );
   if (rc && countyBackedType
@@ -2983,9 +2987,27 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       const unitDimensionStep = unitsParcelled
         ? 'collect the unit number and re-run the lookup with it (condo/townhome unit parcels carry the unit\'s own dimensions), or replace home/lot sq ft and stories with the unit\'s actual figures'
         : 'collect the unit number and get the unit\'s own sq ft and stories from the customer — rental complexes have no per-unit county parcels; if this is actually an individually parcelled condo/townhome community, running the lookup again with the unit number will pull the unit\'s own record';
+      // Dimension provenance is per FIELD: a tech-verified or builder value
+      // may have overridden the county's — only county-sourced dimensions
+      // are the master parcel's, so only claim (and warn about) those
+      // (codex P1). Absent per-field evidence on a county-backed record,
+      // the value is the county's.
+      const countyDim = (field) => {
+        const ev = rc._fieldEvidence?.[field];
+        if (!ev) return true;
+        return COUNTY_ROLL_SOURCES.has(String(ev.sourceType || '').toLowerCase());
+      };
+      const countyDimLabels = [
+        countyDim('squareFootage') ? 'sq ft' : null,
+        countyDim('lotSize') ? 'lot' : null,
+        countyDim('stories') ? 'stories' : null,
+      ].filter(Boolean);
+      const dimensionWarning = countyDimLabels.length
+        ? `, and the prefilled ${countyDimLabels.join(', ')} ${countyDimLabels.length > 1 ? 'are' : 'is'} the WHOLE BUILDING'S, not one home's. Do NOT save ${countyDimLabels.length > 1 ? 'these' : 'it'} as field-verified — that would permanently pin the building's dimensions to this address.`
+        : '.';
       flags.push({
         field: 'commercialSubtype',
-        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way, and the prefilled sq ft, lot, and stories are the WHOLE BUILDING'S, not one home's. Do NOT save these as field-verified — that would permanently pin the building's dimensions to this address. If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way${dimensionWarning} If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
         priority: 'HIGH',
       });
     }

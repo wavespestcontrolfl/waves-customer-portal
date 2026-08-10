@@ -435,6 +435,41 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
   });
 
+  test('verified/permit/builder type sources do not pass the county-roll gate (codex P1)', () => {
+    // Authoritative for classification, but not the county roll — the copy
+    // claims county provenance, so only county/cadastral evidence earns it.
+    for (const sourceType of ['verified', 'permit', 'builder']) {
+      const flags = buildFieldVerifyFlags(countyMultifamilyBuilding({
+        _source: 'hybrid',
+        _fieldEvidence: { propertyType: { value: 'Multifamily', sourceType, fieldVerify: false, score: 90 } },
+      }), null, null);
+      expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+    }
+  });
+
+  test('per-field dimension provenance: verified sqft is excluded from the building-wide claim (codex P1)', () => {
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+      _fieldEvidence: {
+        squareFootage: { value: 1200, sourceType: 'verified', fieldVerify: false, score: 100 },
+      },
+    }), null, null).find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/lot, stories are the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/sq ft, lot, stories/);
+  });
+
+  test('all dimensions tech-verified → no building-wide dimension claim, exit steps remain', () => {
+    const verified = (value) => ({ value, sourceType: 'verified', fieldVerify: false, score: 100 });
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding({
+      _fieldEvidence: {
+        squareFootage: verified(1200), lotSize: verified(500), stories: verified(2),
+      },
+    }), null, null).find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/set Commercial to No/i);
+  });
+
   test('hybrid whose type evidence IS county-sourced → guidance fires', () => {
     const hybrid = countyMultifamilyBuilding({
       _source: 'hybrid',
