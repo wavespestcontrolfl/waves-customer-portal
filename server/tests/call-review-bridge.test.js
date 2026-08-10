@@ -158,6 +158,22 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(out.needsConfirmation).not.toContain('missing_unit_number');
   });
 
+  test('suffix aliases outside the narrow strip list still corroborate (Loop vs Lp)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV('100 Example Lp'),
+      extracted: { address_line1: '100 Example Loop', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).toContain('missing_unit_number');
+    // A genuinely different street still fails, alias table or not.
+    const different = deriveCallReviewBridge({
+      addressValidation: UNIT_AV('100 Example Lp'),
+      extracted: { address_line1: '100 Sample Loop', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(different.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
   test('same street name in a different city/ZIP is a different building → no unit ask', () => {
     const differentZip = deriveCallReviewBridge({
       addressValidation: UNIT_AV(),

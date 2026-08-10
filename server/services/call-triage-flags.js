@@ -430,11 +430,20 @@ function unitAskCorroborated(av, extracted = {}) {
   // to collect a unit already on the record files a permanent, unanswerable
   // task. Covers both shapes: a dedicated legacy line 2 and a unit peeled
   // out of the street line itself ("100 Example Condo Ct Apt 4").
-  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
   if (String(extracted.address_line2 || '').trim()) return false;
   if (splitStreetLineUnit(extracted.address_line1).unit) return false;
-  const avKey = streetCompareKey(av?.normalized?.street_line_1);
-  const legacyKey = streetCompareKey(extracted.address_line1);
+  // Compare through the CANONICAL suffix table, not streetCompareKey's
+  // hand-written strip list (codex r15 P1): that list omits pairs the
+  // normalizer already aliases — "100 Example Loop" vs Google's "100 Example
+  // Lp" — and a false mismatch here silently suppresses the ask, leaving the
+  // office with the generic hold and no instruction to collect the unit.
+  // streetCompareKey itself is deliberately left alone: the adoption rule and
+  // the second-address check are calibrated to its narrower matching.
+  const buildingKey = (line) => normalizeStreetLine(splitStreetLineUnit(line).street)
+    .toLowerCase().replace(/[^a-z0-9]/g, '');
+  const avKey = buildingKey(av?.normalized?.street_line_1);
+  const legacyKey = buildingKey(extracted.address_line1);
   if (!avKey || !legacyKey || avKey !== legacyKey) return false;
   const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
