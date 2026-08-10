@@ -599,13 +599,45 @@ const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 // visit for marking purposes, and checking only the primary left those techs
 // with no way to record the points they drilled.
 async function markLaneForService(svc) {
-  const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-  const profile = await resolveCompletionProfileForScheduledService(svc, db);
-  const primaryKey = profile?.serviceKey || null;
-  if (laneSupportsMarks(primaryKey)) return primaryKey;
+  const { addonVerdictsFromLines, resolveAddonVerdicts } = require('../services/service-report/trace-eligibility');
+
+  // A COMPLETED visit resolves from the identity frozen into its record, not
+  // from the mutable schedule row (codex P2 r4). The report renders from
+  // completedServiceKey / completedAddonLines, so resolving live here lets an
+  // admin repoint via update-details desynchronize the two: the route would
+  // accept marks for a lane that never renders, or reject a clear for a
+  // removed lane while its old pins stay customer-visible.
+  let frozen = null;
   try {
-    const { resolveAddonVerdicts } = require('../services/service-report/trace-eligibility');
-    const addonVerdicts = await resolveAddonVerdicts(svc.id, db);
+    const record = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('service_data');
+    const data = record?.service_data
+      ? (typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data)
+      : null;
+    if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) frozen = data;
+  } catch { /* fall through to the live resolution below */ }
+
+  let primaryKey = null;
+  let addonVerdicts = [];
+  if (frozen) {
+    primaryKey = frozen.completedServiceKey || null;
+    if (Array.isArray(frozen.completedAddonLines)) {
+      addonVerdicts = await addonVerdictsFromLines(frozen.completedAddonLines, db).catch(() => []);
+    }
+  } else {
+    const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+    const profile = await resolveCompletionProfileForScheduledService(svc, db);
+    primaryKey = profile?.serviceKey || null;
+  }
+  if (laneSupportsMarks(primaryKey)) return primaryKey;
+
+  try {
+    // Scan every line for a photo lane — not combineLineVerdicts, which stops
+    // at the primary or the first eligible add-on (codex P1 r4). Must match
+    // the report's scan or the two disagree about whether marks may exist.
+    if (!frozen) addonVerdicts = await resolveAddonVerdicts(svc.id, db);
     const photoLine = (addonVerdicts || []).find(
       (v) => v?.eligible && v.variant === 'photo' && laneSupportsMarks(v.serviceKey),
     );

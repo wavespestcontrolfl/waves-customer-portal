@@ -2673,24 +2673,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // widening the combine above, so a spray/outline add-on cannot start
   // rescuing primaries in a configuration where the registry is otherwise
   // dark; only a PHOTO verdict is adopted here.
-  let photoLaneVerdict = traceEligibility;
-  if (photoMarksGateOn()
-    && !traceEligibilityGateOn()
-    && traceEligibility.variant !== 'photo') {
+  // Scans EVERY line independently rather than reusing combineLineVerdicts
+  // (codex P1 r4): that helper returns the primary when it is eligible, or
+  // the FIRST eligible add-on, so a foam line sitting behind an eligible
+  // trenching primary — or behind an earlier spray/outline add-on — was never
+  // seen. markLaneForService meanwhile offered marks for that same line, so a
+  // technician could place points the report then silently dropped.
+  //
+  // Runs under BOTH gate configurations: the combined verdict can be 'spray'
+  // from an eligible primary even with the eligibility gate on, so gating this
+  // scan on the gate state would leave the same hole. Only the marks gate
+  // guards it, and only a 'photo' verdict is ever adopted — the satellite
+  // lane's combined verdict above is left untouched.
+  let photoLaneVerdict = traceEligibility.variant === 'photo' ? traceEligibility : null;
+  if (!photoLaneVerdict && photoMarksGateOn()) {
     try {
       const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
-      const combinedForPhoto = combineLineVerdicts(
-        traceEligibility,
-        Array.isArray(frozenPhotoLines)
-          ? await addonVerdictsFromLines(frozenPhotoLines, knex, { renderSide: true })
-          : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
-      );
-      if (combinedForPhoto.eligible && combinedForPhoto.variant === 'photo') {
-        photoLaneVerdict = combinedForPhoto;
-      }
-    } catch { /* primary verdict stands — fail-soft, same as the combine above */ }
+      const lineVerdicts = Array.isArray(frozenPhotoLines)
+        ? await addonVerdictsFromLines(frozenPhotoLines, knex, { renderSide: true })
+        : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true });
+      photoLaneVerdict = (lineVerdicts || [])
+        .find((v) => v?.eligible && v.variant === 'photo') || null;
+    } catch { /* fail-soft: no photo lane found, the satellite verdict stands */ }
   }
-  const photoLaneSuppressed = photoMarksGateOn() && photoLaneVerdict.variant === 'photo';
+  const photoLaneSuppressed = photoMarksGateOn() && Boolean(photoLaneVerdict);
   const traceSuppressed = (traceEligibilityGateOn()
     && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
     || photoLaneSuppressed;
@@ -4480,7 +4486,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           marks: photo.marks,
           // photoLaneVerdict, not the primary: a foam ADD-ON makes the visit
           // a photo lane and must be able to publish the card (codex P1 r3).
-          eligibility: photoLaneVerdict,
+          // Null when no line is a photo lane — the context then declines on
+          // lane_not_eligible, which is the correct answer.
+          eligibility: photoLaneVerdict || traceEligibility,
         });
         if (!context.available || !photo.url) return null;
         return {

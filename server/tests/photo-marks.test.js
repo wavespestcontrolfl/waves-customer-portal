@@ -321,6 +321,27 @@ describe('a foam ADD-ON makes the visit a photo lane', () => {
     expect(block).toMatchObject({ status: 403, payload: { code: 'trace_photo_lane' } });
   });
 
+  test('a photo add-on is found BEHIND an eligible earlier line', async () => {
+    // combineLineVerdicts stops at the primary (when eligible) or the first
+    // eligible add-on, so a foam line behind a trenching primary or an
+    // earlier spray add-on was invisible — while the tech route offered marks
+    // for it, producing marks the report silently dropped (codex P1 r4).
+    const verdicts = await addonVerdictsFromLines(
+      [
+        { serviceKey: 'termite_trenching', findingsType: 'termite_treatment', service_name: 'Trenching' },
+        { serviceKey: 'foam_drill', findingsType: 'termite_treatment', service_name: 'Drill-and-Foam Termite' },
+      ],
+      knexStub([]),
+    );
+    // The combined verdict picks the FIRST eligible line...
+    const { combineLineVerdicts } = require('../services/service-report/trace-eligibility');
+    expect(combineLineVerdicts({ eligible: false, reason: 'bait_station_lane' }, verdicts).variant)
+      .toBe('spray');
+    // ...so the photo lane must be found by an independent scan.
+    const photoLine = verdicts.find((v) => v?.eligible && v.variant === 'photo');
+    expect(photoLine).toMatchObject({ variant: 'photo', serviceKey: 'foam_drill' });
+  });
+
   test('a visit with no foam line keeps pre-gate capture behavior', async () => {
     const fresh = require('../services/service-report/trace-eligibility');
     const block = await withGates(undefined, 'true', () => fresh.traceCaptureBlockPayload(
