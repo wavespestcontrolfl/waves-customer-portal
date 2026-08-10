@@ -83,7 +83,7 @@ describe('attributeUnclaimedBridgeLeads', () => {
       lead_source_id: 'src-bridge',
     }];
     // The locked FOR UPDATE re-read inside the per-lead transaction.
-    firstByTable.leads = {
+    firstByTable['leads as l'] = {
       id: 'lead-1',
       customer_id: 'c1',
       lead_source_id: 'src-bridge',
@@ -113,7 +113,7 @@ describe('attributeUnclaimedBridgeLeads', () => {
     listByTable['leads as l'] = [{
       id: 'lead-anon', customer_id: null, created_at: '2026-06-01', lead_source_id: 'src-bridge',
     }];
-    firstByTable.leads = {
+    firstByTable['leads as l'] = {
       id: 'lead-anon', customer_id: null, created_at: '2026-06-01', lead_source_id: 'src-bridge', twilio_call_sid: null,
     };
     const res = await attributeUnclaimedBridgeLeads();
@@ -143,7 +143,7 @@ describe('attributeUnclaimedBridgeLeads', () => {
     listByTable['leads as l'] = [{
       id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge',
     }];
-    firstByTable.leads = {
+    firstByTable['leads as l'] = {
       id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge', twilio_call_sid: null,
     };
     // recordCallPpcAttribution's lead_id lookup finds a row owned by another source
@@ -249,10 +249,15 @@ describe('scheduler wiring', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
     const lockedRead = sweep.split('const locked = await trx')[1].slice(0, 1200);
-    expect(lockedRead).toMatch(/whereNull\('deleted_at'\)/);
+    expect(lockedRead).toMatch(/whereNull\('l\.deleted_at'\)/);
     // Terminal-status exclusion under the lock: an admin marking the lead
     // duplicate/disqualified/spam mid-wait must not receive the row.
-    expect(lockedRead).toMatch(/COALESCE\(status,''\) NOT IN \('duplicate','disqualified','spam'\)/);
+    expect(lockedRead).toMatch(/COALESCE\(l\.status,''\) NOT IN \('duplicate','disqualified','spam'\)/);
+    // Ambiguity exclusions re-applied under the lock too (codex P1 r19): a
+    // force-reprocess can link an ambiguous call to the selected lead while
+    // the transaction waits — the shared helper runs on both queries.
+    expect(lockedRead).toMatch(/\.modify\(applyAmbiguityExclusions\)/);
+    expect(sweep).toMatch(/const applyAmbiguityExclusions = /);
   });
 
   test('successor discovery covers stamp, sid AND ownership-gated phone reuse (pre-push P0 r20)', () => {

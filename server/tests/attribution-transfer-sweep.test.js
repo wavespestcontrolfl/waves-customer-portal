@@ -251,4 +251,47 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(inserts).toHaveLength(0);
     expect(markerClearUpdates()).toHaveLength(1);
   });
+
+  test('a STAMP-LESS marker naming its target (to_lead_id) records against that lead instead of clearing (codex P1 r19)', async () => {
+    // reconcileFormerLeadLinkage's relink is deliberately stamp-less
+    // (gained-phone / sid-linked) — deriving the target exclusively from
+    // metadata.lead_id read this marker as positively-cleared linkage and
+    // deleted it without writing the attribution it carried.
+    const pending = { ...PENDING, to_lead_id: 'lead-B' };
+    scanRows = [{ id: 'call-1', metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.recorded).toBe(1);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({ lead_id: 'lead-B', customer_id: 'cust-1', source_call_id: 'call-1' });
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a live stamp takes PRECEDENCE over the marker-named target — a repoint re-decides the lead (codex P1 r19)', async () => {
+    const pending = { ...PENDING, to_lead_id: 'lead-B' };
+    const md = { lead_id: 'lead-C', attribution_transfer_pending: pending };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    leadRows = { 'lead-C': { id: 'lead-C', customer_id: 'cust-9' } };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.recorded).toBe(1);
+    expect(inserts[0].row).toMatchObject({ lead_id: 'lead-C', customer_id: 'cust-9' });
+  });
+
+  test('a stamp-less marker whose target lead is gone/soft-deleted clears — the lock re-applies the live predicate (codex P1 r19)', async () => {
+    const pending = { ...PENDING, to_lead_id: 'lead-B' };
+    scanRows = [{ id: 'call-1', metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: { attribution_transfer_pending: pending }, created_at: '2026-08-09T12:00:00Z' };
+    leadRows = { 'lead-B': { id: 'lead-B', customer_id: 'cust-1', deleted_at: '2026-08-09' } };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.cleared).toBe(1);
+    expect(inserts).toHaveLength(0);
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
 });

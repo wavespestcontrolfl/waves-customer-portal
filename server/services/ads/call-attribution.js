@@ -23,6 +23,10 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 // shared so the successor-inheritance gate can never drift from it (codex
 // P1 PR #3303 r18).
 const { isNonLeadCallContent } = require('../../utils/non-lead-call-content');
+// The processor's customer-attached lead-creation gate, mirrored by the
+// phone-successor linkage check (codex P1 r19) — same shared-definition
+// rule as the content veto above.
+const { shouldCreateCallLeadForCustomer } = require('../../utils/call-lead-customer-gate');
 
 // Map a lead_sources.source_type to the ad_service_attribution channel key +
 // paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
@@ -563,6 +567,43 @@ async function attributeUnclaimedBridgeLeads({
   const days = Math.max(1, parseInt(olderThanDays, 10) || 7);
   const cap = Math.max(1, parseInt(limit, 10) || 200);
 
+  // All three ambiguity-exclusion arms (sid / stamp / phone-reuse — see
+  // the excludeCallSids/excludeCallIds parameter doc). Expects the leads
+  // table aliased 'l'; applied to the candidate scan AND re-applied under
+  // the lead lock (codex P1 r19).
+  const applyAmbiguityExclusions = (qb) => {
+    if (excludeCallSids.length) {
+      qb.where(function sidNotAmbiguous() {
+        this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);
+      });
+    }
+    if (excludeCallIds.length) {
+      qb.whereNotExists(function stampedCallAmbiguous() {
+        this.select(1).from('call_log as cla')
+          .whereRaw("cla.metadata->>'lead_id' = l.id::text")
+          .whereIn('cla.id', excludeCallIds);
+      });
+      // PHONE-reuse linkage arm (codex P1 r18): a phone-bearing call the
+      // processor linked via findReusableCallLead left neither a sid nor
+      // a stamp on the lead — the only durable linkage is the caller's
+      // number, so a lead whose phone matches an ambiguous call's CALLER
+      // leg (from_phone; the dialed leg is the shared office number and
+      // would over-exclude every bridge-target lead) sits out until the
+      // ambiguity resolves. Deliberately broader than the retire arm's
+      // ownership gating: this exclusion only DELAYS an irreversible
+      // organic label and lifts the day the ambiguity clears, so
+      // shared-number over-match costs a day of waiting, never a wrong
+      // row. NULL/short lead phones must PASS (same rule as the NULL-sid
+      // arm): the length guard empties the subquery for them.
+      qb.whereNotExists(function phoneLinkedCallAmbiguous() {
+        this.select(1).from('call_log as clp')
+          .whereIn('clp.id', excludeCallIds)
+          .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
+          .whereRaw("RIGHT(regexp_replace(COALESCE(clp.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)");
+      });
+    }
+  };
+
   const leads = await db('leads as l')
     .whereIn('l.lead_source_id', bridgeSources.map((s) => s.id))
     // Live leads only (codex P1 r14): a soft-deleted lead with a customer
@@ -652,39 +693,14 @@ async function attributeUnclaimedBridgeLeads({
     })
     // Ambiguous-match exclusion (see the parameter doc). NULL-sid leads
     // must PASS the sid arm — a bare whereNotIn filters NULL rows out
-    // (NULL NOT IN (...) is SQL NULL).
-    .modify((qb) => {
-      if (excludeCallSids.length) {
-        qb.where(function sidNotAmbiguous() {
-          this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);
-        });
-      }
-      if (excludeCallIds.length) {
-        qb.whereNotExists(function stampedCallAmbiguous() {
-          this.select(1).from('call_log as cla')
-            .whereRaw("cla.metadata->>'lead_id' = l.id::text")
-            .whereIn('cla.id', excludeCallIds);
-        });
-        // PHONE-reuse linkage arm (codex P1 r18): a phone-bearing call the
-        // processor linked via findReusableCallLead left neither a sid nor
-        // a stamp on the lead — the only durable linkage is the caller's
-        // number, so a lead whose phone matches an ambiguous call's CALLER
-        // leg (from_phone; the dialed leg is the shared office number and
-        // would over-exclude every bridge-target lead) sits out until the
-        // ambiguity resolves. Deliberately broader than the retire arm's
-        // ownership gating: this exclusion only DELAYS an irreversible
-        // organic label and lifts the day the ambiguity clears, so
-        // shared-number over-match costs a day of waiting, never a wrong
-        // row. NULL/short lead phones must PASS (same rule as the NULL-sid
-        // arm): the length guard empties the subquery for them.
-        qb.whereNotExists(function phoneLinkedCallAmbiguous() {
-          this.select(1).from('call_log as clp')
-            .whereIn('clp.id', excludeCallIds)
-            .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
-            .whereRaw("RIGHT(regexp_replace(COALESCE(clp.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)");
-        });
-      }
-    })
+    // (NULL NOT IN (...) is SQL NULL). Shared with the locked reread below
+    // (codex P1 r19): the exclusion snapshot goes stale while this
+    // transaction waits for the lead lock — a force-reprocess can LINK one
+    // of the ambiguous calls to a selected lead in that window, and the
+    // locked provenance resolution would then record the irreversible
+    // organic row the exclusion exists to prevent. One helper, applied to
+    // both queries (alias 'l' in each), so the arms can never drift.
+    .modify(applyAmbiguityExclusions)
     .orderBy('l.created_at')
     .limit(cap)
     .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id', 'l.twilio_call_sid');
@@ -713,19 +729,25 @@ async function attributeUnclaimedBridgeLeads({
         // reassigned customer or changed source must not pair a funnel
         // row with the wrong owner or channel. Channel re-derived from
         // the LOCKED row; a source that left the bridge set skips.
-        const locked = await trx('leads')
-          .where({ id: lead.id })
+        const locked = await trx('leads as l')
+          .where('l.id', lead.id)
           // Live-lead predicate re-applied under the lock (codex P1 r14):
           // a lead soft-deleted between selection and lock must not gain
           // an organic funnel row.
-          .whereNull('deleted_at')
+          .whereNull('l.deleted_at')
           // Terminal-status exclusion re-applied too (codex P2 r16): an
           // admin marking the lead duplicate/disqualified/spam while this
           // transaction waited must not receive the irreversible organic
           // row off the stale candidate snapshot.
-          .whereRaw("COALESCE(status,'') NOT IN ('duplicate','disqualified','spam')")
+          .whereRaw("COALESCE(l.status,'') NOT IN ('duplicate','disqualified','spam')")
+          // Ambiguity exclusions re-applied too (codex P1 r19): a
+          // force-reprocess can link an ambiguous call to this lead while
+          // the transaction waits for the lock — the stale snapshot would
+          // then resolve that call as provenance and write the
+          // irreversible organic row the exclusion exists to prevent.
+          .modify(applyAmbiguityExclusions)
           .forUpdate()
-          .first('id', 'customer_id', 'lead_source_id', 'service_interest', 'first_contact_at', 'created_at', 'twilio_call_sid');
+          .first('l.id', 'l.customer_id', 'l.lead_source_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.twilio_call_sid');
         if (!locked) return { recorded: false, reason: 'lead_gone' };
         const lockedSource = sourceById.get(locked.lead_source_id);
         const lockedChannel = attributionForSourceType(lockedSource?.source_type);
@@ -801,6 +823,42 @@ function callCarriesDurableLeadEvidence(aiExtractionRaw) {
   if (!extracted || typeof extracted !== 'object') return false;
   if (extracted.is_spam === true) return false;
   return !isNonLeadCallContent(extracted);
+}
+
+// The processor's LINKAGE decision re-judged, not just its content veto
+// (codex P1 r19): shouldCreateLead also gates customer-attached calls on
+// shouldCreateCallLeadForCustomer — an established customer's call
+// classified new_inquiry passes the content veto yet deliberately creates
+// or reuses NO lead, so inheriting the lead's booked/completed history
+// onto it would reassign funnel data to a call that never linked. Mirrored
+// from durable evidence:
+//   - customer-less candidates pass (that linkage path was gated only by
+//     workable signal + the content veto already applied above);
+//   - customer-attached voicemails never link (the processor's own veto);
+//   - a customer CREATED BY the candidate call (the durable
+//     metadata.created_customer_id stamp) always passed the gate;
+//   - otherwise the customer's pipeline stage must sit in the processor's
+//     lead-pipeline set (shouldCreateCallLeadForCustomer — the SHARED
+//     definition in utils/call-lead-customer-gate, same no-drift rule as
+//     the content veto). The CURRENT stage is judged — the at-call stage
+//     is not recorded — so a since-won customer's genuine successor is
+//     conservatively refused (FAIL CLOSED: the retire falls back to
+//     delete, never to a wrong inheritance).
+async function phoneSuccessorActuallyLinked(dbc, cand) {
+  let extracted = cand.ai_extraction;
+  if (typeof extracted === 'string') {
+    try { extracted = JSON.parse(extracted); } catch { return false; }
+  }
+  if (!extracted || typeof extracted !== 'object') return false;
+  if (!cand.customer_id) return true;
+  if (extracted.is_voicemail === true) return false;
+  let md = cand.metadata;
+  if (typeof md === 'string') {
+    try { md = JSON.parse(md); } catch { md = {}; }
+  }
+  if (md && String(md.created_customer_id || '') === String(cand.customer_id)) return true;
+  const customer = await dbc('customers').where({ id: cand.customer_id }).first('pipeline_stage');
+  return shouldCreateCallLeadForCustomer(customer || null);
 }
 
 // EVERY durable linkage mode (pre-push P0 r20): the stamp arm covers
@@ -901,29 +959,47 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
         });
       }
     });
-  // Two-step selection, unlike the stamp/sid arms: the content gate reads
-  // ai_extraction (TEXT) in JS, so candidates are scanned WITHOUT locks
-  // first — locking rows that then fail the gate would widen contention
-  // for nothing — and only the chosen candidate is re-selected under the
-  // r19 FOR UPDATE eligibility, which re-evaluates every predicate against
-  // the locked row's current version. The evidence is re-judged from the
-  // LOCKED row too: a full force-reprocess cycle (claim → re-extract →
-  // settle) can land between the scan and the lock. Newest-first, bounded:
-  // a lead with 10+ settled, unprovenanced, evidence-failing calls on its
-  // own number is not a real shape — the bound only guards the scan.
-  const candidates = await eligibilityFilters(phoneArm())
-    .orderBy('created_at', 'desc')
-    .limit(10)
-    .select([...SUCCESSOR_COLS, 'ai_extraction']);
-  for (const cand of (candidates || [])) {
-    if (!callCarriesDurableLeadEvidence(cand.ai_extraction)) continue;
-    const locked = await eligibilityFilters(phoneArm().where('call_log.id', cand.id))
+  // Two-step selection, unlike the stamp/sid arms: the content + linkage
+  // gates read ai_extraction (TEXT) and the customer row in JS, so
+  // candidates are scanned WITHOUT locks first — locking rows that then
+  // fail the gates would widen contention for nothing — and only the
+  // chosen candidate is re-selected under the r19 FOR UPDATE eligibility,
+  // which re-evaluates every predicate against the locked row's current
+  // version. The evidence is re-judged from the LOCKED row too: a full
+  // force-reprocess cycle (claim → re-extract → settle) can land between
+  // the scan and the lock. Newest-first, PAGED TO EXHAUSTION (codex P1
+  // r19): a frequent established customer readily accumulates ten routine
+  // support/billing calls that fail the gates, and stopping at a fixed
+  // window would treat the lead as successor-less — deleting
+  // history-bearing attribution while an older settled linked call still
+  // supports it. The batch size only bounds each scan round; keyset
+  // cursor ((created_at, id) strictly descending — id tie-breaks equal
+  // timestamps) so concurrent settles can't shift an offset window.
+  let cursor = null;
+  for (;;) {
+    const batch = await eligibilityFilters(phoneArm())
+      .modify((qb) => {
+        if (cursor) qb.whereRaw('(created_at, id) < (?, ?)', [cursor.created_at, cursor.id]);
+      })
       .orderBy('created_at', 'desc')
-      .forUpdate()
-      .first(...SUCCESSOR_COLS, 'ai_extraction');
-    if (locked && callCarriesDurableLeadEvidence(locked.ai_extraction)) return locked;
+      .orderBy('id', 'desc')
+      .limit(10)
+      .select([...SUCCESSOR_COLS, 'ai_extraction', 'customer_id']);
+    if (!batch || !batch.length) return null;
+    for (const cand of batch) {
+      if (!callCarriesDurableLeadEvidence(cand.ai_extraction)) continue;
+      if (!(await phoneSuccessorActuallyLinked(dbc, cand))) continue;
+      const locked = await eligibilityFilters(phoneArm().where('call_log.id', cand.id))
+        .orderBy('created_at', 'desc')
+        .forUpdate()
+        .first(...SUCCESSOR_COLS, 'ai_extraction', 'customer_id');
+      if (locked && callCarriesDurableLeadEvidence(locked.ai_extraction)
+        && await phoneSuccessorActuallyLinked(dbc, locked)) return locked;
+    }
+    if (batch.length < 10) return null;
+    const last = batch[batch.length - 1];
+    cursor = { created_at: last.created_at, id: last.id };
   }
-  return null;
 }
 
 async function retireCallAttributionRow(dbc, callLogId, leadId) {
@@ -1171,10 +1247,22 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
     summary.scanFailed = true;
     return summary;
   }
+  // The marker's target lead: a live stamp takes PRECEDENCE (a repoint
+  // after the marker was armed re-decides the target), and a STAMP-LESS
+  // marker names its own target in to_lead_id (codex P1 r19:
+  // reconcileFormerLeadLinkage's relink is deliberately stamp-less —
+  // gained-phone / sid-linked — so deriving the target exclusively from
+  // metadata.lead_id read every such marker as a positively-cleared
+  // linkage and deleted it without writing the attribution it carried).
+  // Markers with neither (legacy payload-less shapes) still clear.
+  const markerTargetLeadId = (md, pending) => {
+    if (md.lead_id) return String(md.lead_id);
+    return pending && pending.to_lead_id ? String(pending.to_lead_id) : null;
+  };
   for (const row of rows) {
     summary.scanned += 1;
     const scannedMd = parseMd(row.metadata);
-    const scannedLeadId = scannedMd.lead_id ? String(scannedMd.lead_id) : null;
+    const scannedLeadId = markerTargetLeadId(scannedMd, scannedMd.attribution_transfer_pending);
     try {
       const outcome = await db.transaction(async (trx) => {
         // Leads FIRST (repo-wide order): the scanned stamp names the lead
@@ -1231,16 +1319,21 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           await stampAttempt();
           return 'skipped';
         }
-        const liveLeadId = md.lead_id ? String(md.lead_id) : null;
-        // Positively-established dead linkage: a settled call with no live
-        // stamp (or a durable non-lead verdict) can never take the write.
+        const liveLeadId = markerTargetLeadId(md, pending);
+        // Positively-established dead linkage: a settled call with no
+        // resolvable target (no stamp AND no marker-named lead — the
+        // legacy payload-less shape) or a durable non-lead verdict can
+        // never take the write.
         if (!liveLeadId || md.no_attribution === true) {
           await clearMarker();
           return 'cleared';
         }
         if (liveLeadId !== scannedLeadId) return 'skipped'; // repointed since the scan — next run locks the right lead
         if (!lockedLead) {
-          // The stamp still names this lead but the row is gone/soft-deleted.
+          // The stamp/marker still names this lead but the row is
+          // gone/soft-deleted — nothing left to attribute (the lock above
+          // re-applied the live predicate, so this is the revalidation
+          // for stamp-less targets too).
           await clearMarker();
           return 'cleared';
         }

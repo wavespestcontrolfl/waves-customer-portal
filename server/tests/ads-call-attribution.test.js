@@ -834,11 +834,124 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
     expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
   });
 
+  test("an ESTABLISHED customer's lead-shaped call can NOT inherit — the processor's customer gate never linked it (codex P1 r19)", async () => {
+    // new_inquiry content passes the veto, but shouldCreateLead also
+    // requires shouldCreateCallLeadForCustomer for customer-attached
+    // calls — an active_customer's call created/reused no lead.
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'active_customer' };
+    listQueueByTable.call_log = [[{
+      id: 'call-established',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence(),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a MID-PIPELINE customer-attached call passes the linkage mirror and inherits (codex P1 r19)', async () => {
+    const successor = {
+      id: 'call-pipeline',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'estimate_sent' };
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-pipeline')).toBeTruthy();
+  });
+
+  test('a customer CREATED BY the candidate call passes via the durable created_customer_id stamp — no stage read (codex P1 r19)', async () => {
+    const successor = {
+      id: 'call-creator',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: { created_customer_id: 'cust-1' },
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'active_customer' }; // would refuse if consulted
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-creator')).toBeTruthy();
+  });
+
+  test('a customer-attached VOICEMAIL never inherits — the processor voicemail-vetoes that linkage path (codex P1 r19)', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'estimate_sent' }; // stage alone would pass
+    listQueueByTable.call_log = [[{
+      id: 'call-voicemail',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence({ is_voicemail: true }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('the scan PAGES past ten rejected candidates to an older valid successor (codex P1 r19)', async () => {
+    const routine = (i) => ({
+      id: `call-routine-${i}`,
+      created_at: `2026-08-09T12:00:${String(59 - i).padStart(2, '0')}Z`,
+      ai_extraction: JSON.stringify({ call_type: 'billing' }),
+    });
+    const older = {
+      id: 'call-page-two-valid',
+      to_phone: '+19415550001',
+      created_at: '2026-08-01T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, older]; // stamp arm miss; FOR UPDATE re-select hit
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [
+      Array.from({ length: 10 }, (_, i) => routine(i)), // full first page, all fail the gate
+      [older], // second page
+    ];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-page-two-valid')).toBeTruthy();
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
   test('the phone arm excludes outbound calls and sid-dissenting calls in SQL (durable columns)', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
-    const arm = src.split('const phoneArm = ()')[1].split('const candidates')[0];
+    const arm = src.split('const phoneArm = ()')[1].split('let cursor')[0];
     // The office dialing the number back never creates or reuses a lead.
     expect(arm).toMatch(/NOT LIKE 'outbound%'/);
     // A call whose sid is a DIFFERENT live lead's originating sid is that

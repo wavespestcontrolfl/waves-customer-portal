@@ -927,17 +927,10 @@ function customerPhoneMatches(phone, customer = {}) {
   return samePhone(phone, customer.phone);
 }
 
-const LEAD_PIPELINE_STAGES = new Set([
-  'new_lead',
-  'contacted',
-  'qualified',
-  'estimate_needed',
-  'estimate_draft',
-  'estimate_sent',
-  'estimate_viewed',
-  'follow_up',
-  'negotiating',
-]);
+// Extracted VERBATIM to the shared util (codex P1 PR #3303 r19) — the
+// attribution retire path mirrors this exact gate on phone-matched
+// successors; never re-inline or duplicate it.
+const { LEAD_PIPELINE_STAGES, shouldCreateCallLeadForCustomer } = require('../utils/call-lead-customer-gate');
 
 // Terminal lead statuses (`leads.status`). Mirrors admin-leads.js's own
 // "active lead" definition (status NOT IN these). The customer-less recovery
@@ -947,12 +940,6 @@ const LEAD_PIPELINE_STAGES = new Set([
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
 const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
-
-function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
-  if (!customer) return false;
-  if (createdCustomerFromCall) return true;
-  return LEAD_PIPELINE_STAGES.has(String(customer.pipeline_stage || '').toLowerCase());
-}
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -2782,8 +2769,23 @@ async function reconcileFormerLeadLinkage({
   await db.transaction(async (trx) => {
     // The final lead's row lock serializes this with concurrent stampers
     // and rejections; the fenced call-row lock makes the breadcrumb read
-    // authoritative.
-    await trx('leads').where({ id: leadId }).forUpdate().first('id');
+    // authoritative. The target is re-validated LIVE under its lock
+    // (codex P1 r19): soft-deleted between linkage and this transaction,
+    // transferring the former lead's history onto it would strand the row
+    // where runCallPpcAttribution's live-lead predicate can never repair
+    // it, and consuming the breadcrumb would erase the only retry state.
+    // Keep the breadcrumb (a later reprocess re-runs this reconciliation)
+    // and suppress this pass's funnel write.
+    const lockedTarget = await trx('leads')
+      .where({ id: leadId })
+      .whereNull('deleted_at')
+      .forUpdate()
+      .first('id');
+    if (!lockedTarget) {
+      conflictRetired = true;
+      logger.warn(`[call-proc] stamp-less relink of ${callSid} targets a missing/deleted lead ${leadId} — breadcrumb retained, funnel write suppressed`);
+      return;
+    }
     const owned = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
@@ -2831,6 +2833,14 @@ async function reconcileFormerLeadLinkage({
           if (customerId && markerAttr && !markerBridgeTarget) {
             markerPayload = {
               from_lead_id: String(formerLeadId),
+              // The marker's TARGET, persisted explicitly (codex P1 r19):
+              // this relink is deliberately STAMP-LESS (gained-phone /
+              // sid-linked — no metadata.lead_id), and the transfer sweep
+              // derives its target from the stamp, so without this the
+              // sweep read the marker as a positively-cleared linkage and
+              // deleted it without ever writing the attribution it
+              // carried. The sweep gives a live stamp precedence.
+              to_lead_id: String(leadId),
               lead_source: markerAttr.leadSource,
               is_paid: markerAttr.isPaid,
               detail: leadSourceRow.name || 'inbound call',

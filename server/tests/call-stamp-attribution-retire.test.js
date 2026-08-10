@@ -10,6 +10,7 @@ let mockTokenMatches = true;
 let mockSuccessorRow; // the retire primitives' settled-successor scan
 let mockAttributionRows = []; // retireAll's affected-leads read
 let mockAttrFirstQueue = []; // ordered ad_service_attribution .first reads
+let mockTargetLeadRow; // reconcile's live-revalidated target lead lock (codex P1 r19)
 const mockDeletes = [];
 const mockUpdates = [];
 
@@ -26,6 +27,9 @@ jest.mock('../models/db', () => {
       if (table === 'ad_service_attribution') {
         return mockAttrFirstQueue.length ? mockAttrFirstQueue.shift() : undefined;
       }
+      // The reconcile's target-lead lock re-applies the live predicate
+      // (codex P1 r19) — a deleted/missing target reads back undefined.
+      if (table === 'leads') return mockTargetLeadRow;
       if (table !== 'call_log') return undefined;
       const fenced = b._wheres.some((w) => w[0] === 'where' && w[1] === 'processing_token');
       // Fenced ownership reads carry the row's live metadata too (the
@@ -48,7 +52,9 @@ jest.mock('../models/db', () => {
     return b;
   };
   const db = (table) => makeBuilder(table);
-  db.raw = (sql) => sql;
+  // Bindings ride along so payload pins (e.g. the marker's to_lead_id) can
+  // assert on what jsonb_set actually writes, not just the SQL shape.
+  db.raw = (sql, bindings) => (bindings === undefined ? sql : `${sql} /*${JSON.stringify(bindings)}*/`);
   db.transaction = async (fn) => fn(db);
   return db;
 });
@@ -70,6 +76,7 @@ beforeEach(() => {
   mockSuccessorRow = undefined;
   mockAttributionRows = [{ lead_id: 'lead-9' }]; // one funnel row for the call
   mockAttrFirstQueue = [];
+  mockTargetLeadRow = { id: 'lead-new' }; // target lead live by default
   mockDeletes.length = 0;
   mockUpdates.length = 0;
 });
@@ -276,5 +283,41 @@ describe('reconcileFormerLeadLinkage — stamp-less breadcrumb consumption (code
     const writes = callLogMetaUpdates();
     expect(writes).toHaveLength(1);
     expect(writes[0].patch.metadata).not.toContain('attribution_transfer_pending');
+  });
+
+  test('the armed marker names its TARGET lead — the stamp-less sweep has no stamp to derive it from (codex P1 r19)', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    mockAttrFirstQueue = [undefined, { id: 'legacy-row' }];
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(true);
+    const writes = callLogMetaUpdates();
+    expect(writes).toHaveLength(1);
+    // The binding is a JSON.stringify'd payload inside a stringified
+    // bindings array, so the quotes arrive escaped.
+    expect(writes[0].patch.metadata).toContain('\\"to_lead_id\\":\\"lead-new\\"');
+    expect(writes[0].patch.metadata).toContain('\\"from_lead_id\\":\\"lead-old\\"');
+  });
+
+  test('a missing/deleted TARGET lead reconciles nothing and RETAINS the breadcrumb — the retry state survives (codex P1 r19)', async () => {
+    mockCallRow = { metadata: { attribution_former_lead_id: 'lead-old' } };
+    mockAttrFirstQueue = [{ id: 'row-1' }, undefined]; // would have transferred if the target were live
+    mockTargetLeadRow = undefined; // live-predicate lock finds no row
+
+    const res = await reconcileFormerLeadLinkage(baseArgs());
+
+    expect(res.conflictRetired).toBe(true); // funnel write suppressed
+    expect(mockAttrFirstQueue).toHaveLength(2); // no reconcile reads consumed
+    expect(mockUpdates.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(callLogMetaUpdates()).toHaveLength(0); // breadcrumb NOT consumed
+  });
+
+  test('the target-lead lock re-applies the LIVE predicate in source (codex P1 r19)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const block = src.slice(src.indexOf('async function reconcileFormerLeadLinkage'));
+    const lockRead = block.slice(0, block.indexOf('forUpdate'));
+    expect(lockRead).toContain("whereNull('deleted_at')");
   });
 });
