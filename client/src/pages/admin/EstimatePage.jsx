@@ -37,6 +37,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
+import { palmPrefillAllowed } from "../../lib/lookupPrefill";
 
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
@@ -1169,6 +1170,11 @@ function EstimateToolView() {
           ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
           ...(key === "stories" ? { _storiesEdited: true } : {}),
           ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+          // palmCount ONLY: the auto flag tracks the PROPERTY count's
+          // provenance — a treatment-count edit says nothing about it, and
+          // flipping the flag there would leave a stale property prefill
+          // uncleared on the next lookup.
+          ...(key === "palmCount" ? { _palmCountAuto: false } : {}),
         };
         if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = val;
@@ -1513,7 +1519,16 @@ function EstimateToolView() {
         upd.landscapeComplexity = ep.landscapeComplexity;
       if (ep.nearWater && ep.nearWater !== "NONE") upd.nearWater = "YES";
       if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
-      if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
+      // Palm prefill rides the server-stamped trust verdict — a distrusted
+      // AI count leaves the field empty for the operator to count
+      // (lib/lookupPrefill.js; owner ruling 2026-08-10). When THIS lookup
+      // supplies no trusted count (distrusted, zero, or absent), the
+      // setForm below clears a previous lookup's auto-fill instead of
+      // letting the form merge carry it into pricing; operator-typed
+      // values (_palmCountAuto false) always stand.
+      if (palmPrefillAllowed(ep)) {
+        upd.palmCount = String(ep.estimatedPalmCount);
+      }
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
       estimateVersionRef.current += 1;
@@ -1528,6 +1543,20 @@ function EstimateToolView() {
         };
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
+        }
+        if (upd.palmCount !== undefined) {
+          next._palmCountAuto = true;
+        } else if (f._palmCountAuto && String(f.palmCount || "").trim() !== "") {
+          // This lookup supplied no trusted count — clear the previous
+          // lookup's auto-fill (and the treatment count that still mirrors
+          // it) so a stale prefill can't ride into T&S reserve or
+          // injection pricing. Operator-typed values keep the flag false
+          // via the change handler and are never touched.
+          next.palmCount = "";
+          if (String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
+            next.palmTreatmentCount = "";
+          }
+          next._palmCountAuto = false;
         }
         return next;
       });

@@ -2,7 +2,7 @@
 // property-calculator.js — Property measurement calculations
 // ============================================================
 const {
-  HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
+  HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, TURF_FACTORS,
   MOSQUITO,
 } = require('./constants');
 
@@ -315,11 +315,9 @@ function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'stand
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
   const raw = Math.round(lotSqFt * pct);
-  // `uncapped: true` returns the raw lot-density estimate so callers can
-  // preserve uncappedBedAreaEstimate when the cap fires. Default behavior
-  // (caller passes nothing) is unchanged: always cap at BED_AREA_CAP.
-  if (options && options.uncapped) return raw;
-  return Math.min(raw, BED_AREA_CAP);
+  // Owner ruling 2026-08-10: never clamped — large estimates price IN FULL
+  // and the pricer routes them to review (bed_area_at_or_above_8000).
+  return raw;
 }
 
 function calculatePerimeter(footprint, complexity = 'standard') {
@@ -584,11 +582,10 @@ function calculatePropertyProfile(input) {
   let bedArea;
   let bedAreaSource;
   let bedAreaPricingConfidence;
-  let bedAreaCapped = false;
-  // Raw uncapped estimate — preserved when capping fires so downstream
-  // consumers (priceTreeShrub, admin review surfaces) can show what the
-  // estimator wanted to use vs what BED_AREA_CAP allowed.
-  let uncappedBedAreaEstimate;
+  // Owner ruling 2026-08-10: NO bed-area clamping anywhere — a typed 14,000
+  // used to price as 8,000 (~43% low). Every source now carries in full;
+  // the T&S pricer routes large areas (>= BED_AREA_REVIEW_SQFT) to manual
+  // review instead.
 
   if (validSourceHint === 'fallback') {
     bedArea = 0;
@@ -597,34 +594,22 @@ function calculatePropertyProfile(input) {
   } else if (inputBedArea !== null) {
     bedAreaSource = validSourceHint === 'estimated' ? 'estimated' : 'explicit';
     bedAreaPricingConfidence = bedAreaSource === 'estimated' ? 'medium' : 'high';
-    if (bedAreaSource === 'estimated') {
-      bedArea = Math.min(inputBedArea, BED_AREA_CAP);
-      bedAreaCapped = inputBedArea >= BED_AREA_CAP;
-      if (bedAreaCapped) uncappedBedAreaEstimate = inputBedArea;
-    } else {
-      bedArea = inputBedArea;
-    }
+    bedArea = inputBedArea;
   } else if (providedEstimatedBedArea !== null) {
-    bedArea = Math.min(providedEstimatedBedArea, BED_AREA_CAP);
+    bedArea = providedEstimatedBedArea;
     bedAreaSource = 'estimated';
     bedAreaPricingConfidence = 'medium';
-    bedAreaCapped = providedEstimatedBedArea >= BED_AREA_CAP;
-    if (bedAreaCapped) uncappedBedAreaEstimate = providedEstimatedBedArea;
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
-    const rawLotBedArea = estimateBedArea(
+    bedArea = estimateBedArea(
       input.lotSqFt,
       features.shrubs,
-      features.complexity,
-      { uncapped: true }
+      features.complexity
     );
-    bedArea = Math.min(rawLotBedArea, BED_AREA_CAP);
     // Lot-density inference is now distinguishable from a customer-supplied
     // estimate — `lot_based` is propagated through generateEstimate so the
     // T&S resolver and admin review surfaces can flag it differently.
     bedAreaSource = 'lot_based';
     bedAreaPricingConfidence = 'medium';
-    bedAreaCapped = rawLotBedArea >= BED_AREA_CAP;
-    if (bedAreaCapped) uncappedBedAreaEstimate = rawLotBedArea;
   } else {
     bedArea = 0;
     bedAreaSource = 'fallback';
@@ -672,8 +657,6 @@ function calculatePropertyProfile(input) {
     estimatedBedArea: bedAreaSource === 'estimated' ? bedArea : undefined,
     bedAreaSource,
     bedAreaPricingConfidence,
-    bedAreaCapped,
-    ...(uncappedBedAreaEstimate !== undefined ? { uncappedBedAreaEstimate } : {}),
     palmCount: input.palmCount,
     palmInventory: input.palmInventory,
     perimeter,

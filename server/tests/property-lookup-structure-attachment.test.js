@@ -339,3 +339,135 @@ describe('mergeAiAnalyses — tree-count field confidence (T&S reprice lane)', (
     expect(close._treeCountConfidence).toBe(92);
   });
 });
+
+describe('mergeAiAnalyses + profile — palm-count trust (owner ruling 2026-08-10)', () => {
+  const { _private: priv, buildEnrichedProfile: buildProfile } = require('../routes/property-lookup-v2');
+  const merge = priv?.mergeAiAnalyses;
+
+  test('gap-filled palm count carries ITS provider confidence; divergence zeroes the stamp', () => {
+    if (!merge) return;
+    const gapFilled = merge([
+      { provider: 'claude', analysis: { confidenceScore: 90 } },
+      { provider: 'gemini', analysis: { confidenceScore: 40, estimatedPalmCount: 9 } },
+    ]);
+    expect(gapFilled.estimatedPalmCount).toBe(9);
+    expect(gapFilled._palmCountConfidence).toBe(40);
+    const divergent = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 12 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: 4 } },
+    ]);
+    expect(divergent._palmCountConfidence).toBe(0);
+    expect((divergent.aiDivergences || []).some((d) => d.field === 'estimatedPalmCount')).toBe(true);
+    // Small-count noise (5 vs 4) does not flag.
+    const close = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 5 } },
+      { provider: 'openai', analysis: { confidenceScore: 88, estimatedPalmCount: 4 } },
+    ]);
+    expect(close._palmCountConfidence).toBe(92);
+  });
+
+  test('the profile carries palmCountTrusted so the estimator prefill reads ONE server-side verdict', () => {
+    if (!buildProfile) return;
+    const trusted = buildProfile(null, {
+      confidenceScore: 88, _palmCountConfidence: 88, estimatedPalmCount: 7,
+    }, 27.1, -82.4);
+    expect(trusted.palmCountConfidence).toBe(88);
+    expect(trusted.palmCountTrusted).toBe(true);
+    // A gap-filled low-confidence count is affirmatively distrusted — the
+    // estimator leaves the palm field empty for the operator to count.
+    const distrusted = buildProfile(null, {
+      confidenceScore: 73, _palmCountConfidence: 40, estimatedPalmCount: 9,
+    }, 27.1, -82.4);
+    expect(distrusted.palmCountTrusted).toBe(false);
+    // Missing stamp = legacy cached analysis rebuilt through
+    // buildEnrichedProfile: NO verdict is attached at all (an explicit
+    // false would suppress every cached address's prefill for the cache
+    // lifetime), and the client's `!== false` contract preserves the
+    // pre-existing prefill.
+    const unstamped = buildProfile(null, {
+      confidenceScore: 88, estimatedPalmCount: 7,
+    }, 27.1, -82.4);
+    expect(unstamped.palmCountTrusted).toBeUndefined();
+  });
+
+  test('a confident ZERO reading contradicts a positive one — divergence fires, stamp zeroes (all three fields)', () => {
+    const merge = require('../routes/property-lookup-v2')._private?.mergeAiAnalyses;
+    if (!merge) return;
+    // 7 palms vs an explicit "no palms" — without zeros in the divergence
+    // set this looked like a single supported read and prefilled.
+    const palms = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } },
+    ]);
+    expect(palms._palmCountConfidence).toBe(0);
+    const trees = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedTreeCount: 9 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedTreeCount: 0 } },
+    ]);
+    expect(trees._treeCountConfidence).toBe(0);
+    const beds = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedBedAreaSf: 0 } },
+    ]);
+    expect(beds._bedAreaConfidence).toBe(0);
+    // An ABSENT read still doesn't count as disagreement — and neither
+    // does an explicit NULL (the provider didn't measure; Number(null) is
+    // 0 and must not masquerade as an observed zero).
+    const absent = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90 } },
+    ]);
+    expect(absent._palmCountConfidence).toBe(92);
+    const nullRead = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: null } },
+    ]);
+    expect(nullRead._palmCountConfidence).toBe(92);
+    const nullBed = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedBedAreaSf: null } },
+    ]);
+    expect(nullBed._bedAreaConfidence).toBe(92);
+  });
+
+  test('the V1 translator honors the verdict — a distrusted estimate never becomes palmInventory.palmCount', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    if (!translateV2CallToV1Input) return;
+    // Distrusted: the raw field can still arrive on a spread request
+    // profile even after the UI cleared it — the promotion must skip it.
+    const distrusted = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: false,
+    }, [], {});
+    expect(distrusted.palmInventory?.palmCount).toBeUndefined();
+    // Trusted and legacy (no verdict) both promote — the `!== false`
+    // contract, same as the client prefill.
+    const trusted = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: true,
+    }, [], {});
+    expect(trusted.palmInventory?.palmCount).toBe(9);
+    const legacy = translateV2CallToV1Input({ estimatedPalmCount: 9 }, [], {});
+    expect(legacy.palmInventory?.palmCount).toBe(9);
+    // A REAL stored inventory count is not an AI read — it stands even
+    // when the vision estimate is distrusted.
+    const stored = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: false,
+      palmInventory: { palmCount: 4 },
+    }, [], {});
+    expect(stored.palmInventory?.palmCount).toBe(4);
+  });
+
+  test("wrong-premise vetoes the prefill; the no-record 'all' flag does not (palms are pure vision)", () => {
+    const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
+    // Confident vision count on a record-less lookup: county rolls don't
+    // count palms, so the 'all' flag must not suppress the prefill.
+    expect(lookupPalmCountIsTrustworthy({
+      estimatedPalmCount: 7, palmCountConfidence: 88,
+      fieldVerifyFlags: [{ field: 'all', reason: 'No property record data', priority: 'HIGH' }],
+    })).toBe(true);
+    // The geocoder snapped — these are the NEIGHBOR'S palms.
+    expect(lookupPalmCountIsTrustworthy({
+      estimatedPalmCount: 7, palmCountConfidence: 88,
+      fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }],
+    })).toBe(false);
+  });
+});
