@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
+} from './markedPhotoCopy';
 
 // Marked-photo card — treated points the technician tapped onto a photo of the
 // area they actually treated (GATE_PHOTO_MARKS, dark).
@@ -12,25 +15,12 @@ import { useEffect, useRef, useState } from 'react';
 // count — a total here would invite a customer to tally pins against billed
 // points. The server context carries no total for the same reason.
 //
-// Unlike the station map this renders in PDFs too: it pins against OUR photo,
-// not a satellite basemap, so there is no provider-ToS reason to withhold it.
-// Motion is the only thing gated on live view.
-
-const KIND_COLOR = {
-  foam_injection: '#0A7EC2',
-  spot_treatment: '#157A5B',
-  wood_treatment: '#A9690C',
-};
-// Never alert red: that is reserved for genuine alerts, and a treated point is
-// a record of work performed, not a warning.
-const DEFAULT_COLOR = '#0A7EC2';
-
-const CAPTIONS = {
-  foamPoints: 'Foam was injected at the points your technician marked on this visit.',
-};
-// The caption attributes the marks to the technician's record rather than
-// asserting they are all of them — the phrasing the count rule requires.
-const FALLBACK_CAPTION = 'Your technician marked the points treated on this visit.';
+// This is the LIVE web surface. The PDF/email document renders its own
+// marked-photo block in ServiceReportDocument.jsx (that path returns before
+// this tree ever mounts), and both read their wording and palette from
+// markedPhotoCopy.js so the two cannot drift. Unlike the station map the card
+// is present in the PDF at all: it pins against OUR photo rather than a
+// satellite basemap, so no provider-ToS reason to withhold it.
 
 export default function MarkedPhotoCard({ marked, live = true }) {
   const stageRef = useRef(null);
@@ -60,13 +50,17 @@ export default function MarkedPhotoCard({ marked, live = true }) {
   if (!marked?.url || !hasMarks) return null;
 
   const legend = Array.isArray(marked.legend) ? marked.legend : [];
-  const caption = CAPTIONS[marked.captionKey] || FALLBACK_CAPTION;
+  const caption = markedPhotoCaption(marks, marked.captionKey);
 
   return (
     <section data-glass="card" className="sr-section" id="treated-points">
       <h2>Where we treated</h2>
+      {/* "marked each point" would assert an exhaustive inventory (codex P1) —
+          marks are optional and need not be complete, and foam is billed by
+          drill-point count, so a customer could read exhaustiveness as a
+          promise that every billed point carries a pin. */}
       <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
-        Your technician photographed the treated area and marked each point.
+        {MARKED_PHOTO_INTRO}
       </p>
       <div
         ref={stageRef}
@@ -134,7 +128,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
                 transform: 'translateX(-50%)',
                 minWidth: 25, height: 25, padding: '0 6px',
                 borderRadius: 999, border: '2px solid rgba(255,255,255,.94)',
-                background: KIND_COLOR[mark.kind] || DEFAULT_COLOR,
+                background: markColor(mark.kind),
                 color: '#fff', fontSize: 12, fontWeight: 600,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 boxShadow: '0 2px 7px rgba(6,16,24,.5)',
@@ -156,7 +150,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
               <span
                 style={{
                   width: 11, height: 11, borderRadius: '50%', flex: 'none',
-                  background: KIND_COLOR[entry.kind] || DEFAULT_COLOR,
+                  background: markColor(entry.kind),
                 }}
               />
               {entry.label}

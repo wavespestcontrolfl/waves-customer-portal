@@ -178,6 +178,73 @@ describe('buildMarkedPhotoContext', () => {
   });
 });
 
+describe('photo-lane capture block is independent of GATE_TRACE_ELIGIBILITY', () => {
+  // The rollout allows GATE_PHOTO_MARKS on while GATE_TRACE_ELIGIBILITY is
+  // still off. Under that ordering the photo-lane block must still fire, or a
+  // foam visit can save a satellite trace and publish a perimeter band beside
+  // its marked photo (codex P1).
+  const { traceCaptureBlockPayload } = require('../services/service-report/trace-eligibility');
+  const foamService = { id: 'ss-foam', service_type: 'Drill-and-Foam Termite' };
+
+  const withBothGates = async ({ eligibility, marks }, fn) => {
+    const prevE = process.env.GATE_TRACE_ELIGIBILITY;
+    const prevP = process.env.GATE_PHOTO_MARKS;
+    if (eligibility === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = eligibility;
+    if (marks === undefined) delete process.env.GATE_PHOTO_MARKS;
+    else process.env.GATE_PHOTO_MARKS = marks;
+    try { return await fn(); } finally {
+      if (prevE === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prevE;
+      if (prevP === undefined) delete process.env.GATE_PHOTO_MARKS;
+      else process.env.GATE_PHOTO_MARKS = prevP;
+    }
+  };
+
+  // Profile resolver stub: foam catalog key, shared typed pointer.
+  jest.mock('../services/service-completion-profiles', () => ({
+    resolveCompletionProfileForScheduledService: async () => ({
+      serviceKey: 'foam_drill', findingsType: 'termite_treatment',
+    }),
+  }), { virtual: false });
+
+  test('blocks the satellite tracer with only the photo gate on', async () => {
+    const block = await withBothGates({ eligibility: undefined, marks: 'true' },
+      () => traceCaptureBlockPayload(foamService, null, { captureMode: 'perimeter' }));
+    expect(block).toMatchObject({ status: 403, payload: { code: 'trace_photo_lane' } });
+  });
+
+  test('blocks it with both gates on', async () => {
+    const block = await withBothGates({ eligibility: 'true', marks: 'true' },
+      () => traceCaptureBlockPayload(foamService, null, { captureMode: 'perimeter' }));
+    expect(block).toMatchObject({ status: 403, payload: { code: 'trace_photo_lane' } });
+  });
+
+  test('stays fully inert with both gates off', async () => {
+    const block = await withBothGates({ eligibility: undefined, marks: undefined },
+      () => traceCaptureBlockPayload(foamService, null, { captureMode: 'perimeter' }));
+    expect(block).toBeNull();
+  });
+
+  test('the photo gate alone does not activate the wider registry', async () => {
+    // An ineligible NON-photo lane must keep pre-gate behavior when only the
+    // marks gate is on — turning on foam marks cannot silently start
+    // suppressing captures across unrelated lanes.
+    jest.resetModules();
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: async () => ({
+        serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping',
+      }),
+    }));
+    const fresh = require('../services/service-report/trace-eligibility');
+    const block = await withBothGates({ eligibility: undefined, marks: 'true' },
+      () => fresh.traceCaptureBlockPayload({ id: 'ss-trap', service_type: 'Rodent Trap Check' }, null, {}));
+    expect(block).toBeNull();
+    jest.dontMock('../services/service-completion-profiles');
+    jest.resetModules();
+  });
+});
+
 describe('foam routes to the photo variant', () => {
   test('the catalog key wins over the shared termite_treatment pointer', () => {
     // Foam completes as termite_treatment, which it shares with liquid

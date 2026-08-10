@@ -488,7 +488,14 @@ function traceEligibilityGateOn() {
  * in the field.
  */
 async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = undefined } = {}) {
-  if (!traceEligibilityGateOn()) return null;
+  // Two independent gates reach this helper (codex P1). The eligibility gate
+  // governs the full registry; GATE_PHOTO_MARKS governs only the photo-lane
+  // block below. The rollout allows the photo gate to go on FIRST, and under
+  // that ordering an eligibility-gated early return would let a foam visit
+  // save a satellite trace — so the photo block must stand on its own gate.
+  const { photoMarksGateOn } = require('./photo-marks');
+  const photoGateOn = photoMarksGateOn();
+  if (!traceEligibilityGateOn() && !photoGateOn) return null;
   let eligibility;
   try {
     const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
@@ -534,6 +541,12 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
       reason: variant,
     },
   } : null);
+  // Photo gate on, eligibility gate off: ONLY the photo-lane block is in
+  // force. Every other verdict keeps pre-gate behavior, so turning on marks
+  // cannot silently activate the wider registry.
+  if (!traceEligibilityGateOn()) {
+    return eligibility.eligible ? photoLaneBlock(eligibility.variant) : null;
+  }
   if (eligibility.eligible) {
     return photoLaneBlock(eligibility.variant) || modeMismatchBlock(eligibility.variant);
   }

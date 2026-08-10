@@ -147,8 +147,14 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
 
   return (
     <div
+      // This modal mounts INSIDE the photo manager, whose backdrop closes it
+      // on click. Without stopping propagation here the very first tap — the
+      // one placing a mark — would bubble out and unmount the whole workflow
+      // before anything could be saved (codex P1). Stopped at the root so
+      // every descendant is covered, including the photo and the chips.
+      onClick={(e) => e.stopPropagation()}
       style={{
-        position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(4,10,16,.72)',
+        position: 'fixed', inset: 0, zIndex: 1001, background: 'rgba(4,10,16,.72)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14,
       }}
       role="dialog"

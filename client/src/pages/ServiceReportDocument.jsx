@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
+import {
+  MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
+} from '../components/report/markedPhotoCopy';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -1150,6 +1153,67 @@ export default function ServiceReportDocument({ data, token }) {
             )}
           </div>
         )}
+
+        {/* Treated-point marks (GATE_PHOTO_MARKS, dark — empty otherwise).
+            The PDF path returns before ReportViewPage's live card ever mounts,
+            so the document renders its own block (codex P1). Deliberately NOT
+            the fixed-height contain thumbnail used for the gallery below:
+            pins are positioned as percentages of the IMAGE, and a contained
+            image inside a taller box would leave every pin offset from the
+            point it marks. Natural aspect keeps the percentages honest.
+            Static by nature — no animation in print. States no count. */}
+        {(data.markedPhotos || []).map((marked) => (
+          <div key={marked.photoId} className="doc-keep">
+            <SectionHeader>Where we treated</SectionHeader>
+            <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
+              {MARKED_PHOTO_INTRO}
+            </p>
+            <div style={{ position: 'relative', lineHeight: 0 }}>
+              <img
+                src={marked.url}
+                alt={marked.caption || 'Photograph of the treated area with the treated points marked'}
+                onError={() => markImageFailed(marked.url)}
+                style={{
+                  display: 'block', width: '100%', borderRadius: 4, border: `1px solid ${HAIR}`,
+                }}
+              />
+              {(marked.marks || []).map((mark) => (
+                <span
+                  key={`${mark.n}-${mark.kind}`}
+                  style={{
+                    position: 'absolute',
+                    left: `${mark.x * 100}%`,
+                    top: `${mark.y * 100}%`,
+                    transform: 'translate(-50%, -50%)',
+                    minWidth: 17, height: 17, padding: '0 4px',
+                    borderRadius: 999, border: '1.5px solid rgba(255,255,255,.94)',
+                    background: markColor(mark.kind),
+                    color: '#fff', fontSize: 9.5, fontWeight: 700, lineHeight: 1,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  {mark.n}
+                </span>
+              ))}
+            </div>
+            {(marked.legend || []).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', margin: '6px 0 0' }}>
+                {marked.legend.map((entry) => (
+                  <span key={entry.kind} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: INK }}>
+                    <span style={{
+                      width: 8, height: 8, borderRadius: '50%', flex: 'none', background: markColor(entry.kind),
+                    }}
+                    />
+                    {entry.label}
+                  </span>
+                ))}
+              </div>
+            )}
+            <p style={{ margin: '6px 0 0', fontSize: 10, lineHeight: 1.5, color: MUTED }}>
+              {markedPhotoCaption(marked.marks, marked.captionKey)}
+            </p>
+          </div>
+        ))}
 
         {/* Service photos — embedded (owner 2026-08-03, supersedes the
             portal-link-only call earlier the same day). */}

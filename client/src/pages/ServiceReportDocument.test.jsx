@@ -971,4 +971,49 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
   });
+
+  // The PDF path returns before ReportViewPage's live marked-photo card ever
+  // mounts, so this document renders its own block. A promise that the card
+  // appears in the PDF is only true if it is tested HERE (codex P1).
+  const MARKED = {
+    photoId: 'mp1',
+    url: 'https://cdn.example.com/wall.jpg',
+    caption: 'Exterior wall base',
+    captionKey: 'foamPoints',
+    legend: [{ kind: 'foam_injection', label: 'Drilled & foamed' }],
+    marks: [
+      { n: 1, x: 0.25, y: 0.5, kind: 'foam_injection', label: 'Drilled & foamed' },
+      { n: 2, x: 0.75, y: 0.5, kind: 'foam_injection', label: 'Drilled & foamed' },
+    ],
+  };
+
+  it('renders treated-point marks in the PDF document', () => {
+    const { container } = render(
+      <ServiceReportDocument data={{ ...BASE_DATA, markedPhotos: [MARKED] }} token="tok123" />,
+    );
+    expect(container.textContent).toMatch(/Where we treated/);
+    expect(container.textContent).toMatch(/Drilled & foamed/);
+    expect(container.querySelector('img[src="https://cdn.example.com/wall.jpg"]')).toBeTruthy();
+    // Pins are positioned as percentages of the IMAGE — a contained image in a
+    // taller box would offset every pin from the point it marks.
+    const pin = [...container.querySelectorAll('span')].find((el) => el.textContent === '1');
+    expect(pin).toBeTruthy();
+    expect(pin.style.left).toBe('25%');
+    expect(pin.style.top).toBe('50%');
+  });
+
+  it('states no count on the PDF marked-photo block', () => {
+    const { container } = render(
+      <ServiceReportDocument data={{ ...BASE_DATA, markedPhotos: [MARKED] }} token="tok123" />,
+    );
+    expect(container.textContent).toMatch(/marked on this visit\./);
+    expect(container.textContent).not.toMatch(/2 points|2 of 2|each point/);
+  });
+
+  it('renders nothing when the visit carries no marks', () => {
+    const { container } = render(
+      <ServiceReportDocument data={{ ...BASE_DATA, markedPhotos: [] }} token="tok123" />,
+    );
+    expect(container.textContent).not.toMatch(/Where we treated/);
+  });
 });

@@ -2604,7 +2604,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
     addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
-  const { loadMarksByS3Key, buildMarkedPhotoContext } = require('./photo-marks');
+  const { loadMarksByS3Key, buildMarkedPhotoContext, photoMarksGateOn } = require('./photo-marks');
   // Completion-frozen primary identity wins over the live profile —
   // update-details can repoint the schedule row after completion (codex
   // P2 r15); legacy records (field absent) keep the live resolution.
@@ -2652,8 +2652,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // publish a spray band — the client's traced map treats anything that is
   // not 'outline' as spray, so an unsuppressed 'photo' would render as a
   // perimeter claim. Suppress the trace for every non-satellite variant.
-  const traceSuppressed = traceEligibilityGateOn()
-    && (!traceEligibility.eligible || traceEligibility.variant === 'photo');
+  //
+  // The photo-lane clause hangs off THIS feature's own gate, not the
+  // eligibility gate (codex P1): the rollout explicitly allows
+  // GATE_PHOTO_MARKS on while GATE_TRACE_ELIGIBILITY is still off, and in
+  // that order an eligibility-gated clause is inert — a foam visit would
+  // publish a saved trace under legacy perimeter copy right beside its
+  // marked photo, which is the exact false claim this change exists to stop.
+  const traceSuppressed = (traceEligibilityGateOn()
+    && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
+    || (photoMarksGateOn() && traceEligibility.variant === 'photo');
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
