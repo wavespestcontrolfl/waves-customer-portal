@@ -12770,7 +12770,15 @@ const CallRecordingProcessor = {
             // transfer sweep already locks leads → call_log, re-verifies
             // the target, and completes exactly this write.
             let repairPayload = null;
-            if (!leadId && !mdRaw.attribution_transfer_pending) {
+            // A resolved leadId does NOT mean the repair is unnecessary
+            // (codex P1 r26): the rejection demoted this call's row to
+            // legacy, so runCallPpcAttribution refuses it as
+            // 'unprovenanced_row' and writes nothing. Clearing the verdict
+            // and its recorded lead ids here would then destroy the only
+            // evidence of what to reclaim. Arm the marker in BOTH cases —
+            // the sweep's repair branch re-points the demoted row — using
+            // this pass's own lead when it has one.
+            if (!mdRaw.attribution_transfer_pending) {
               // The lead the REJECTION itself recorded is authoritative
               // (codex P1 r21): a phone-REUSED lead carries neither this
               // call's sid nor a stamp — stampThisPass requires !phone —
@@ -12781,8 +12789,8 @@ const CallRecordingProcessor = {
               const recordedLeadIds = Array.isArray(mdRaw.no_attribution_lead_ids)
                 ? [...new Set(mdRaw.no_attribution_lead_ids.filter(Boolean).map(String))]
                 : [];
-              let target = null;
-              if (recordedLeadIds.length === 1) {
+              let target = leadId ? String(leadId) : null;
+              if (!target && recordedLeadIds.length === 1) {
                 const recordedLead = await trx('leads')
                   .where({ id: recordedLeadIds[0] })
                   .whereNull('deleted_at')

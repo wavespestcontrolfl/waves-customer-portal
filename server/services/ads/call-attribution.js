@@ -1143,8 +1143,11 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
     // permanently associated with the former customer. Read under the
     // lead's row lock, exactly as reconcileMovedCallAttributionRow does
     // for the same reason.
+    // EXACTLY the locked owner, including NULL (codex P1 r26): an
+    // unassigned lead left the row on its previous customer, and the
+    // downstream sync loads by that column and never replaces it.
     const ownerRow = await dbc('leads').where({ id: leadId }).forUpdate().first('customer_id');
-    if (ownerRow && ownerRow.customer_id) patch.customer_id = ownerRow.customer_id;
+    if (ownerRow) patch.customer_id = ownerRow.customer_id || null;
     const moved = await dbc('ad_service_attribution')
       .where({ lead_id: leadId, source_call_id: callLogId })
       .update(patch);
@@ -1168,12 +1171,9 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
   // the definitive unlink the retire was originally written for.
   const existing = await dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })
-    .first('id', 'funnel_stage', 'booked_amount', 'completed_revenue');
+    .first(...HISTORY_ROW_COLS);
   if (!existing) return 0;
-  const carriesHistory = ['booked', 'completed'].includes(String(existing.funnel_stage || ''))
-    || parseFloat(existing.booked_amount || 0) > 0
-    || parseFloat(existing.completed_revenue || 0) > 0;
-  if (carriesHistory) {
+  if (rowCarriesFunnelHistory(existing)) {
     return dbc('ad_service_attribution')
       .where({ id: existing.id, lead_id: leadId, source_call_id: callLogId })
       .update({ source_call_id: null, updated_at: new Date() });
@@ -1221,6 +1221,27 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
   return affected;
 }
 
+// Does this funnel row carry anything a delete would destroy? (codex P0
+// r26). Checking only booked/completed missed the intermediate stages —
+// contacted / estimate_sent / estimate_viewed / lost — and every metric
+// other than the two revenue columns, so rows with a real estimate on them
+// were still deleted. Successor discovery consults MUTABLE state and can
+// return a false negative, so this must be generous: anything past the
+// bare 'lead' default, or any populated funnel metric, is history.
+// ONE definition — both retirement paths read it.
+const FUNNEL_METRIC_COLS = [
+  'estimate_amount', 'booked_amount', 'completed_revenue', 'gross_profit',
+  'ad_cost', 'projected_ltv_12mo',
+];
+const HISTORY_ROW_COLS = ['id', 'funnel_stage', 'source_call_id', ...FUNNEL_METRIC_COLS];
+
+function rowCarriesFunnelHistory(row) {
+  if (!row) return false;
+  const stage = String(row.funnel_stage || '').trim().toLowerCase();
+  if (stage && stage !== 'lead') return true;
+  return FUNNEL_METRIC_COLS.some((c) => row[c] != null && parseFloat(row[c]) !== 0);
+}
+
 // Retire ONE row by id without ever destroying accumulated history
 // (codex P0 r25). The non-orphan retire already demotes history-bearing
 // rows to legacy instead of deleting; the ORPHAN paths (lead hard-deleted
@@ -1230,12 +1251,9 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
 async function retireRowPreservingHistory(dbc, rowId) {
   const row = await dbc('ad_service_attribution')
     .where({ id: rowId })
-    .first('id', 'funnel_stage', 'booked_amount', 'completed_revenue', 'source_call_id');
+    .first(...HISTORY_ROW_COLS);
   if (!row) return 0;
-  const carriesHistory = ['booked', 'completed'].includes(String(row.funnel_stage || ''))
-    || parseFloat(row.booked_amount || 0) > 0
-    || parseFloat(row.completed_revenue || 0) > 0;
-  if (!carriesHistory) return dbc('ad_service_attribution').where({ id: row.id }).del();
+  if (!rowCarriesFunnelHistory(row)) return dbc('ad_service_attribution').where({ id: row.id }).del();
   if (row.source_call_id == null) return 0; // already legacy — nothing to free
   return dbc('ad_service_attribution')
     .where({ id: row.id })

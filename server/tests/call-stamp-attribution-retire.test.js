@@ -344,8 +344,15 @@ describe('rejection-repair marker on the no_attribution clear (codex P1 r20)', (
     expect(branch).toMatch(/liveRow\?\.metadata/);
   });
 
-  test('the repair only arms when THIS pass created no lead and no marker already stands', () => {
-    expect(branch).toMatch(/if \(!leadId && !mdRaw\.attribution_transfer_pending\)/);
+  test('the repair arms whenever no marker already stands — a resolved lead does NOT skip it (codex P1 r26)', () => {
+    // The rejection demoted this call's row to legacy, so a corrected pass
+    // WITH a lead still writes nothing (recordCallPpcAttribution refuses
+    // 'unprovenanced_row'); skipping the marker there destroyed the only
+    // evidence of what to reclaim.
+    expect(branch).toMatch(/if \(!mdRaw\.attribution_transfer_pending\)/);
+    expect(branch).not.toMatch(/if \(!leadId && !mdRaw\.attribution_transfer_pending\)/);
+    // ...and this pass's own lead is the preferred target when it has one.
+    expect(branch).toMatch(/let target = leadId \? String\(leadId\) : null;/);
   });
 
   test('the REJECTION-RECORDED lead is the authoritative target — phone reuse leaves no stamp or sid (codex P1 r21)', () => {
