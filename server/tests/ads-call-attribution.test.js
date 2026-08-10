@@ -732,7 +732,16 @@ describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + p
 describe('phone successor arm requires durable lead evidence (codex P1 r18)', () => {
   // The lead is phone-linked only: no sid, unshared number, owned customer.
   const PHONE_LEAD = { twilio_call_sid: null, phone: '+19415551234', customer_id: 'cust-1' };
-  const evidence = (extra) => JSON.stringify({ call_type: 'new_inquiry', is_lead: true, ...extra });
+  // Workable by default (pre-push P1 r20): customer-less successors now
+  // re-judge hasWorkableLeadSignal, so linked-call fixtures carry concrete
+  // service intent + reachability (synthetic identity per PII rule).
+  const evidence = (extra) => JSON.stringify({
+    call_type: 'new_inquiry',
+    is_lead: true,
+    matched_service: 'pest control',
+    email: 'psample00005@example.com',
+    ...extra,
+  });
 
   test("a settled billing call from the lead's number can NOT inherit — the row deletes", async () => {
     // An ordinary support/billing call finishes 'processed' with no
@@ -917,6 +926,66 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
     expect(n).toBe(1);
     expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
     expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less call with service intent but NO reachability can NOT inherit — hasWorkableLeadSignal never linked it (pre-push P1 r20)', async () => {
+    // A caller leg is present, so the gate's phone branch applies: intent
+    // alone without email/address (and not a voicemail) never minted a
+    // workable unnamed lead.
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[{
+      id: 'call-intent-only',
+      created_at: '2026-08-09T12:00:00Z',
+      from_phone: '+12025550101',
+      metadata: {},
+      ai_extraction: evidence({ email: undefined }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less parseable-but-EMPTY extraction can NOT inherit — no service intent (pre-push P1 r20)', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[{
+      id: 'call-empty-extraction',
+      created_at: '2026-08-09T12:00:00Z',
+      from_phone: '+12025550101',
+      metadata: {},
+      ai_extraction: JSON.stringify({ call_type: 'new_inquiry', is_lead: true }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less VOICEMAIL with intent and a caller leg inherits — voicemail satisfies the reachback arm, mirroring the processor (pre-push P1 r20)', async () => {
+    const successor = {
+      id: 'call-vm-lead',
+      to_phone: '+19415550001',
+      from_phone: '+12025550101',
+      created_at: '2026-08-09T12:00:00Z',
+      metadata: {},
+      ai_extraction: evidence({ email: undefined, is_voicemail: true }),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-vm-lead')).toBeTruthy();
   });
 
   test('the scan PAGES past ten rejected candidates to an older valid successor (codex P1 r19)', async () => {

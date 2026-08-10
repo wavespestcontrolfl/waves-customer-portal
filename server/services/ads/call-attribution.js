@@ -27,6 +27,11 @@ const { isNonLeadCallContent } = require('../../utils/non-lead-call-content');
 // phone-successor linkage check (codex P1 r19) — same shared-definition
 // rule as the content veto above.
 const { shouldCreateCallLeadForCustomer } = require('../../utils/call-lead-customer-gate');
+// The processor's customer-LESS lead-creation gate (pre-push P1 r20) —
+// same shared-definition rule: a customer-less call only ever linked via
+// hasWorkableLeadSignal (concrete service intent + reachability), so the
+// successor mirror must re-judge it, not just the content veto.
+const { hasWorkableLeadSignal } = require('../../utils/workable-lead-signal');
 
 // Map a lead_sources.source_type to the ad_service_attribution channel key +
 // paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
@@ -832,8 +837,11 @@ function callCarriesDurableLeadEvidence(aiExtractionRaw) {
 // or reuses NO lead, so inheriting the lead's booked/completed history
 // onto it would reassign funnel data to a call that never linked. Mirrored
 // from durable evidence:
-//   - customer-less candidates pass (that linkage path was gated only by
-//     workable signal + the content veto already applied above);
+//   - customer-less candidates re-judge hasWorkableLeadSignal with the
+//     caller leg as the phone (pre-push P1 r20 — the SHARED definition in
+//     utils/workable-lead-signal): the processor's workableUnnamedLead
+//     path demanded concrete service intent + reachability on top of the
+//     content veto, so parseable-but-empty extraction never linked;
 //   - customer-attached voicemails never link (the processor's own veto);
 //   - a customer CREATED BY the candidate call (the durable
 //     metadata.created_customer_id stamp) always passed the gate;
@@ -850,7 +858,21 @@ async function phoneSuccessorActuallyLinked(dbc, cand) {
     try { extracted = JSON.parse(extracted); } catch { return false; }
   }
   if (!extracted || typeof extracted !== 'object') return false;
-  if (!cand.customer_id) return true;
+  if (!cand.customer_id) {
+    // Customer-less linkage = workableUnnamedLead: the processor required
+    // hasWorkableLeadSignal (concrete service intent + reachability) on
+    // top of the content veto (pre-push P1 r20) — a parseable-but-empty
+    // extraction never created or reused this lead and must not inherit.
+    // The caller leg is the phone (the arm matched it to the lead's
+    // number); an absent caller leg falls to the gate's phone-less
+    // intent+email branch, exactly as the processor's sentinel-filtered
+    // anonymous path did.
+    return hasWorkableLeadSignal({
+      extracted,
+      phone: String(cand.from_phone || '').trim() || null,
+      voicemail: extracted.is_voicemail === true,
+    });
+  }
   if (extracted.is_voicemail === true) return false;
   let md = cand.metadata;
   if (typeof md === 'string') {
@@ -984,7 +1006,7 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
       .limit(10)
-      .select([...SUCCESSOR_COLS, 'ai_extraction', 'customer_id']);
+      .select([...SUCCESSOR_COLS, 'ai_extraction', 'customer_id', 'from_phone']);
     if (!batch || !batch.length) return null;
     for (const cand of batch) {
       if (!callCarriesDurableLeadEvidence(cand.ai_extraction)) continue;
@@ -992,7 +1014,7 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
       const locked = await eligibilityFilters(phoneArm().where('call_log.id', cand.id))
         .orderBy('created_at', 'desc')
         .forUpdate()
-        .first(...SUCCESSOR_COLS, 'ai_extraction', 'customer_id');
+        .first(...SUCCESSOR_COLS, 'ai_extraction', 'customer_id', 'from_phone');
       if (locked && callCarriesDurableLeadEvidence(locked.ai_extraction)
         && await phoneSuccessorActuallyLinked(dbc, locked)) return locked;
     }

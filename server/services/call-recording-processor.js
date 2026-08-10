@@ -1845,15 +1845,10 @@ function leadContactCompleteness(fields = {}) {
 // is the phone. Without this branch a fully-identified prospect calling from
 // a blocked number produced no lead row anywhere (name + email + address +
 // quote promised → invisible in Leads/Customers, triage cards only).
-function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
-  const text = (v) => String(v == null ? '' : v).trim();
-  const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
-  if (!phone) {
-    return hasServiceIntent && EMAIL_RE.test(text(extracted.email).toLowerCase());
-  }
-  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
-  return hasServiceIntent && (hasReachback || voicemail === true);
-}
+// Extracted VERBATIM to the shared util (pre-push P1 PR #3303 r20) — the
+// attribution retire path mirrors this exact gate on customer-less
+// phone-matched successors; never re-inline or duplicate it.
+const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
 
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
