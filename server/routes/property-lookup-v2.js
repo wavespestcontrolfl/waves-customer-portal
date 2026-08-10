@@ -2952,11 +2952,21 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // classification but are not the county roll, and this copy claims
   // county-roll provenance (codex P1).
   const COUNTY_ROLL_SOURCES = new Set(['county', 'cadastral']);
-  const countyBackedType = rc && (
-    COUNTY_ROLL_SOURCES.has(String(rc._source || ''))
-    || COUNTY_ROLL_SOURCES.has(String(rc._fieldEvidence?.propertyType?.sourceType || '').toLowerCase())
-    || Boolean(rc._parcel?.aggregated)
-  );
+  // Field evidence, WHERE IT EXISTS, is the authority on where the type
+  // came from (codex P2): applyVerifiedOverrides rewrites propertyType's
+  // evidence to sourceType 'verified' but leaves rc._source at 'county',
+  // so a record-level arm evaluated first would credit the county roll for
+  // a technician's override ('HOA Common Area', or 'Multifamily' with a
+  // multi-unit count) and tell the operator the roll classified it. Only
+  // when propertyType carries NO evidence does the record-level source —
+  // or the stacked-parcel aggregation, which is assembled from county unit
+  // parcels — stand in for it.
+  const typeEvidenceSource = rc?._fieldEvidence?.propertyType
+    ? String(rc._fieldEvidence.propertyType.sourceType || '').toLowerCase()
+    : null;
+  const countyBackedType = Boolean(rc) && (typeEvidenceSource !== null
+    ? COUNTY_ROLL_SOURCES.has(typeEvidenceSource)
+    : (COUNTY_ROLL_SOURCES.has(String(rc._source || '')) || Boolean(rc._parcel?.aggregated)));
   if (rc && countyBackedType
       && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
     const masterParcelSubtype = resolveCommercialSubtype(rc, {});
@@ -2967,9 +2977,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     // carry unitCount 1 with _parcel.residentialUnits 30–48. The HOA
     // common-area subtype needs no unit count: that parcel is association
     // property (a clubhouse/greenbelt), never a resident's own home.
-    const masterUnitCount = rc._parcel?.aggregated
-      ? Math.max(Number(trustedUnitCount(rc)) || 0, Number(rc._parcel.residentialUnits) || 0)
-      : Number(trustedUnitCount(rc)) || 0;
+    // _parcel.residentialUnits is COUNTY GIS by construction — attachParcelMeta
+    // stamps it straight off the roll layer — so it is trusted evidence whether
+    // or not the lookup stacked unit parcels. Gating it on `aggregated` hid the
+    // only positive evidence on the commonest master shape (codex P1): county
+    // GIS returns ONE multifamily master polygon, attachParcelMeta records its
+    // 48 assessed units, `aggregated` stays unset, and buildCadastralRecord
+    // leaves unitCount at the seeded 1 — so a 48-unit building failed the
+    // evidence test and got none of this guidance, which is the exact
+    // commercial diversion the flag exists to catch. A single condo UNIT's own
+    // parcel carries residentialUnits 1, so the one-unit guard still holds.
+    // Bounded like the aggregate seeding (ai-property-lookup coerceInt 2–2000)
+    // so a bad layer response can't claim thousands of units.
+    const parcelUnits = Math.min(Number(rc._parcel?.residentialUnits) || 0, 2000);
+    const masterUnitCount = Math.max(Number(trustedUnitCount(rc)) || 0, parcelUnits);
     const masterParcelEvidence = masterUnitCount > 1 || Boolean(rc._parcel?.aggregated);
     if (masterParcelSubtype === 'hoa_common_area_residential'
         || (masterParcelSubtype === 'multifamily_common_area_residential' && masterParcelEvidence)) {

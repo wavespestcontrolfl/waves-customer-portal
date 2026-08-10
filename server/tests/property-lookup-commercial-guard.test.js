@@ -569,6 +569,70 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flag.reason).toMatch(/48-unit/);
   });
 
+  test('NON-STACKED county master polygon (unitCount 1, _parcel.residentialUnits 48, no aggregated) → flag fires (codex P1)', () => {
+    // The commonest master shape: county GIS returns ONE multifamily master
+    // parcel rather than stacked unit parcels, so attachParcelMeta records the
+    // assessed unit total but leaves `aggregated` unset and unitCount at 1.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { residentialUnits: 48 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/48-unit/);
+  });
+
+  test('a single condo unit parcel (residentialUnits 1) still gets no master-parcel copy', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        propertyType: 'Multifamily Condominium', unitCount: 1, squareFootage: 1200,
+        _parcel: { residentialUnits: 1 },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('a runaway parcel unit count is bounded, not echoed verbatim', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ unitCount: 1, _parcel: { residentialUnits: 999999 } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/2000-unit/);
+    expect(flag.reason).not.toMatch(/999999/);
+  });
+
+  test('a TECH-VERIFIED propertyType override on a county record gets no county-roll copy (codex P2)', () => {
+    // applyVerifiedOverrides rewrites the field evidence to 'verified' but
+    // leaves _source at 'county' — the copy must not credit the roll.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        _fieldEvidence: { propertyType: { sourceType: 'verified', value: 'Multifamily' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('a verified override cannot ride the AGGREGATED arm into county-roll copy either (codex P2)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        propertyType: 'HOA Common Area',
+        _parcel: { aggregated: true, residentialUnits: 30 },
+        _fieldEvidence: { propertyType: { sourceType: 'verified', value: 'HOA Common Area' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('county field evidence on a NON-county _source record still passes the gate', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({
+        _source: 'hybrid',
+        _fieldEvidence: { propertyType: { sourceType: 'county', value: 'Multifamily' } },
+      }), null, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
+  });
+
   test('aggregated parcel labeled Apartment still gets the re-lookup path (aggregation is built from unit parcels)', () => {
     const flags = buildFieldVerifyFlags(
       countyMultifamilyBuilding({ propertyType: 'Apartment', _parcel: { aggregated: true } }), null, null
