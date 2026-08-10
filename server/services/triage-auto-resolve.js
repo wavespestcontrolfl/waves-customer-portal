@@ -60,7 +60,9 @@ const ADDRESS_MOOT_CODES = new Set([
 ]);
 // missing_unit_number is deliberately NOT address-moot: the moot rule fires on
 // street + zip existing on file, and a multi-unit building address has both
-// while the unit is still uncollected — the ask stands until performed.
+// while the unit is still uncollected — the ask stands until performed. It is
+// closed event-driven instead (resolveOpenUnitNumberCards below) when a later
+// call's AV accepts a subpremise-complete address for the same building.
 
 // Mirror of FAIL_OPEN_CUSTOMER_STAGES in call-recording-processor.js: only
 // these pipeline stages carry a trustworthy on-file address. Terminal and
@@ -334,6 +336,97 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   return null;
 }
 
+// ── Event-driven unit-number resolution ─────────────────────────────────
+//
+// Mirror of customer-email-fanout's resolveOpenEmailReviewCards, for the one
+// address ask the nightly moot rules above deliberately never touch: a LATER
+// call whose Address Validation accepted a subpremise-complete address (the
+// caller finally supplied the unit and it validated) answers the standing
+// missing_unit_number card. Without this the card outlives the very
+// acceptance that collected the unit (codex #3324 r1 P2).
+//
+// Same-building corroboration: only cards whose call heard the SAME street
+// (V1 address_line1 or V2 street_line_1, unit designators stripped, compared
+// suffix-insensitively) as the accepted verdict resolve — a multi-property
+// customer's acceptance for a different address must not clear the condo's
+// unit ask. Fail closed: missing/unparseable streets keep the card.
+
+// Pure per-card predicate, exported for tests. `row` carries the card's
+// call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1).
+function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
+  const { streetCompareKey } = require('./call-triage-flags');
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const key = (line) => {
+    const street = splitStreetLineUnit(line).street;
+    return street ? streetCompareKey(street) : '';
+  };
+  const acceptedKey = key(acceptedStreetLine);
+  if (!acceptedKey) return false;
+  const heard = [];
+  for (const [raw, pick] of [
+    [row.call_extraction, (p) => p?.property?.service_address?.street_line_1],
+    [row.call_extraction_v1, (p) => p?.address_line1],
+  ]) {
+    if (raw == null) continue;
+    let parsed = raw;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        continue; // unparseable side contributes nothing; fail closed overall
+      }
+    }
+    const line = String(pick(parsed) || '').trim();
+    if (line) heard.push(key(line));
+  }
+  return heard.includes(acceptedKey);
+}
+
+// Never throws on a no-op; returns the number of cards resolved. Shares the
+// per-call lock contract (utils/triage-locks.js) and the review_status
+// re-sync with the sweep, admin-triage, and the email resolver.
+async function resolveOpenUnitNumberCards({ customerId, acceptedStreetLine, source = 'later call validated the full unit address' }, conn = db) {
+  if (!customerId || !String(acceptedStreetLine || '').trim()) return 0;
+  const now = new Date();
+  const candidates = await conn('triage_items as t')
+    .join('call_log as cl', 'cl.id', 't.call_log_id')
+    .where('t.reason_code', 'missing_unit_number')
+    .whereIn('t.status', ['open', 'in_progress'])
+    .where('cl.customer_id', customerId)
+    .select(
+      't.id', 't.call_log_id',
+      'cl.ai_extraction_enriched as call_extraction',
+      'cl.ai_extraction as call_extraction_v1',
+    );
+  const answered = candidates.filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine));
+  if (!answered.length) return 0;
+  const resolveCards = async (trx) => {
+    const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
+    for (const callId of callIds) await lockTriageCall(trx, callId);
+    const updated = await trx('triage_items')
+      .whereIn('id', answered.map((i) => i.id))
+      .whereIn('status', ['open', 'in_progress'])
+      .update({
+        status: 'resolved',
+        resolution_note: `Auto-resolved: ${String(source).slice(0, 150)} (Address Validation accepted with no missing unit).`,
+        resolved_at: now,
+        updated_at: now,
+      });
+    for (const callId of callIds) {
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: callId })
+        .whereIn('status', ['open', 'in_progress'])
+        .count('* as n')
+        .first();
+      await trx('call_log')
+        .where({ id: callId })
+        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
+    }
+    return updated;
+  };
+  return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
+}
+
 async function runTriageAutoResolve({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('triageAutoResolve')) {
@@ -502,6 +595,8 @@ async function sweep({ now = new Date() } = {}) {
 
 module.exports = {
   runTriageAutoResolve,
+  resolveOpenUnitNumberCards,
+  unitCardAnsweredByAcceptedStreet,
   classifyTriageItem,
   hasNewAddressEvidence,
   callSuppliedAddress,

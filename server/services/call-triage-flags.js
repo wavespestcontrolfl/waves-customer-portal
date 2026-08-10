@@ -159,11 +159,6 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('out_of_service_area');
     } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
       flags.push('address_unverified');
-      // AV resolved the BUILDING but Google reports the unit designator
-      // missing (condo/townhome address given without a unit). The generic
-      // hold above stays authoritative; this names the specific ask.
-      // Advisory by construction — deliberately NOT in BLOCKING_TRIAGE_FLAGS.
-      if (isMissingUnitNumber(av)) flags.push('missing_unit_number');
     } else if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
       // AV accepted a REAL premise — but the model wasn't sure it heard the
       // right street. "Palm Ave" misheard as "Park Ave" validates cleanly at
@@ -175,6 +170,19 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // validated_accept / corrected → clean, no blocking address flag (the
     // whole point: a corrected bad zip clears triage instead of holding the
     // call).
+
+    // AV resolved the BUILDING but Google reports the unit designator
+    // missing (condo/townhome address given without a unit). The generic
+    // hold above stays authoritative when the status is unresolved; this
+    // names the specific ask. Advisory by construction — deliberately NOT
+    // in BLOCKING_TRIAGE_FLAGS. Checked OUTSIDE the status chain: a
+    // garbled-street recovery swaps in its own validated_accept verdict,
+    // and the processor carries the original missing-subpremise evidence
+    // onto that effective result — the ask must survive the recovered
+    // (accepted) status, not just the unresolved ones.
+    if (avStatus !== 'out_of_service_area' && isMissingUnitNumber(av)) {
+      flags.push('missing_unit_number');
+    }
   } else {
     if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
       flags.push('missing_service_address');
@@ -406,7 +414,13 @@ function isMissingUnitNumber(av) {
 function suppressAddressFlagsForAV(flags, addressValidation) {
   const s = addressValidation?.status;
   if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
-  return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f));
+  // A recovery-produced accept can still CARRY the original verdict's
+  // missing-subpremise evidence (the processor merges it onto the effective
+  // result before the flags run) — the unit ask is the one address flag such
+  // an accept does not answer, so it survives the suppression. A true accept
+  // has no missing components and clears it as documented above.
+  return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f)
+    || (f === 'missing_unit_number' && isMissingUnitNumber(addressValidation)));
 }
 
 function mergeTriageFlags(modelFlags, deterministicFlags) {
@@ -1290,6 +1304,14 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
 
   const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
   if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+  // V2-only address evidence: when legacy V1 missed the street entirely,
+  // hadStreet is false and the address branch above never ran — but V2 heard
+  // the building address, and its deterministic pass (fed the same AV
+  // verdict) already flagged the missing unit. Consume it so the ask still
+  // files; dedupe with the branch's own push for the both-heard case.
+  if (flags.includes('missing_unit_number') && !needsConfirmation.includes('missing_unit_number')) {
+    needsConfirmation.push('missing_unit_number');
+  }
 
   if (extracted.first_name && !String(extracted.last_name || '').trim()
       && (extracted.lead_quality === 'hot' || extracted.lead_quality === 'warm')) {
@@ -1365,16 +1387,27 @@ function deriveEmailReview(extracted = {}) {
  * call that never restates the address/email must not erase the earlier call's
  * warnings (the lead's extracted_data is otherwise a rolling latest-call
  * snapshot, so a quick follow-up call was wiping address_unverified /
- * email_unverified off the lead). Union of both, with one supersede rule: an
+ * email_unverified off the lead). Union of both, with two supersede rules: an
  * address recovered-and-validated on the newer call replaces the stale
- * address_unverified.
+ * address_unverified, and a newer call whose AV verdict accepted the EXACT
+ * premise (accept/corrected with no missing subpremise — i.e. the caller
+ * finally supplied the unit and it validated) answers the prior call's
+ * standing missing_unit_number ask. A recovery-produced accept that still
+ * carries the original missing-subpremise evidence clears nothing — recovery
+ * fixes a garbled street, not a missing unit.
  */
-function mergeNeedsConfirmation(prior, next) {
+function mergeNeedsConfirmation(prior, next, addressValidation = null) {
   const nextArr = Array.isArray(next) ? next : [];
-  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
-  return nextArr.includes('address_recovered')
-    ? merged.filter((r) => r !== 'address_unverified')
-    : merged;
+  let merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
+  if (nextArr.includes('address_recovered')) {
+    merged = merged.filter((r) => r !== 'address_unverified');
+  }
+  const avStatus = addressValidation?.status;
+  if ((avStatus === 'validated_accept' || avStatus === 'corrected')
+      && !isMissingUnitNumber(addressValidation)) {
+    merged = merged.filter((r) => r !== 'missing_unit_number');
+  }
+  return merged;
 }
 
 /**

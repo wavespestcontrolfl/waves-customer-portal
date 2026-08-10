@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -2456,7 +2456,7 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, addressValidation = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -2496,7 +2496,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation);
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, addressValidation);
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -6392,8 +6392,14 @@ const CallRecordingProcessor = {
     // of the original unresolvable one. The persisted ai_address_validation
     // shadow row keeps the ORIGINAL verdict; the shadow bridge also receives
     // the original + the recovery result and applies its own adoption rule.
+    // Recovery fixes a garbled STREET; it cannot supply the unit the original
+    // verdict said was missing — carry the subpremise evidence onto the
+    // effective verdict so the enforce-mode flags (and the AV suppression)
+    // still see the owed unit ask behind the recovered accept.
     const effectiveAddressValidation = (addressRecovery?.recovered && addressRecovery.avResult)
-      ? addressRecovery.avResult
+      ? (isMissingUnitNumber(v2AddressValidation)
+        ? { ...addressRecovery.avResult, missingComponents: [...new Set([...(addressRecovery.avResult.missingComponents || []), 'subpremise'])] }
+        : addressRecovery.avResult)
       : v2AddressValidation;
     // Which extraction pass recovered (codex final-round P2). The offline
     // audits reconstruct the routing verdict from the address_recovered card
@@ -7362,6 +7368,28 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A subpremise-complete AV acceptance on THIS call answers a standing
+    // unit-number ask an earlier call filed for the same building — mirror of
+    // the email fanout's later-call resolution above; the nightly sweep
+    // deliberately never moots missing_unit_number, so this is the only path
+    // that closes the card once the unit is finally supplied. Same-building
+    // corroboration + fail-closed matching live in the resolver. A recovery-
+    // produced accept still carries the missing-subpremise evidence and is
+    // excluded by the isMissingUnitNumber guard.
+    if (customerId
+        && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
+        && !isMissingUnitNumber(effectiveAddressValidation)
+        && effectiveAddressValidation?.normalized?.street_line_1) {
+      try {
+        await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
+          customerId,
+          acceptedStreetLine: effectiveAddressValidation.normalized.street_line_1,
+        });
+      } catch (e) {
+        logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
+      }
+    }
+
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
     // customer whose two addresses arrived on one call, which is exactly the
@@ -8262,7 +8290,11 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
+            // The effective AV verdict rides along so a call that finally
+            // supplied the unit (subpremise-complete accept) clears the prior
+            // call's standing missing_unit_number ask instead of unioning it
+            // back in forever.
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, effectiveAddressValidation);
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,
@@ -8539,7 +8571,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality },
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, addressValidation: effectiveAddressValidation },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;

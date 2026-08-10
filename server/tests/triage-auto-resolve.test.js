@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const {
   runTriageAutoResolve,
   classifyTriageItem,
+  unitCardAnsweredByAcceptedStreet,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
@@ -311,6 +312,36 @@ describe('rule notes', () => {
       expect(note.length).toBeGreaterThan(10);
       expect(note.length).toBeLessThanOrEqual(500);
     }
+  });
+});
+
+// Event-driven unit-number resolution: the same-building corroboration
+// predicate (fail closed). Fixtures synthetic.
+describe('unitCardAnsweredByAcceptedStreet', () => {
+  const v2 = (street) => JSON.stringify({ property: { service_address: { street_line_1: street } } });
+  const v1 = (street) => JSON.stringify({ address_line1: street });
+
+  test('V2-heard building street matches the accepted street (suffix-insensitive)', () => {
+    const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
+    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Court')).toBe(true);
+  });
+
+  test('accepted street carrying the unit still matches the unitless building street', () => {
+    const row = { call_extraction: null, call_extraction_v1: v1('100 Example Condo Ct') };
+    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct Apt 104')).toBe(true);
+    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct, Unit 104')).toBe(true);
+  });
+
+  test('a DIFFERENT street never answers the card (multi-property customer)', () => {
+    const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
+    expect(unitCardAnsweredByAcceptedStreet(row, '4200 Other Sample Blvd')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, '102 Example Condo Ct')).toBe(false);
+  });
+
+  test('fail closed: missing or unparseable streets keep the card', () => {
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: null, call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, '')).toBe(false);
   });
 });
 

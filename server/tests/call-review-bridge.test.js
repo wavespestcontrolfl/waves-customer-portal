@@ -118,10 +118,12 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     }
   );
 
+  // Synthetic fixture address — never a real caller's (AGENTS.md: no
+  // customer PII on the repo surface).
   test('ambiguous PREMISE missing its subpremise → missing_unit_number rides with address_unverified', () => {
     const out = deriveCallReviewBridge({
       addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
-      extracted: { address_line1: '100 Harbour Isle Ct', city: 'Bradenton', lead_quality: 'warm' },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
     });
     expect(out.needsConfirmation).toContain('address_unverified');
     expect(out.needsConfirmation).toContain('missing_unit_number');
@@ -130,10 +132,26 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
   test('ambiguous without a missing subpremise → no unit-number ask', () => {
     const out = deriveCallReviewBridge({
       addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [] },
-      extracted: { address_line1: '100 Harbour Isle Ct', city: 'Bradenton', lead_quality: 'warm' },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
     });
     expect(out.needsConfirmation).toContain('address_unverified');
     expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('V2-only evidence: V1 heard no street, but the V2 deterministic pass flagged the missing unit → ask still files', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: { city: 'Bradenton', lead_quality: 'warm' }, // no address_line1 → address branch never runs
+      v2TriageFlags: ['address_unverified', 'missing_unit_number'],
+    });
+    expect(out.needsConfirmation).toContain('missing_unit_number');
+    // Both-heard case stays deduped: the branch push and the V2 flag are one ask.
+    const both = deriveCallReviewBridge({
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(both.needsConfirmation.filter((r) => r === 'missing_unit_number')).toHaveLength(1);
   });
 
   test('out_of_service_area with a street → out_of_service_area reason', () => {
@@ -316,5 +334,23 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
   test('handles empty/garbage input', () => {
     expect(mergeNeedsConfirmation(null, undefined)).toEqual([]);
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
+  });
+
+  test('a subpremise-complete accept on the newer call clears the standing unit ask', () => {
+    const accepted = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [] };
+    const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted);
+    expect(merged).not.toContain('missing_unit_number');
+    expect(merged).toContain('email_unverified');
+  });
+
+  test('a recovery-produced accept still carrying missing-subpremise evidence clears nothing', () => {
+    const carried = { status: 'validated_accept', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'], carried))
+      .toContain('missing_unit_number');
+  });
+
+  test('without an AV verdict the unit ask persists as before', () => {
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [])).toContain('missing_unit_number');
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], { status: 'ambiguous' })).toContain('missing_unit_number');
   });
 });

@@ -232,6 +232,26 @@ describe('computeDeterministicTriageFlags', () => {
       expect(BLOCKING_TRIAGE_FLAGS.has('missing_unit_number')).toBe(false);
     });
 
+    test('recovery-produced accept carrying the original missing-subpremise evidence keeps the unit ask (survives AV suppression)', () => {
+      const e = validV2Extraction();
+      // The processor merges the original verdict's missingComponents onto the
+      // effective recovery accept — the ask must survive both the accepted
+      // status chain and suppressAddressFlagsForAV.
+      const carried = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: ['subpremise'] };
+      const flags = computeDeterministicTriageFlags(e, { addressValidation: carried });
+      expect(flags).toContain('missing_unit_number');
+      expect(flags).not.toContain('address_unverified');
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], carried)).toContain('missing_unit_number');
+    });
+
+    test('a true accept (no missing components) emits and suppresses nothing unit-related', () => {
+      const e = validV2Extraction();
+      const clean = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: [] };
+      expect(computeDeterministicTriageFlags(e, { addressValidation: clean })).not.toContain('missing_unit_number');
+      // A STALE unit flag from another source is still superseded by a clean accept.
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], clean)).not.toContain('missing_unit_number');
+    });
+
     test('api_unavailable holds for review (address_validation_unavailable) and still applies model signals', () => {
       const e = validV2Extraction();
       e.confidence.service_address = 0.3;
