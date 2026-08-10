@@ -94,7 +94,48 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
   // stays unchanged, and treating that as "nothing to do" would leave the
   // wrong or rejected draft public and sendable.
   const forcedQuarantine = !!(pending.conflict || pending.reason);
-  if (!forcedQuarantine && data.lead_id) {
+  // A forced verdict CAN be superseded by a newer processing generation
+  // (codex P1, local audit on 3092fbbb8): the spam/identity verdict was
+  // deferred behind a delivery claim, then a force-reprocess claimed
+  // generation N+1, re-qualified the call, and cleared the call-side
+  // verdict — finalizing the stale marker here would archive the valid
+  // draft and unlink its lead. Under the call-row lock (leads first,
+  // repo-wide estimates → leads → call_log order): a NEWER settled
+  // generation whose live verdict is CLEAR downgrades the forced marker
+  // to the ordinary obsolete test below; a newer generation still
+  // IN FLIGHT defers — the marker goes back on the row and the
+  // wedged-invalidation sweep re-attempts once the call settles.
+  // Generation-less markers (written before the column deployed) and
+  // same-generation markers finalize exactly as before.
+  let forcedSuperseded = false;
+  const verdictCallId = data?.estimatorEngine?.callLogId || null;
+  if (forcedQuarantine && pending.generation != null && verdictCallId) {
+    const leadLockIds = [...new Set([data.lead_id, pending.from].filter(Boolean).map(String))].sort();
+    for (const leadLockId of leadLockIds) {
+      await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
+    }
+    const callRow = await trx('call_log').where({ id: verdictCallId }).forUpdate()
+      .first('processing_generation', 'processing_status', 'processing_token', 'extraction_attempts', 'metadata');
+    const liveGen = callRow?.processing_generation != null ? Number(callRow.processing_generation) : null;
+    if (callRow && liveGen != null && liveGen > Number(pending.generation)) {
+      if (callReprocessInFlight(callRow)) {
+        restorePendingInvalidation(data, pending);
+        await trx('estimates').where({ id: estimateId })
+          .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+        return { terminal: false, status: String(row.status || '').toLowerCase(), deferred: true };
+      }
+      forcedSuperseded = !(await callRejectedForDrafting(trx, verdictCallId));
+    }
+  }
+  if (forcedSuperseded && !data.lead_id) {
+    // Superseded forced verdict on a lead-less draft: the newer settled
+    // generation's verdict is clear and there is no durable linkage left
+    // to compare — the marker is obsolete, the draft stays.
+    await trx('estimates').where({ id: estimateId })
+      .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+  }
+  if ((!forcedQuarantine || forcedSuperseded) && data.lead_id) {
     // The obsolete-vs-apply decision is made against LOCKED state and the
     // locks are HELD through whichever write follows (codex P1, GH round
     // on a6c3a5c5c): a plain read could observe the call momentarily
@@ -158,13 +199,34 @@ function takePendingInvalidation(data) {
     // signal that this verdict is not a linkage repoint (codex P0, PR
     // #3304 GH r8b).
     reason: eng.invalidation_pending_reason || null,
+    // The processing generation the deferring verdict OBSERVED (codex P1,
+    // local audit on 3092fbbb8) — lets the finalizer detect a forced
+    // verdict superseded by a newer pass's re-qualification.
+    generation: eng.invalidation_pending_generation != null
+      ? Number(eng.invalidation_pending_generation) : null,
   };
   delete eng.invalidation_pending_at;
   delete eng.invalidation_pending_from;
   delete eng.invalidation_pending_to;
   delete eng.invalidation_pending_conflict;
   delete eng.invalidation_pending_reason;
+  delete eng.invalidation_pending_generation;
   return pending;
+}
+
+// Inverse of takePendingInvalidation — used when the finalizer must DEFER
+// (a newer processing generation is mid-flight): the marker goes back on
+// the row so the wedged-invalidation sweep re-attempts once the call
+// settles, and every send/accept guard keeps failing closed on it.
+function restorePendingInvalidation(data, pending) {
+  const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
+  data.estimatorEngine = eng;
+  eng.invalidation_pending_at = pending.at;
+  if (pending.from) eng.invalidation_pending_from = pending.from;
+  if (pending.to) eng.invalidation_pending_to = pending.to;
+  if (pending.conflict) eng.invalidation_pending_conflict = pending.conflict;
+  if (pending.reason) eng.invalidation_pending_reason = pending.reason;
+  if (pending.generation != null) eng.invalidation_pending_generation = pending.generation;
 }
 
 // Sweep estimates wedged on a pending invalidation whose delivery claim is
@@ -224,7 +286,9 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
           return false;
         }
         const outcome = await completePendingInvalidation(trx, candidate.id, { row, data, pending });
-        return !outcome.obsolete;
+        // deferred = a newer processing generation is mid-flight; the
+        // marker went back on the row and a later sweep re-attempts.
+        return !outcome.obsolete && !outcome.deferred;
       });
       if (done) {
         finalized += 1;
@@ -1889,6 +1953,12 @@ const REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = [
   'invalidation_pending_from',
   'invalidation_pending_to',
   'invalidation_pending_conflict',
+  // The forced reason and the observed generation ride the same marker —
+  // a revise clearing either downgrades a deferred forced quarantine to a
+  // plain linkage repoint (the r8c bug class) or strips the supersession
+  // evidence the finalizer needs.
+  'invalidation_pending_reason',
+  'invalidation_pending_generation',
   'identity_conflict',
 ];
 

@@ -666,12 +666,28 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           // obsolete whenever the linkage was unchanged (the sid-linked
           // case), leaving the rejected or wrong-identity draft live.
           if (!eng.invalidation_pending_at || eng[forcedKey] !== reason) {
+            // The generation this forced verdict rides on (codex P1,
+            // local audit on 3092fbbb8): the finalizer compares it to the
+            // call's live generation to detect a verdict superseded by a
+            // newer pass's re-qualification. The fence's generation IS
+            // the verdict pass's own (the fence check below rolls the
+            // marker back if the row has moved past it); without a fence,
+            // the live row observed inside this txn is the verdict's
+            // generation. A newer forced verdict overwrites an older
+            // marker's generation — supersession is judged against the
+            // LATEST verdict.
+            const verdictGeneration = ownershipFence?.procGeneration
+              ?? (await trx('call_log').where({ id: callLogId })
+                .first('processing_generation')
+                .then((r) => (r?.processing_generation != null ? Number(r.processing_generation) : null))
+                .catch(() => null));
             data.estimatorEngine = {
               ...eng,
               invalidation_pending_at: eng.invalidation_pending_at || new Date().toISOString(),
               // The claim release performs the unlink for a deferred
               // quarantine too — it needs the source lead.
               invalidation_pending_from: eng.invalidation_pending_from || quarantinedLeadId,
+              ...(verdictGeneration != null ? { invalidation_pending_generation: verdictGeneration } : {}),
               [forcedKey]: reason,
             };
             await trx('estimates').where({ id: conflicted.id })

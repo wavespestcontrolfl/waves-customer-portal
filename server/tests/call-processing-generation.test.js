@@ -575,3 +575,131 @@ describe('staleCallLinkageReason ownedByCaller generation arm', () => {
     expect(reason).toBe('call_reprocessing_before_delivery');
   });
 });
+
+describe('completePendingInvalidation — forced verdicts vs a newer generation', () => {
+  // Required lazily so the shared db mock above satisfies its module load.
+  const { completePendingInvalidation, takePendingInvalidation } = require('../services/admin-estimate-persistence');
+
+  const trxFor = (callRow, writes) => {
+    const trx = (table) => {
+      const b = {};
+      for (const m of ['where', 'whereNull', 'orderBy', 'forUpdate']) b[m] = () => b;
+      b.first = async () => (table === 'call_log' ? callRow : null);
+      b.update = async (row) => { writes.push({ table, row }); return 1; };
+      return b;
+    };
+    trx.fn = { now: () => 'NOW()' };
+    return trx;
+  };
+
+  const SETTLED = (generation, metadata = {}) => ({
+    processing_generation: generation,
+    processing_status: 'processed',
+    processing_token: null,
+    extraction_attempts: 0,
+    metadata,
+  });
+
+  const FORCED_PENDING = (generation) => ({
+    at: '2026-08-10T00:00:00.000Z',
+    from: 'lead-a',
+    to: null,
+    conflict: 'email_identity_conflict',
+    reason: null,
+    generation,
+  });
+
+  const rowAndData = () => ({
+    row: { status: 'draft', archived_at: null },
+    data: { estimatorEngine: { callLogId: 'call-1' } },
+  });
+
+  const writtenEstimate = (writes) => JSON.parse(writes.find((w) => w.table === 'estimates').row.estimate_data);
+
+  test('SUPERSEDED: a newer SETTLED generation with a clear live verdict discards the forced marker', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const out = await completePendingInvalidation(trxFor(SETTLED(6), writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBe(true);
+    const written = writtenEstimate(writes);
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(written.estimatorEngine.invalidation_pending_at).toBeUndefined();
+  });
+
+  test('DEFERRED: a newer generation still IN FLIGHT restores the marker for the wedged sweep', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const inFlight = { ...SETTLED(6), processing_token: 'tok-live', processing_status: 'processing' };
+    const out = await completePendingInvalidation(trxFor(inFlight, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.deferred).toBe(true);
+    const written = writtenEstimate(writes);
+    expect(written.estimatorEngine.invalidation_pending_at).toBe('2026-08-10T00:00:00.000Z');
+    expect(written.estimatorEngine.invalidation_pending_conflict).toBe('email_identity_conflict');
+    expect(written.estimatorEngine.invalidation_pending_generation).toBe(5);
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+  });
+
+  test('a RE-OBSERVED verdict on the newer settled generation still applies the invalidation', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const blocked = SETTLED(6, { estimator_draft_block: { reason: 'email_identity_conflict' } });
+    const out = await completePendingInvalidation(trxFor(blocked, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(out.deferred).toBeUndefined();
+    const written = writtenEstimate(writes);
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeTruthy();
+    expect(written.estimatorEngine.identity_conflict).toBe('email_identity_conflict');
+  });
+
+  test('SAME generation finalizes exactly as before — no supersession test runs', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const out = await completePendingInvalidation(trxFor(SETTLED(5), writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(out.deferred).toBeUndefined();
+    expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
+  });
+
+  test('a GENERATION-LESS forced marker (pre-column) finalizes exactly as before', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const out = await completePendingInvalidation(trxFor(SETTLED(6), writes), 'est-1', {
+      row, data, pending: { ...FORCED_PENDING(null), generation: null },
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(out.deferred).toBeUndefined();
+    expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
+  });
+
+  test('takePendingInvalidation carries the generation and strips its key', () => {
+    const data = {
+      estimatorEngine: {
+        invalidation_pending_at: '2026-08-10T00:00:00.000Z',
+        invalidation_pending_conflict: 'email_identity_conflict',
+        invalidation_pending_generation: 5,
+      },
+    };
+    const pending = takePendingInvalidation(data);
+    expect(pending.generation).toBe(5);
+    expect(data.estimatorEngine.invalidation_pending_generation).toBeUndefined();
+  });
+
+  test('the forced deferral writer stamps the verdict generation on the marker (source pin)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const writerAt = source.indexOf("const forcedKey = identityConflict ? 'invalidation_pending_conflict' : 'invalidation_pending_reason'");
+    expect(writerAt).toBeGreaterThan(-1);
+    const genAt = source.indexOf('const verdictGeneration = ownershipFence?.procGeneration', writerAt);
+    expect(genAt).toBeGreaterThan(writerAt);
+    expect(source.indexOf('invalidation_pending_generation: verdictGeneration', genAt)).toBeGreaterThan(genAt);
+  });
+});
