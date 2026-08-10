@@ -6284,7 +6284,14 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
 // claim and delivery — it leaves a paid invoice whose receipt the operator
 // resends from the invoices page (no money impact). We accept that narrow gap
 // over double-texting the customer.
-async function sendPrepaidReceiptForInvoice(invoice) {
+// `operatorInitiated` is CALLER-DECLARED (default false so any future
+// autonomous caller stays fenced): the only entry today is the
+// authenticated POST /schedule/:id/prepaid action where the operator
+// explicitly asked for the receipt. Without it an after-hours send is
+// held at the window, the email leg still succeeds, and receipt_sent_at
+// stays claimed — permanently dropping the requested text (codex r21
+// local audit).
+async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false } = {}) {
   const claimed = await db('invoices')
     .where({ id: invoice.id })
     .whereNull('receipt_sent_at')
@@ -6308,7 +6315,7 @@ async function sendPrepaidReceiptForInvoice(invoice) {
   }).catch((err) => ({ ok: false, error: err.message }));
   let smsResult = { ok: false, skipped: true };
   try {
-    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false, hasEmailLeg: true });
+    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false, hasEmailLeg: true, operatorInitiated });
     smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     smsResult = { ok: false, error: err.message };
@@ -6338,7 +6345,7 @@ async function sendPrepaidReceiptForInvoice(invoice) {
 // atomic paid transition; open PaymentIntent cancelled/refused first), then send
 // the receipt. Never throws to the route: every non-send path returns a typed
 // reason the modal can explain.
-async function generatePrepaidReceiptForService(serviceId) {
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -6374,7 +6381,7 @@ async function generatePrepaidReceiptForService(serviceId) {
   // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
   // (idempotently) send the receipt for the existing paid invoice.
   if (['paid', 'prepaid'].includes(invoice.status)) {
-    return sendPrepaidReceiptForInvoice(invoice);
+    return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
   // Coverage gate: only finalize when the cash fully covers the amount due. A
@@ -6484,7 +6491,7 @@ async function generatePrepaidReceiptForService(serviceId) {
     }
   }
 
-  return sendPrepaidReceiptForInvoice(outcome.invoice);
+  return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated });
 }
 
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
@@ -6554,7 +6561,9 @@ router.post('/:id/prepaid', async (req, res, next) => {
       prepaidAmount: amt,
     });
     if (decision.attempt) {
-      receipt = await generatePrepaidReceiptForService(req.params.id).catch((err) => {
+      // Authenticated operator action with an explicit receipt request —
+      // operator provenance for the 8AM-8PM send window.
+      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true }).catch((err) => {
         logger.error(`[schedule] prepaid receipt failed for ${req.params.id}: ${err.message}`);
         return { sent: false, reason: 'error' };
       });
@@ -10335,6 +10344,7 @@ router._test = {
   appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
+  sendPrepaidReceiptForInvoice,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
   mintScheduledServiceInvoiceWithDeposit,
