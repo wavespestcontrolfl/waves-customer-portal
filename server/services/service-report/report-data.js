@@ -2686,17 +2686,35 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // guards it, and only a 'photo' verdict is ever adopted — the satellite
   // lane's combined verdict above is left untouched.
   let photoLaneVerdict = traceEligibility.variant === 'photo' ? traceEligibility : null;
-  if (!photoLaneVerdict && photoMarksGateOn()) {
+  // Tracked alongside, because a photo lane must NOT suppress a satellite
+  // trace some OTHER line legitimately earned (codex P1 r5). On a mixed
+  // trenching+foam visit the tech can save a trenching trace — the capture
+  // path and the field feed both use the combined satellite verdict — so
+  // suppressing on "a photo lane exists" silently dropped a trace the tech
+  // had successfully recorded. The two artifacts coexist: the marked photo
+  // shows the drill points, the trace shows the trenched perimeter.
+  let satelliteLineEligible = traceEligibility.eligible && traceEligibility.variant !== 'photo';
+  if (photoMarksGateOn() && (!photoLaneVerdict || !satelliteLineEligible)) {
     try {
       const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
       const lineVerdicts = Array.isArray(frozenPhotoLines)
         ? await addonVerdictsFromLines(frozenPhotoLines, knex, { renderSide: true })
         : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true });
-      photoLaneVerdict = (lineVerdicts || [])
-        .find((v) => v?.eligible && v.variant === 'photo') || null;
+      if (!photoLaneVerdict) {
+        photoLaneVerdict = (lineVerdicts || [])
+          .find((v) => v?.eligible && v.variant === 'photo') || null;
+      }
+      if (!satelliteLineEligible) {
+        satelliteLineEligible = (lineVerdicts || [])
+          .some((v) => v?.eligible && v.variant !== 'photo');
+      }
     } catch { /* fail-soft: no photo lane found, the satellite verdict stands */ }
   }
-  const photoLaneSuppressed = photoMarksGateOn() && Boolean(photoLaneVerdict);
+  // Suppress the satellite trace only when the visit has NO satellite-capable
+  // line — i.e. the foam IS the treatment, not one line among several.
+  const photoLaneSuppressed = photoMarksGateOn()
+    && Boolean(photoLaneVerdict)
+    && !satelliteLineEligible;
   const traceSuppressed = (traceEligibilityGateOn()
     && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
     || photoLaneSuppressed;

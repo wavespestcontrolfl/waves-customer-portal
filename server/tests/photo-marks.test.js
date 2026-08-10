@@ -342,6 +342,27 @@ describe('a foam ADD-ON makes the visit a photo lane', () => {
     expect(photoLine).toMatchObject({ variant: 'photo', serviceKey: 'foam_drill' });
   });
 
+  test('a mixed visit keeps BOTH artifacts: satellite line stays eligible', async () => {
+    // A trenching+foam visit earns a trace from the trenching line AND a
+    // marked photo from the foam line. Suppressing the trace because a photo
+    // lane exists silently dropped a trace the tech had already saved — the
+    // capture path and field feed both use the combined satellite verdict
+    // (codex P1 r5).
+    const verdicts = await addonVerdictsFromLines(
+      [
+        { serviceKey: 'termite_trenching', findingsType: 'termite_treatment', service_name: 'Trenching' },
+        { serviceKey: 'foam_drill', findingsType: 'termite_treatment', service_name: 'Drill-and-Foam Termite' },
+      ],
+      knexStub([]),
+    );
+    const photoLine = verdicts.find((v) => v?.eligible && v.variant === 'photo');
+    const satelliteLine = verdicts.find((v) => v?.eligible && v.variant !== 'photo');
+    expect(photoLine).toBeTruthy();
+    expect(satelliteLine).toBeTruthy();
+    // Both present ⇒ the render must NOT suppress the satellite trace.
+    expect(Boolean(photoLine) && !satelliteLine).toBe(false);
+  });
+
   test('a visit with no foam line keeps pre-gate capture behavior', async () => {
     const fresh = require('../services/service-report/trace-eligibility');
     const block = await withGates(undefined, 'true', () => fresh.traceCaptureBlockPayload(

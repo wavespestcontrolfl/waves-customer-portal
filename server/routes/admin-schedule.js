@@ -1965,7 +1965,13 @@ router.get('/', async (req, res, next) => {
     // still fails closed via the unresolved sentinel — capture's own
     // catalog rule (r18) rejects those ids the same way.
     let dayPointerLookupFailed = false;
-    if (traceEligibilityGateOn()) {
+    // rowTraceNeeded, not the eligibility gate alone (codex P2 r5): with only
+    // GATE_PHOTO_MARKS on, skipping this batch left every linked add-on
+    // resolving to `unresolved:<id>`, so a foam add-on never read as a photo
+    // lane and traceFeedFields defaulted to traceEligible:true — the tech was
+    // offered a satellite workflow the save endpoint then rejects. The week
+    // feed already batches under either gate.
+    if (rowTraceNeeded) {
       // Primary AND add-on catalog ids in one batch — a grouped visit with
       // an ineligible primary but a spray-capable add-on line still traces
       // (codex P2 r11).
