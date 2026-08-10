@@ -576,6 +576,26 @@ async function attributeUnclaimedBridgeLeads({
   // the excludeCallSids/excludeCallIds parameter doc). Expects the leads
   // table aliased 'l'; applied to the candidate scan AND re-applied under
   // the lead lock (codex P1 r19).
+  // EVERY durable call↔lead linkage mode, as ONE correlated predicate
+  // (codex P1 r24). Four consecutive rounds found the same root gap on
+  // successive surfaces, because sid + metadata-stamp are only two of the
+  // modes: findReusableCallLead links a PHONE-bearing call without
+  // touching the lead's sid or writing a stamp, and the bridge persists
+  // its own association in metadata.google_ads_call_bridge.leadMatch.
+  // Every guard below composes this instead of repeating two arms, so a
+  // new consumer cannot reintroduce the gap. Lead alias is 'l'; the caller
+  // passes its call alias. The phone arm is deliberately broad — in these
+  // guards a false positive only makes the lead WAIT for another sweep,
+  // while a false negative writes an irreversible organic label.
+  const linkedCallToLead = (qb, a) => {
+    qb.where(function anyDurableLinkage() {
+      this.orWhereRaw(`${a}.twilio_call_sid = l.twilio_call_sid`)
+        .orWhereRaw(`${a}.metadata->>'lead_id' = l.id::text`)
+        .orWhereRaw(`${a}.metadata->'google_ads_call_bridge'->'leadMatch'->>'leadId' = l.id::text`)
+        .orWhereRaw(`LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10 AND RIGHT(regexp_replace(COALESCE(${a}.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)`);
+    });
+  };
+
   const applyAmbiguityExclusions = (qb) => {
     if (excludeCallSids.length) {
       qb.where(function sidNotAmbiguous() {
@@ -645,19 +665,13 @@ async function attributeUnclaimedBridgeLeads({
     // column: the lead↔call linkage is twilio_call_sid, the same join the
     // bridge's own fetchCrmCalls uses (a NULL sid on the lead matches nothing
     // and passes, correctly — no linked call, no bridge stamp).
-    .whereNotExists(function callAlreadyBridged() {
-      this.select(1).from('call_log as cl')
-        .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
-        .whereNotNull('cl.google_ads_call_resource_name');
-    })
-    // Same claim check on the STAMP linkage arm (pre-push P1 r14): a
-    // phone-less reused lead links through call_log.metadata.lead_id, and
-    // its call being bridged is just as much a Google Ads claim as a
-    // sid-linked one — sweeping it organic would double-bucket the lead.
-    .whereNotExists(function stampedCallAlreadyBridged() {
-      this.select(1).from('call_log as clb')
-        .whereRaw("clb.metadata->>'lead_id' = l.id::text")
-        .whereNotNull('clb.google_ads_call_resource_name');
+    // A bridged CALL whose lead was never repointed is still a CLAIMED
+    // Google Ads call — "unclaimed" means no bridge stamp on ANY call
+    // durably linked to this lead, across every linkage mode.
+    .whereNotExists(function anyLinkedCallAlreadyBridged() {
+      this.select(1).from('call_log as clb');
+      linkedCallToLead(this, 'clb');
+      this.whereNotNull('clb.google_ads_call_resource_name');
     })
     // A lead whose linked call is not SETTLED-ATTRIBUTABLE must not be
     // swept into organic attribution. Rejection (spam/voicemail terminal,
@@ -672,29 +686,17 @@ async function attributeUnclaimedBridgeLeads({
     // 'processed' or legacy NULL — expressed as its complement, on both
     // linkage arms: the lead's own sid AND the metadata stamp (phone-less
     // reuse). A blocked lead simply waits for the next sweep run.
-    .whereNotExists(function sidCallNotAttributable() {
-      this.select(1).from('call_log as clr')
-        .whereRaw('clr.twilio_call_sid = l.twilio_call_sid')
-        .where(function notSettled() {
-          this.whereNotNull('clr.processing_token')
-            .orWhere(function badStatus() {
-              this.whereNotNull('clr.processing_status')
-                .whereNot('clr.processing_status', 'processed');
-            })
-            .orWhereRaw("clr.metadata->>'no_attribution' = 'true'");
-        });
-    })
-    .whereNotExists(function stampedCallNotAttributable() {
-      this.select(1).from('call_log as cls')
-        .whereRaw("cls.metadata->>'lead_id' = l.id::text")
-        .where(function notSettled() {
-          this.whereNotNull('cls.processing_token')
-            .orWhere(function badStatus() {
-              this.whereNotNull('cls.processing_status')
-                .whereNot('cls.processing_status', 'processed');
-            })
-            .orWhereRaw("cls.metadata->>'no_attribution' = 'true'");
-        });
+    .whereNotExists(function anyLinkedCallNotAttributable() {
+      this.select(1).from('call_log as clr');
+      linkedCallToLead(this, 'clr');
+      this.where(function notSettled() {
+        this.whereNotNull('clr.processing_token')
+          .orWhere(function badStatus() {
+            this.whereNotNull('clr.processing_status')
+              .whereNot('clr.processing_status', 'processed');
+          })
+          .orWhereRaw("clr.metadata->>'no_attribution' = 'true'");
+      });
     })
     // Ambiguous-match exclusion (see the parameter doc). NULL-sid leads
     // must PASS the sid arm — a bare whereNotIn filters NULL rows out

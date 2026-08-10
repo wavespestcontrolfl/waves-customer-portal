@@ -315,12 +315,29 @@ describe('scheduler wiring', () => {
 
   test('a bridge-claimed call_log row excludes its lead even when the lead was never repointed', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
-    expect(ca).toMatch(/callAlreadyBridged/);
-    // call_log has NO lead_id column — the linkage is twilio_call_sid (the
-    // bridge's own fetchCrmCalls join; prod-schema-verified 2026-07-01).
-    expect(ca).toMatch(/whereRaw\('cl\.twilio_call_sid = l\.twilio_call_sid'\)/);
-    expect(ca).not.toMatch(/cl\.lead_id/);
-    expect(ca).toMatch(/whereNotNull\('cl\.google_ads_call_resource_name'\)/);
+    expect(ca).toMatch(/anyLinkedCallAlreadyBridged/);
+    // call_log has NO lead_id column — linkage is expressed by the shared
+    // predicate below (prod-schema-verified 2026-07-01).
+    expect(ca).not.toMatch(/clb\.lead_id\b/);
+    expect(ca).toMatch(/whereNotNull\('clb\.google_ads_call_resource_name'\)/);
+  });
+
+  test('BOTH sweep guards compose the one shared linkage predicate — all four durable modes (codex P1 r24)', () => {
+    // Four consecutive rounds found the same root gap on successive
+    // surfaces: sid + metadata stamp are only two of the modes. A
+    // phone-reused lead has neither, and the bridge keeps its own
+    // association in metadata.google_ads_call_bridge.leadMatch.
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const helper = ca.split('const linkedCallToLead = (qb, a) => {')[1].split('};')[0];
+    expect(helper).toMatch(/twilio_call_sid = l\.twilio_call_sid/);
+    expect(helper).toMatch(/metadata->>'lead_id' = l\.id::text/);
+    expect(helper).toMatch(/google_ads_call_bridge'->'leadMatch'->>'leadId' = l\.id::text/);
+    expect(helper).toMatch(/from_phone/);
+    // Composed by both guards, and the old duplicated arms are gone.
+    expect(ca).toMatch(/linkedCallToLead\(this, 'clb'\)/);
+    expect(ca).toMatch(/linkedCallToLead\(this, 'clr'\)/);
+    expect(ca).not.toMatch(/function stampedCallAlreadyBridged/);
+    expect(ca).not.toMatch(/function stampedCallNotAttributable/);
   });
 });
 
