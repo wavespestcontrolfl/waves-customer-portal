@@ -245,6 +245,93 @@ describe('photo-lane capture block is independent of GATE_TRACE_ELIGIBILITY', ()
   });
 });
 
+describe('a foam ADD-ON makes the visit a photo lane', () => {
+  // A termite-bait primary with a foam add-on is a foam visit for photo
+  // purposes. With only GATE_PHOTO_MARKS on, the add-on combine that the
+  // eligibility gate normally performs is skipped, so the capture path has to
+  // resolve add-ons itself or the visit can still save a satellite trace
+  // (codex P1 r3).
+  const { traceCaptureBlockPayload, addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+
+  const knexStub = (addonRows) => {
+    const fn = (table) => {
+      if (table === 'scheduled_service_addons') {
+        return {
+          where: () => ({
+            orderBy: () => ({ orderBy: () => ({ select: async () => addonRows }) }),
+          }),
+        };
+      }
+      if (table === 'services') {
+        return { whereIn: () => ({ select: async () => [{ id: 'cat-foam', service_key: 'foam_drill' }] }) };
+      }
+      if (table === 'service_completion_profiles') {
+        return {
+          whereIn: () => ({
+            where: () => ({ select: async () => [{ service_key: 'foam_drill', project_type: 'termite_treatment' }] }),
+          }),
+        };
+      }
+      return { where: () => ({ first: async () => null }) };
+    };
+    return fn;
+  };
+
+  const withGates = async (eligibility, marks, fn) => {
+    const prevE = process.env.GATE_TRACE_ELIGIBILITY;
+    const prevP = process.env.GATE_PHOTO_MARKS;
+    if (eligibility === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = eligibility;
+    if (marks === undefined) delete process.env.GATE_PHOTO_MARKS;
+    else process.env.GATE_PHOTO_MARKS = marks;
+    try { return await fn(); } finally {
+      if (prevE === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prevE;
+      if (prevP === undefined) delete process.env.GATE_PHOTO_MARKS;
+      else process.env.GATE_PHOTO_MARKS = prevP;
+    }
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../services/service-completion-profiles', () => ({
+      // Ineligible PRIMARY: a termite bait station check.
+      resolveCompletionProfileForScheduledService: async () => ({
+        serviceKey: 'termite_installation_setup', findingsType: 'termite_bait_station',
+      }),
+    }));
+  });
+  afterEach(() => { jest.dontMock('../services/service-completion-profiles'); jest.resetModules(); });
+
+  test('add-on verdicts carry the service key the vocabulary is drawn from', async () => {
+    const verdicts = await addonVerdictsFromLines(
+      [{ service_id: 'cat-foam', service_name: 'Drill-and-Foam Termite' }],
+      knexStub([]),
+    );
+    expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'photo', serviceKey: 'foam_drill' });
+  });
+
+  test('capture is blocked with only the marks gate on', async () => {
+    const fresh = require('../services/service-report/trace-eligibility');
+    const block = await withGates(undefined, 'true', () => fresh.traceCaptureBlockPayload(
+      { id: 'ss-1', service_type: 'Termite Bait Station Check' },
+      knexStub([{ service_id: 'cat-foam', service_name: 'Drill-and-Foam Termite' }]),
+      { captureMode: 'perimeter' },
+    ));
+    expect(block).toMatchObject({ status: 403, payload: { code: 'trace_photo_lane' } });
+  });
+
+  test('a visit with no foam line keeps pre-gate capture behavior', async () => {
+    const fresh = require('../services/service-report/trace-eligibility');
+    const block = await withGates(undefined, 'true', () => fresh.traceCaptureBlockPayload(
+      { id: 'ss-2', service_type: 'Termite Bait Station Check' },
+      knexStub([]),
+      { captureMode: 'perimeter' },
+    ));
+    expect(block).toBeNull();
+  });
+});
+
 describe('traceFeedFields — the schedule/dispatch tracer affordance', () => {
   // traceEligible means "offer the SATELLITE tracer". A photo lane is mapped
   // by marking a photo, so offering the tracer is a dead end: the capture

@@ -2665,7 +2665,32 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // legacy lane booleans when it is off, so with only GATE_PHOTO_MARKS on
   // they never read traceSuppressed at all and a pre-existing foam trace
   // still published as a perimeter map with an exterior advisory.
-  const photoLaneSuppressed = photoMarksGateOn() && traceEligibility.variant === 'photo';
+  // Photo decisions must consider EVERY line, not just the primary (codex
+  // P1 r3). The add-on combine above is gated on traceEligibilityGateOn(), so
+  // with only GATE_PHOTO_MARKS on a foam ADD-ON on an ineligible primary
+  // (termite bait + foam) never reached the verdict — and its saved trace
+  // published with legacy perimeter copy. Resolved separately rather than by
+  // widening the combine above, so a spray/outline add-on cannot start
+  // rescuing primaries in a configuration where the registry is otherwise
+  // dark; only a PHOTO verdict is adopted here.
+  let photoLaneVerdict = traceEligibility;
+  if (photoMarksGateOn()
+    && !traceEligibilityGateOn()
+    && traceEligibility.variant !== 'photo') {
+    try {
+      const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
+      const combinedForPhoto = combineLineVerdicts(
+        traceEligibility,
+        Array.isArray(frozenPhotoLines)
+          ? await addonVerdictsFromLines(frozenPhotoLines, knex, { renderSide: true })
+          : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
+      );
+      if (combinedForPhoto.eligible && combinedForPhoto.variant === 'photo') {
+        photoLaneVerdict = combinedForPhoto;
+      }
+    } catch { /* primary verdict stands — fail-soft, same as the combine above */ }
+  }
+  const photoLaneSuppressed = photoMarksGateOn() && photoLaneVerdict.variant === 'photo';
   const traceSuppressed = (traceEligibilityGateOn()
     && (!traceEligibility.eligible || traceEligibility.variant === 'photo'))
     || photoLaneSuppressed;
@@ -4453,7 +4478,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .map((photo) => {
         const context = buildMarkedPhotoContext({
           marks: photo.marks,
-          eligibility: traceEligibility,
+          // photoLaneVerdict, not the primary: a foam ADD-ON makes the visit
+          // a photo lane and must be able to publish the card (codex P1 r3).
+          eligibility: photoLaneVerdict,
         });
         if (!context.available || !photo.url) return null;
         return {

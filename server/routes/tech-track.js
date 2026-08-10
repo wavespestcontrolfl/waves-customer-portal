@@ -593,10 +593,25 @@ router.get('/:id/photos', async (req, res, next) => {
 // or findings and can legitimately show where treatment was applied.
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
+// The lane whose mark vocabulary applies to this visit. The PRIMARY wins when
+// it supports marks; otherwise any ADD-ON line that resolves to a photo lane
+// does (codex P1 r3) — a termite-bait primary with a foam add-on is a foam
+// visit for marking purposes, and checking only the primary left those techs
+// with no way to record the points they drilled.
 async function markLaneForService(svc) {
   const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
   const profile = await resolveCompletionProfileForScheduledService(svc, db);
-  return profile?.serviceKey || null;
+  const primaryKey = profile?.serviceKey || null;
+  if (laneSupportsMarks(primaryKey)) return primaryKey;
+  try {
+    const { resolveAddonVerdicts } = require('../services/service-report/trace-eligibility');
+    const addonVerdicts = await resolveAddonVerdicts(svc.id, db);
+    const photoLine = (addonVerdicts || []).find(
+      (v) => v?.eligible && v.variant === 'photo' && laneSupportsMarks(v.serviceKey),
+    );
+    if (photoLine) return photoLine.serviceKey;
+  } catch { /* fail-soft: the primary key stands, marks simply aren't offered */ }
+  return primaryKey;
 }
 
 router.get('/:id/photo-marks', async (req, res, next) => {

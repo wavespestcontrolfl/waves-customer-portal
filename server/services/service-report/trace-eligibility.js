@@ -570,8 +570,21 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
   // Photo gate on, eligibility gate off: ONLY the photo-lane block is in
   // force. Every other verdict keeps pre-gate behavior, so turning on marks
   // cannot silently activate the wider registry.
+  //
+  // Add-ons are resolved here too (codex P1 r3): a visit whose PRIMARY is a
+  // bait check but which also performs a foam add-on is a photo lane, and
+  // returning on the primary alone let that visit save a satellite trace.
+  // photoLaneBlock returns null for every non-photo variant, so an eligible
+  // spray/outline add-on still falls through to legacy behavior.
   if (!traceEligibilityGateOn()) {
-    return eligibility.eligible ? photoLaneBlock(eligibility.variant) : null;
+    if (eligibility.eligible) return photoLaneBlock(eligibility.variant);
+    try {
+      const combined = combineLineVerdicts(
+        eligibility,
+        await resolveAddonVerdicts(scheduledService?.id, knex),
+      );
+      return combined.eligible ? photoLaneBlock(combined.variant) : null;
+    } catch { return null; }
   }
   if (eligibility.eligible) {
     return photoLaneBlock(eligibility.variant) || modeMismatchBlock(eligibility.variant);
@@ -672,12 +685,18 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
   }
   return addons.map((addon) => {
       if (addon.frozen) {
-        return resolveTraceEligibility({
+        // serviceKey rides the verdict (codex P1 r3): a photo-lane add-on
+        // supplies the mark vocabulary, and the tech route only has the
+        // PRIMARY profile's key to work from otherwise.
+        return {
+          ...resolveTraceEligibility({
+            serviceKey: addon.frozen.key,
+            findingsType: addon.frozen.pointer,
+            displayName: addon.service_name || '',
+            ...(renderSide ? { typedValues: null } : {}),
+          }),
           serviceKey: addon.frozen.key,
-          findingsType: addon.frozen.pointer,
-          displayName: addon.service_name || '',
-          ...(renderSide ? { typedValues: null } : {}),
-        });
+        };
       }
       // A SUPPLIED catalog id that cannot be resolved — transient lookup
       // failure, or the row no longer exists — must not fall to the
@@ -690,7 +709,8 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
           ? `unresolved:${addon.service_id}`
           : (keyById.get(addon.service_id) || `unresolved:${addon.service_id}`))
         : null;
-      return resolveTraceEligibility({
+      return {
+        ...resolveTraceEligibility({
         serviceKey: key,
         // A successful pointer query that returned NO row for a resolved
         // key is a cutover/deactivation, not "untyped" (codex P2 r26):
@@ -710,7 +730,11 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
         // at render (typedValues null fails their conditions closed) and
         // permissive at capture (codex P1 r13).
         ...(renderSide ? { typedValues: null } : {}),
-      });
+        }),
+        // Same reason as the frozen branch: a photo-lane add-on carries the
+        // key its mark vocabulary is drawn from (codex P1 r3).
+        serviceKey: key,
+      };
   });
 }
 
