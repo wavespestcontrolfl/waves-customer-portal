@@ -833,11 +833,13 @@ describe('deriveProposalDraft', () => {
     // visit count is NOT an annual cadence; the charge must derive.
     const roach = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
-        engineResult: { lineItems: [{ service: 'german_roach', label: 'German Roach Cleanout — 3 Visit Program', price: 450, total: 450, visits: 3 }] },
+        engineResult: { lineItems: [{ service: 'german_roach', label: 'German Roach Cleanout — 3 Visit Program', price: 450, total: 450, visits: 3, det: '3 visits · kitchens and baths' }] },
       },
     });
     expect(roach.correctiveWork).toHaveLength(1);
     expect(roach.correctiveWork[0].amount).toBe(450);
+    // Raw rows keep their customer-facing det scope too (codex r19).
+    expect(roach.correctiveWork[0].includes).toEqual(['3 visits · kitchens and baths']);
 
     // Explicit one-time cadence wins even beside recurring-looking fields.
     const flea = await deriveProposalDraft({ category: 'COMMERCIAL',

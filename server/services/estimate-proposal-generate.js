@@ -912,10 +912,15 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       taxable: commercialTaxableDefault(item.service || item.name, explicitTaxable, { taxabilityMap, oneTime: true }),
       // Mapped specialty rows persist customer-facing scope (bed-bug room/
       // visit counts) under the `det` alias — resolve it exactly like the
-      // public extraction (`item.detail || item.det`) or Generate → Save
-      // keeps the price but silently drops the material scope (codex 1A-ii
-      // r14).
-      includes: (item.detail || item.det) ? [String(item.detail || item.det).slice(0, 200)] : [],
+      // public extraction (`item.detail || item.det`), falling back to the
+      // consumed raw twin's aliases (metadata merge, codex 1A-ii r14/r19)
+      // or Generate → Save keeps the price but silently drops the material
+      // scope.
+      includes: (() => {
+        const twinLine = twinEntry ? twinEntry.line : null;
+        const detail = item.detail || item.det || twinLine?.detail || twinLine?.det;
+        return detail ? [String(detail).slice(0, 200)] : [];
+      })(),
     });
   }
   for (const { line, used } of rawPool) {
@@ -930,7 +935,11 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
       taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
-      includes: [],
+      // Raw engine rows carry customer-facing scope under the same
+      // detail/det aliases the public extractor preserves (rodent
+      // sanitation sq ft, flea visit breakdown) — dropping it publishes
+      // the price without the material scope (codex 1A-ii r19).
+      includes: (line.detail || line.det) ? [String(line.detail || line.det).slice(0, 200)] : [],
     });
   }
   if (conflicted.length) {

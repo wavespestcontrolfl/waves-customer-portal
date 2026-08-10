@@ -408,7 +408,16 @@ export default function CommercialProposalPage() {
       // because the operator added or loaded it, and family/frequency/tax
       // edits leave no text for a content predicate to see (codex 1A-ii
       // r17b). Fill-only means fill EMPTY sections.
-      if (draft?.programs?.length && live.programsState.length === 0 && !hasAuthoredBuildingLines) {
+      // The MONETARY sides install all-or-nothing at the client too (codex
+      // 1A-ii r19): they jointly replace ONE synthesized itemization, so
+      // installing half while a leftover placeholder row blocks the other
+      // half would clear building lines carrying BOTH charges — the blank
+      // row then saves as nothing and the PUT recomputes the missing total
+      // to ZERO.
+      const monetaryInstallBlocked = hasAuthoredBuildingLines
+        || (draft?.programs?.length && live.programsState.length !== 0)
+        || (draft?.correctiveWork?.length && live.correctiveWork.length !== 0);
+      if (draft?.programs?.length && !monetaryInstallBlocked) {
         setProgramsState(draft.programs.map((program) => ({
           service: program.service,
           label: program.label,
@@ -426,8 +435,7 @@ export default function CommercialProposalPage() {
         monetaryFilled += 1;
         programsInstalled = true;
       }
-      if (draft?.correctiveWork?.length && live.correctiveWork.length === 0
-        && !hasAuthoredBuildingLines) {
+      if (draft?.correctiveWork?.length && !monetaryInstallBlocked) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
           label: w.label,
           amount: w.amount,
@@ -474,6 +482,8 @@ export default function CommercialProposalPage() {
       } else if (draft?.warnings?.length) setError(draft.warnings.join(' '));
       else if (draft?.programs?.length && hasAuthoredBuildingLines) {
         setError('Programs were not generated: this proposal already has building line items. Clear them first to switch to generated programs.');
+      } else if ((draft?.programs?.length || draft?.correctiveWork?.length) && monetaryInstallBlocked) {
+        setError('Programs and corrective work were not generated: those sections already have rows. Generation replaces both monetary sections together — remove the started rows first.');
       } else setError('Nothing to generate — the estimate has no derivable sections this proposal is missing.');
     } catch (e) {
       setError(e.message);
