@@ -67,6 +67,15 @@ function visitDateKey(value) {
   return null;
 }
 
+// Same callback truthiness the accept-time extension uses
+// (applyFrozenExistingServiceExtension) — the frozen appointment list must
+// name exactly the rows accept reprices, and a free callback visit is not
+// one of them (codex #3338 r7).
+function isCallbackServiceRow(row = {}) {
+  return row.is_callback === true || row.is_callback === 1
+    || row.is_callback === '1' || row.is_callback === 'true';
+}
+
 // Precedence guards MIRRORED from waveguard-existing-services.toQualifyingKeys
 // (which follows detectServiceLine / the recurring-appointment-seeder): a
 // rodent-led name ("Rodent Pest Control", "Rodent Bait Stations") is the
@@ -521,12 +530,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       nextScheduledDate: scheduledDates[0] || null,
       // Normalized visit calendar days, deduped and sorted — the
       // tier-upgrade existing-service display names the exact appointments
-      // the extension covers.
-      scheduledVisitDates: [...new Set(serviceRows.map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort(),
-      // Any row funded by an annual-prepay term: the accept-time extension
-      // must not reprice the paid term — it credits the difference instead
-      // (owner decision 2026-08-10).
-      prepaid: serviceRows.some((row) => !!row.annual_prepay_term_id),
+      // the extension covers, so this uses the SAME callback exclusion the
+      // accept-time reprice applies (codex #3338 r7: a free callback visit
+      // in the list would present an appointment the new price never
+      // touches).
+      scheduledVisitDates: [...new Set(serviceRows
+        .filter((row) => !isCallbackServiceRow(row))
+        .map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort(),
+      // Any non-callback row funded by an annual-prepay term: the
+      // accept-time extension must not reprice the paid term — it credits
+      // the difference instead (owner decision 2026-08-10).
+      prepaid: serviceRows.some((row) => !isCallbackServiceRow(row) && !!row.annual_prepay_term_id),
     };
   });
 
@@ -649,13 +663,29 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     // rows), so display and billing move together by construction. Dark
     // behind GATE_WAVEGUARD_EXTEND_EXISTING (money surface): gate off
     // freezes an empty list — nothing is advertised, accept has nothing to
-    // apply. The math applies the DELTA percentage points (combined − current
-    // tier) to the CONTRACTED per-visit price, exactly what
-    // `extraDiscountPct` advertises — exact for the dominant Bronze-origin
-    // case, and for upgrades from an already-discounted tier it never
-    // over-discounts relative to base-price math.
+    // apply.
+    //
+    // Two deliberate exclusions keep every displayed number exactly
+    // billable (codex #3338 r3+r4):
+    //  - BRONZE-ORIGIN upgrades only (current tier discount 0%). Above
+    //    Bronze, delta-points math on an already-discounted contracted
+    //    price does not equal the advertised tier rate off the original
+    //    basis ($90 Silver-priced at Gold: −5pp gives $85.50, base math
+    //    gives $85), and the original basis is unknowable for legacy
+    //    contracts — those upgrades stay on the review-bell path until the
+    //    owner rules on the math.
+    //  - Monthly-lane members bill customers.monthly_rate, which row
+    //    repricing never touches — an "applied automatically" card would
+    //    diverge from the charge, so they stay on the review-bell path
+    //    entirely (the accept-side monthlyLaneMember guard remains as
+    //    defense for snapshots frozen before this exclusion).
     const existingServices = [];
-    if (upgraded && isEnabled('waveguardExtendExisting')) {
+    const monthlyLaneMember = (() => {
+      // Lazy require: billing-cadence sits near the converter's import web.
+      const { customerPreservesMonthlyMembership } = require('./billing-cadence');
+      return customerPreservesMonthlyMembership(customer);
+    })();
+    if (upgraded && oldTier.discount === 0 && !monthlyLaneMember && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
       const today = etDateString();
       for (const svc of currentSpend.currentServices) {
@@ -783,10 +813,17 @@ function publicMembershipView(snapshot) {
       : null,
     // The customer's own current price, discounted price, and visit dates
     // are projected DELIBERATELY (owner decision 2026-08-10): the estimate
-    // page renders "your Pest Control: $X → $Y/visit" with the appointments
-    // it covers. Addresses, payment history, and per-contract breakdowns
-    // stay staff-only as before.
-    existingServices: (Array.isArray(snapshot.existingServices) ? snapshot.existingServices : [])
+    // page renders "your Pest Control: $X → $Y / application" with the
+    // appointments it covers. Addresses, payment history, and per-contract
+    // breakdowns stay staff-only as before.
+    // Gate checked at PROJECTION time too (codex #3338 r1): a plan frozen
+    // while the gate was on must not keep displaying "applied automatically
+    // when you approve" after the kill switch turns the accept-side apply
+    // off — flipping the gate silences display and apply together, in both
+    // directions, at every instant.
+    existingServices: (isEnabled('waveguardExtendExisting') && Array.isArray(snapshot.existingServices)
+      ? snapshot.existingServices
+      : [])
       .map((service) => ({
         key: service?.key ?? null,
         label: service?.label ?? null,

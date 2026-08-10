@@ -650,18 +650,32 @@ async function applyFrozenExistingServiceExtension({
     const prepaidRows = familyRows.filter((row) => !!row.annual_prepay_term_id);
     const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
     let repriced = 0;
+    let driftRows = 0;
     for (const row of repriceRows) {
       const price = Number(row.estimated_price);
       // Unpriced = NULL stays NULL (billing invariant 8): a blank price is
       // manual/monthly-lane billing, never a $0 write.
       if (!(price > 0)) continue;
+      // FROZEN figure or nothing (codex #3338 r5): a row whose contracted
+      // price moved after the estimate was saved gets NO automatic write —
+      // a proportional delta would bill a figure the customer never saw,
+      // and stamping the frozen figure could undo a legitimate post-save
+      // price change. Drifted rows park for the owner (named in the
+      // notification's review clause below).
       const matchesFrozen = Math.abs(price - Number(svc.currentPerVisit)) <= 0.01;
-      const next = matchesFrozen
-        ? Number(svc.newPerVisit)
-        : Math.round(price * (1 - Number(svc.extraDiscountPct || 0) / 100) * 100) / 100;
+      if (!matchesFrozen) {
+        driftRows += 1;
+        continue;
+      }
+      const next = Number(svc.newPerVisit);
       if (!(next > 0) || next >= price) continue;
       await database('scheduled_services').where({ id: row.id }).update({ estimated_price: next });
       repriced += 1;
+    }
+    if (driftRows > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${driftRows} visit${driftRows === 1 ? '' : 's'} priced differently than quoted — apply manually)`,
+      );
     }
     if (repriced > 0) {
       summary.repricedRowCount += repriced;
@@ -4083,23 +4097,21 @@ const EstimateConverter = {
     // notification: in-transaction callers dispatch post-commit so a
     // rolled-back accept can't page staff.
     let tierUpgradeNotification = null;
-    // Upgrade = the activated tier outranks the customer's PERSISTED tier
-    // (codex #3228 r2) — not the tier the prior rows alone would derive. A
-    // stale-stamped Gold customer whose rows only support Silver is a
-    // downgrade (no "upgrade" alert), while a Bronze-stamped legacy customer
-    // whose existing rows already supported Silver gets the review alert the
-    // moment an accept actually moves the stored tier up.
+    // Existing-service extension (owner 2026-08-10): apply the frozen
+    // snapshot plan the estimate displayed. Runs on SNAPSHOT/ACTIVATED tier
+    // agreement, NOT on the persisted-tier upgrade check below (codex #3338
+    // r2): a stale-stamped Silver customer whose rows only re-earn Silver
+    // still displayed the extension card, and gating the apply on the
+    // stored tier rising would leave that advertised discount unapplied.
+    // The helper itself no-ops without a tier-matching frozen plan, so
+    // legacy estimates and non-upgrades stay untouched. Savepoint-confined
+    // — a failed extension rolls back only itself (writes + audit
+    // together) and the accept falls back to the 2026-08-05 review copy;
+    // the accepted plan is never lost to its discount extension.
+    let extension = null;
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
-      && tier && tier !== 'none'
-      && isMembershipTierUpgrade(customer.waveguard_tier, tier)) {
-      const discountPct = Math.round((discount || 0) * 100);
-      // Existing-service extension (owner 2026-08-10): apply the frozen
-      // snapshot plan the estimate displayed. Savepoint-confined — a failed
-      // extension rolls back only itself (writes + audit together) and this
-      // accept falls back to the 2026-08-05 review copy below; the accepted
-      // plan is never lost to its discount extension.
-      let extension = null;
+      && tier && tier !== 'none') {
       try {
         extension = await database.transaction((sp) => applyFrozenExistingServiceExtension({
           database: sp,
@@ -4114,7 +4126,20 @@ const EstimateConverter = {
         logger.warn(`[estimate-converter] existing-service tier extension failed (falling back to review notice): ${extErr.message}`);
         extension = null;
       }
-      const extensionApplied = extension?.applied === true;
+    }
+    const extensionApplied = extension?.applied === true;
+    // Upgrade REVIEW alert = the activated tier outranks the customer's
+    // PERSISTED tier (codex #3228 r2) — not the tier the prior rows alone
+    // would derive. A stale-stamped Gold customer whose rows only support
+    // Silver is a downgrade (no "upgrade" alert), while a Bronze-stamped
+    // legacy customer whose existing rows already supported Silver gets the
+    // review alert the moment an accept actually moves the stored tier up.
+    // An APPLIED extension always notifies, upgrade or not — money moved.
+    if (!suppressRecurringConversion && !commercialOnlyRecurring
+      && priorQualifyingKeys.length > 0
+      && tier && tier !== 'none'
+      && (extensionApplied || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
+      const discountPct = Math.round((discount || 0) * 100);
       const appliedClauses = extensionApplied
         ? [
           extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',

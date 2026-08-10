@@ -132,32 +132,42 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
-  test('a drifted contracted price gets the proportional delta, never the stale frozen figure', async () => {
-    const { database, updates } = fakeTrx();
-    mockRowsState.rows = [pestRow({ estimated_price: 60 })];
-    const summary = await applyFrozenExistingServiceExtension({
-      database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
-    });
-    expect(summary.repricedRowCount).toBe(1);
-    expect(updates).toEqual([{ id: 'row-1', estimated_price: 54 }]);
-  });
-
-  test('unpriced rows stay NULL and prices never go up', async () => {
+  test('a drifted contracted price parks for review — never a write the customer did not see', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [
-      pestRow({ id: 'null-price', estimated_price: null }),
-      // A row already priced BELOW the frozen target must not be raised.
-      pestRow({ id: 'already-low', estimated_price: 40 }),
+      pestRow({ id: 'drift-up', estimated_price: 60 }),
+      // Below-frozen drift is drift all the same — the frozen figure could
+      // undo a legitimate post-save price change in either direction.
+      pestRow({ id: 'drift-down', scheduled_date: '2100-01-27', estimated_price: 40 }),
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
       estimateData: frozenSnapshotData(), activatedTier: 'Silver',
     });
-    // already-low still reprices proportionally (40 → 36) — down, never up;
-    // the NULL row is untouched.
-    expect(updates).toEqual([{ id: 'already-low', estimated_price: 36 }]);
+    expect(updates).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.repricedRowCount).toBe(0);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (2 visits priced differently than quoted — apply manually)',
+    ]);
+  });
+
+  test('unpriced rows stay NULL; matching rows apply beside a drifted sibling', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'null-price', estimated_price: null }),
+      pestRow({ id: 'matches', scheduled_date: '2100-01-27', estimated_price: 55 }),
+      pestRow({ id: 'drifted', scheduled_date: '2100-04-27', estimated_price: 60 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([{ id: 'matches', estimated_price: 49.5 }]);
     expect(summary.repricedRowCount).toBe(1);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit priced differently than quoted — apply manually)',
+    ]);
   });
 
   test('rows created by THIS accept and past/callback rows are excluded', async () => {

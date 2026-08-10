@@ -880,6 +880,88 @@ describe('existing-service tier extension snapshot', () => {
     expect(ctx.discountAppliesTo).toBe('new_services_only');
   });
 
+  test('gate on: an above-Bronze origin stays on the review path (delta math would not equal the tier rate)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      // Existing pest + lawn → current tier Silver (10% already contracted).
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+      ],
+      paidInvoices: [],
+    });
+    // Adding mosquito raises Silver → Gold, but the extension only freezes
+    // Bronze-origin upgrades (codex #3338 r3).
+    const estData = {
+      result: {
+        recurring: {
+          discount: 0.15,
+          annualBeforeDiscount: 500,
+          annualAfterDiscount: 425,
+          services: [{ name: 'Mosquito Treatment', mo: 41.67 }],
+        },
+      },
+    };
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', estData });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: a monthly-lane member stays on the review path (row repricing never touches monthly_rate)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      customer: {
+        id: 'cust-1', first_name: 'Don', active: true, waveguard_tier: 'Bronze',
+        pipeline_stage: 'active_customer', monthly_rate: 55, billing_mode: null,
+      },
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('gate on: callback visits never appear in the frozen appointment list', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'cb', service_type: 'pest_control', scheduled_date: '2099-02-14', estimated_price: 0, is_callback: true },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    // The accept-time reprice excludes callbacks, so the displayed list
+    // must too (codex #3338 r7).
+    expect(ctx.existingServices[0].upcomingVisitDates).toEqual(['2099-01-05', '2099-04-05', '2099-07-05']);
+  });
+
+  test('gate flipped off after freezing: the projection stops exposing the frozen extension', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(snapshot.existingServices).toHaveLength(1);
+    // Kill switch flips off with the frozen plan already saved: display
+    // must go dormant with the accept-side apply (codex #3338 r1).
+    mockExtendExistingGate = false;
+    const view = publicMembershipView(snapshot);
+    expect(view.existingServices).toEqual([]);
+  });
+
   test('gate on: no tier change means no extension rows', async () => {
     mockExtendExistingGate = true;
     const database = fakeDb({
