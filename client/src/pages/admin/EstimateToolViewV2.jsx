@@ -58,6 +58,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
+import { palmPrefillAllowed } from "../../lib/lookupPrefill";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 import {
   normalizePhoneDigits,
@@ -3543,7 +3544,17 @@ export default function EstimateToolViewV2({
         upd.landscapeComplexity = ep.landscapeComplexity;
       if (ep.nearWater && ep.nearWater !== "NONE") upd.nearWater = "YES";
       if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
-      if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
+      // Palm prefill rides the server-stamped trust verdict — a distrusted
+      // AI count leaves the field empty for the operator to count
+      // (lib/lookupPrefill.js; owner ruling 2026-08-10). Distrust CLEARS
+      // rather than skips: the update merges into the existing form, so
+      // skipping would leave a previous address's auto-filled count in
+      // pricing state (the trusted branch has always overwritten it).
+      if (palmPrefillAllowed(ep)) {
+        upd.palmCount = String(ep.estimatedPalmCount);
+      } else if (Number(ep.estimatedPalmCount) > 0) {
+        upd.palmCount = "";
+      }
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
       const termiteFootprintNumber = lookupTermiteFootprintSqFt(ep);
       if (termiteFootprintNumber) upd.termiteFootprintSqFt = String(Math.round(termiteFootprintNumber));
@@ -3598,6 +3609,13 @@ export default function EstimateToolViewV2({
         applyTermiteEstimate("preslabSqft", "_preslabSqftAuto", slabNumber);
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
+        }
+        // A distrusted-count CLEAR also clears the mirrored treatment count
+        // when it still duplicates the old auto-fill (operator-typed
+        // treatment counts differ and survive).
+        if (upd.palmCount === "" && String(f.palmTreatmentCount || "") !== ""
+          && String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
+          next.palmTreatmentCount = "";
         }
         return next;
       });
@@ -4205,7 +4223,12 @@ export default function EstimateToolViewV2({
       Object.assign(profile, (() => {
         const fallback = parsePositiveInteger(baseProfile.palmCount)
           ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
-          ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
+          // The raw vision estimate only backstops when the server-stamped
+          // verdict trusts it — a distrusted count must not slip into T&S
+          // pricing through this request-profile fallback either.
+          ?? (palmPrefillAllowed(baseProfile)
+            ? parsePositiveInteger(baseProfile.estimatedPalmCount)
+            : undefined);
         const value = propertyPalmCount ?? fallback;
         return value
           ? {

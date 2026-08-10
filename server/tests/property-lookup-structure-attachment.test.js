@@ -339,3 +339,95 @@ describe('mergeAiAnalyses — tree-count field confidence (T&S reprice lane)', (
     expect(close._treeCountConfidence).toBe(92);
   });
 });
+
+describe('mergeAiAnalyses + profile — palm-count trust (owner ruling 2026-08-10)', () => {
+  const { _private: priv, buildEnrichedProfile: buildProfile } = require('../routes/property-lookup-v2');
+  const merge = priv?.mergeAiAnalyses;
+
+  test('gap-filled palm count carries ITS provider confidence; divergence zeroes the stamp', () => {
+    if (!merge) return;
+    const gapFilled = merge([
+      { provider: 'claude', analysis: { confidenceScore: 90 } },
+      { provider: 'gemini', analysis: { confidenceScore: 40, estimatedPalmCount: 9 } },
+    ]);
+    expect(gapFilled.estimatedPalmCount).toBe(9);
+    expect(gapFilled._palmCountConfidence).toBe(40);
+    const divergent = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 12 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: 4 } },
+    ]);
+    expect(divergent._palmCountConfidence).toBe(0);
+    expect((divergent.aiDivergences || []).some((d) => d.field === 'estimatedPalmCount')).toBe(true);
+    // Small-count noise (5 vs 4) does not flag.
+    const close = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 5 } },
+      { provider: 'openai', analysis: { confidenceScore: 88, estimatedPalmCount: 4 } },
+    ]);
+    expect(close._palmCountConfidence).toBe(92);
+  });
+
+  test('the profile carries palmCountTrusted so the estimator prefill reads ONE server-side verdict', () => {
+    if (!buildProfile) return;
+    const trusted = buildProfile(null, {
+      confidenceScore: 88, _palmCountConfidence: 88, estimatedPalmCount: 7,
+    }, 27.1, -82.4);
+    expect(trusted.palmCountConfidence).toBe(88);
+    expect(trusted.palmCountTrusted).toBe(true);
+    // A gap-filled low-confidence count is affirmatively distrusted — the
+    // estimator leaves the palm field empty for the operator to count.
+    const distrusted = buildProfile(null, {
+      confidenceScore: 73, _palmCountConfidence: 40, estimatedPalmCount: 9,
+    }, 27.1, -82.4);
+    expect(distrusted.palmCountTrusted).toBe(false);
+    // Missing stamp (legacy cache shape) is also not trusted — but the
+    // client treats only an explicit false as suppression, so legacy
+    // payloads keep their pre-existing prefill behavior.
+    const unstamped = buildProfile(null, {
+      confidenceScore: 88, estimatedPalmCount: 7,
+    }, 27.1, -82.4);
+    expect(unstamped.palmCountTrusted).toBe(false);
+  });
+
+  test('a confident ZERO reading contradicts a positive one — divergence fires, stamp zeroes (all three fields)', () => {
+    const merge = require('../routes/property-lookup-v2')._private?.mergeAiAnalyses;
+    if (!merge) return;
+    // 7 palms vs an explicit "no palms" — without zeros in the divergence
+    // set this looked like a single supported read and prefilled.
+    const palms = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } },
+    ]);
+    expect(palms._palmCountConfidence).toBe(0);
+    const trees = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedTreeCount: 9 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedTreeCount: 0 } },
+    ]);
+    expect(trees._treeCountConfidence).toBe(0);
+    const beds = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedBedAreaSf: 0 } },
+    ]);
+    expect(beds._bedAreaConfidence).toBe(0);
+    // An ABSENT read still doesn't count as disagreement.
+    const absent = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90 } },
+    ]);
+    expect(absent._palmCountConfidence).toBe(92);
+  });
+
+  test("wrong-premise vetoes the prefill; the no-record 'all' flag does not (palms are pure vision)", () => {
+    const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
+    // Confident vision count on a record-less lookup: county rolls don't
+    // count palms, so the 'all' flag must not suppress the prefill.
+    expect(lookupPalmCountIsTrustworthy({
+      estimatedPalmCount: 7, palmCountConfidence: 88,
+      fieldVerifyFlags: [{ field: 'all', reason: 'No property record data', priority: 'HIGH' }],
+    })).toBe(true);
+    // The geocoder snapped — these are the NEIGHBOR'S palms.
+    expect(lookupPalmCountIsTrustworthy({
+      estimatedPalmCount: 7, palmCountConfidence: 88,
+      fieldVerifyFlags: [{ field: 'address', reason: 'snapped', priority: 'HIGH' }],
+    })).toBe(false);
+  });
+});

@@ -178,6 +178,30 @@ function recordPropertyTypeIsTrustworthy(record) {
   return !(sourceType === '' || sourceType === 'unknown' || sourceType === 'generic');
 }
 
+// Palm counts drive REAL money twice over — the v4.7 T&S palm reserve when
+// armed, and palm_injection per-palm pricing when the operator submits the
+// estimator's palm field — and the vision read has the same gap-fill
+// exposure as the tree count. The estimator pages PREFILL their palm-count
+// field from this estimate (owner ruling 2026-08-10: AI counts the palms,
+// the operator modifies if need be — the lawn treatable-area pattern), so
+// the verdict is stamped server-side onto the enriched profile
+// (palmCountTrusted) and a distrusted count leaves the field EMPTY for the
+// operator to count instead of prefill garbage.
+function lookupPalmCountIsTrustworthy(enriched) {
+  const count = Number(enriched?.estimatedPalmCount);
+  if (!Number.isFinite(count) || count <= 0) return false;
+  const fieldConfidence = Number(enriched?.palmCountConfidence ?? enriched?._palmCountConfidence);
+  if (!Number.isFinite(fieldConfidence) || fieldConfidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
+  // Wrong-premise vetoes (imagery of the NEIGHBOR'S palms), but the
+  // no-record 'all' flag deliberately does not: palm counts are pure vision
+  // — county records don't count palms, so record absence says nothing
+  // about the read, and this verdict only gates an operator-editable
+  // prefill (autonomous paths never price an AI palm count at all).
+  if (hasWrongPremiseFlag(enriched)) return false;
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  return !flags.some((flag) => String(flag?.field || '').toLowerCase().includes('palm'));
+}
+
 // Same field-level rule as the bed area below: estimatedTreeCount is
 // gap-filled outside divergence tracking, so the blended average can
 // launder a lone low-confidence count straight into per-tree labor minutes
@@ -266,6 +290,7 @@ module.exports = {
   lookupTurfEstimateIsTrustworthy,
   lookupTurfZeroIsObserved,
   lookupTreeCountIsTrustworthy,
+  lookupPalmCountIsTrustworthy,
   structuralFactIsTrustworthy,
   hasWrongPremiseFlag,
 };
