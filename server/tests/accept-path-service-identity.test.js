@@ -238,6 +238,40 @@ describe('catalogServiceIdForProfile', () => {
   });
 });
 
+describe('migration rollback preserves data it did not create', () => {
+  // codex #3328 r6 P2: dropping the column unconditionally would erase
+  // admin-added or later-migration engine_keys.
+  const migration = require('../models/migrations/20260810000002_services_engine_key');
+
+  const fakeKnex = ({ survivingCount }) => {
+    const dropped = { column: false, index: false };
+    const qb = () => ({
+      where: () => ({ whereRaw: () => ({ update: async () => 1 }) }),
+      whereNotNull: () => ({ count: async () => [{ count: survivingCount }] }),
+    });
+    qb.schema = {
+      hasTable: async () => true,
+      hasColumn: async () => true,
+      alterTable: async (_t, cb) => { cb({ dropColumn: () => { dropped.column = true; } }); },
+    };
+    qb.raw = async (sql) => { if (/DROP INDEX/.test(sql)) dropped.index = true; };
+    qb.fn = { now: () => 'now()' };
+    return { qb, dropped };
+  };
+
+  test('RETAINS the column when other mappings survive', async () => {
+    const { qb, dropped } = fakeKnex({ survivingCount: '3' });
+    await migration.down(qb);
+    expect(dropped).toEqual({ column: false, index: false });
+  });
+
+  test('drops the column cleanly when nothing survives', async () => {
+    const { qb, dropped } = fakeKnex({ survivingCount: '0' });
+    await migration.down(qb);
+    expect(dropped).toEqual({ column: true, index: true });
+  });
+});
+
 describeOrSkip('seeded engine_keys mapping against the migrated catalog', () => {
   let knex;
   beforeAll(() => {

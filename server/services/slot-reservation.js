@@ -1144,14 +1144,26 @@ async function commitReservation({
       updates.estimated_duration_minutes = effectiveDurationMinutes;
       updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
-    }
-    // Backfill the catalog link for holds taken before the mapping existed
-    // (or whose profile only became resolvable at commit). NEVER overwrites an
-    // id already on the row: an admin repoint outranks the derived value, and
-    // the reserve-path stamp is already correct when present.
-    if (!row.service_id) {
-      const catalogServiceId = await catalogServiceIdForProfile(client, serviceProfile);
-      if (catalogServiceId) updates.service_id = catalogServiceId;
+      // The catalog link is RESTAMPED from the accepted profile, in the same
+      // block that recomputes the label — id and label must describe the same
+      // service, and the accept is authoritative over the hold.
+      //
+      // This deliberately OVERWRITES the reserve-path stamp (codex #3328 r6
+      // P1). The earlier "never overwrite" guard was meant to protect an admin
+      // repoint, but on a graduating hold there is no repoint to protect: the
+      // row is a 15-minute reservation with customer_id NULL, invisible as a
+      // customer visit, so any id on it is reserve-DERIVED by construction.
+      // Meanwhile the accept-side reservation lookup binds only
+      // estimate/date/start/technician — NOT the reserved service mode — so a
+      // hold reserved as a mapped one-time specialty can be accepted in
+      // recurring mode. Preserving the hold's id there would commit recurring
+      // pricing and scheduling carrying a german-roach / bee-wasp / pre-slab
+      // catalog ID, and completion resolution trusts `service_id` BEFORE the
+      // label — the wrong billing and compliance lane.
+      //
+      // Assigned unconditionally, including null: if the accepted profile
+      // resolves to nothing, a stale specialty id must be CLEARED, not kept.
+      updates.service_id = await catalogServiceIdForProfile(client, serviceProfile);
     }
 
     const [updated] = await client('scheduled_services')

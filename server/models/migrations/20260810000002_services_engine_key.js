@@ -78,6 +78,7 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
+  if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
 
   // Clear only the values this migration seeded — engine_keys added by an admin
   // or a later migration are not ours to drop.
@@ -88,13 +89,22 @@ exports.down = async function down(knex) {
       .update({ engine_keys: null, updated_at: knex.fn.now() });
   }
 
-  await knex.raw(`DROP INDEX IF EXISTS ${GIN_INDEX}`);
-
-  if (await knex.schema.hasColumn('services', 'engine_keys')) {
-    await knex.schema.alterTable('services', (t) => {
-      t.dropColumn('engine_keys');
-    });
+  // RETAIN the column when ANY mapping survives the seed rollback (codex #3328
+  // r6 P2). Dropping it unconditionally would erase admin-added or
+  // later-migration engine_keys — destroying data this migration never created,
+  // which is exactly what the seeded-row rollback rule forbids. The column is
+  // nullable and inert without values, so keeping it costs nothing; a fully
+  // unseeded catalog still gets a clean, complete rollback.
+  const [{ count }] = await knex('services').whereNotNull('engine_keys').count({ count: '*' });
+  if (Number(count) > 0) {
+    // Index stays too — it serves the surviving rows.
+    return;
   }
+
+  await knex.raw(`DROP INDEX IF EXISTS ${GIN_INDEX}`);
+  await knex.schema.alterTable('services', (t) => {
+    t.dropColumn('engine_keys');
+  });
 };
 
 exports.ENGINE_KEY_SEEDS = ENGINE_KEY_SEEDS;
