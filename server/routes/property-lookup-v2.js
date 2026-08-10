@@ -3975,9 +3975,32 @@ function mergeAiAnalyses(providerResults) {
   // so a gap-filled read can't average its way into a customer price.
   const mergedBedArea = Number(merged.estimatedBedAreaSf);
   if (Number.isFinite(mergedBedArea) && mergedBedArea > 0) {
-    merged._bedAreaConfidence = sorted
-      .filter((r) => Number(r.analysis?.estimatedBedAreaSf) === mergedBedArea)
-      .reduce((mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0);
+    const bedReads = sorted
+      .map((r) => ({ provider: r.provider, value: Number(r.analysis?.estimatedBedAreaSf), conf: Number(r.analysis?.confidenceScore) || 0 }))
+      .filter((r) => Number.isFinite(r.value) && r.value > 0);
+    const maxRead = Math.max(...bedReads.map((r) => r.value));
+    const minRead = Math.min(...bedReads.map((r) => r.value));
+    // Two providers disagreeing MATERIALLY on the bed area (>25% of the
+    // larger) is a conflict no single provider's confidence can launder —
+    // the winner is whichever provider sorted first, not a measurement.
+    // Zero the stamp so the trust predicate routes the estimate to its
+    // reviewed lot-inference fallback, and record the divergence.
+    const bedAreaDivergent = bedReads.length > 1 && (maxRead - minRead) > maxRead * 0.25;
+    if (bedAreaDivergent) {
+      merged._bedAreaConfidence = 0;
+      merged.aiDivergences = [
+        ...(merged.aiDivergences || []),
+        {
+          field: 'estimatedBedAreaSf',
+          primary: primary.provider,
+          ...Object.fromEntries(bedReads.map((r) => [r.provider, r.value])),
+        },
+      ];
+    } else {
+      merged._bedAreaConfidence = bedReads
+        .filter((r) => r.value === mergedBedArea)
+        .reduce((mx, r) => Math.max(mx, r.conf), 0);
+    }
   }
 
   return merged;

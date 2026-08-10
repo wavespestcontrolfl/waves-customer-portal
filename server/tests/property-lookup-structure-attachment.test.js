@@ -273,3 +273,42 @@ describe('mergeAiAnalyses — structureAttachment', () => {
     expect(merged._structureAttachmentConfidence).toBe(40);
   });
 });
+
+describe('mergeAiAnalyses — bed-area field confidence (T&S reprice lane)', () => {
+  const { _private: priv } = require('../routes/property-lookup-v2');
+  const merge = priv?.mergeAiAnalyses;
+
+  test('stamps the winning value with ITS provider confidence, not the blended average', () => {
+    if (!merge) return;
+    // Two high scorers omitted the bed area; the lone reporter scored 40.
+    // Blended = (90+90+40)/3 = 73 ≥ 60 — but the stamp must say 40.
+    const merged = merge([
+      { provider: 'claude', analysis: { confidenceScore: 90 } },
+      { provider: 'openai', analysis: { confidenceScore: 90 } },
+      { provider: 'gemini', analysis: { confidenceScore: 40, estimatedBedAreaSf: 2600 } },
+    ]);
+    expect(merged.estimatedBedAreaSf).toBe(2600);
+    expect(merged._bedAreaConfidence).toBe(40);
+    expect(merged.confidenceScore).toBeGreaterThanOrEqual(60);
+  });
+
+  test('materially divergent readings zero the stamp and record the divergence', () => {
+    if (!merge) return;
+    const merged = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 88, estimatedBedAreaSf: 900 } },
+    ]);
+    // Winner is sort order (claude, higher score) — not a measurement.
+    expect(merged._bedAreaConfidence).toBe(0);
+    expect((merged.aiDivergences || []).some((d) => d.field === 'estimatedBedAreaSf')).toBe(true);
+  });
+
+  test('close readings (within 25%) keep the winning provider confidence', () => {
+    if (!merge) return;
+    const merged = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 88, estimatedBedAreaSf: 2300 } },
+    ]);
+    expect(merged._bedAreaConfidence).toBe(92);
+  });
+});

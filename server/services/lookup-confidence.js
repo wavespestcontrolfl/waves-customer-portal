@@ -87,20 +87,39 @@ function lookupBedAreaIsTrustworthy(enriched) {
   ));
 }
 
-// The satellite turf estimate is a vision read like the bed area — same
-// imagery, same self-grading. A low-confidence or turf-flagged read may not
-// satisfy the lawn measurement and become an exact self-service price; the
-// caller adopts nothing and the request fails closed to
-// PROPERTY_DETAILS_NEEDED when no other turf source exists. (Existing
-// consumption, so an absent score stays adequate — legacy payloads carried
-// none.)
-function lookupTurfEstimateIsTrustworthy(enriched) {
-  const turf = Number(enriched?.estimatedTurfSf);
-  if (!Number.isFinite(turf) || turf <= 0) return false;
+// Trust of the turf READ itself, value-agnostic: adequate confidence and no
+// turf/lawn verify flag. (Existing consumption, so an absent score stays
+// adequate — legacy payloads carried none.)
+function lookupTurfReadIsTrustworthy(enriched) {
+  if (!enriched) return false;
   if (!lookupConfidenceIsAdequate(enriched)) return false;
   return !hasVerifyFlagMatching(enriched, (field) => (
     field.includes('turf') || field.includes('lawn')
   ));
+}
+
+// The satellite turf estimate is a vision read like the bed area — same
+// imagery, same self-grading. A low-confidence or turf-flagged read may not
+// satisfy the lawn measurement and become an exact self-service price; the
+// caller adopts nothing and the request fails closed to
+// PROPERTY_DETAILS_NEEDED when no other turf source exists.
+function lookupTurfEstimateIsTrustworthy(enriched) {
+  const turf = Number(enriched?.estimatedTurfSf);
+  if (!Number.isFinite(turf) || turf <= 0) return false;
+  return lookupTurfReadIsTrustworthy(enriched);
+}
+
+// A trusted vision ZERO is a measurement too — an observed no-lawn
+// property. The lookup distinguishes it explicitly: turfSource 'vision'
+// covers a measured 0, while its synthetic no-basis zero ships as
+// turfSource 'none' (and the stale-imagery guard deletes bogus zeros
+// before they get here). Without this, a no-lawn property with a lot on
+// file would fall through to the lot-based turf inference and receive a
+// lawn quote for a lawn the imagery shows does not exist.
+function lookupTurfZeroIsObserved(enriched) {
+  if (Number(enriched?.estimatedTurfSf) !== 0) return false;
+  if (String(enriched?.turfSource || '').trim().toLowerCase() !== 'vision') return false;
+  return lookupTurfReadIsTrustworthy(enriched);
 }
 
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
@@ -217,6 +236,7 @@ module.exports = {
   lookupDimensionIsTrustworthy,
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
+  lookupTurfZeroIsObserved,
   structuralFactIsTrustworthy,
   hasWrongPremiseFlag,
 };

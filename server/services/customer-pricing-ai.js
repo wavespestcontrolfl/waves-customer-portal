@@ -348,7 +348,7 @@ function lookupEnabled() {
 const {
   lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
-  lookupTurfEstimateIsTrustworthy, structuralFactIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy, lookupTurfZeroIsObserved, structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
@@ -374,10 +374,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   const profileLawn = profileLawnRaw === null || profileLawnRaw === undefined || profileLawnRaw === ''
     ? null
     : Number(profileLawnRaw);
-  const lawnExplicitZero = profileLawn === 0;
+  let lawnKnownZero = profileLawn === 0;
   let lawnSqFt = Number.isFinite(profileLawn) && profileLawn > 0
     ? profileLawn
-    : (lawnExplicitZero ? 0 : positiveNumber(customer.property_sqft));
+    : (lawnKnownZero ? 0 : positiveNumber(customer.property_sqft));
   let bedArea = positiveNumber(customer.bed_sqft);
   // Provenance is load-bearing money data, not a label: the T&S pricer
   // applies its shrub-density factor to MEASURED bed areas only, so an
@@ -392,7 +392,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   let palmCount = positiveNumber(customer.palm_count);
   let lookupMeta = null;
   // Feature defaults, NOT observations: the profile carries no feature
-  // columns, so these stand only until the lookup answers.
+  // columns, so these stand only until the lookup answers. treeCount is
+  // deliberately ABSENT, not 0 — priceTreeShrub treats any supplied count
+  // (including 0) as explicit and skips its density fallback, so a default
+  // zero would price no per-tree labor or material with no review warning.
   let features = {
     pool: false,
     poolCage: false,
@@ -401,7 +404,6 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     trees: 'moderate',
     complexity: 'moderate',
     irrigation: false,
-    treeCount: 0,
   };
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
@@ -448,8 +450,16 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // like the bed area: a low-confidence or turf-flagged one may not
       // become an exact self-service lawn price, so it is adopted only when
       // the lookup trusted its own read.
-      if (!lawnExplicitZero && lookupTurfEstimateIsTrustworthy(p)) {
+      if (!lawnKnownZero && lookupTurfEstimateIsTrustworthy(p)) {
         lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
+      } else if (!lawnKnownZero && !(lawnSqFt > 0) && lookupTurfZeroIsObserved(p)) {
+        // A trusted vision ZERO is a measurement too (turfSource 'vision'
+        // covers an observed no-lawn property; the synthetic no-basis zero
+        // ships as 'none'). Without this, a no-lawn property with a lot on
+        // file would fall through to the lot-based turf inference and be
+        // quoted lawn care for a lawn the imagery shows does not exist. A
+        // STORED positive turf measurement still wins over the vision zero.
+        lawnKnownZero = true;
       }
       // Provenance rides WITH the value: a lookup-derived area is
       // 'estimated', never the operator-measured 'explicit'. And only a
@@ -556,7 +566,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         trees: String(p.treeDensity || features.trees || 'moderate').toLowerCase(),
         complexity: String(p.landscapeComplexity || features.complexity || 'moderate').toLowerCase(),
         irrigation: !!p.irrigationVisible || features.irrigation,
-        treeCount: positiveNumber(p.estimatedTreeCount, features.treeCount),
+        // Only a POSITIVE observed count is a count. The enriched payload
+        // coerces an absent read to 0 (`|| 0`), so zero is
+        // indistinguishable from missing — leave it unset and let the
+        // pricer's density fallback (which carries its own warning) run.
+        treeCount: positiveNumber(p.estimatedTreeCount) || undefined,
       };
       } else {
         // Record-backed pool/cage still price — they are assessor data, not
@@ -580,7 +594,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     // An explicit zero rides through as 0 — the lawn pricer preserves >= 0,
     // and `undefined` would invite a downstream lot-based turf inference for
     // a lawn the profile measured as absent.
-    lawnSqFt: lawnExplicitZero ? 0 : (lawnSqFt || undefined),
+    lawnSqFt: lawnKnownZero ? 0 : (lawnSqFt || undefined),
     stories: stories || 1,
     // Provenance rides with the count: a defaulted story count (no lookup,
     // or a verify-flagged read discarded above) must say so, or the
@@ -609,7 +623,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     hasHomeSqFt: homeSqFt > 0,
     hasLotSqFt: lotSqFt > 0,
     hasLawnSqFt: lawnSqFt > 0,
-    lawnExplicitZero,
+    lawnKnownZero,
     hasBedArea: bedArea > 0,
   };
 }
@@ -642,8 +656,8 @@ function missingPropertyFor(serviceKeys, context) {
   // lot would quote lawn care on a lawn the profile says does not exist.
   // That request routes to PROPERTY_DETAILS_NEEDED and a human instead.
   const OUTDOOR_AREA_SUFFICIENT = {
-    lawn_care: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnExplicitZero),
-    one_time_lawn: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnExplicitZero),
+    lawn_care: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnKnownZero),
+    one_time_lawn: (c) => c.hasLawnSqFt || (c.hasLotSqFt && !c.lawnKnownZero),
     mosquito: (c) => c.hasLotSqFt,
     one_time_mosquito: (c) => c.hasLotSqFt,
     tree_shrub: (c) => c.hasBedArea || c.hasLotSqFt,

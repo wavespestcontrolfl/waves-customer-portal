@@ -1390,3 +1390,16 @@ describe('bed-area trust keys off FIELD-level confidence, not the blended averag
     })).toBe(true);
   });
 });
+
+describe('r8: materially divergent bed-area readings never stamp trustworthy', () => {
+  const { lookupBedAreaIsTrustworthy } = require('../services/lookup-confidence');
+
+  test('a zeroed divergence stamp fails the predicate regardless of provider confidence', () => {
+    // mergeAiAnalyses zeroes _bedAreaConfidence when providers disagree by
+    // >25% of the larger reading — the winner was sort order, not a
+    // measurement.
+    expect(lookupBedAreaIsTrustworthy({
+      estimatedBedAreaSf: 2600, bedAreaConfidence: 0, aiConfidence: 92,
+    })).toBe(false);
+  });
+});

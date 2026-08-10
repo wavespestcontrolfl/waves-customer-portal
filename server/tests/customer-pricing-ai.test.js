@@ -850,7 +850,9 @@ describe('lookup confidence gates every vision-derived price modifier', () => {
     expect(ctx.propertyInput.features.pool).toBe(false);
     expect(ctx.propertyInput.features.poolCage).toBe(false);
     expect(ctx.propertyInput.features.shrubs).toBe('moderate');
-    expect(ctx.propertyInput.features.treeCount).toBe(0);
+    // Absent, not 0: priceTreeShrub treats any supplied count (incl. 0) as
+    // explicit and would price zero per-tree labor with no review warning.
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
     expect(ctx.propertyInput.bedArea).toBeUndefined();
     // County-sourced facts are not vision reads and still apply.
     expect(ctx.propertyInput.yearBuilt).toBe(1998);
@@ -910,7 +912,7 @@ describe('lookup trust: global flags, record-backed pools, bed-area-only T&S', (
     expect(ctx.propertyInput.features.poolCageSize).toBe('large');
     // Vision-only reads stay gated at that confidence.
     expect(ctx.propertyInput.features.shrubs).toBe('moderate');
-    expect(ctx.propertyInput.features.treeCount).toBe(0);
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
   });
 
   test('a vision-only pool stays gated at low confidence', async () => {
@@ -1038,7 +1040,7 @@ describe('an explicit zero turf measurement is preserved, never backfilled', () 
     // neither the mirrored 2200 nor the lookup's 3400 may resurrect a lawn.
     expect(ctx.propertyInput.lawnSqFt).toBe(0);
     expect(ctx.hasLawnSqFt).toBe(false);
-    expect(ctx.lawnExplicitZero).toBe(true);
+    expect(ctx.lawnKnownZero).toBe(true);
   });
 
   test('a SILENT profile (null/absent) still falls back to customer.property_sqft', async () => {
@@ -1049,7 +1051,7 @@ describe('an explicit zero turf measurement is preserved, never backfilled', () 
       propertyLookup: null,
     });
     expect(fromNull.propertyInput.lawnSqFt).toBe(2200);
-    expect(fromNull.lawnExplicitZero).toBe(false);
+    expect(fromNull.lawnKnownZero).toBe(false);
     const fromMissingProfile = await resolve({ customer, turfProfile: null, propertyLookup: null });
     expect(fromMissingProfile.propertyInput.lawnSqFt).toBe(2200);
   });
@@ -1057,11 +1059,11 @@ describe('an explicit zero turf measurement is preserved, never backfilled', () 
   test('a measured-zero lawn blocks the lot stand-in for lawn quotes — ask, do not infer turf', () => {
     if (!missing) return;
     const ctx = { hasHomeSqFt: true, hasLotSqFt: true, hasLawnSqFt: false, hasBedArea: false, palmCount: 0 };
-    expect(missing(['lawn_care'], { ...ctx, lawnExplicitZero: true })).toBe('outdoor_sqft');
-    expect(missing(['one_time_lawn'], { ...ctx, lawnExplicitZero: true })).toBe('outdoor_sqft');
+    expect(missing(['lawn_care'], { ...ctx, lawnKnownZero: true })).toBe('outdoor_sqft');
+    expect(missing(['one_time_lawn'], { ...ctx, lawnKnownZero: true })).toBe('outdoor_sqft');
     // Unmeasured lawn keeps the lot inference; other lot-based services are untouched.
-    expect(missing(['lawn_care'], { ...ctx, lawnExplicitZero: false })).toBeNull();
-    expect(missing(['mosquito'], { ...ctx, lawnExplicitZero: true })).toBeNull();
+    expect(missing(['lawn_care'], { ...ctx, lawnKnownZero: false })).toBeNull();
+    expect(missing(['mosquito'], { ...ctx, lawnKnownZero: true })).toBeNull();
   });
 });
 
@@ -1373,5 +1375,67 @@ describe('risk notices vs evidence distrust, and yearBuilt gating (r7)', () => {
       propertyLookup: async () => ({ propertyRecord: { yearBuilt: 1962 } }),
     });
     expect(clean.propertyInput.yearBuilt).toBe(1962);
+  });
+});
+
+describe('r8: unset tree counts, observed vision zero-turf', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const resolve = _private?.resolvePropertyContext;
+  const missing = _private?.missingPropertyFor || null;
+  const customer = {
+    id: 'cust-r8',
+    address_line1: '2 Shellrock Way',
+    city: 'Osprey',
+    state: 'FL',
+    zip: '34229',
+    lot_sqft: 9000,
+  };
+
+  test('no lookup → treeCount stays ABSENT so the pricer density fallback (with its warning) runs', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({ customer, turfProfile: null, propertyLookup: null });
+    expect(ctx.propertyInput.features.treeCount).toBeUndefined();
+    // A zero estimatedTreeCount is indistinguishable from missing (the
+    // enriched payload coerces absent to 0) — also stays unset.
+    const zeroCount = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedTreeCount: 0, aiConfidence: 90 } }),
+    });
+    expect(zeroCount.propertyInput.features.treeCount).toBeUndefined();
+  });
+
+  test('a trusted vision ZERO turf is an observed no-lawn property — lot inference must not resurrect it', async () => {
+    if (!resolve) return;
+    const ctx = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'vision', aiConfidence: 90 },
+      }),
+    });
+    expect(ctx.lawnKnownZero).toBe(true);
+    expect(ctx.propertyInput.lawnSqFt).toBe(0);
+    if (missing) {
+      expect(missing(['lawn_care'], { ...ctx, hasHomeSqFt: true, palmCount: 0 })).toBe('outdoor_sqft');
+    }
+    // The synthetic no-basis zero (turfSource 'none') keeps the lot fallback.
+    const synthetic = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'none', aiConfidence: 90 },
+      }),
+    });
+    expect(synthetic.lawnKnownZero).toBe(false);
+    // An untrusted vision zero proves nothing either.
+    const lowConf = await resolve({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { estimatedTurfSf: 0, turfSource: 'vision', aiConfidence: 30 },
+      }),
+    });
+    expect(lowConf.lawnKnownZero).toBe(false);
   });
 });
