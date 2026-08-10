@@ -238,37 +238,23 @@ describe('catalogServiceIdForProfile', () => {
   });
 });
 
-describe('migration rollback preserves data it did not create', () => {
-  // codex #3328 r6 P2: dropping the column unconditionally would erase
-  // admin-added or later-migration engine_keys.
+describe('migration rollback touches nothing', () => {
+  // codex #3328 r6/r7 P2: value equality cannot establish ownership, so down()
+  // is a documented no-op rather than a "clear only what I wrote" heuristic.
   const migration = require('../models/migrations/20260810000002_services_engine_key');
 
-  const fakeKnex = ({ survivingCount }) => {
-    const dropped = { column: false, index: false };
-    const qb = () => ({
-      where: () => ({ whereRaw: () => ({ update: async () => 1 }) }),
-      whereNotNull: () => ({ count: async () => [{ count: survivingCount }] }),
+  test('down() performs NO database work at all', async () => {
+    const touched = [];
+    const qb = new Proxy(() => { touched.push('query'); return qb; }, {
+      get: (_t, prop) => {
+        if (prop === 'then') return undefined;
+        touched.push(String(prop));
+        return qb;
+      },
+      apply: () => { touched.push('query'); return qb; },
     });
-    qb.schema = {
-      hasTable: async () => true,
-      hasColumn: async () => true,
-      alterTable: async (_t, cb) => { cb({ dropColumn: () => { dropped.column = true; } }); },
-    };
-    qb.raw = async (sql) => { if (/DROP INDEX/.test(sql)) dropped.index = true; };
-    qb.fn = { now: () => 'now()' };
-    return { qb, dropped };
-  };
-
-  test('RETAINS the column when other mappings survive', async () => {
-    const { qb, dropped } = fakeKnex({ survivingCount: '3' });
     await migration.down(qb);
-    expect(dropped).toEqual({ column: false, index: false });
-  });
-
-  test('drops the column cleanly when nothing survives', async () => {
-    const { qb, dropped } = fakeKnex({ survivingCount: '0' });
-    await migration.down(qb);
-    expect(dropped).toEqual({ column: true, index: true });
+    expect(touched).toEqual([]);
   });
 });
 

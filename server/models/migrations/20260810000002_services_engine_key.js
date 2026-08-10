@@ -76,35 +76,22 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('services'))) return;
-  if (!(await knex.schema.hasColumn('services', 'engine_keys'))) return;
-
-  // Clear only the values this migration seeded — engine_keys added by an admin
-  // or a later migration are not ours to drop.
-  for (const seed of ENGINE_KEY_SEEDS) {
-    await knex('services')
-      .where({ service_key: seed.service_key })
-      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(seed.engine_keys)])
-      .update({ engine_keys: null, updated_at: knex.fn.now() });
-  }
-
-  // RETAIN the column when ANY mapping survives the seed rollback (codex #3328
-  // r6 P2). Dropping it unconditionally would erase admin-added or
-  // later-migration engine_keys — destroying data this migration never created,
-  // which is exactly what the seeded-row rollback rule forbids. The column is
-  // nullable and inert without values, so keeping it costs nothing; a fully
-  // unseeded catalog still gets a clean, complete rollback.
-  const [{ count }] = await knex('services').whereNotNull('engine_keys').count({ count: '*' });
-  if (Number(count) > 0) {
-    // Index stays too — it serves the surviving rows.
-    return;
-  }
-
-  await knex.raw(`DROP INDEX IF EXISTS ${GIN_INDEX}`);
-  await knex.schema.alterTable('services', (t) => {
-    t.dropColumn('engine_keys');
-  });
+// DOWN IS A DOCUMENTED NO-OP (codex #3328 r6/r7 P2).
+//
+// Two earlier shapes were both wrong. Dropping the column erases admin-added or
+// later-migration engine_keys — data this migration never created. Clearing
+// only rows whose value still equals the seed looked safer, but VALUE EQUALITY
+// CANNOT ESTABLISH OWNERSHIP: an admin who deliberately sets the same mapping
+// is indistinguishable from this migration's write, and those destructive
+// updates run BEFORE any surviving-row check could stop them.
+//
+// There is nothing to undo that is worth that risk. `engine_keys` is nullable
+// and additive: with the column present and unread by older code the schema is
+// inert, and the accept-path lookup fails open on absence anyway. So the
+// rollback deliberately leaves both the column and its data in place. To retire
+// the mapping, ship a FORWARD migration that clears the specific rows it owns.
+exports.down = async function down() {
+  // Intentionally empty — see the comment above.
 };
 
 exports.ENGINE_KEY_SEEDS = ENGINE_KEY_SEEDS;
