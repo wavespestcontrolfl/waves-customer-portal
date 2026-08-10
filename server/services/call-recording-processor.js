@@ -6175,7 +6175,7 @@ const CallRecordingProcessor = {
           // and the queue covers the case where that budget is already
           // spent (codex P0, PR #3304 GH r8d).
           const { markQuarantinePending } = require('./estimator-engine');
-          await markQuarantinePending(call.id, extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail');
+          await markQuarantinePending(call.id, extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail', { procGeneration });
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
         }
       }
@@ -9301,7 +9301,7 @@ const CallRecordingProcessor = {
           // queue the scheduler drains.
           if (engineErr.quarantineFailed) {
             const { markQuarantinePending } = require('./estimator-engine');
-            const queued = await markQuarantinePending(call.id, 'email_identity_conflict');
+            const queued = await markQuarantinePending(call.id, 'email_identity_conflict', { procGeneration });
             if (!queued) {
               // Neither the estimate markers NOR the durable queue landed
               // (codex P0, PR #3304 GH r8h) — the unmarked draft would stay

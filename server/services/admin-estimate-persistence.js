@@ -108,6 +108,9 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
   // Generation-less markers (written before the column deployed) and
   // same-generation markers finalize exactly as before.
   let forcedSuperseded = false;
+  // The live generation the supersession judgement was made against —
+  // carried to the linkage recheck below so it applies the SAME cutoff.
+  let liveGenForRecheck = null;
   const verdictCallId = data?.estimatorEngine?.callLogId || null;
   if (forcedQuarantine && pending.generation != null && verdictCallId) {
     const leadLockIds = [...new Set([data.lead_id, pending.from].filter(Boolean).map(String))].sort();
@@ -126,6 +129,7 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
       .first('processing_generation', 'processing_status', 'processing_token',
         'extraction_attempts', 'created_at', 'metadata');
     const liveGen = callRow?.processing_generation != null ? Number(callRow.processing_generation) : null;
+    liveGenForRecheck = liveGen;
     if (callRow && liveGen != null && liveGen > Number(pending.generation)) {
       if (callReprocessInFlight(callRow)) {
         restorePendingInvalidation(data, pending);
@@ -171,7 +175,13 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
     for (const leadLockId of leadLockIds) {
       await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
     }
-    if (!(await staleCallLinkageReason(trx, data, { lockCallRow: true }))) {
+    // The recheck inherits the supersession cutoff (codex P1, GH round on
+    // fe55a83df) — without it, the marker this branch just judged stale
+    // came straight back as 'call_draft_block' and archived the draft.
+    if (!(await staleCallLinkageReason(trx, data, {
+      lockCallRow: true,
+      supersededBelowGeneration: forcedSuperseded ? liveGenForRecheck : null,
+    }))) {
       await trx('estimates').where({ id: estimateId })
         .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
       return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
@@ -411,7 +421,18 @@ async function callRejectedForDrafting(dbc, callLogId, {
   return null;
 }
 
-async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null } = {}) {
+// `supersededBelowGeneration` has the same meaning here as in
+// callRejectedForDrafting, and the linkage recheck needs it for the same
+// reason (codex P1, GH round on fe55a83df): once the caller has
+// established that a forced verdict was superseded, this recheck must not
+// resurrect the very marker that was just judged stale — it would return
+// 'call_draft_block', the obsolete test would fail, and the valid draft
+// would be archived anyway. Only LEAD-LESS drafts took the caller's early
+// return, so the linked-draft path — the production shape — still lost.
+async function staleCallLinkageReason(dbc, data, {
+  lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null,
+  supersededBelowGeneration = null,
+} = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
   // The CALL-SIDE verdict applies to EVERY engine draft (codex P0, PR
@@ -457,8 +478,16 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
   // callLogId, so this must precede the durable-linkage bail.
   try {
     const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
-    if (md?.estimator_draft_block?.reason) return 'call_draft_block';
-    if (md?.estimator_quarantine_pending?.reason) return 'call_quarantine_pending';
+    const markerCurrent = (marker) => {
+      if (supersededBelowGeneration == null) return true;
+      const g = marker?.generation;
+      if (g == null) return true;
+      return Number(g) >= Number(supersededBelowGeneration);
+    };
+    if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) return 'call_draft_block';
+    if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
+      return 'call_quarantine_pending';
+    }
   } catch { /* unparseable metadata: fall through to the linkage compare */ }
   // The REPROCESSING fence applies to every engine draft too (codex P1,
   // PR #3304 GH r10): a legacy or lead-less draft is just as unsafe to

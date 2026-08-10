@@ -942,12 +942,25 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
 // otherwise leave the unmarked draft public and sendable with nothing
 // scheduled to try again. The failure is stamped on the CALL row and the
 // scheduler sweep below retries it until it lands.
-async function markQuarantinePending(callLogId, reason) {
+// `procGeneration` stamps the QUEUED marker with the generation whose
+// verdict it carries (codex P1, GH round on fe55a83df). Without it the
+// queue entry looked generation-less, and a generation-less marker is
+// deliberately honored as un-provably-stale — so a queue written by
+// generation N kept a later supersession check from firing, and the stale
+// N quarantine archived a draft N+1 had already re-qualified. (The wedged
+// -invalidation sweep runs BEFORE the quarantine sweep, so the queue is
+// not cleared first.) Only genuinely legacy markers should need that
+// fail-closed fallback.
+async function markQuarantinePending(callLogId, reason, { procGeneration = null } = {}) {
   try {
     await db('call_log').where({ id: callLogId }).update({
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_quarantine_pending}', ?::jsonb, true)",
-        [JSON.stringify({ reason, at: new Date().toISOString() })],
+        [JSON.stringify({
+          reason,
+          at: new Date().toISOString(),
+          ...(procGeneration != null ? { generation: Number(procGeneration) } : {}),
+        })],
       ),
       updated_at: new Date(),
     });

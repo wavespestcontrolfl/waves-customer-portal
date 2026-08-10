@@ -525,8 +525,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(fnAt).toBeGreaterThan(-1);
     const leadLockAt = source.indexOf("await trx('leads').where({ id: leadLockId }).forUpdate()", fnAt);
     expect(leadLockAt).toBeGreaterThan(fnAt);
-    const verdictAt = source.indexOf('staleCallLinkageReason(trx, data, { lockCallRow: true })', leadLockAt);
+    const verdictAt = source.indexOf('staleCallLinkageReason(trx, data, {', leadLockAt);
     expect(verdictAt).toBeGreaterThan(leadLockAt);
+    expect(source.indexOf('lockCallRow: true', verdictAt)).toBeGreaterThan(verdictAt);
   });
 });
 
@@ -584,7 +585,15 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     const trx = (table) => {
       const b = {};
       for (const m of ['where', 'whereNull', 'orderBy', 'forUpdate']) b[m] = () => b;
-      b.first = async () => (table === 'call_log' ? callRow : null);
+      // leads resolves so the LINKAGE comparison in staleCallLinkageReason
+      // finds the draft's own lead intact — otherwise every linked-draft
+      // case exits on 'call_linkage_changed_before_delivery' and the
+      // marker logic under test never runs.
+      b.first = async () => {
+        if (table === 'call_log') return callRow;
+        if (table === 'leads') return { id: 'lead-a' };
+        return null;
+      };
       b.update = async (row) => { writes.push({ table, row }); return 1; };
       return b;
     };
@@ -775,6 +784,93 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     expect(genAt).toBeGreaterThan(lookupAt);
     // No swallowing catch between the lookup and the derived value.
     expect(source.slice(lookupAt, genAt)).not.toMatch(/catch/);
+  });
+
+  // The PRODUCTION shape: a linked draft keeps lead_id, so it does NOT take
+  // the lead-less early return — it runs the linkage recheck, which is where
+  // a stale marker previously came back as 'call_draft_block' and archived
+  // the draft anyway (codex P1 on fe55a83df: every earlier stale-marker test
+  // omitted lead_id and so never exercised this branch).
+  const linkedRowAndData = () => ({
+    row: { status: 'draft', archived_at: null },
+    data: { lead_id: 'lead-a', lead_linkage: 'stamp', estimatorEngine: { callLogId: 'call-1' } },
+  });
+
+  test('LINKED draft: a stale draft-block does not survive the linkage recheck (codex P1)', async () => {
+    const writes = [];
+    const { row, data } = linkedRowAndData();
+    const staleMarker = {
+      ...SETTLED(6, {
+        lead_id: 'lead-a',
+        estimator_draft_block: { reason: 'email_identity_conflict', generation: 5 },
+      }),
+      twilio_call_sid: null,
+    };
+    const out = await completePendingInvalidation(trxFor(staleMarker, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBe(true);
+    const written = writtenEstimate(writes);
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(written.lead_id).toBe('lead-a');
+  });
+
+  test('LINKED draft: a marker AT the live generation still archives it', async () => {
+    const writes = [];
+    const { row, data } = linkedRowAndData();
+    const freshMarker = {
+      ...SETTLED(6, {
+        lead_id: 'lead-a',
+        estimator_draft_block: { reason: 'email_identity_conflict', generation: 6 },
+      }),
+      twilio_call_sid: null,
+    };
+    const out = await completePendingInvalidation(trxFor(freshMarker, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
+  });
+
+  test('LINKED draft: a stale QUEUED quarantine is superseded too', async () => {
+    const writes = [];
+    const { row, data } = linkedRowAndData();
+    const staleQueue = {
+      ...SETTLED(6, {
+        lead_id: 'lead-a',
+        estimator_quarantine_pending: { reason: 'email_identity_conflict', generation: 5 },
+      }),
+      twilio_call_sid: null,
+    };
+    const out = await completePendingInvalidation(trxFor(staleQueue, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBe(true);
+  });
+
+  test('markQuarantinePending stamps the queued marker with its generation (codex P1)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const fnAt = source.indexOf('async function markQuarantinePending');
+    expect(fnAt).toBeGreaterThan(-1);
+    expect(source.indexOf('{ procGeneration = null } = {}', fnAt)).toBeGreaterThan(fnAt);
+    const stampAt = source.indexOf('generation: Number(procGeneration)', fnAt);
+    expect(stampAt).toBeGreaterThan(fnAt);
+    // Both processor call sites forward the pass generation.
+    const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const sites = proc.split('markQuarantinePending(call.id').slice(1);
+    expect(sites.length).toBe(2);
+    for (const site of sites) expect(site.slice(0, 160)).toMatch(/procGeneration/);
+  });
+
+  test('the linkage recheck receives the supersession cutoff (source pin)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/admin-estimate-persistence.js'), 'utf8');
+    const fnAt = source.indexOf('async function completePendingInvalidation');
+    const recheckAt = source.indexOf('supersededBelowGeneration: forcedSuperseded ? liveGenForRecheck : null', fnAt);
+    expect(recheckAt).toBeGreaterThan(fnAt);
   });
 
   test('takePendingInvalidation carries the generation and strips its key', () => {
