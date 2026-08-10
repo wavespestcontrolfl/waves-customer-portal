@@ -41,7 +41,9 @@ function fakeKnex({ byName = [], byShortName = [], byKey = [] } = {}) {
       }
       calls.shortName += 1;
       const hits = byShortName.filter((r) => String(r.short_name).toLowerCase() === String(value).toLowerCase());
-      return { limit: (n) => ({ select: async () => hits.slice(0, n) }) };
+      // No .limit() — the resolver fetches the WHOLE collision set, because an
+      // unordered limit cannot prove uniqueness.
+      return { select: async () => hits };
     },
   });
   builder.schema = { hasTable: async () => false };
@@ -198,10 +200,16 @@ describeOrSkip('live catalog short-name collisions', () => {
     const mixed = [...groups.entries()]
       .filter(([, g]) => g.length > 1 && new Set(g.map((r) => r.billing_type)).size > 1)
       .map(([k, g]) => `${k}: ${g.map((r) => `${r.service_key}(${r.billing_type})`).join(', ')}`);
-    // Known and accepted TODAY (the code fails closed on both); listed so a NEW
-    // collision fails this test instead of hiding among them.
-    const KNOWN = ['lawn care', 'mosquito'];
-    const unexpected = mixed.filter((m) => !KNOWN.includes(m.split(':')[0]));
+    // Known and accepted TODAY (the code fails closed on both), pinned WITH
+    // their row counts (codex #3334 r3): allowlisting the NAME alone would let
+    // a known group silently grow — a 6th "Lawn Care" row is new drift, not the
+    // collision that was reviewed.
+    const KNOWN_COUNTS = { 'lawn care': 5, mosquito: 2 };
+    const unexpected = mixed.filter((m) => {
+      const name = m.split(':')[0];
+      const size = (groups.get(name) || []).length;
+      return KNOWN_COUNTS[name] !== size;
+    });
     expect(unexpected).toEqual([]);
   });
 });

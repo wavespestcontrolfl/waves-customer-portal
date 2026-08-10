@@ -303,12 +303,14 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // on the fail-closed side instead of reading `.length` off whatever came back.
   let shortNameMatches = [];
   try {
-    // Bounded, but wide enough to see the WHOLE collision set — the narrowing
-    // below filters candidates, and it cannot filter rows it never fetched.
-    // Largest real collision today is 5 ("Lawn Care").
+    // NO LIMIT (codex #3334 r3 P1): an unordered limit cannot prove it fetched
+    // the whole collision set, so narrowing could leave exactly one row and
+    // return it while another matching identity sat outside the window —
+    // resolving an identity that was never actually unique. The predicate is an
+    // equality match on one column of a ~100-row catalog, so the full set is
+    // both cheap and the only correct basis for a uniqueness decision.
     shortNameMatches = await knex('services')
       .whereRaw('lower(short_name) = lower(?)', [serviceType])
-      .limit(10)
       .select('service_key', 'name', 'category', 'billing_type');
   } catch (err) {
     shortNameMatches = [];
@@ -359,9 +361,14 @@ async function resolveCompletionProfileForScheduledService(scheduledService = {}
 }
 
 async function resolveCompletionProfileForServiceId(serviceId, knex = db) {
+  // MUST carry the identity evidence the resolver reads (codex #3334 r3 P1):
+  // an explicit projection that omits service_key_snapshot / is_recurring
+  // silently downgrades every caller of this wrapper back to label-only
+  // matching, so a service_id-null row with an ambiguous label loses the typed
+  // completion + billing identity this change exists to preserve.
   const scheduledService = await knex('scheduled_services')
     .where({ id: serviceId })
-    .first('id', 'service_id', 'service_type');
+    .first('id', 'service_id', 'service_type', 'service_key_snapshot', 'is_recurring');
   if (!scheduledService) return null;
   return resolveCompletionProfileForScheduledService(scheduledService, knex);
 }
