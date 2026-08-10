@@ -390,16 +390,13 @@ function deliverySummary(channels = {}) {
 // per additional_applications row — mirror of the server gate in
 // server/routes/admin-projects.js.
 function certApplicationChecks(app = {}, labelPrefix = "") {
-  // "Other" is a sentinel, not a valid entry — a legacy draft carrying it with
-  // no description stays incomplete rather than printing "Other" onto the
-  // certificate. Mirror of the server comment in admin-projects.js.
-  const productName = app.product_name === "Other"
-    ? app.product_name_other
-    : app.product_name;
+  // "Other" is a sentinel, not a valid entry — a legacy draft carrying it is
+  // incomplete with or without a `_other` description, since neither the bare
+  // sentinel nor a description the applicator can no longer see belongs on an
+  // issued certificate. Mirror of the server comment in admin-projects.js.
+  const productName = app.product_name === "Other" ? null : app.product_name;
   const rawMethod = app.treatment_method;
-  const treatmentMethod = rawMethod === "Other"
-    ? app.treatment_method_other
-    : rawMethod;
+  const treatmentMethod = rawMethod === "Other" ? null : rawMethod;
   // Method-aware coverage requirements — bait systems have no gallons, borate
   // wood treatments may not either.
   const isBaitSystem = rawMethod === "Bait system";

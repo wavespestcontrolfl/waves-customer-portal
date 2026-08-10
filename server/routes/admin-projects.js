@@ -588,20 +588,21 @@ function certAdditionalApplications(findings) {
 // Runs once over the flat primary-application keys (the original cert_*
 // keys/labels) and once per additional application row.
 function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
-  // "Other" is a sentinel, never a valid certificate entry: the form dropped
-  // both the choice and its "(if Other)" free-text companion because a bare
-  // "Other" is not an acceptable FBC 1816.1.7 method or FDACS 5E-14.106
-  // product. Drafts saved before that removal still carry the description, so
-  // it wins when present — but a legacy draft holding the bare sentinel stays
-  // INCOMPLETE and blocks the send. Do not add an `|| app.product_name`-style
-  // fallback here: it would let the sentinel satisfy the gate and print
-  // "Other" onto the document. The tech resolves it by picking a real method —
-  // the select keeps an out-of-options value selectable
-  // (ProjectFindingFieldInput.jsx:879), so the legacy draft is editable, not
-  // dead-ended.
-  const productName = app.product_name === 'Other' ? app.product_name_other : app.product_name;
+  // "Other" is a sentinel, never a valid entry on the issued document: the
+  // form dropped both the choice and its "(if Other)" free-text companion
+  // because a bare "Other" is not an acceptable FBC 1816.1.7 method or FDACS
+  // 5E-14.106 product. A draft saved before that removal is INCOMPLETE here
+  // whether or not it carries a `_other` description — the description is no
+  // longer visible in the form, and an FDACS document must not print a value
+  // the applicator cannot see or correct before signing it. The tech resolves
+  // it by picking a real method: the select keeps an out-of-options value
+  // selectable (ProjectFindingFieldInput.jsx:879), so the legacy draft opens
+  // showing "Other" and is editable, not dead-ended. Do not reintroduce a
+  // fallback to `_other` or to the picker value; either one lets the sentinel
+  // satisfy the gate.
+  const productName = app.product_name === 'Other' ? null : app.product_name;
   const rawMethod = app.treatment_method;
-  const method = rawMethod === 'Other' ? app.treatment_method_other : rawMethod;
+  const method = rawMethod === 'Other' ? null : rawMethod;
   // Coverage requirements vary by application method. Liquid soil barriers
   // (chemical) are sized by gallons of finished solution applied across a
   // measured area. Wood treatments (borate) are measured by treated area
