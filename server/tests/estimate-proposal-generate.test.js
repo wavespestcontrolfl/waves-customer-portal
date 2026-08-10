@@ -828,6 +828,41 @@ describe('deriveProposalDraft', () => {
     expect(green.warnings).toEqual([]);
   });
 
+  test('r18: one-time packages with a generic visits count derive as corrective work, never vanish as pseudo-recurring', async () => {
+    // German-roach cleanout returns { price, total, visits } — the package
+    // visit count is NOT an annual cadence; the charge must derive.
+    const roach = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'german_roach', label: 'German Roach Cleanout — 3 Visit Program', price: 450, total: 450, visits: 3 }] },
+      },
+    });
+    expect(roach.correctiveWork).toHaveLength(1);
+    expect(roach.correctiveWork[0].amount).toBe(450);
+
+    // Explicit one-time cadence wins even beside recurring-looking fields.
+    const flea = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'flea', serviceKey: 'flea', billingCadence: 'one_time', visits: 3, total: 385 }] },
+      },
+    });
+    expect(flea.correctiveWork).toHaveLength(1);
+    expect(flea.correctiveWork[0].amount).toBe(385);
+    expect(flea.programs).toBeNull();
+  });
+
+  test('r18: engineResult one-time containers beside a mapped result still derive', async () => {
+    // result exists → the selected engine result is `result`; the separate
+    // engineResult.oneTime container must still contribute its charge.
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+        engineResult: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] } },
+      },
+    });
+    expect(draft.correctiveWork).toHaveLength(1);
+    expect(draft.correctiveWork[0].amount).toBe(500);
+  });
+
   test('r17b: mapped/raw mirrors merge authoritative metadata — accepted net outranks, explicit tax propagates, disagreement fails', async () => {
     // Raw twin carries the operator-accepted net: ONE charge at $250,
     // never $550 across both rows.

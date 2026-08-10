@@ -55,6 +55,24 @@ const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine
 // and the canonical heuristic-turf predicate — a lawn row priced off
 // turfBasis plausibleMaxTurfCap/lotFallback is a field-verification price
 // even at MEDIUM confidence (codex 1A-ii r10).
+// Explicit one-time classification WINS over the recurring heuristics
+// (codex 1A-ii r18): real one-time engine packages carry a generic
+// `visits` count — german-roach cleanout returns { price, total, visits },
+// flea packages stamp billingCadence 'one_time' beside visits — that
+// visitsPerYearForRecurringService would misread as an annual cadence.
+function rowIsExplicitlyOneTime(row = {}) {
+  const cadence = String(row.billingCadence || row.billing_cadence || row.frequency || row.cadence || '')
+    .trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return cadence === 'one_time' || cadence === 'onetime';
+}
+
+// Recurring evidence for RAW line rows: only the explicitly ANNUAL cadence
+// fields count — generic visits/apps are package counts on one-time rows
+// unless recurring dollars prove otherwise (codex 1A-ii r18).
+function rowHasAnnualCadence(row = {}) {
+  return (num(row.visitsPerYear) > 0) || (num(row.appsPerYear) > 0) || (num(row.treatmentsPerYear) > 0);
+}
+
 function rowIsReviewGated(row = {}) {
   return lineRequiresReview(row)
     || lineHasHeuristicTurf(row)
@@ -410,6 +428,10 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
       extraSeenKeys.add(key);
       return true;
     })
+    // An explicitly one-time engine row (flea's billingCadence 'one_time'
+    // beside a package `visits` count) belongs to corrective work, never a
+    // recurring program candidate (codex 1A-ii r18).
+    .filter((row) => !rowIsExplicitlyOneTime(row))
     .filter((row) => (visitsPerYearForRecurringService(row) > 0)
       || (recurringLineAnnualAmount(row) > 0)
       || row.manualFinalAnnual != null);
@@ -692,6 +714,15 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   const sourceLists = [
     estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true }),
     estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true }),
+    // estimateData.engineResult is a SEPARATE container when a mapped
+    // `result` exists beside it — its oneTime/specItems rows are otherwise
+    // invisible (only its lineItems flow through the raw containers), and
+    // with a null onetime_total the omission has no reconcile backstop
+    // (codex 1A-ii r18; the service-lines and delivery-options collectors
+    // deliberately merge these shapes).
+    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? [estimateOneTimeItemsFromData({ result: estimateData.engineResult }, { collapseMirrored: true })]
+      : []),
   ];
   const oneTimeIdentity = (item) => [
     String(item.service || '').toLowerCase(),
@@ -714,6 +745,9 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   const gatedOneTimeIdentities = new Set([
     ...estimateOneTimeItemsFromData(estimateData),
     ...estimateOneTimeItemsFromData({ result: engineResult }),
+    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? estimateOneTimeItemsFromData({ result: estimateData.engineResult })
+      : []),
   ].filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
   const objSeen = new Set();
   const emittedCounts = new Map();
@@ -790,8 +824,12 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     // (codex 1A-ii r4).
     if (line.manualFinalOneTime === 0) return true;
     if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
-    const noRecurringEvidence = !(visitsPerYearForRecurringService(line) > 0)
-      && !(recurringLineAnnualAmount(line) > 0);
+    // Explicit one-time cadence wins outright; otherwise only the
+    // explicitly ANNUAL cadence fields count as recurring evidence — a
+    // package `visits` count on a priced row (german-roach cleanout, flea)
+    // must not exclude the charge from corrective work (codex 1A-ii r18).
+    const noRecurringEvidence = rowIsExplicitlyOneTime(line)
+      || (!rowHasAnnualCadence(line) && !(recurringLineAnnualAmount(line) > 0));
     return noRecurringEvidence
       && num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
   });
