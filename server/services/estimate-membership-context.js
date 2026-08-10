@@ -537,6 +537,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       scheduledVisitDates: [...new Set(serviceRows
         .filter((row) => !isCallbackServiceRow(row))
         .map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort(),
+      // Stable row identities of those same appointments — the accept-time
+      // extension applies ONLY to rows frozen here (codex #3338 r10: a
+      // visit added between save and accept was never shown and must not
+      // be repriced or credited; ids survive reschedules where dates
+      // don't). Staff-side only — never projected to the public payload.
+      // Sorted for determinism — an identity SET whose order must not
+      // depend on DB row order (the source query has none).
+      scheduledRowIds: serviceRows
+        .filter((row) => !isCallbackServiceRow(row))
+        .map((row) => row.id).filter(Boolean)
+        .sort((a, b) => String(a).localeCompare(String(b))),
       // Any non-callback row funded by an annual-prepay term: the
       // accept-time extension must not reprice the paid term — it credits
       // the difference instead (owner decision 2026-08-10).
@@ -714,6 +725,9 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
           newPerVisit: round2(currentPerVisit - perVisitSavings),
           remainingVisits: upcomingVisitDates.length || svc.activeScheduledVisits || null,
           upcomingVisitDates,
+          // Frozen appointment identities the accept-time apply is pinned
+          // to (staff-side; deliberately NOT in publicMembershipView).
+          rowIds: Array.isArray(svc.scheduledRowIds) ? svc.scheduledRowIds : [],
           prepaid: svc.prepaid === true,
         });
       }
@@ -789,13 +803,39 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 // snapshot field defaults to staff-only unless it is projected here.
 function publicMembershipView(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null;
+  // Gate checked at PROJECTION time too (codex #3338 r1): a plan frozen
+  // while the gate was on must not keep displaying after the kill switch
+  // turns the accept-side apply off. Computed first so the
+  // discountAppliesTo discriminator below can follow the PROJECTED rows.
+  const projectedExistingServices = (isEnabled('waveguardExtendExisting') && Array.isArray(snapshot.existingServices)
+    ? snapshot.existingServices
+    : [])
+    .map((service) => ({
+      key: service?.key ?? null,
+      label: service?.label ?? null,
+      currentPerVisit: service?.currentPerVisit ?? null,
+      newPerVisit: service?.newPerVisit ?? null,
+      extraDiscountPct: service?.extraDiscountPct ?? null,
+      perVisitSavings: service?.perVisitSavings ?? null,
+      remainingVisits: service?.remainingVisits ?? null,
+      upcomingVisitDates: Array.isArray(service?.upcomingVisitDates)
+        ? service.upcomingVisitDates.filter(Boolean)
+        : [],
+      prepaid: service?.prepaid ?? null,
+    }));
   return {
     isExistingCustomer: snapshot.isExistingCustomer === true,
     firstName: snapshot.firstName ?? null,
     tier: snapshot.tier ?? null,
     tierLabel: snapshot.tierLabel ?? null,
     tierDiscountPct: snapshot.tierDiscountPct ?? null,
-    discountAppliesTo: snapshot.discountAppliesTo ?? null,
+    // Follows the PROJECTED rows, not the frozen value (codex #3338 r8): a
+    // 'new_and_existing_services' snapshot whose rows the gate now hides
+    // must not leave the SSR upgrade blurb promising existing-service
+    // coverage the accept side won't deliver.
+    discountAppliesTo: projectedExistingServices.length
+      ? (snapshot.discountAppliesTo ?? null)
+      : (snapshot.discountAppliesTo ? 'new_services_only' : null),
     // Keys only — the cross-sell picker needs what the account already has,
     // never where or for how much.
     existingServiceKeys: Array.isArray(snapshot.existingServiceKeys)
@@ -814,29 +854,9 @@ function publicMembershipView(snapshot) {
     // The customer's own current price, discounted price, and visit dates
     // are projected DELIBERATELY (owner decision 2026-08-10): the estimate
     // page renders "your Pest Control: $X → $Y / application" with the
-    // appointments it covers. Addresses, payment history, and per-contract
-    // breakdowns stay staff-only as before.
-    // Gate checked at PROJECTION time too (codex #3338 r1): a plan frozen
-    // while the gate was on must not keep displaying "applied automatically
-    // when you approve" after the kill switch turns the accept-side apply
-    // off — flipping the gate silences display and apply together, in both
-    // directions, at every instant.
-    existingServices: (isEnabled('waveguardExtendExisting') && Array.isArray(snapshot.existingServices)
-      ? snapshot.existingServices
-      : [])
-      .map((service) => ({
-        key: service?.key ?? null,
-        label: service?.label ?? null,
-        currentPerVisit: service?.currentPerVisit ?? null,
-        newPerVisit: service?.newPerVisit ?? null,
-        extraDiscountPct: service?.extraDiscountPct ?? null,
-        perVisitSavings: service?.perVisitSavings ?? null,
-        remainingVisits: service?.remainingVisits ?? null,
-        upcomingVisitDates: Array.isArray(service?.upcomingVisitDates)
-          ? service.upcomingVisitDates.filter(Boolean)
-          : [],
-        prepaid: service?.prepaid ?? null,
-      })),
+    // appointments it covers. Addresses, payment history, per-contract
+    // breakdowns, and the frozen rowIds stay staff-only as before.
+    existingServices: projectedExistingServices,
     newServices: (Array.isArray(snapshot.newServices) ? snapshot.newServices : [])
       .map((service) => ({
         key: service?.key ?? null,

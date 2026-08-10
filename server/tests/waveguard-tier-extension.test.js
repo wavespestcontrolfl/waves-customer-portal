@@ -53,7 +53,7 @@ function fakeTrx() {
   return { database, updates, auditRows };
 }
 
-function frozenSnapshotData({ prepaid = false } = {}) {
+function frozenSnapshotData({ prepaid = false, rowIds = ['row-1', 'row-2'] } = {}) {
   return {
     membershipSnapshot: {
       isExistingCustomer: true,
@@ -68,6 +68,7 @@ function frozenSnapshotData({ prepaid = false } = {}) {
         newPerVisit: 49.5,
         remainingVisits: 2,
         upcomingVisitDates: ['2099-10-28', '2100-01-27'],
+        rowIds,
         prepaid,
       }],
     },
@@ -142,7 +143,7 @@ describe('applyFrozenExistingServiceExtension', () => {
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+      estimateData: frozenSnapshotData({ rowIds: ['drift-up', 'drift-down'] }), activatedTier: 'Silver',
     });
     expect(updates).toEqual([]);
     expect(summary.applied).toBe(false);
@@ -161,12 +162,42 @@ describe('applyFrozenExistingServiceExtension', () => {
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+      estimateData: frozenSnapshotData({ rowIds: ['null-price', 'matches', 'drifted'] }), activatedTier: 'Silver',
     });
     expect(updates).toEqual([{ id: 'matches', estimated_price: 49.5 }]);
     expect(summary.repricedRowCount).toBe(1);
     expect(summary.reviewFamilies).toEqual([
       'Pest Control (1 visit priced differently than quoted — apply manually)',
+    ]);
+  });
+
+  test('a same-family visit created after the estimate was saved is never touched (ID-pinned apply)', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1' }),
+      // Same family, matching price, upcoming — but absent from the frozen
+      // plan the customer saw (codex #3338 r10).
+      pestRow({ id: 'added-after-save', scheduled_date: '2100-04-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([{ id: 'row-1', estimated_price: 49.5 }]);
+    expect(summary.repricedRowCount).toBe(1);
+  });
+
+  test('a frozen plan without appointment identities parks for review instead of family-wide matching', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow()];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: [] }), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (no frozen appointment identities — apply manually)',
     ]);
   });
 
@@ -180,7 +211,7 @@ describe('applyFrozenExistingServiceExtension', () => {
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+      estimateData: frozenSnapshotData({ rowIds: ['own', 'past', 'callback', 'live'] }), activatedTier: 'Silver',
     });
     expect(updates).toEqual([{ id: 'live', estimated_price: 49.5 }]);
     expect(summary.repricedRowCount).toBe(1);
@@ -194,7 +225,7 @@ describe('applyFrozenExistingServiceExtension', () => {
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData({ prepaid: true }), activatedTier: 'Silver',
+      estimateData: frozenSnapshotData({ prepaid: true, rowIds: ['pre-1', 'pre-2'] }), activatedTier: 'Silver',
     });
     expect(updates).toEqual([]);
     expect(summary.applied).toBe(true);
@@ -221,8 +252,8 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(updates).toEqual([]);
   });
 
-  test('monthly-lane members park a rate-review exception; families outside the plan are named for review', async () => {
-    const { database } = fakeTrx();
+  test('monthly-lane members: NO writes at all — the whole plan parks as a rate review before any mutation', async () => {
+    const { database, updates, auditRows } = fakeTrx();
     mockRowsState.rows = [pestRow()];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
@@ -230,8 +261,16 @@ describe('applyFrozenExistingServiceExtension', () => {
       monthlyLaneMember: true,
       priorQualifyingKeys: ['pest_control', 'tree_shrub'],
     });
-    expect(summary.applied).toBe(true);
+    // codex #3338 r9: row repricing never lowers a monthly member's
+    // scalar charge, so nothing may mutate — review-only summary.
+    expect(summary.applied).toBe(false);
     expect(summary.monthlyRateReviewNeeded).toBe(true);
-    expect(summary.reviewFamilies).toEqual(['tree_shrub']);
+    expect(updates).toEqual([]);
+    expect(auditRows).toEqual([]);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(summary.reviewFamilies).toEqual([
+      'tree_shrub',
+      'Pest Control (monthly-billed — adjust the monthly rate manually)',
+    ]);
   });
 });

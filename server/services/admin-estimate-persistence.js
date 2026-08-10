@@ -1873,6 +1873,26 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
       .where('address_line1', 'ilike', `${houseNumber} %`)
       .limit(8)
       .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip', 'waveguard_tier', 'monthly_rate');
+    // A member's NON-PRIMARY addresses live in customer_properties, not
+    // customers.address_line1 (codex #3338 r12) — a secondary-property
+    // estimate must warn the same way. Best-effort: environments without
+    // the table just skip this leg.
+    try {
+      const propertyCandidates = await database('customer_properties as cp')
+        .join('customers as c', 'cp.customer_id', 'c.id')
+        .where('cp.active', true)
+        .where((q) => q.where('c.active', true).orWhereNull('c.active'))
+        .whereNull('c.deleted_at')
+        .where('cp.address_line1', 'ilike', `${houseNumber} %`)
+        .limit(8)
+        .select(
+          'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate',
+          'cp.address_line1', 'cp.city', 'cp.zip',
+        );
+      candidates.push(...propertyCandidates);
+    } catch (propErr) {
+      logger.warn(`[admin-estimate] unlinked-member property-address leg skipped: ${propErr.message}`);
+    }
     for (const candidate of candidates) {
       if (!candidate.address_line1) continue;
       const candidateAddress = [candidate.address_line1, candidate.city, candidate.zip].filter(Boolean).join(', ');

@@ -835,6 +835,9 @@ describe('existing-service tier extension snapshot', () => {
       newPerVisit: 105.3,
       remainingVisits: 3,
       upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
+      // Frozen appointment identities the accept-time apply pins to
+      // (codex #3338 r10) — staff-side only.
+      rowIds: ['s1', 's2', 's3'],
       prepaid: false,
     })]);
     expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
@@ -956,10 +959,14 @@ describe('existing-service tier extension snapshot', () => {
     });
     expect(snapshot.existingServices).toHaveLength(1);
     // Kill switch flips off with the frozen plan already saved: display
-    // must go dormant with the accept-side apply (codex #3338 r1).
+    // must go dormant with the accept-side apply (codex #3338 r1) — and
+    // the SSR copy discriminator must fall back with it (codex #3338 r8),
+    // or the legacy upgrade blurb keeps promising existing-service
+    // coverage the accept side won't deliver.
     mockExtendExistingGate = false;
     const view = publicMembershipView(snapshot);
     expect(view.existingServices).toEqual([]);
+    expect(view.discountAppliesTo).toBe('new_services_only');
   });
 
   test('gate on: no tier change means no extension rows', async () => {

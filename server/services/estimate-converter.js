@@ -619,6 +619,20 @@ async function applyFrozenExistingServiceExtension({
   const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
   summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key));
 
+  // Monthly-lane members bill customers.monthly_rate — row writes and
+  // prepaid credits would not deliver the displayed reduction (codex #3338
+  // r9), so NOTHING is mutated for them: the whole frozen plan parks as a
+  // manual rate adjustment BEFORE any write runs. Snapshots now exclude
+  // monthly-lane members at save time; this guards mode changes between
+  // save and accept and snapshots frozen before that exclusion.
+  if (monthlyLaneMember === true) {
+    summary.monthlyRateReviewNeeded = true;
+    for (const svc of plan) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (monthly-billed — adjust the monthly rate manually)`);
+    }
+    return summary;
+  }
+
   const { loadExistingRecurringQualifyingRows, qualifyingKeysForRow } = require('./waveguard-existing-services');
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
   const today = etDateString();
@@ -642,7 +656,18 @@ async function applyFrozenExistingServiceExtension({
 
   let creditTotal = 0;
   for (const svc of plan) {
-    const familyRows = liveRows.filter((row) => qualifyingKeysForRow(row).some((key) => svc.keys.includes(key)));
+    // ID-pinned apply (codex #3338 r10): only the appointments frozen at
+    // save time — a same-family visit created between save and accept was
+    // never shown on the card and must not be repriced or credited. Ids
+    // survive reschedules (dates don't). A frozen row without identities
+    // parks for review rather than falling back to family-wide matching.
+    const frozenRowIds = Array.isArray(svc.rowIds) ? svc.rowIds.map(String) : [];
+    if (!frozenRowIds.length) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (no frozen appointment identities — apply manually)`);
+      continue;
+    }
+    const familyRows = liveRows.filter((row) => frozenRowIds.includes(String(row.id))
+      && qualifyingKeysForRow(row).some((key) => svc.keys.includes(key)));
     if (!familyRows.length) {
       summary.skippedFamilies.push(svc.label || svc.key);
       continue;
@@ -4128,17 +4153,27 @@ const EstimateConverter = {
       }
     }
     const extensionApplied = extension?.applied === true;
+    // A frozen plan that applied NOTHING but parked work (all rows drifted,
+    // monthly-lane snapshot, missing identities) must still page staff
+    // (codex #3338 r10 sibling): the customer accepted a card that
+    // advertised automatic application, so silence is not an option even
+    // when the persisted tier didn't move.
+    const extensionNeedsReview = !!extension && !extensionApplied
+      && (extension.reviewFamilies.length > 0
+        || extension.skippedFamilies.length > 0
+        || extension.monthlyRateReviewNeeded === true);
     // Upgrade REVIEW alert = the activated tier outranks the customer's
     // PERSISTED tier (codex #3228 r2) — not the tier the prior rows alone
     // would derive. A stale-stamped Gold customer whose rows only support
     // Silver is a downgrade (no "upgrade" alert), while a Bronze-stamped
     // legacy customer whose existing rows already supported Silver gets the
     // review alert the moment an accept actually moves the stored tier up.
-    // An APPLIED extension always notifies, upgrade or not — money moved.
+    // An APPLIED extension always notifies, upgrade or not — money moved;
+    // so does a frozen plan that parked for review.
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && (extensionApplied || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
+      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
       const discountPct = Math.round((discount || 0) * 100);
       const appliedClauses = extensionApplied
         ? [
@@ -4152,6 +4187,13 @@ const EstimateConverter = {
             : '',
         ].filter(Boolean)
         : [];
+      // Review copy names the SPECIFIC parked work when a frozen plan
+      // produced any (codex #3338 r10 sibling) — "review whether to
+      // extend" alone would undersell an accept whose card already
+      // promised the extension.
+      const reviewClauses = !extensionApplied && extension
+        ? [...extension.reviewFamilies, ...extension.skippedFamilies]
+        : [];
       const tierReviewPayload = {
         type: 'estimate_converted',
         title: extensionApplied
@@ -4159,7 +4201,7 @@ const EstimateConverter = {
           : `WaveGuard ${tier} activated: review existing plan rates`,
         body: extensionApplied
           ? `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. ${appliedClauses.join(' ')}`
-          : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-visit prices — review whether to extend the ${discountPct}% tier discount to them.`,
+          : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-application prices — review whether to extend the ${discountPct}% tier discount to them.${reviewClauses.length ? ` Needs manual attention: ${reviewClauses.join('; ')}.` : ''}`,
         options: {
           icon: '⭐',
           link: `/admin/customers?customerId=${customerId}`,
