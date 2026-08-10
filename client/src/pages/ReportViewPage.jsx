@@ -5,6 +5,7 @@ import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
+import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -8545,6 +8546,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               sectionId={`companion-${companion.type}-visit-timeline`}
             />
           </div>
+        ))}
+
+        {/* Treated-point marks on the tech's own photo (GATE_PHOTO_MARKS,
+            dark — the server sends an empty list when off, so this renders
+            nothing today). Unlike the station map this DOES render in PDFs:
+            it pins against our photo, not a satellite basemap. */}
+        {(data.markedPhotos || []).map((marked) => (
+          <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
         ))}
 
         {/* Bait station map (station-map-v1) — live web only; pdf/static have

@@ -2604,6 +2604,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
     addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
+  const { loadMarksByS3Key, buildMarkedPhotoContext } = require('./photo-marks');
   // Completion-frozen primary identity wins over the live profile —
   // update-details can repoint the schedule row after completion (codex
   // P2 r15); legacy records (field absent) keep the live resolution.
@@ -2644,7 +2645,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       );
     } catch { /* primary verdict stands */ }
   }
-  const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
+  // The 'photo' variant is eligible for a MARKED-PHOTO card, never for the
+  // satellite trace: foam is a point application into wall voids with no
+  // perimeter and no area. A trace row saved on such a visit (captured before
+  // the lane was classified, or through the admin capture path) must not
+  // publish a spray band — the client's traced map treats anything that is
+  // not 'outline' as spray, so an unsuppressed 'photo' would render as a
+  // perimeter claim. Suppress the trace for every non-satellite variant.
+  const traceSuppressed = traceEligibilityGateOn()
+    && (!traceEligibility.eligible || traceEligibility.variant === 'photo');
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -3419,6 +3428,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // surfaced it in the mowing module — so a failed/absent V2 build (legacy path,
   // flag off, no assessment, or a build error) keeps the photo in the gallery instead
   // of losing it (Codex P1).
+  // Treated-point marks (GATE_PHOTO_MARKS, dark). Keyed on the photo's S3 key
+  // rather than its id because marks placed before completion belong to a
+  // staging row that promotion deletes and re-inserts under a new id; the S3
+  // key survives that verbatim. Fail-soft to an empty map.
+  const photoMarksByKey = await loadMarksByS3Key({
+    scheduledServiceId: service.scheduled_service_id,
+    knex,
+  }).catch(() => new Map());
   const photoPayload = await Promise.all(photos
     .map(async (photo) => ({
       id: photo.id,
@@ -3430,6 +3447,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       hashSha256: photo.hash_sha256 || null,
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
+      marks: photoMarksByKey.get(photo.s3_key) || [],
     })));
   // Photos that EXIST on the record but whose URL would not resolve are
   // silent omissions the page's onError counter can never see (codex P2
@@ -4406,6 +4424,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     photos: (gaugePhotoId && reportV2 && mowingHeight && mowingHeight.photoUrl)
       ? photoPayload.filter((p) => String(p.id) !== String(gaugePhotoId))
       : photoPayload,
+    // Marked-photo cards (GATE_PHOTO_MARKS, dark) — one per photo carrying
+    // treated-point marks. Empty on every other visit, which is the whole
+    // "marks are optional" ruling: no marks means no card, not an empty state.
+    // Deliberately carries NO count/total (see photo-marks.js ruling 3).
+    markedPhotos: photoPayload
+      .map((photo) => {
+        const context = buildMarkedPhotoContext({
+          marks: photo.marks,
+          eligibility: traceEligibility,
+        });
+        if (!context.available || !photo.url) return null;
+        return {
+          photoId: photo.id,
+          url: photo.url,
+          caption: photo.caption || '',
+          marks: context.marks,
+          legend: context.legend,
+          captionKey: context.captionKey,
+        };
+      })
+      .filter(Boolean),
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     // Canonical PUBLIC origin for links baked into the permanent PDF, and ''

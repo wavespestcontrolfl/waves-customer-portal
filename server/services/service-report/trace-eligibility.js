@@ -177,6 +177,28 @@ const SERVICE_KEY_RULES = {
   lawn_care_recurring: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_fertilization: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_tree_shrub_combo: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  // Drill-and-foam (catalog identity shipped in #3306). Foam goes into wall
+  // voids and block cells — a point application with no line and no area, so
+  // neither the spray band nor the lawn outline can depict it honestly. It
+  // gets the 'photo' variant: treated points marked on a PHOTO of the area
+  // actually treated (see service-report/photo-marks.js).
+  //
+  // overridesSnapshot is required, not decorative: foam completes as the
+  // typed `termite_treatment` findings type, which it SHARES with liquid
+  // perimeter and trenching, and typed lanes are evaluated first. Without the
+  // override a foam visit would inherit that lane's 'spray' variant. This is
+  // the same precedence fire_ant and tick_control already rely on — the
+  // catalog key's geometry is more specific than a shared typed pointer.
+  //
+  // The shared lane's requiresPerimeterMethod condition still suppresses a
+  // SPRAY map on these visits; this rule decides what they may publish
+  // instead, and nothing renders unless GATE_PHOTO_MARKS is on.
+  foam_drill: {
+    eligible: true, variant: 'photo', captionKey: 'foamPoints', overridesSnapshot: true,
+  },
+  foam_recurring: {
+    eligible: true, variant: 'photo', captionKey: 'foamPoints', overridesSnapshot: true,
+  },
   // liquid termite keys (typed — listed for callers that only have the key)
   // pointerRequired (codex P2 r27): these keys' spray verdicts are only
   // valid WITH their termite_treatment pointer — its perimeter-method
@@ -499,8 +521,21 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
       },
     };
   };
+  // The 'photo' variant is eligible for a treated-point map but NOT for the
+  // satellite tracer — foam has no perimeter and no area to trace. Without
+  // this branch modeMismatchBlock would read 'photo' as "not lawn" and wave a
+  // perimeter trace through, which is exactly the false exterior claim the
+  // registry exists to prevent.
+  const photoLaneBlock = (variant) => (variant === 'photo' ? {
+    status: 403,
+    payload: {
+      error: 'This service is mapped by marking the treated points on a photo, not by tracing the property.',
+      code: 'trace_photo_lane',
+      reason: variant,
+    },
+  } : null);
   if (eligibility.eligible) {
-    return modeMismatchBlock(eligibility.variant);
+    return photoLaneBlock(eligibility.variant) || modeMismatchBlock(eligibility.variant);
   }
   // An eligible ADD-ON line rescues the capture too (codex P2 r11) —
   // fail-open on lookup errors, same posture as the rest of this helper.
@@ -509,7 +544,9 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
       eligibility,
       await resolveAddonVerdicts(scheduledService?.id, knex),
     );
-    if (combined.eligible) return modeMismatchBlock(combined.variant);
+    if (combined.eligible) {
+      return photoLaneBlock(combined.variant) || modeMismatchBlock(combined.variant);
+    }
   } catch { return null; }
   return {
     status: 403,

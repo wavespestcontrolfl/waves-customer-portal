@@ -51,6 +51,16 @@ const {
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
+const {
+  photoMarksGateOn,
+  markKindsForLane,
+  defaultKindForLane,
+  laneSupportsMarks,
+  validateMarks,
+  saveMarksForPhoto,
+  loadMarksByS3Key,
+  MAX_MARKS_PER_PHOTO,
+} = require('../services/service-report/photo-marks');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -568,6 +578,111 @@ router.get('/:id/photos', async (req, res, next) => {
     next(err);
   }
 });
+
+// ── Treated-point marks on a service photo (GATE_PHOTO_MARKS, dark) ────────────
+// The technician photographs the area they actually treated and taps the
+// treated points on it. Marks are metadata keyed on the photo's S3 KEY — never
+// composited into the image (that would break the service_photos hash chain)
+// and never keyed on service_photos.id (promotion of a staged photo deletes
+// and re-inserts that row under a new id mid-visit).
+//
+// Marks are OPTIONAL by owner ruling: a visit with none is complete, so these
+// endpoints exist to be skipped without consequence.
+async function markLaneForService(svc) {
+  const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+  const profile = await resolveCompletionProfileForScheduledService(svc, db);
+  return profile?.serviceKey || null;
+}
+
+router.get('/:id/photo-marks', async (req, res, next) => {
+  try {
+    if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    // Lane resolution failure is not a 500: the tech simply gets no marking
+    // affordance, same fail-soft posture as the rest of the tech portal.
+    const serviceKey = await markLaneForService(svc).catch(() => null);
+    const byKey = await loadMarksByS3Key({ scheduledServiceId: svc.id });
+    res.json({
+      supported: laneSupportsMarks(serviceKey),
+      kinds: markKindsForLane(serviceKey),
+      defaultKind: defaultKindForLane(serviceKey),
+      maxMarks: MAX_MARKS_PER_PHOTO,
+      marksByS3Key: Object.fromEntries(byKey),
+    });
+  } catch (err) {
+    logger.error(`[tech-track] photo-marks list failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Whole-set replace for ONE photo: the stored set always equals what the tech
+// last saw. An empty array clears the marks, which is how Skip is honoured
+// after a previous save.
+router.put('/:id/photo-marks', async (req, res, next) => {
+  try {
+    if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const s3Key = typeof req.body?.s3Key === 'string' ? req.body.s3Key.trim() : '';
+    if (!s3Key) return res.status(400).json({ error: 's3Key is required' });
+
+    // The posted key must belong to THIS visit — either a staged photo or a
+    // promoted one. Without this check a caller could attach marks to another
+    // customer's photo by guessing its key.
+    const ownsKey = await photoKeyBelongsToService(svc.id, s3Key);
+    if (!ownsKey) return res.status(404).json({ error: 'Photo not found on this service' });
+
+    const serviceKey = await markLaneForService(svc).catch(() => null);
+    const validation = validateMarks(req.body?.marks, { serviceKey });
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    const saved = await saveMarksForPhoto({
+      scheduledServiceId: svc.id,
+      s3Key,
+      marks: validation.marks,
+      technicianId: req.technicianId || null,
+    });
+    logger.info(
+      `[tech-track] photo marks saved service=${svc.id} tech=${req.technicianId} count=${saved.length}`
+    );
+    res.json({ marks: validation.marks });
+  } catch (err) {
+    logger.error(`[tech-track] photo-marks save failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// A photo belongs to the visit if it is still staged against the scheduled
+// service, or was promoted onto that visit's service_record.
+async function photoKeyBelongsToService(scheduledServiceId, s3Key) {
+  const staged = await db('scheduled_service_photo_staging')
+    .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
+    .first('id')
+    .catch(() => null);
+  if (staged) return true;
+  const record = await db('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id')
+    .catch(() => null);
+  if (!record) return false;
+  const promoted = await db('service_photos')
+    .where({ service_record_id: record.id, s3_key: s3Key })
+    .first('id')
+    .catch(() => null);
+  return !!promoted;
+}
 
 // ── Recap clip capture DURING the visit (pest-recap lane, P4b) ──────────────────
 // Mirrors the admin-dispatch recap-media endpoints but tech-portal-scoped to the
