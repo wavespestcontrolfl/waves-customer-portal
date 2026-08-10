@@ -2881,6 +2881,11 @@ export default function EstimateToolViewV2({
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
         ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
+        // palmCount ONLY: the auto flag tracks the PROPERTY count's
+          // provenance — a treatment-count edit says nothing about it, and
+          // flipping the flag there would leave a stale property prefill
+          // uncleared on the next lookup.
+          ...(key === "palmCount" ? { _palmCountAuto: false } : {}),
       };
       // Entering a Bora-Care surface run while the attic box still holds an
       // untouched lookup estimate signals a surface-only job — drop the auto
@@ -3546,14 +3551,13 @@ export default function EstimateToolViewV2({
       if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
       // Palm prefill rides the server-stamped trust verdict — a distrusted
       // AI count leaves the field empty for the operator to count
-      // (lib/lookupPrefill.js; owner ruling 2026-08-10). Distrust CLEARS
-      // rather than skips: the update merges into the existing form, so
-      // skipping would leave a previous address's auto-filled count in
-      // pricing state (the trusted branch has always overwritten it).
+      // (lib/lookupPrefill.js; owner ruling 2026-08-10). When THIS lookup
+      // supplies no trusted count (distrusted, zero, or absent), the
+      // setForm below clears a previous lookup's auto-fill instead of
+      // letting the form merge carry it into pricing; operator-typed
+      // values (_palmCountAuto false) always stand.
       if (palmPrefillAllowed(ep)) {
         upd.palmCount = String(ep.estimatedPalmCount);
-      } else if (Number(ep.estimatedPalmCount) > 0) {
-        upd.palmCount = "";
       }
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
       const termiteFootprintNumber = lookupTermiteFootprintSqFt(ep);
@@ -3610,12 +3614,19 @@ export default function EstimateToolViewV2({
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
         }
-        // A distrusted-count CLEAR also clears the mirrored treatment count
-        // when it still duplicates the old auto-fill (operator-typed
-        // treatment counts differ and survive).
-        if (upd.palmCount === "" && String(f.palmTreatmentCount || "") !== ""
-          && String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
-          next.palmTreatmentCount = "";
+        if (upd.palmCount !== undefined) {
+          next._palmCountAuto = true;
+        } else if (f._palmCountAuto && String(f.palmCount || "").trim() !== "") {
+          // This lookup supplied no trusted count — clear the previous
+          // lookup's auto-fill (and the treatment count that still mirrors
+          // it) so a stale prefill can't ride into T&S reserve or
+          // injection pricing. Operator-typed values keep the flag false
+          // via the change handler and are never touched.
+          next.palmCount = "";
+          if (String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
+            next.palmTreatmentCount = "";
+          }
+          next._palmCountAuto = false;
         }
         return next;
       });
@@ -4220,32 +4231,49 @@ export default function EstimateToolViewV2({
       // Palm pricing requires an explicit positive integer. The property-level
       // count is used only as a prefill/default; the palmInjection service
       // payload below carries the number of palms treated for this line.
-      Object.assign(profile, (() => {
-        const fallback = parsePositiveInteger(baseProfile.palmCount)
-          ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
-          // The raw vision estimate only backstops when the server-stamped
-          // verdict trusts it — a distrusted count must not slip into T&S
-          // pricing through this request-profile fallback either.
-          ?? (palmPrefillAllowed(baseProfile)
-            ? parsePositiveInteger(baseProfile.estimatedPalmCount)
-            : undefined);
-        const value = propertyPalmCount ?? fallback;
-        return value
-          ? {
-              palmCount: value,
-              estimatedPalmCount: value,
-              palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
-            }
-          : {};
-      })());
-      // The profile spread above still carries the RAW baseProfile fields —
-      // when the verdict rejected the AI count and nothing explicit replaced
-      // it, strip the estimate so the server translator (which promotes
-      // estimatedPalmCount into palmInventory.palmCount) can't price it.
-      if (!palmPrefillAllowed(baseProfile) && !parsePositiveInteger(profile.palmCount)) {
+      // An operator who CLEARED the palm field said "no palms" — the AI
+      // estimate must not resurrect through the fallback (or the server
+      // translator's promotion) and reprice the count they rejected.
+      const palmManuallyCleared = form._palmCountAuto === false
+        && String(form.palmCount || "").trim() === "";
+      if (palmManuallyCleared) {
+        // The operator said "no palms": EVERY saved/AI leg is void — on an
+        // estimate revision the saved engine profile carries
+        // palmCount/palmInventory.palmCount too, and any surviving field
+        // would show an empty palm box while T&S silently priced the prior
+        // count.
+        delete profile.palmCount;
         delete profile.estimatedPalmCount;
-        if (profile.palmInventory && !parsePositiveInteger(profile.palmInventory.palmCount)) {
-          delete profile.palmInventory.palmCount;
+        if (profile.palmInventory) delete profile.palmInventory.palmCount;
+      } else {
+        Object.assign(profile, (() => {
+          const fallback = parsePositiveInteger(baseProfile.palmCount)
+            ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
+            // The raw vision estimate only backstops when the server-stamped
+            // verdict trusts it — a distrusted count must not slip into T&S
+            // pricing through this request-profile fallback.
+            ?? (palmPrefillAllowed(baseProfile)
+              ? parsePositiveInteger(baseProfile.estimatedPalmCount)
+              : undefined);
+          const value = propertyPalmCount ?? fallback;
+          return value
+            ? {
+                palmCount: value,
+                estimatedPalmCount: value,
+                palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
+              }
+            : {};
+        })());
+        // The profile spread above still carries the RAW baseProfile fields —
+        // when the verdict rejected the AI count and nothing explicit
+        // replaced it, strip the estimate so the server translator (which
+        // promotes estimatedPalmCount into palmInventory.palmCount) can't
+        // price it.
+        if (!palmPrefillAllowed(baseProfile) && !parsePositiveInteger(profile.palmCount)) {
+          delete profile.estimatedPalmCount;
+          if (profile.palmInventory && !parsePositiveInteger(profile.palmInventory.palmCount)) {
+            delete profile.palmInventory.palmCount;
+          }
         }
       }
       profile.estimatedTreeCount = treeCount;

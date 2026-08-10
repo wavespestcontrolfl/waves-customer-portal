@@ -1170,6 +1170,11 @@ function EstimateToolView() {
           ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
           ...(key === "stories" ? { _storiesEdited: true } : {}),
           ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+          // palmCount ONLY: the auto flag tracks the PROPERTY count's
+          // provenance — a treatment-count edit says nothing about it, and
+          // flipping the flag there would leave a stale property prefill
+          // uncleared on the next lookup.
+          ...(key === "palmCount" ? { _palmCountAuto: false } : {}),
         };
         if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = val;
@@ -1516,14 +1521,13 @@ function EstimateToolView() {
       if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
       // Palm prefill rides the server-stamped trust verdict — a distrusted
       // AI count leaves the field empty for the operator to count
-      // (lib/lookupPrefill.js; owner ruling 2026-08-10). Distrust CLEARS
-      // rather than skips: the update merges into the existing form, so
-      // skipping would leave a previous address's auto-filled count in
-      // pricing state (the trusted branch has always overwritten it).
+      // (lib/lookupPrefill.js; owner ruling 2026-08-10). When THIS lookup
+      // supplies no trusted count (distrusted, zero, or absent), the
+      // setForm below clears a previous lookup's auto-fill instead of
+      // letting the form merge carry it into pricing; operator-typed
+      // values (_palmCountAuto false) always stand.
       if (palmPrefillAllowed(ep)) {
         upd.palmCount = String(ep.estimatedPalmCount);
-      } else if (Number(ep.estimatedPalmCount) > 0) {
-        upd.palmCount = "";
       }
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
@@ -1540,12 +1544,19 @@ function EstimateToolView() {
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
         }
-        // A distrusted-count CLEAR also clears the mirrored treatment count
-        // when it still duplicates the old auto-fill (operator-typed
-        // treatment counts differ and survive).
-        if (upd.palmCount === "" && String(f.palmTreatmentCount || "") !== ""
-          && String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
-          next.palmTreatmentCount = "";
+        if (upd.palmCount !== undefined) {
+          next._palmCountAuto = true;
+        } else if (f._palmCountAuto && String(f.palmCount || "").trim() !== "") {
+          // This lookup supplied no trusted count — clear the previous
+          // lookup's auto-fill (and the treatment count that still mirrors
+          // it) so a stale prefill can't ride into T&S reserve or
+          // injection pricing. Operator-typed values keep the flag false
+          // via the change handler and are never touched.
+          next.palmCount = "";
+          if (String(f.palmTreatmentCount || "") === String(f.palmCount || "")) {
+            next.palmTreatmentCount = "";
+          }
+          next._palmCountAuto = false;
         }
         return next;
       });
