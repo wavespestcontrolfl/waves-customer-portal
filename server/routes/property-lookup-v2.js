@@ -2927,6 +2927,123 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
+  // Multifamily/HOA master-parcel guidance: county rolls model condo and
+  // townhome communities as building-level "Multifamily" parcels, so a
+  // unit-less address (typed or geocoder-snapped) resolves to the
+  // ASSOCIATION'S whole-building parcel and flips an individual resident's
+  // lookup to Commercial (two real leads in two days: a condo flea call and
+  // a townhome spider/wasp form lead, both truly residential units).
+  // Guidance only — the classification, the commercial manual-quote gate,
+  // and every pricing path are untouched; the operator decides
+  // resident-vs-association. Distinct field key so the win/loss byFlagField
+  // slice doesn't double-count propertyType. The subtype is derived from the
+  // RECORD alone (no ai) so a satellite/AI commercial signal on a
+  // non-multifamily record can't produce copy asserting county master-parcel
+  // provenance it doesn't have — commercialSignalRecord inside these helpers
+  // already strips untrusted web-sourced type strings (the Gateway Ave
+  // guard), so "record alone" means trusted-record evidence. The copy
+  // additionally asserts COUNTY-ROLL provenance, so the TYPE FIELD itself
+  // must be county-backed: a pure county/cadastral merge, an authoritative
+  // propertyType evidence source, or the stacked-parcel aggregation. A
+  // legacy AI-cache record (no field evidence) or a hybrid whose type came
+  // from a web hit is trusted for classification but must not produce
+  // county-master copy (codex P1 ×2).
+  // County/cadastral ONLY — verified/permit/builder are authoritative for
+  // classification but are not the county roll, and this copy claims
+  // county-roll provenance (codex P1).
+  const COUNTY_ROLL_SOURCES = new Set(['county', 'cadastral']);
+  // Field evidence, WHERE IT EXISTS, is the authority on where the type
+  // came from (codex P2): applyVerifiedOverrides rewrites propertyType's
+  // evidence to sourceType 'verified' but leaves rc._source at 'county',
+  // so a record-level arm evaluated first would credit the county roll for
+  // a technician's override ('HOA Common Area', or 'Multifamily' with a
+  // multi-unit count) and tell the operator the roll classified it. Only
+  // when propertyType carries NO evidence does the record-level source —
+  // or the stacked-parcel aggregation, which is assembled from county unit
+  // parcels — stand in for it.
+  const typeEvidenceSource = rc?._fieldEvidence?.propertyType
+    ? String(rc._fieldEvidence.propertyType.sourceType || '').toLowerCase()
+    : null;
+  const countyBackedType = Boolean(rc) && (typeEvidenceSource !== null
+    ? COUNTY_ROLL_SOURCES.has(typeEvidenceSource)
+    : (COUNTY_ROLL_SOURCES.has(String(rc._source || '')) || Boolean(rc._parcel?.aggregated)));
+  if (rc && countyBackedType
+      && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
+    const masterParcelSubtype = resolveCommercialSubtype(rc, {});
+    // Positive master-parcel evidence, so a county match for ONE condo unit
+    // ("Multifamily Condominium", unitCount 1, its own parcel) is never told
+    // its correct unit dimensions are the building's (codex P1). Aggregates
+    // count via residentialUnits — the real Manatee condo-building records
+    // carry unitCount 1 with _parcel.residentialUnits 30–48. The HOA
+    // common-area subtype needs no unit count: that parcel is association
+    // property (a clubhouse/greenbelt), never a resident's own home.
+    // _parcel.residentialUnits is COUNTY GIS by construction — attachParcelMeta
+    // stamps it straight off the roll layer — so it is trusted evidence whether
+    // or not the lookup stacked unit parcels. Gating it on `aggregated` hid the
+    // only positive evidence on the commonest master shape (codex P1): county
+    // GIS returns ONE multifamily master polygon, attachParcelMeta records its
+    // 48 assessed units, `aggregated` stays unset, and buildCadastralRecord
+    // leaves unitCount at the seeded 1 — so a 48-unit building failed the
+    // evidence test and got none of this guidance, which is the exact
+    // commercial diversion the flag exists to catch. A single condo UNIT's own
+    // parcel carries residentialUnits 1, so the one-unit guard still holds.
+    // Bounded like the aggregate seeding (ai-property-lookup coerceInt 2–2000)
+    // so a bad layer response can't claim thousands of units.
+    const parcelUnits = Math.min(Number(rc._parcel?.residentialUnits) || 0, 2000);
+    const masterUnitCount = Math.max(Number(trustedUnitCount(rc)) || 0, parcelUnits);
+    const masterParcelEvidence = masterUnitCount > 1 || Boolean(rc._parcel?.aggregated);
+    if (masterParcelSubtype === 'hoa_common_area_residential'
+        || (masterParcelSubtype === 'multifamily_common_area_residential' && masterParcelEvidence)) {
+      const unitCount = masterUnitCount;
+      // The unit re-lookup is only recommended on POSITIVE evidence the
+      // community parcels each unit: condo/townhome text on the trusted
+      // record, or the stacked-parcel aggregation (which is built from
+      // exactly those unit parcels). Generic "Multifamily" labels cover
+      // rental buildings too — those units have no separate county parcels,
+      // so the safe default is customer-supplied dimensions, with a hedge
+      // for Multifamily-labeled condo communities.
+      const recordText = commercialSignalText(commercialSignalRecord(rc), {});
+      const unitsParcelled = /condo|condominium|townhome|townhouse/.test(recordText)
+        || Boolean(rc._parcel?.aggregated);
+      const unitDimensionStep = unitsParcelled
+        ? 'collect the unit number and re-run the lookup with it (condo/townhome unit parcels carry the unit\'s own dimensions), or replace home/lot sq ft and stories with the unit\'s actual figures'
+        : 'collect the unit number and get the unit\'s own sq ft and stories from the customer — rental complexes have no per-unit county parcels; if this is actually an individually parcelled condo/townhome community, running the lookup again with the unit number will pull the unit\'s own record';
+      // Dimension provenance is per FIELD: a tech-verified or builder value
+      // may have overridden the county's — only county-sourced dimensions
+      // are the master parcel's, so only claim (and warn about) those
+      // (codex P1). Absent per-field evidence on a county-backed record,
+      // the value is the county's.
+      const countyDim = (field) => {
+        // PRESENCE first, provenance second (codex P2): a value the roll
+        // never supplied cannot be "prefilled" or "the whole building's",
+        // and absent field evidence made the provenance test pass it
+        // anyway. This bit systematically — the Sarasota GIS parser always
+        // sets `stories` to null (county-parcel-gis.js), so every Sarasota
+        // master parcel warned the operator about a prefilled story count
+        // that was never there. 0 counts as absent, matching how the rest
+        // of this file reads these dimensions.
+        const value = rc[field];
+        if (value == null || value === '' || Number(value) === 0) return false;
+        const ev = rc._fieldEvidence?.[field];
+        if (!ev) return true;
+        return COUNTY_ROLL_SOURCES.has(String(ev.sourceType || '').toLowerCase());
+      };
+      const countyDimLabels = [
+        countyDim('squareFootage') ? 'sq ft' : null,
+        countyDim('lotSize') ? 'lot' : null,
+        countyDim('stories') ? 'stories' : null,
+      ].filter(Boolean);
+      const dimensionWarning = countyDimLabels.length
+        ? `, and the prefilled ${countyDimLabels.join(', ')} ${countyDimLabels.length > 1 ? 'are' : 'is'} the WHOLE BUILDING'S, not one home's. Do NOT save ${countyDimLabels.length > 1 ? 'these' : 'it'} as field-verified — that would permanently pin the building's dimensions to this address.`
+        : '.';
+      flags.push({
+        field: 'commercialSubtype',
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way${dimensionWarning} If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
+        priority: 'HIGH',
+      });
+    }
+  }
+
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
