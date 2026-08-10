@@ -860,8 +860,10 @@ function callCarriesDurableLeadEvidence(aiExtractionRaw) {
 //     definition in utils/call-lead-customer-gate, same no-drift rule as
 //     the content veto). The CURRENT stage is judged — the at-call stage
 //     is not recorded — so a since-won customer's genuine successor is
-//     conservatively refused (FAIL CLOSED: the retire falls back to
-//     delete, never to a wrong inheritance).
+//     refused here. ⚠️ That refusal is only tolerable because the retire
+//     NO LONGER DELETES history-bearing rows (codex P0 r24): it demotes
+//     them to legacy instead. The r20 note that called delete "fail
+//     closed" had the irreversible direction backwards.
 async function phoneSuccessorActuallyLinked(dbc, cand) {
   let extracted = cand.ai_extraction;
   if (typeof extracted === 'string') {
@@ -1119,6 +1121,32 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
     if (moved) return moved;
     // 0-row update: the row moved/vanished under us — fall through to the
     // (equally conditioned) delete, which will no-op the same way.
+  }
+  // NEVER delete accumulated history (codex P0 r24). The successor scan's
+  // gates read MUTABLE state — the phone arm re-judges the customer's
+  // CURRENT pipeline_stage — so a call legitimately linked while that
+  // customer was mid-pipeline is refused once they become won/active, and
+  // the scan then reports "no successor" for a lead that genuinely has
+  // one. The r20 reasoning had the fail-closed direction BACKWARDS:
+  // deleting is the irreversible outcome, not the safe one.
+  // A row carrying booked/completed stage or any revenue is DEMOTED to
+  // legacy (source_call_id NULL) instead of deleted: the lead keeps its
+  // funnel history, the partial-UNIQUE provenance slot frees for a future
+  // write, and legacy rows are already this codebase's permanently
+  // conservative shape (provenance recovery and the transfer sweep both
+  // refuse to guess at them). Only a bare, history-free row is deleted —
+  // the definitive unlink the retire was originally written for.
+  const existing = await dbc('ad_service_attribution')
+    .where({ lead_id: leadId, source_call_id: callLogId })
+    .first('id', 'funnel_stage', 'booked_amount', 'completed_revenue');
+  if (!existing) return 0;
+  const carriesHistory = ['booked', 'completed'].includes(String(existing.funnel_stage || ''))
+    || parseFloat(existing.booked_amount || 0) > 0
+    || parseFloat(existing.completed_revenue || 0) > 0;
+  if (carriesHistory) {
+    return dbc('ad_service_attribution')
+      .where({ id: existing.id, lead_id: leadId, source_call_id: callLogId })
+      .update({ source_call_id: null, updated_at: new Date() });
   }
   return dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })

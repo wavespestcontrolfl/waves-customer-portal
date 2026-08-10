@@ -652,6 +652,18 @@ describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock
 });
 
 describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + pre-push P0 r19)', () => {
+  // The retire reads the row before deciding delete-vs-demote (codex P0
+  // r24); a bare history-free row is the delete case these tests model.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-x', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  // The retire reads the row before deciding delete-vs-demote (codex P0
+  // r24); a bare history-free row is the delete case these tests model.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-x', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
   test('retireCallAttributionRow moves the row to the newest settled successor — history intact, dimensions refreshed', async () => {
     // With multiple calls reusing one lead, the row owner's rejection
     // deleted the lead's booked/completed history even though a later
@@ -741,6 +753,16 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
     matched_service: 'pest control',
     email: 'psample00005@example.com',
     ...extra,
+  });
+
+  // Same as above: these assert the DELETE branch, so the row must exist.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-y', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  // Same as above: these assert the DELETE branch, so the row must exist.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-y', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
   });
 
   test("a settled billing call from the lead's number can NOT inherit — the row deletes", async () => {
@@ -1088,5 +1110,54 @@ describe('orphaned provenance (NULL lead_id) in reconcileMovedCallAttributionRow
     // Both terminal arms (target-slot conflict, and no target at all).
     const deletes = fn.match(/whereNull\('lead_id'\)\.del\(\)/g) || [];
     expect(deletes).toHaveLength(2);
+  });
+});
+
+// codex P0 r24 — the successor gates read MUTABLE state (the phone arm
+// re-judges the customer's CURRENT pipeline_stage), so "no successor" is
+// not proof the lead has none. Deleting is the irreversible direction.
+describe('retire NEVER deletes accumulated funnel history', () => {
+  const PHONE_LEAD = { id: 'lead-1', phone: '+19415550001', customer_id: null };
+
+  beforeEach(() => {
+    firstQueueByTable.call_log = [undefined]; // stamp arm misses
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[]]; // no successor survives the gates
+  });
+
+  test('a booked/completed row is DEMOTED to legacy (source_call_id NULL), not deleted', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-1', funnel_stage: 'completed', booked_amount: '450.00', completed_revenue: '450.00',
+    };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+    const demote = updateCalls.find((u) => u.table === 'ad_service_attribution');
+    expect(demote.row).toMatchObject({ source_call_id: null });
+  });
+
+  test('revenue alone (still stage lead) is enough to preserve the row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-2', funnel_stage: 'lead', booked_amount: '0', completed_revenue: '125.50',
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution').row)
+      .toMatchObject({ source_call_id: null });
+  });
+
+  test('a bare history-free row still DELETES — the definitive unlink', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-3', funnel_stage: 'lead', booked_amount: null, completed_revenue: null,
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
   });
 });

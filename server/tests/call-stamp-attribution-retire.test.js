@@ -75,7 +75,9 @@ beforeEach(() => {
   mockTokenMatches = true;
   mockSuccessorRow = undefined;
   mockAttributionRows = [{ lead_id: 'lead-9' }]; // one funnel row for the call
-  mockAttrFirstQueue = [];
+  // The retire reads that row before choosing delete-vs-demote (codex P0
+  // r24): bare + history-free is the delete case these tests model.
+  mockAttrFirstQueue = [{ id: 'asa-9', funnel_stage: 'lead', booked_amount: null, completed_revenue: null }];
   mockTargetLeadRow = { id: 'lead-new' }; // target lead live by default
   mockDeletes.length = 0;
   mockUpdates.length = 0;
