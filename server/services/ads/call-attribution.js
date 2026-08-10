@@ -584,15 +584,20 @@ async function attributeUnclaimedBridgeLeads({
   // its own association in metadata.google_ads_call_bridge.leadMatch.
   // Every guard below composes this instead of repeating two arms, so a
   // new consumer cannot reintroduce the gap. Lead alias is 'l'; the caller
-  // passes its call alias. The phone arm is deliberately broad — in these
-  // guards a false positive only makes the lead WAIT for another sweep,
-  // while a false negative writes an irreversible organic label.
+  // passes its call alias.
+  // PERSISTED links ONLY (codex P1 r25). A bare last-10 phone arm was
+  // tried and removed: it treats every historical call on the number as
+  // linked, so a permanently-bridged or permanently-rejected old call
+  // suppresses a LATER distinct lead reusing that number forever. The
+  // "a false positive only delays" reasoning was wrong — those blockers
+  // never change state, so the suppression is permanent, not transient.
+  // A phone-reused lead with no sid, stamp, or bridge leadMatch is left to
+  // the processor's own linkage record rather than guessed at here.
   const linkedCallToLead = (qb, a) => {
     qb.where(function anyDurableLinkage() {
       this.orWhereRaw(`${a}.twilio_call_sid = l.twilio_call_sid`)
         .orWhereRaw(`${a}.metadata->>'lead_id' = l.id::text`)
-        .orWhereRaw(`${a}.metadata->'google_ads_call_bridge'->'leadMatch'->>'leadId' = l.id::text`)
-        .orWhereRaw(`LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10 AND RIGHT(regexp_replace(COALESCE(${a}.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)`);
+        .orWhereRaw(`${a}.metadata->'google_ads_call_bridge'->'leadMatch'->>'leadId' = l.id::text`);
     });
   };
 
@@ -1176,15 +1181,42 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
   // back the whole rejection finalization — and with no lead there is no
   // successor to inherit anything.
   if (rows.some((r) => r.lead_id == null)) {
-    affected += await dbc('ad_service_attribution')
+    // Per row, history-preserving (codex P0 r25): a blanket delete took
+    // booked/completed revenue with it whenever the lead had been hard
+    // deleted. Same demote-vs-delete rule as the lead-scoped path.
+    const orphanRows = await dbc('ad_service_attribution')
       .where({ source_call_id: callLogId })
       .whereNull('lead_id')
-      .del();
+      .select('id');
+    for (const orphan of (orphanRows || [])) {
+      affected += await retireRowPreservingHistory(dbc, orphan.id);
+    }
   }
   for (const leadId of new Set(rows.filter((r) => r.lead_id != null).map((r) => String(r.lead_id)))) {
     affected += await retireCallAttributionRow(dbc, callLogId, leadId);
   }
   return affected;
+}
+
+// Retire ONE row by id without ever destroying accumulated history
+// (codex P0 r25). The non-orphan retire already demotes history-bearing
+// rows to legacy instead of deleting; the ORPHAN paths (lead hard-deleted
+// ⇒ lead_id NULL) were still deleting unconditionally, so a row holding
+// booked/completed revenue vanished with the lead. Same rule everywhere:
+// clear the provenance slot, keep the money.
+async function retireRowPreservingHistory(dbc, rowId) {
+  const row = await dbc('ad_service_attribution')
+    .where({ id: rowId })
+    .first('id', 'funnel_stage', 'booked_amount', 'completed_revenue', 'source_call_id');
+  if (!row) return 0;
+  const carriesHistory = ['booked', 'completed'].includes(String(row.funnel_stage || ''))
+    || parseFloat(row.booked_amount || 0) > 0
+    || parseFloat(row.completed_revenue || 0) > 0;
+  if (!carriesHistory) return dbc('ad_service_attribution').where({ id: row.id }).del();
+  if (row.source_call_id == null) return 0; // already legacy — nothing to free
+  return dbc('ad_service_attribution')
+    .where({ id: row.id })
+    .update({ source_call_id: null, updated_at: new Date() });
 }
 
 // Move the funnel row a specific call created when its linkage moves to a
@@ -1274,7 +1306,7 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
       // already owns its row, so this orphan is unreachable history that
       // only blocks the provenance slot. Delete it directly, exactly as
       // retireAllCallAttributionRows does for NULL-lead rows.
-      await dbc('ad_service_attribution').where({ id: oldRow.id }).whereNull('lead_id').del();
+      await retireRowPreservingHistory(dbc, oldRow.id);
       return 'retired_conflict';
     }
     await retireCallAttributionRow(dbc, callLogId, fromLeadId);
@@ -1285,7 +1317,7 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
     // a null lead, so returning 'retired_cleared' here would report a
     // definitive unlink while the orphan row still held the provenance
     // slot and blocked every later insert for this call.
-    await dbc('ad_service_attribution').where({ id: oldRow.id }).whereNull('lead_id').del();
+    await retireRowPreservingHistory(dbc, oldRow.id);
     return 'retired_cleared';
   }
   await retireCallAttributionRow(dbc, callLogId, fromLeadId);

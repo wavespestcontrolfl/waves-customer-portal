@@ -322,7 +322,7 @@ describe('scheduler wiring', () => {
     expect(ca).toMatch(/whereNotNull\('clb\.google_ads_call_resource_name'\)/);
   });
 
-  test('BOTH sweep guards compose the one shared linkage predicate — all four durable modes (codex P1 r24)', () => {
+  test('BOTH sweep guards compose the one shared linkage predicate — PERSISTED modes only (codex P1 r24/r25)', () => {
     // Four consecutive rounds found the same root gap on successive
     // surfaces: sid + metadata stamp are only two of the modes. A
     // phone-reused lead has neither, and the bridge keeps its own
@@ -332,7 +332,10 @@ describe('scheduler wiring', () => {
     expect(helper).toMatch(/twilio_call_sid = l\.twilio_call_sid/);
     expect(helper).toMatch(/metadata->>'lead_id' = l\.id::text/);
     expect(helper).toMatch(/google_ads_call_bridge'->'leadMatch'->>'leadId' = l\.id::text/);
-    expect(helper).toMatch(/from_phone/);
+    // NO bare phone arm (codex P1 r25): a permanently-bridged or
+    // permanently-rejected old call on a reused number would suppress a
+    // later distinct lead's attribution forever, not merely delay it.
+    expect(helper).not.toMatch(/from_phone/);
     // Composed by both guards, and the old duplicated arms are gone.
     expect(ca).toMatch(/linkedCallToLead\(this, 'clb'\)/);
     expect(ca).toMatch(/linkedCallToLead\(this, 'clr'\)/);

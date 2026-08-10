@@ -1106,10 +1106,14 @@ describe('orphaned provenance (NULL lead_id) in reconcileMovedCallAttributionRow
     expect(moveStmt).toMatch(/\.modify\(applySourceIdentity\)/);
   });
 
-  test('an orphan that cannot transfer is DELETED, never reported cleared while it still holds the slot', () => {
-    // Both terminal arms (target-slot conflict, and no target at all).
-    const deletes = fn.match(/whereNull\('lead_id'\)\.del\(\)/g) || [];
-    expect(deletes).toHaveLength(2);
+  test('an orphan that cannot transfer is RETIRED history-preservingly, never left holding the slot (codex P0 r25)', () => {
+    // Both terminal arms (target-slot conflict, and no target at all) go
+    // through the shared primitive, which demotes a history-bearing row to
+    // legacy and deletes only a bare one — the blanket delete took
+    // booked/completed revenue with it when the lead was hard-deleted.
+    const retires = fn.match(/retireRowPreservingHistory\(dbc, oldRow\.id\)/g) || [];
+    expect(retires).toHaveLength(2);
+    expect(fn).not.toMatch(/whereNull\('lead_id'\)\.del\(\)/);
   });
 });
 
