@@ -1455,6 +1455,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     delete ai.imperviosSurfacePercent;
     delete ai.estimatedBedAreaSf;
     delete ai.estimatedBedAreaPercent;
+    delete ai._bedAreaConfidence;
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1744,6 +1745,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
+    // Field-level confidence behind the winning bed-area value (stamped by
+    // mergeAiAnalyses) — the trust predicate requires it; the blended
+    // aiConfidence can be held above the floor by providers that never
+    // reported a bed area.
+    bedAreaConfidence: ai?._bedAreaConfidence,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
@@ -3959,6 +3965,19 @@ function mergeAiAnalyses(providerResults) {
       (mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0
     );
     merged._structureAttachmentSupport = supporters.length;
+  }
+
+  // Confidence behind the FINAL bed-area value — same rationale as
+  // structureAttachment above. estimatedBedAreaSf is not divergence-tracked
+  // and the gap-fill loop can adopt it from a lone low-confidence provider
+  // while the other providers' high scores hold the blended average above
+  // the pricing floor. The T&S bed-area trust predicate keys off this stamp
+  // so a gap-filled read can't average its way into a customer price.
+  const mergedBedArea = Number(merged.estimatedBedAreaSf);
+  if (Number.isFinite(mergedBedArea) && mergedBedArea > 0) {
+    merged._bedAreaConfidence = sorted
+      .filter((r) => Number(r.analysis?.estimatedBedAreaSf) === mergedBedArea)
+      .reduce((mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0);
   }
 
   return merged;

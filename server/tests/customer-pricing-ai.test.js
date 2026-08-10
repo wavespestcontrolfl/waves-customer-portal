@@ -772,7 +772,7 @@ describe('property context reads only columns the customers table actually has',
     const fromLookup = await resolve({
       customer: customerWithBasics,
       turfProfile: null,
-      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, aiConfidence: 88 } }),
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88 } }),
     });
     expect(fromLookup.propertyInput.bedArea).toBe(2600);
     // Provenance drives money: the T&S density factor applies to measured
@@ -782,7 +782,7 @@ describe('property context reads only columns the customers table actually has',
     const fromProfile = await resolve({
       customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 4 },
       turfProfile: null,
-      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, aiConfidence: 88 } }),
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88 } }),
     });
     expect(fromProfile.propertyInput.bedArea).toBe(1800);
     expect(fromProfile.propertyInput.bedAreaSource).toBe('explicit');
@@ -830,7 +830,11 @@ describe('lookup confidence gates every vision-derived price modifier', () => {
 
   test('a confident read feeds pool/cage/density/trees and the bed area', async () => {
     const ctx = await _private.resolvePropertyContext({
-      customer, turfProfile: null, propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 88 }) }),
+      customer,
+      turfProfile: null,
+      // bedAreaConfidence: the field-level stamp is required for the bed
+      // area specifically — the blended average alone no longer prices it.
+      propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 88, bedAreaConfidence: 88 }) }),
     });
     expect(ctx.propertyInput.features.pool).toBe(true);
     expect(ctx.propertyInput.features.poolCage).toBe(true);

@@ -70,6 +70,17 @@ function hasVerifyFlagMatching(enriched, matcher) {
 function lookupBedAreaIsTrustworthy(enriched) {
   const area = Number(enriched?.estimatedBedAreaSf);
   if (!Number.isFinite(area) || area <= 0) return false;
+  // FIELD-level confidence, not the blended average: the merge gap-fills
+  // estimatedBedAreaSf from a lone low-confidence provider while other
+  // providers' high scores hold the average above the floor, and bed area
+  // is not divergence-tracked so no flag fires. mergeAiAnalyses stamps the
+  // max confidence among the providers that reported the WINNING value
+  // (surfaced as bedAreaConfidence). A missing stamp — legacy cached
+  // payloads merged before the stamp existed — fails closed like a missing
+  // score: bed area is a NEW consumption, and the quote falls back to the
+  // lot inference, which carries its own review markers.
+  const fieldConfidence = Number(enriched?.bedAreaConfidence ?? enriched?._bedAreaConfidence);
+  if (!Number.isFinite(fieldConfidence) || fieldConfidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
   if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
   return !hasVerifyFlagMatching(enriched, (field) => (
     field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf')
