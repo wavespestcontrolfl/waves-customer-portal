@@ -1330,19 +1330,24 @@ const StripeService = {
       if (Number(preConfirm.amount) !== totalCents) {
         throw new Error('Deposit amount changed during payment — please try again.');
       }
-      // The estimate's verdict re-checked AFTER the last Stripe round-trip,
-      // immediately before confirm (pre-push P0, PR #3304 — checking it
-      // before the retrieve reopened the quarantine-to-charge race for the
-      // duration of that network call): estimate-side archive/full/pending
-      // gates plus the call-side fallback verdict. A missing/unparseable
-      // row fails closed — money never moves on an estimate whose
-      // provenance can't be re-verified. The plain throw routes to the
-      // generic 400 and the failure-path reset below restores the intent
-      // to face.
-      {
+      // The estimate's verdict re-checked AFTER the last Stripe round-trip
+      // and SERIALIZED through the confirm (pre-push P0s, PR #3304 — an
+      // unlocked read released before confirm let a correction commit in
+      // the gap and money moved on a just-invalidated estimate): the
+      // estimate row and, for engine drafts, the call row are locked FOR
+      // UPDATE (repo order: estimates → call_log — no leads lock is taken
+      // here, so no cycle with the processor's leads → call_log writers)
+      // and HELD through the Stripe confirm. Corrections queue behind one
+      // bounded provider round-trip instead of landing mid-charge. A
+      // missing/unparseable row fails closed — money never moves on an
+      // estimate whose provenance can't be re-verified. The plain throw
+      // routes to the generic 400 and the failure-path reset below
+      // restores the intent to face.
+      const confirmed = await db.transaction(async (trx) => {
         const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
         const unavailable = new Error('This estimate is temporarily unavailable — please contact our office.');
-        const freshRow = await db('estimates').where({ id: estimateId }).first('estimate_data', 'archived_at');
+        const freshRow = await trx('estimates').where({ id: estimateId })
+          .forUpdate().first('estimate_data', 'archived_at');
         const freshData = (() => {
           if (!freshRow) return null;
           try {
@@ -1353,17 +1358,19 @@ const StripeService = {
         })();
         if (!freshData) throw unavailable;
         const eng = freshData.estimatorEngine;
-        if (eng?.callLogId
-          && (freshRow.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
-          throw unavailable;
+        if (eng?.callLogId) {
+          if (freshRow.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) {
+            throw unavailable;
+          }
+          await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
         }
-        if (await callSideBlockForEstimateData(db, freshData)) throw unavailable;
-      }
-      const confirmed = await stripe.paymentIntents.confirm(
-        quote.paymentIntentId,
-        {},
-        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-      );
+        if (await callSideBlockForEstimateData(trx, freshData)) throw unavailable;
+        return stripe.paymentIntents.confirm(
+          quote.paymentIntentId,
+          {},
+          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+        );
+      });
       logger.info(`[stripe] Finalized estimate deposit ${estimateId}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
       return {
         paymentIntentId: confirmed.id,

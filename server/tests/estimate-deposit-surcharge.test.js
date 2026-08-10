@@ -68,8 +68,12 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
         where: jest.fn().mockReturnThis(),
         whereNull: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn().mockReturnThis(),
         first: jest.fn(async () => mockDbRows[table] ?? null),
       }));
+      // The verdict check + confirm are serialized in one transaction
+      // holding the estimate/call row locks (PR #3304).
+      db.transaction = jest.fn(async (fn) => fn(db));
       return db;
     });
   });

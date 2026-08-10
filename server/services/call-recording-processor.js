@@ -9309,13 +9309,25 @@ const CallRecordingProcessor = {
               // into the retry lane so the whole pass runs again; the
               // estimator re-quarantines from a clean slate.
               try {
-                await db('call_log').where({ id: call.id })
-                  .whereNull('processing_token')
-                  .update({
-                    processing_status: 'extraction_failed',
-                    updated_at: new Date(),
-                  });
-                logger.error(`[call-proc] quarantine queue write failed for ${callSid} — call pushed to the retry lane`);
+                let lastResortQ = db('call_log').where({ id: call.id })
+                  .whereNull('processing_token');
+                // Generation-fenced (pre-push P1, PR #3304): this detached
+                // handler can fire after a NEWER pass claimed and finalized
+                // — overwriting its settled status with extraction_failed
+                // would recreate the exact NULL-token ambiguity the
+                // generation counter closes. Same generation = still ours.
+                if (procGeneration != null) {
+                  lastResortQ = lastResortQ.where('processing_generation', procGeneration);
+                }
+                const pushed = await lastResortQ.update({
+                  processing_status: 'extraction_failed',
+                  updated_at: new Date(),
+                });
+                if (pushed) {
+                  logger.error(`[call-proc] quarantine queue write failed for ${callSid} — call pushed to the retry lane`);
+                } else {
+                  logger.info(`[call-proc] quarantine retry-lane write skipped for ${callSid} — a newer pass owns the call`);
+                }
               } catch (lastResortErr) {
                 logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${callSid}: ${lastResortErr.message}`);
               }

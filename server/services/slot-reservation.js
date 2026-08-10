@@ -402,6 +402,35 @@ async function reserveSlot({
         throw err;
       }
 
+      // Revalidated on the LOCKED row (pre-push P1, PR #3304): the route's
+      // archive/marker/call-side guards ran before this transaction opened,
+      // and an invalidation committing in between would still mint a
+      // scheduled-service hold for a quarantined estimate. Scoped to engine
+      // drafts; the same generic not-found the route's call-side guard
+      // returns, so quarantined tokens stay indistinguishable from missing
+      // ones.
+      {
+        const reservationData = (() => {
+          try {
+            const d = typeof estimate.estimate_data === 'string'
+              ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+            return d && typeof d === 'object' ? d : null;
+          } catch { return null; }
+        })();
+        const eng = reservationData?.estimatorEngine;
+        if (eng?.callLogId) {
+          const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+          const blocked = estimate.archived_at || eng.linkage_invalidated_at
+            || eng.invalidation_pending_at
+            || await callSideBlockForEstimateData(trx, reservationData);
+          if (blocked) {
+            const err = new Error('estimate is quarantined by a call-linkage correction');
+            err.code = 'ESTIMATE_NOT_FOUND';
+            throw err;
+          }
+        }
+      }
+
       const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
           serviceMode,
