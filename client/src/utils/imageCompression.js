@@ -90,10 +90,66 @@ function indexOfAscii(bytes, marker, end = bytes.length) {
   return -1;
 }
 
+function fourCC(bytes, off) {
+  return String.fromCharCode(
+    bytes[off],
+    bytes[off + 1],
+    bytes[off + 2],
+    bytes[off + 3],
+  );
+}
+
+// Tri-state on purpose: "unknown" (we ran out of prefix before reaching a
+// decisive chunk) must not be reported as "still", or we'd flatten an
+// animation we simply failed to read far enough to see.
+const ANIMATED = "animated";
+const STILL = "still";
+const UNKNOWN = "unknown";
+
+/**
+ * Walk the RIFF chunk table rather than scanning for a marker: in an extended
+ * WebP an ICCP/EXIF chunk legally precedes ANIM and can push it arbitrarily
+ * far into the file, so any fixed byte window is guessable-wrong.
+ */
+function webpAnimationState(bytes) {
+  if (bytes.length < 12) return UNKNOWN;
+  if (fourCC(bytes, 0) !== "RIFF" || fourCC(bytes, 8) !== "WEBP") return STILL;
+  let off = 12;
+  while (off + 8 <= bytes.length) {
+    const cc = fourCC(bytes, off);
+    if (cc === "ANIM" || cc === "ANMF") return ANIMATED;
+    // Image data reached with no animation chunk — decisively a still.
+    if (cc === "VP8 " || cc === "VP8L") return STILL;
+    const size =
+      (bytes[off + 4] |
+        (bytes[off + 5] << 8) |
+        (bytes[off + 6] << 16) |
+        (bytes[off + 7] << 24)) >>>
+      0;
+    // Chunk payloads are padded to an even length.
+    off += 8 + size + (size % 2);
+  }
+  return UNKNOWN;
+}
+
+/**
+ * APNG declares acTL before the first IDAT. Ancillary chunks (iCCP, eXIf) may
+ * precede acTL, so the same "ran out of prefix" caveat applies here.
+ */
+function pngAnimationState(bytes) {
+  const idat = indexOfAscii(bytes, "IDAT");
+  // Bound the acTL search by IDAT — past that we'd be scanning compressed
+  // pixel data where "acTL" can occur by coincidence.
+  const acTL = indexOfAscii(bytes, "acTL", idat === -1 ? bytes.length : idat);
+  if (acTL !== -1) return ANIMATED;
+  return idat === -1 ? UNKNOWN : STILL;
+}
+
 /**
  * True when re-encoding would silently drop animation frames.
- * Fails SAFE: an unreadable header is treated as animated so we pass the file
- * through untouched rather than flattening something we couldn't inspect.
+ * Fails SAFE: an unreadable or inconclusive header is treated as animated, so
+ * we pass the file through untouched rather than flattening something we
+ * couldn't fully inspect.
  */
 export async function isAnimatedImage(file) {
   const type = mimeOf(file);
@@ -104,16 +160,11 @@ export async function isAnimatedImage(file) {
     const bytes = new Uint8Array(
       await file.slice(0, SNIFF_BYTES).arrayBuffer(),
     );
-    if (type === "image/png") {
-      // Only look ahead of the first IDAT — past that we'd be scanning
-      // compressed pixel data where "acTL" can occur by coincidence.
-      const idat = indexOfAscii(bytes, "IDAT");
-      return (
-        indexOfAscii(bytes, "acTL", idat === -1 ? bytes.length : idat) !== -1
-      );
-    }
-    // Animated WebP declares VP8X + ANIM within the first header chunks.
-    return indexOfAscii(bytes, "ANIM", 512) !== -1;
+    const state =
+      type === "image/png"
+        ? pngAnimationState(bytes)
+        : webpAnimationState(bytes);
+    return state !== STILL;
   } catch {
     return true;
   }

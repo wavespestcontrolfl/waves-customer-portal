@@ -20,6 +20,44 @@ function fileWithHeader(name, type, headerAscii, size = 1024) {
   };
 }
 
+function fileWithBytes(name, type, bytes, size = 1024) {
+  return {
+    name,
+    type,
+    size,
+    slice: (start = 0, end = bytes.length) => ({
+      arrayBuffer: async () => bytes.slice(start, end).buffer,
+    }),
+  };
+}
+
+// Real RIFF container bytes: "RIFF" + size + "WEBP", then FourCC/size/payload
+// chunks with the spec's even-length padding.
+function webpBytes(chunks) {
+  const body = [];
+  for (const { cc, payloadLength = 0 } of chunks) {
+    for (let i = 0; i < 4; i++) body.push(cc.charCodeAt(i));
+    body.push(
+      payloadLength & 0xff,
+      (payloadLength >> 8) & 0xff,
+      (payloadLength >> 16) & 0xff,
+      (payloadLength >> 24) & 0xff,
+    );
+    for (let i = 0; i < payloadLength + (payloadLength % 2); i++) body.push(0);
+  }
+  const header = [];
+  for (const ch of "RIFF") header.push(ch.charCodeAt(0));
+  const riffSize = body.length + 4;
+  header.push(
+    riffSize & 0xff,
+    (riffSize >> 8) & 0xff,
+    (riffSize >> 16) & 0xff,
+    (riffSize >> 24) & 0xff,
+  );
+  for (const ch of "WEBP") header.push(ch.charCodeAt(0));
+  return new Uint8Array([...header, ...body]);
+}
+
 const MB = 1024 * 1024;
 
 // A stand-in for a picked File. jsdom has no canvas, so every test injects a
@@ -107,17 +145,62 @@ describe("isAnimatedImage", () => {
   });
 
   it("detects animated WebP via the ANIM chunk", async () => {
-    const webp = fileWithHeader(
-      "a.webp",
-      "image/webp",
-      "RIFF....WEBPVP8X....ANIM",
-    );
-    await expect(isAnimatedImage(webp)).resolves.toBe(true);
+    const bytes = webpBytes([
+      { cc: "VP8X", payloadLength: 10 },
+      { cc: "ANIM", payloadLength: 6 },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
+    ).resolves.toBe(true);
+  });
+
+  it("finds ANIM behind a large ICCP chunk, past any fixed byte window", async () => {
+    // The ordering Codex flagged: a colour profile legally precedes ANIM and
+    // pushes it well past a naive 512-byte scan.
+    const bytes = webpBytes([
+      { cc: "VP8X", payloadLength: 10 },
+      { cc: "ICCP", payloadLength: 4096 },
+      { cc: "ANIM", payloadLength: 6 },
+    ]);
+    expect(bytes.length).toBeGreaterThan(512);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
+    ).resolves.toBe(true);
   });
 
   it("does not treat a still WebP as animated", async () => {
-    const webp = fileWithHeader("a.webp", "image/webp", "RIFF....WEBPVP8 ....");
-    await expect(isAnimatedImage(webp)).resolves.toBe(false);
+    const bytes = webpBytes([{ cc: "VP8 ", payloadLength: 32 }]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
+    ).resolves.toBe(false);
+  });
+
+  it("treats a still lossless WebP behind a colour profile as still", async () => {
+    const bytes = webpBytes([
+      { cc: "VP8X", payloadLength: 10 },
+      { cc: "ICCP", payloadLength: 2048 },
+      { cc: "VP8L", payloadLength: 32 },
+    ]);
+    await expect(
+      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
+    ).resolves.toBe(false);
+  });
+
+  it("fails safe when the prefix ends before any decisive WebP chunk", async () => {
+    // ICCP larger than the sniff window: we never reach ANIM or VP8, so we
+    // must NOT claim "still" and flatten a possible animation.
+    const bytes = webpBytes([
+      { cc: "VP8X", payloadLength: 10 },
+      { cc: "ICCP", payloadLength: 4096 },
+    ]).slice(0, 40); // truncated mid-ICCP, mimicking a bounded read
+    await expect(
+      isAnimatedImage(fileWithBytes("a.webp", "image/webp", bytes)),
+    ).resolves.toBe(true);
+  });
+
+  it("fails safe when a PNG prefix ends before IDAT", async () => {
+    const png = fileWithHeader("a.png", "image/png", "\x89PNG\r\n\x1a\nIHDR");
+    await expect(isAnimatedImage(png)).resolves.toBe(true);
   });
 
   it("fails safe — an unreadable header counts as animated", async () => {
