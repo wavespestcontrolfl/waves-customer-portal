@@ -3014,6 +3014,16 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       // (codex P1). Absent per-field evidence on a county-backed record,
       // the value is the county's.
       const countyDim = (field) => {
+        // PRESENCE first, provenance second (codex P2): a value the roll
+        // never supplied cannot be "prefilled" or "the whole building's",
+        // and absent field evidence made the provenance test pass it
+        // anyway. This bit systematically — the Sarasota GIS parser always
+        // sets `stories` to null (county-parcel-gis.js), so every Sarasota
+        // master parcel warned the operator about a prefilled story count
+        // that was never there. 0 counts as absent, matching how the rest
+        // of this file reads these dimensions.
+        const value = rc[field];
+        if (value == null || value === '' || Number(value) === 0) return false;
         const ev = rc._fieldEvidence?.[field];
         if (!ev) return true;
         return COUNTY_ROLL_SOURCES.has(String(ev.sourceType || '').toLowerCase());

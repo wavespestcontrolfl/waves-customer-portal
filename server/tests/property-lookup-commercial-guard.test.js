@@ -569,6 +569,41 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flag.reason).toMatch(/48-unit/);
   });
 
+  test('a MISSING dimension is not claimed as prefilled — Sarasota null stories (codex P2)', () => {
+    // county-parcel-gis's Sarasota parser always sets stories null, so every
+    // Sarasota master parcel warned about a story count that was never there.
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ stories: null }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    // Scoped to the DIMENSION-WARNING clause — "stories" still belongs in
+    // the exit step ("get the unit's own sq ft and stories from the
+    // customer"), which is about what to collect, not what was prefilled.
+    expect(flag.reason).toMatch(/the prefilled sq ft, lot are the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/prefilled[^.]*stories/);
+  });
+
+  test('a ZERO dimension counts as absent too', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ lotSize: 0, stories: 0 }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/the prefilled sq ft is the WHOLE BUILDING'S/);
+    expect(flag.reason).not.toMatch(/\blot\b/);
+  });
+
+  test('no county dimensions present at all → no building-wide claim, exit steps remain', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ squareFootage: 0, lotSize: 0, stories: null }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).not.toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/association, complex owner, or property manager/);
+  });
+
   test('NON-STACKED county master polygon (unitCount 1, _parcel.residentialUnits 48, no aggregated) → flag fires (codex P1)', () => {
     // The commonest master shape: county GIS returns ONE multifamily master
     // parcel rather than stacked unit parcels, so attachParcelMeta records the
