@@ -365,6 +365,23 @@ finding and warns on P1. Reviewers must return JSON matching
     address); never `validated_accept`/`corrected` unless
     `inServiceArea === true`; AV unreachable → hold for review, never
     silent auto-route.
+  - A `PREMISE`-granularity verdict whose only missing component is
+    `subpremise` is a resolved building without its unit, NOT a garbled
+    street — never feed it to street recovery (`avMissingUnitOnly`
+    guard). There is no mis-hearing to find, so a "successful" recovery
+    can only confirm a DIFFERENT real address and turn the caller's
+    ambiguous hold into an accepted wrong-parcel booking. It holds for
+    review with `missing_unit_number` naming the ask.
+  - An owed address ask only clears on evidence that answers THAT ask:
+    a unit ask needs an affirmative `SUB_PREMISE` acceptance (a
+    `PREMISE` accept proves the building only), for the same building
+    (street AND place — ZIP, else city), from a trusted address
+    (enforce mode or a shadow-bridge adoption), with unambiguous
+    attribution (multi-property or unidentifiable sibling cards block
+    it) and no later-raised ask erased by an older call's reprocess.
+    The `triage_items` cards are the per-building ledger; a lead's
+    rolled-up `needs_confirmation` string is not, so clear it only from
+    a LIVE ledger read taken under the lead lock — never a snapshot.
   - Auto-routing stays confidence-gated (auto-create only when confidence
     ≥ threshold AND the address validates AND the service maps AND no
     HOA/commercial flag — else triage), appointment inserts keep their
