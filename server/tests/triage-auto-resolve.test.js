@@ -319,61 +319,76 @@ describe('rule notes', () => {
 // Event-driven unit-number resolution: the same-building corroboration
 // predicate (fail closed). Fixtures synthetic.
 describe('unitCardAnsweredByAcceptedStreet', () => {
-  const v2 = (street) => JSON.stringify({ property: { service_address: { street_line_1: street } } });
-  const v1 = (street) => JSON.stringify({ address_line1: street });
+  const v2 = (street, city = 'Bradenton', zip = '34212') => JSON.stringify({
+    property: { service_address: { street_line_1: street, city, postal_code: zip } },
+  });
+  const v1 = (street, city = 'Bradenton', zip = '34212') => JSON.stringify({ address_line1: street, city, zip });
+  const accepted = (street, city = 'Bradenton', zip = '34212') => ({ street_line_1: street, city, postal_code: zip });
 
   test('V2-heard building street matches the accepted street (suffix-insensitive)', () => {
     const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
-    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Court')).toBe(true);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Court'))).toBe(true);
   });
 
   test('accepted street carrying the unit still matches the unitless building street', () => {
     const row = { call_extraction: null, call_extraction_v1: v1('100 Example Condo Ct') };
-    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct Apt 104')).toBe(true);
-    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct, Unit 104')).toBe(true);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct Apt 104'))).toBe(true);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct, Unit 104'))).toBe(true);
   });
 
   test('a DIFFERENT street never answers the card (multi-property customer)', () => {
     const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
-    expect(unitCardAnsweredByAcceptedStreet(row, '4200 Other Sample Blvd')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet(row, '102 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('4200 Other Sample Blvd'))).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('102 Example Condo Ct'))).toBe(false);
+  });
+
+  test('same street name in a DIFFERENT city/ZIP is a different building (place corroboration)', () => {
+    const row = { call_extraction: v2('100 Example Condo Ct', 'Bradenton', '34212'), call_extraction_v1: null };
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct', 'Sarasota', '34236'))).toBe(false);
+    // ZIP is the strong discriminator when both sides carry one.
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct', 'Bradenton', '34210'))).toBe(false);
+    // Aliased postal city with matching ZIP still matches.
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct', 'Lakewood Ranch', '34212'))).toBe(true);
+    // No corroborating place pair on either side → fail closed.
+    const bare = { call_extraction: JSON.stringify({ property: { service_address: { street_line_1: '100 Example Condo Ct' } } }), call_extraction_v1: null };
+    expect(unitCardAnsweredByAcceptedStreet(bare, { street_line_1: '100 Example Condo Ct' })).toBe(false);
   });
 
   test('V2 street is authoritative: an acceptance matching only V1 while V2 names another building resolves nothing', () => {
     const row = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: v1('4200 Other Sample Blvd') };
     // V1/V2 disagree → ambiguous attribution, keep the card for BOTH streets.
-    expect(unitCardAnsweredByAcceptedStreet(row, '4200 Other Sample Blvd')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet(row, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('4200 Other Sample Blvd'))).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct'))).toBe(false);
     // Agreeing extractions resolve normally.
     const agree = { call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: v1('100 Example Condo Court') };
-    expect(unitCardAnsweredByAcceptedStreet(agree, '100 Example Condo Ct')).toBe(true);
+    expect(unitCardAnsweredByAcceptedStreet(agree, accepted('100 Example Condo Ct'))).toBe(true);
   });
 
   test('fail closed: missing or unparseable extractions keep the card', () => {
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: null, call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: v1('100 Example Condo Ct') }, '100 Example Condo Ct')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: '{not json' }, '100 Example Condo Ct')).toBe(false);
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, '')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: null, call_extraction_v1: null }, accepted('100 Example Condo Ct'))).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: v1('100 Example Condo Ct') }, accepted('100 Example Condo Ct'))).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: '{not json' }, accepted('100 Example Condo Ct'))).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, accepted(''))).toBe(false);
   });
 
   test('more than one same-building card → ambiguous attribution, NONE resolve (unit 202 must not close unit 101\'s ask)', () => {
     const cardA = { id: 'a', call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
     const cardB = { id: 'b', call_extraction: v2('100 Example Condo Court'), call_extraction_v1: null };
     const other = { id: 'c', call_extraction: v2('4200 Other Sample Blvd'), call_extraction_v1: null };
-    expect(selectUnitCardsToResolve([cardA, cardB, other], '100 Example Condo Ct')).toEqual([]);
+    expect(selectUnitCardsToResolve([cardA, cardB, other], accepted('100 Example Condo Ct'))).toEqual([]);
     // A single matching card resolves; non-matching cards never count against it.
-    expect(selectUnitCardsToResolve([cardA, other], '100 Example Condo Ct')).toEqual([cardA]);
-    expect(selectUnitCardsToResolve([], '100 Example Condo Ct')).toEqual([]);
+    expect(selectUnitCardsToResolve([cardA, other], accepted('100 Example Condo Ct'))).toEqual([cardA]);
+    expect(selectUnitCardsToResolve([], accepted('100 Example Condo Ct'))).toEqual([]);
   });
 
   test('multi-property call → ambiguous which unit was answered; card kept', () => {
     const multi = JSON.stringify({
       property: {
-        service_address: { street_line_1: '100 Example Condo Ct' },
+        service_address: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' },
         additional_properties: [{ raw_text: '100 Example Condo Ct, another unit' }],
       },
     });
-    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: multi, call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: multi, call_extraction_v1: null }, accepted('100 Example Condo Ct'))).toBe(false);
   });
 });
 

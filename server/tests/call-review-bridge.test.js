@@ -336,12 +336,14 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
   });
 
+  const CONDO_LEAD = { street: '100 Example Condo Ct', city: 'Bradenton', zip: '34212' };
+
   test('a SUB_PREMISE accept for the SAME building (exact door validated) clears the standing unit ask', () => {
     const accepted = {
       status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
-      normalized: { street_line_1: '100 Example Condo Court Unit 104' },
+      normalized: { street_line_1: '100 Example Condo Court Unit 104', city: 'Bradenton', postal_code: '34212' },
     };
-    const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted, '100 Example Condo Ct');
+    const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted, CONDO_LEAD);
     expect(merged).not.toContain('missing_unit_number');
     expect(merged).toContain('email_unverified');
   });
@@ -349,37 +351,47 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
   test('a SUB_PREMISE accept for a DIFFERENT property never clears this building\'s ask', () => {
     const otherProperty = {
       status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
-      normalized: { street_line_1: '4200 Other Sample Blvd Apt 3' },
+      normalized: { street_line_1: '4200 Other Sample Blvd Apt 3', city: 'Bradenton', postal_code: '34212' },
     };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], otherProperty, '100 Example Condo Ct'))
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], otherProperty, CONDO_LEAD))
+      .toContain('missing_unit_number');
+    // Same street name in a different city/ZIP is a different building too.
+    const otherCity = {
+      status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
+      normalized: { street_line_1: '100 Example Condo Ct Unit 104', city: 'Sarasota', postal_code: '34236' },
+    };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], otherCity, CONDO_LEAD))
       .toContain('missing_unit_number');
   });
 
-  test('fail closed: no prior lead street (or no accepted street) → nothing clears', () => {
+  test('fail closed: no prior lead address, no accepted street, or no place pair → nothing clears', () => {
     const accepted = {
       status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [],
-      normalized: { street_line_1: '100 Example Condo Ct Unit 104' },
+      normalized: { street_line_1: '100 Example Condo Ct Unit 104', city: 'Bradenton', postal_code: '34212' },
     };
     expect(mergeNeedsConfirmation(['missing_unit_number'], [], accepted, null)).toContain('missing_unit_number');
-    const noStreet = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [], normalized: {} };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], noStreet, '100 Example Condo Ct')).toContain('missing_unit_number');
+    const noStreet = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [], normalized: { city: 'Bradenton', postal_code: '34212' } };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], noStreet, CONDO_LEAD)).toContain('missing_unit_number');
+    // Street matches but neither a ZIP nor a city pair corroborates the place.
+    const noPlace = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [], normalized: { street_line_1: '100 Example Condo Ct Unit 104' } };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], noPlace, { street: '100 Example Condo Ct' })).toContain('missing_unit_number');
   });
 
   test('a PREMISE-level accept proves only the building and clears nothing', () => {
     const buildingOnly = {
       status: 'validated_accept', granularity: 'PREMISE', missingComponents: [],
-      normalized: { street_line_1: '100 Example Condo Ct' },
+      normalized: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' },
     };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], [], buildingOnly, '100 Example Condo Ct'))
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], buildingOnly, CONDO_LEAD))
       .toContain('missing_unit_number');
   });
 
   test('a recovery-produced accept still carrying missing-subpremise evidence clears nothing', () => {
     const carried = {
       status: 'validated_accept', granularity: 'PREMISE', missingComponents: ['subpremise'],
-      normalized: { street_line_1: '100 Example Condo Ct' },
+      normalized: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' },
     };
-    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'], carried, '100 Example Condo Ct'))
+    expect(mergeNeedsConfirmation(['missing_unit_number'], ['address_recovered'], carried, CONDO_LEAD))
       .toContain('missing_unit_number');
   });
 

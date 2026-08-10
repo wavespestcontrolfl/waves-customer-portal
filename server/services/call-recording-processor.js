@@ -2496,7 +2496,12 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, addressValidation, lockedLead.address);
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(
+        lockedPriorNeedsConfirmation,
+        bridgeNeedsConfirmation,
+        addressValidation,
+        { street: lockedLead.address, city: lockedLead.city, zip: lockedLead.zip },
+      );
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -6249,6 +6254,14 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // Can the V2-based AV verdict answer a standing unit-number ask? True only
+    // where the address behind it is canonical or corroborated: enforce mode
+    // (V2 drives routing) or a shadow-bridge ADOPTION (the bridge's V1/V2
+    // same-location rule passed). A shadow-mode V2 verdict whose street V1
+    // disagrees with is deliberately NOT trusted — the bridge refuses to
+    // adopt it, and it must not clear cards or lead warnings either
+    // (pre-push audit P1 r4).
+    let v2AddressTrustedForUnitAsk = false;
     // In-run email-review signal: set the moment either bridge branch decides
     // the extracted email needs read-back, BEFORE any card insert — so a
     // failed triage insert cannot release the first-touch email hold below.
@@ -6471,6 +6484,9 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
           const addressValidation = effectiveAddressValidation;
+          // Enforce mode: V2 is the canonical extraction — its AV verdict
+          // needs no V1 corroboration to answer a unit ask.
+          v2AddressTrustedForUnitAsk = true;
           // Fail-open booking (GATE_CALL_FAIL_OPEN_BOOKING): a confirmed booking
           // isn't held over recoverable contact-field flags — the ANI satisfies
           // caller_phone_missing, an existing customer's on-file address clears
@@ -6802,6 +6818,10 @@ const CallRecordingProcessor = {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
         }
         if (normalizedAddress) {
+          // The bridge's V1/V2 same-location rule passed and the validated
+          // address is being adopted — corroborated enough to answer a
+          // standing unit ask.
+          v2AddressTrustedForUnitAsk = true;
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
           if (normalizedAddress.address_line1) extracted.address_line1 = normalizedAddress.address_line1;
@@ -7380,13 +7400,14 @@ const CallRecordingProcessor = {
     // fail-closed matching (incl. the multi-property guard) live in the
     // resolver.
     if (customerId
+        && v2AddressTrustedForUnitAsk
         && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
         && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
         && effectiveAddressValidation?.normalized?.street_line_1) {
       try {
         await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
           customerId,
-          acceptedStreetLine: effectiveAddressValidation.normalized.street_line_1,
+          acceptedAddress: effectiveAddressValidation.normalized,
         });
       } catch (e) {
         logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);
@@ -8293,12 +8314,19 @@ const CallRecordingProcessor = {
                 return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
               } catch { return []; }
             })();
-            // The effective AV verdict + the lead's PRIOR street ride along so
-            // a call that finally supplied the unit (SUB_PREMISE accept for
-            // the SAME building) clears the standing missing_unit_number ask
-            // instead of unioning it back in forever — `current` is the
-            // pre-write row, i.e. the building the ask was filed for.
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, effectiveAddressValidation, current?.address);
+            // The effective AV verdict + the lead's PRIOR address ride along
+            // so a call that finally supplied the unit (SUB_PREMISE accept
+            // for the SAME building) clears the standing missing_unit_number
+            // ask instead of unioning it back in forever — `current` is the
+            // pre-write row, i.e. the building the ask was filed for. The
+            // verdict is withheld entirely when the V2 address is untrusted
+            // (shadow mode without bridge adoption).
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(
+              priorNeedsConfirmation,
+              bridgeNeedsConfirmation,
+              v2AddressTrustedForUnitAsk ? effectiveAddressValidation : null,
+              { street: current?.address, city: current?.city, zip: current?.zip },
+            );
             leadUpdates.extracted_data = JSON.stringify({
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,
@@ -8575,7 +8603,14 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, addressValidation: effectiveAddressValidation },
+                  {
+                    bridgeNeedsConfirmation,
+                    leadQuality: extracted.lead_quality,
+                    // Same trust gate as the pre-lock merge: an uncorroborated
+                    // shadow-mode V2 verdict must not clear the unit ask here
+                    // either.
+                    addressValidation: v2AddressTrustedForUnitAsk ? effectiveAddressValidation : null,
+                  },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;

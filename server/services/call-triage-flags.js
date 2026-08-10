@@ -1407,17 +1407,20 @@ function deriveEmailReview(extracted = {}) {
  * the caller finally supplied the unit and Google confirmed that exact door)
  * IN THE SAME BUILDING the ask was filed for answers the prior call's
  * standing missing_unit_number. Same-building corroboration compares the
- * accepted street against `priorLeadStreet` (the lead's on-file address
- * BEFORE this call's writes — the building the ask was standing for) with
- * unit designators stripped, suffix-insensitively; fail closed when either
- * side is missing, so a later SUB_PREMISE accept for a DIFFERENT property
- * never clears this building's ask (pre-push audit P1 r2). A PREMISE-level
- * accept proves only the building and clears nothing, and a
- * recovery-produced accept that still carries the original
+ * accepted normalized address against `priorLeadAddress` ({street, city,
+ * zip} — the lead's on-file address BEFORE this call's writes, i.e. the
+ * building the ask was standing for): street with unit designators
+ * stripped, suffix-insensitively, PLUS a place check (ZIP when both sides
+ * have one, else city — postal-city aliases; no corroborating pair fails
+ * closed). Fail closed when anything is missing, so a later SUB_PREMISE
+ * accept for a DIFFERENT property — even an identically-numbered street in
+ * another city/ZIP — never clears this building's ask (pre-push audit P1
+ * r2/r4). A PREMISE-level accept proves only the building and clears
+ * nothing, and a recovery-produced accept that still carries the original
  * missing-subpremise evidence is PREMISE-level by construction — recovery
  * fixes a garbled street, not a missing unit.
  */
-function mergeNeedsConfirmation(prior, next, addressValidation = null, priorLeadStreet = null) {
+function mergeNeedsConfirmation(prior, next, addressValidation = null, priorLeadAddress = null) {
   const nextArr = Array.isArray(next) ? next : [];
   let merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
   if (nextArr.includes('address_recovered')) {
@@ -1426,24 +1429,35 @@ function mergeNeedsConfirmation(prior, next, addressValidation = null, priorLead
   const avStatus = addressValidation?.status;
   if ((avStatus === 'validated_accept' || avStatus === 'corrected')
       && addressValidation?.granularity === 'SUB_PREMISE'
-      && sameBuildingStreet(addressValidation?.normalized?.street_line_1, priorLeadStreet)) {
+      && sameBuildingAddress(addressValidation?.normalized, priorLeadAddress)) {
     merged = merged.filter((r) => r !== 'missing_unit_number');
   }
   return merged;
 }
 
-// Unit-designator-stripped, suffix-insensitive same-building comparison for
-// the unit-ask supersede above. Fail closed: a missing street on either side
-// proves nothing and must not clear the ask.
-function sameBuildingStreet(acceptedStreetLine, priorStreetLine) {
+// Same-building comparison for the unit-ask supersede above: unit-stripped
+// suffix-insensitive street equality + place corroboration (ZIP if both
+// sides carry one, else city). Fail closed: missing streets or no
+// corroborating place pair prove nothing and must not clear the ask.
+function sameBuildingAddress(acceptedNormalized, priorLeadAddress) {
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const accepted = acceptedNormalized || {};
+  const prior = priorLeadAddress || {};
   const key = (line) => {
     const street = splitStreetLineUnit(line).street;
     return street ? streetCompareKey(street) : '';
   };
-  const acceptedKey = key(acceptedStreetLine);
-  const priorKey = key(priorStreetLine);
-  return !!acceptedKey && !!priorKey && acceptedKey === priorKey;
+  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
+  const acceptedKey = key(accepted.street_line_1);
+  const priorKey = key(prior.street);
+  if (!acceptedKey || !priorKey || acceptedKey !== priorKey) return false;
+  const az = zip5(accepted.postal_code);
+  const pz = zip5(prior.zip);
+  if (az && pz) return az === pz;
+  const ac = placeKey(accepted.city);
+  const pc = placeKey(prior.city);
+  return !!ac && !!pc && ac === pc;
 }
 
 /**

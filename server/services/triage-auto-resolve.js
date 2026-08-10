@@ -361,20 +361,30 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 // (pre-push audit P1 r3; the pre-PR status quo for those cards anyway).
 
 // Pure per-card predicate, exported for tests. `row` carries the card's
-// call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1).
-// The V2 street is AUTHORITATIVE when present — the missing-unit verdict was
-// produced by Address Validation run on the V2-heard address — and V1 is
-// consulted only when V2 heard no street. Fail closed on an unparseable
-// extraction (either side) and on a V1/V2 street disagreement: a card whose
-// two extractions name different buildings cannot be attributed to either.
-function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
+// call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1);
+// `acceptedAddress` is the AV normalized shape ({street_line_1, city,
+// postal_code}). The V2 street is AUTHORITATIVE when present — the
+// missing-unit verdict was produced by Address Validation run on the
+// V2-heard address — and V1 is consulted only when V2 heard no street. Fail
+// closed on an unparseable extraction (either side) and on a V1/V2 street
+// disagreement: a card whose two extractions name different buildings cannot
+// be attributed to either. Building identity is street + PLACE: ZIP is the
+// strong discriminator when both sides have one; the city comparison applies
+// only when no ZIP pair exists (postal-city aliases — the same rule
+// customer-address-fanout documents); NO corroborating pair at all fails
+// closed, so an identically-numbered street in another city/ZIP never
+// resolves this building's card (pre-push audit P1 r4).
+function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
   const { streetCompareKey } = require('./call-triage-flags');
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const accepted = (acceptedAddress && typeof acceptedAddress === 'object') ? acceptedAddress : {};
   const key = (line) => {
     const street = splitStreetLineUnit(line).street;
     return street ? streetCompareKey(street) : '';
   };
-  const acceptedKey = key(acceptedStreetLine);
+  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
+  const acceptedKey = key(accepted.street_line_1);
   if (!acceptedKey) return false;
   const parse = (raw) => {
     if (raw == null) return null;
@@ -393,26 +403,34 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
   if (Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0) {
     return false;
   }
-  const v2Key = key(String(v2?.property?.service_address?.street_line_1 || '').trim());
+  const v2Addr = v2?.property?.service_address || {};
+  const v2Key = key(String(v2Addr.street_line_1 || '').trim());
   const v1Key = key(String(v1?.address_line1 || '').trim());
   if (v2Key && v1Key && v2Key !== v1Key) return false;
   const authoritative = v2Key || v1Key;
-  return !!authoritative && authoritative === acceptedKey;
+  if (!authoritative || authoritative !== acceptedKey) return false;
+  // Place corroboration from the same side that supplied the street.
+  const cardZip = v2Key ? zip5(v2Addr.postal_code || v2Addr.zip) : zip5(v1?.zip);
+  const cardCity = v2Key ? placeKey(v2Addr.city) : placeKey(v1?.city);
+  const acceptedZip = zip5(accepted.postal_code);
+  const acceptedCity = placeKey(accepted.city);
+  if (acceptedZip && cardZip) return acceptedZip === cardZip;
+  return !!acceptedCity && !!cardCity && acceptedCity === cardCity;
 }
 
 // Pure selection over the loaded candidate rows, exported for tests: the
-// street-matched cards, EMPTY when more than one matches (ambiguous
+// building-matched cards, EMPTY when more than one matches (ambiguous
 // attribution — see the fail-closed rules above).
-function selectUnitCardsToResolve(candidates, acceptedStreetLine) {
-  const answered = (candidates || []).filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine));
+function selectUnitCardsToResolve(candidates, acceptedAddress) {
+  const answered = (candidates || []).filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedAddress));
   return answered.length === 1 ? answered : [];
 }
 
 // Never throws on a no-op; returns the number of cards resolved. Shares the
 // per-call lock contract (utils/triage-locks.js) and the review_status
 // re-sync with the sweep, admin-triage, and the email resolver.
-async function resolveOpenUnitNumberCards({ customerId, acceptedStreetLine, source = 'later call validated the full unit address' }, conn = db) {
-  if (!customerId || !String(acceptedStreetLine || '').trim()) return 0;
+async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source = 'later call validated the full unit address' }, conn = db) {
+  if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return 0;
   const now = new Date();
   const candidates = await conn('triage_items as t')
     .join('call_log as cl', 'cl.id', 't.call_log_id')
@@ -424,7 +442,7 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedStreetLine, sour
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
     );
-  const answered = selectUnitCardsToResolve(candidates, acceptedStreetLine);
+  const answered = selectUnitCardsToResolve(candidates, acceptedAddress);
   if (!answered.length) return 0;
   const resolveCards = async (trx) => {
     const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
