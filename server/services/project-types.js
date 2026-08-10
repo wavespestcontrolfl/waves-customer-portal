@@ -984,11 +984,22 @@ const PROJECT_TYPES = {
     // unchanged and the certificate PDF reads keys, never sections. The
     // repeater's nested sub-fields deliberately carry no sections — they
     // render inside their own per-application rows.
+    //
+    // `disableDictation` on every single-line field here is deliberate and
+    // scoped to THIS form (owner directive, 2026-08-10). The values this
+    // certificate collects are structured, not prose — permit numbers, EPA
+    // registrations, concentrations, gallons, a YYYY-MM-DD renewal date —
+    // and speech-to-text mangles them. Dictation stays on the free-text
+    // notes. Other project types are unaffected: they keep the mic on their
+    // single-line fields, so this must stay a per-field flag rather than a
+    // key added to the renderer's shared allowlist (keys like
+    // `epa_registration` are shared with termite_treatment). Add the flag to
+    // any new single-line field on this form.
     findingsFields: [
       { key: 'treatment_address', label: 'Treatment address', type: 'address', section: 'Site & permit', placeholder: 'Start typing the treatment address' },
-      { key: 'lot_block', label: 'Lot / Block', type: 'text', section: 'Site & permit', placeholder: 'Lot 12, Block C (pre-construction lots)' },
-      { key: 'subdivision', label: 'Subdivision / Community', type: 'text', section: 'Site & permit', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
-      { key: 'permit_number', label: 'Building permit #', type: 'text', section: 'Site & permit', placeholder: 'Issued by the building department' },
+      { key: 'lot_block', label: 'Lot / Block', type: 'text', section: 'Site & permit', placeholder: 'Lot 12, Block C (pre-construction lots)', disableDictation: true },
+      { key: 'subdivision', label: 'Subdivision / Community', type: 'text', section: 'Site & permit', placeholder: 'e.g. Lakewood Ranch — Star Farms', disableDictation: true },
+      { key: 'permit_number', label: 'Building permit #', type: 'text', section: 'Site & permit', placeholder: 'Issued by the building department', disableDictation: true },
       { key: 'builder_contractor', label: 'Builder / General contractor', type: 'customer_search', section: 'Site & permit', placeholder: 'Search customer database or type contractor name' },
       // No treatment_date field: the project-level date IS the treatment date
       // (the forms label it that way for this type, and the certificate prints
@@ -996,17 +1007,17 @@ const PROJECT_TYPES = {
       // send gate.
       { key: 'treatment_time', label: 'Time of treatment', type: 'time', section: 'Application 1 — product & chemistry' },
       { key: 'treatment_method', label: 'Method of treatment', type: 'select', section: 'Application 1 — product & chemistry', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
-      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', section: 'Application 1 — product & chemistry', disableDictation: true },
       { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'multi_select', section: 'Application 1 — product & chemistry', options: WDO_TARGET_OPTIONS },
       { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
-      { key: 'product_name_other', label: 'Product (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
-      { key: 'epa_registration', label: 'EPA registration #', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 7969-210' },
-      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. fipronil' },
-      { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 0.060' },
-      { key: 'square_footage', label: 'Square footage treated', type: 'text', section: 'Application 1 — product & chemistry' },
-      { key: 'linear_feet', label: 'Linear feet treated', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'For trenching / perimeter applications' },
-      { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
-      { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'product_name_other', label: 'Product (if Other)', type: 'text', section: 'Application 1 — product & chemistry', disableDictation: true },
+      { key: 'epa_registration', label: 'EPA registration #', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 7969-210', disableDictation: true },
+      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. fipronil', disableDictation: true },
+      { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 0.060', disableDictation: true },
+      { key: 'square_footage', label: 'Square footage treated', type: 'text', section: 'Application 1 — product & chemistry', disableDictation: true },
+      { key: 'linear_feet', label: 'Linear feet treated', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'For trenching / perimeter applications', disableDictation: true },
+      { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)', disableDictation: true },
+      { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', section: 'Application 1 — product & chemistry', disableDictation: true },
       // Jobs that combine methods (e.g. a Bora-Care wood treatment plus a
       // Termidor soil barrier) record each product as its own application so
       // the certificate carries a per-product FDACS 5E-14.106 record instead
@@ -1025,26 +1036,26 @@ const PROJECT_TYPES = {
         description: 'Applications planned on the scheduled service load here automatically. Add a row only for an extra product applied in the field.',
         fields: [
           { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
-          { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' } },
+          { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' }, disableDictation: true },
           { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
-          { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210' },
-          { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil' },
-          { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060' },
-          { key: 'square_footage', label: 'Square footage treated', type: 'text' },
-          { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
-          { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
-          { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
+          { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210', disableDictation: true },
+          { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil', disableDictation: true },
+          { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060', disableDictation: true },
+          { key: 'square_footage', label: 'Square footage treated', type: 'text', disableDictation: true },
+          { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications', disableDictation: true },
+          { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)', disableDictation: true },
+          { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', disableDictation: true },
         ],
       },
-      { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification' },
-      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification' },
+      { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
+      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
       // FBC 1816.1.7 requires an "authorized signature of the licensed
       // applicator." A typed attestation paired with the printed name +
       // FDACS ID + treatment date is the standard pattern for portal-
       // generated certificates accepted by Florida building departments.
       { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
       { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
-      { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD' },
+      { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD', disableDictation: true },
       { key: 'comments', label: 'Additional notes', type: 'textarea', section: 'Warranty & notes', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
     ],
   },
