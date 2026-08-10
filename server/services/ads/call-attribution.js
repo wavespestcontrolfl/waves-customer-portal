@@ -1169,8 +1169,12 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
   // conservative shape (provenance recovery and the transfer sweep both
   // refuse to guess at them). Only a bare, history-free row is deleted —
   // the definitive unlink the retire was originally written for.
+  // Same lock-before-judging rule as retireRowPreservingHistory (codex P0
+  // r30): an unlocked read lets a concurrent funnel update land revenue on
+  // the row after it was judged history-free and before it is deleted.
   const existing = await dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })
+    .forUpdate()
     .first(...HISTORY_ROW_COLS);
   if (!existing) return 0;
   if (rowCarriesFunnelHistory(existing)) {
@@ -1256,8 +1260,13 @@ function rowCarriesFunnelHistory(row) {
 // booked/completed revenue vanished with the lead. Same rule everywhere:
 // clear the provenance slot, keep the money.
 async function retireRowPreservingHistory(dbc, rowId) {
+  // LOCKED before inspection and held through the decision (codex P0 r30):
+  // lead-funnel-bridge / ad-attribution-sync can add a booked or completed
+  // stage between an unlocked read and the delete, so the row that gets
+  // deleted is not the row that was judged history-free.
   const row = await dbc('ad_service_attribution')
     .where({ id: rowId })
+    .forUpdate()
     .first(...HISTORY_ROW_COLS);
   if (!row) return 0;
   if (!rowCarriesFunnelHistory(row)) return dbc('ad_service_attribution').where({ id: row.id }).del();
@@ -1604,10 +1613,26 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         // it, under the lead lock already held, conditioned on it still
         // being unprovenanced so a concurrent writer cannot be overwritten.
         if (pending.repair_of_rejection && res && res.reason === 'unprovenanced_row') {
+          // The reclaim carries the DECISION too (codex P1 r30):
+          // recordCallPpcAttribution returned before applying any patch, so
+          // restoring provenance alone left the row on its old owner,
+          // channel, paid flag and service dimensions — exactly the stale
+          // data the corrected pass exists to replace.
+          const reclaimInterest = pending.service_interest || null;
           const reclaimed = await trx('ad_service_attribution')
             .where({ lead_id: liveLeadId })
             .whereNull('source_call_id')
-            .update({ source_call_id: row.id, updated_at: new Date() });
+            .update({
+              source_call_id: row.id,
+              customer_id: lockedLead.customer_id || null,
+              lead_source: pending.lead_source,
+              is_paid: pending.is_paid !== false,
+              lead_source_detail: pending.detail || 'inbound call',
+              service_line: inferServiceLine(reclaimInterest),
+              specific_service: inferSpecificService(reclaimInterest),
+              service_bucket: inferServiceBucket(reclaimInterest),
+              updated_at: new Date(),
+            });
           if (reclaimed) {
             await clearMarker();
             return 'recorded';

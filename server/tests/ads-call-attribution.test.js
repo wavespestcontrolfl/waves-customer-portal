@@ -1197,3 +1197,18 @@ describe('ad_cost never counts as funnel history', () => {
     expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
   });
 });
+
+// codex P0 r30 — the history judgement and the delete must see the SAME row.
+describe('retirement locks the row before judging it', () => {
+  test('EVERY history read takes FOR UPDATE immediately before it', () => {
+    // Unlocked, lead-funnel-bridge / ad-attribution-sync can land booked or
+    // completed revenue between the read and the delete.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const reads = src.match(/\.first\(\.\.\.HISTORY_ROW_COLS\)/g) || [];
+    expect(reads.length).toBe(2); // the lead-scoped retire and the orphan helper
+    const locked = src.match(/\.forUpdate\(\)\s*\n\s*\.first\(\.\.\.HISTORY_ROW_COLS\)/g) || [];
+    expect(locked.length).toBe(reads.length);
+  });
+});

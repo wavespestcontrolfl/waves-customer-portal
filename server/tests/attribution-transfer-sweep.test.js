@@ -338,6 +338,14 @@ describe('sweepPendingAttributionTransfers', () => {
     const reclaim = updates.find((u) => u.table === 'ad_service_attribution'
       && u.patch.source_call_id === 'call-1');
     expect(reclaim).toBeTruthy();
+    // The DECISION rides the reclaim too (codex P1 r30): recordCallPpcAttribution
+    // returned before patching, so provenance alone left stale owner/channel.
+    expect(reclaim.patch).toMatchObject({
+      customer_id: 'cust-1',
+      lead_source: 'waves_website',
+      is_paid: false,
+      lead_source_detail: 'Sarasota city page',
+    });
     // Conditioned on the row still being unprovenanced.
     expect(reclaim.wheres).toContainEqual(['whereNull', 'source_call_id']);
     expect(markerClearUpdates()).toHaveLength(1);
