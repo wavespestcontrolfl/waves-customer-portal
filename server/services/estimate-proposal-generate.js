@@ -398,16 +398,35 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     ...(estimateData.engineResult && estimateData.engineResult !== engineResult
       && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
   ];
+  // Every persisted recurring container, exactly the set the collision
+  // detector below scans — hoisted here so review-gate collection sees the
+  // same sources.
+  const recurringSourceContainers = [
+    estimateData.recurring?.services,
+    estimateData.result?.recurring?.services,
+    estimateData.result?.results?.recurring?.services,
+    Array.isArray(estimateData.services)
+      ? estimateData.services.filter((svc) => svc.recurring || svc.frequency) : null,
+    engineResult.lineItems,
+    estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? estimateData.engineResult.lineItems : null,
+  ];
   // The canonical collector EXCLUDES review-gated raw rows
   // (recurringLinesFromEngineResult filters quoteRequired/
   // requiresManualReview), and the canonical-key filter below discards the
   // raw twin before rowIsReviewGated ever sees it — so a mapped row that
   // kept the price but lost the markers would publish a provisional
-  // amount. Collect the gated keys from the RAW rows first; the program
-  // loop treats a canonical row under a gated key as gated (codex 1A-ii
-  // r12).
-  const gatedRawKeys = new Set(rawLineItemsMerged
-    .filter((line) => rowIsReviewGated(line))
+  // amount. Collect the gated keys from EVERY container's raw rows — not
+  // just lineItems: the collector's coalesce keeps an explicit
+  // requiresManualReview:false / manualReviewReasons:[] from one container
+  // over the OTHER container's real marker (coalesceRecurringServiceRows
+  // only fills BLANK fields), so the marker must gate by key from the
+  // source rows themselves (codex 1A-ii r12/r20). The program loop treats
+  // a canonical row under a gated key as gated.
+  const gatedRawKeys = new Set([
+    ...rawLineItemsMerged,
+    ...recurringSourceContainers.filter(Array.isArray).flat(),
+  ].filter((line) => line && typeof line === 'object' && rowIsReviewGated(line))
     .map((line) => canonicalRecurringKey(line)));
   const extraSeenKeys = new Set();
   const extraLineItemRows = rawLineItemsMerged
@@ -508,17 +527,8 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // Building A and Building B) are distinct charges the collapse would
   // merge into one hybrid program — and with null stored totals
   // reconciliation could never catch the loss (local codex P0). Fail with
-  // direction instead of collapsing.
-  const recurringSourceContainers = [
-    estimateData.recurring?.services,
-    estimateData.result?.recurring?.services,
-    estimateData.result?.results?.recurring?.services,
-    Array.isArray(estimateData.services)
-      ? estimateData.services.filter((svc) => svc.recurring || svc.frequency) : null,
-    engineResult.lineItems,
-    estimateData.engineResult && estimateData.engineResult !== engineResult
-      ? estimateData.engineResult.lineItems : null,
-  ];
+  // direction instead of collapsing. (Container list hoisted above, shared
+  // with review-gate collection.)
   const collapsedKeys = new Map();
   for (const container of recurringSourceContainers) {
     if (!Array.isArray(container)) continue;
@@ -810,9 +820,16 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     .filter((line) => line.onProg !== true && line.includedOnProgram !== true
       && num(line.installation?.price) > 0
       && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
+  // Raw engine rows carry their customer-facing copy under label /
+  // display.name (priceGermanRoach emits `label`, priceFlea nests
+  // display.name) — falling back straight to the internal service key
+  // would publish "german_roach" as contractual copy (codex 1A-ii r20).
+  const rawLineLabel = (line, fallback) => String(
+    line.displayName || line.label || line.display?.name || line.name || line.service || fallback,
+  );
   const fromLineItems = lineItemsRows.filter((line) => {
     if (rowIsReviewGated(line) || gatedRawIdentities.has(rawIdentity(line))) {
-      gated.push(String(line.displayName || line.name || line.service || 'item'));
+      gated.push(rawLineLabel(line, 'item'));
       return false;
     }
     // Canonical included-on-program exclusion (same rule as
@@ -926,13 +943,13 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   for (const { line, used } of rawPool) {
     if (used) continue;
     if (line.manualFinalOneTime === 0) {
-      comped.push(String(line.displayName || line.name || line.service || 'item'));
+      comped.push(rawLineLabel(line, 'item'));
       continue;
     }
     const amount = rawResolvedAmount(line);
     if (!(amount > 0)) continue;
     work.push({
-      label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
+      label: rawLineLabel(line, 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
       taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
       // Raw engine rows carry customer-facing scope under the same

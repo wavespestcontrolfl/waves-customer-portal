@@ -828,6 +828,20 @@ describe('deriveProposalDraft', () => {
     expect(green.warnings).toEqual([]);
   });
 
+  test('r20: a review marker in ANY recurring container gates the coalesced row — explicit false must not mask the twin', async () => {
+    // The collector's coalesce keeps root recurring's explicit
+    // requiresManualReview:false over the result twin's real marker — the
+    // gate must still fire from the source rows themselves.
+    const masked = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468, requiresManualReview: false, manualReviewReasons: [] }] },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468, requiresManualReview: true }] } },
+      },
+    });
+    expect(masked.programs).toBeNull();
+    expect(masked.warnings[0]).toMatch(/requires manual review/i);
+  });
+
   test('r18: one-time packages with a generic visits count derive as corrective work, never vanish as pseudo-recurring', async () => {
     // German-roach cleanout returns { price, total, visits } — the package
     // visit count is NOT an annual cadence; the charge must derive.
@@ -838,17 +852,21 @@ describe('deriveProposalDraft', () => {
     });
     expect(roach.correctiveWork).toHaveLength(1);
     expect(roach.correctiveWork[0].amount).toBe(450);
-    // Raw rows keep their customer-facing det scope too (codex r19).
+    // Raw rows keep their customer-facing det scope too (codex r19), and
+    // the engine's `label` is the contractual copy — never the internal
+    // service key (codex r20).
     expect(roach.correctiveWork[0].includes).toEqual(['3 visits · kitchens and baths']);
+    expect(roach.correctiveWork[0].label).toBe('German Roach Cleanout — 3 Visit Program');
 
     // Explicit one-time cadence wins even beside recurring-looking fields.
     const flea = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
-        engineResult: { lineItems: [{ service: 'flea', serviceKey: 'flea', billingCadence: 'one_time', visits: 3, total: 385 }] },
+        engineResult: { lineItems: [{ service: 'flea', serviceKey: 'flea', billingCadence: 'one_time', visits: 3, total: 385, display: { name: 'Flea Elimination Package' } }] },
       },
     });
     expect(flea.correctiveWork).toHaveLength(1);
     expect(flea.correctiveWork[0].amount).toBe(385);
+    expect(flea.correctiveWork[0].label).toBe('Flea Elimination Package');
     expect(flea.programs).toBeNull();
   });
 
