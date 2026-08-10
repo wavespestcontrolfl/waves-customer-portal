@@ -24,6 +24,15 @@ jest.mock('../services/dispatch-completion-deferred', () => ({
 }));
 jest.mock('../services/appointment-card-request', () => ({
   sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
+  resolveExemption: jest.fn(async () => ({ exempt: false })),
+}));
+const mockGetAppointmentContacts = jest.fn(() => [{ phone: '+19415557777' }]);
+jest.mock('../services/customer-contact', () => ({
+  getAppointmentContacts: (...a) => mockGetAppointmentContacts(...a),
+}));
+const mockFilterRecipientsByOptin = jest.fn(async (contacts) => contacts);
+jest.mock('../services/recipient-optin', () => ({
+  filterRecipientsByOptin: (...a) => mockFilterRecipientsByOptin(...a),
 }));
 jest.mock('../services/review-request', () => ({
   markInlineRetryable: jest.fn(async () => {}),
@@ -242,6 +251,100 @@ describe('deferred-replay registry', () => {
     // Deliberately NOT durable: an email miss must never fake an
     // undelivered SMS back onto a retry rail.
     expect(requiresDurableFinalize('appointment_card_request_deferred')).toBe(false);
+  });
+
+  test('card request recheck (r19): payer exemption re-runs — exempt visits suppress the queued bearer link', async () => {
+    const { resolveExemption } = require('../services/appointment-card-request');
+
+    // Third-party payer adopted (or autopay enrolled) overnight — the
+    // homeowner must not be asked for a card, same policy the immediate
+    // path enforces before any capture machinery.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', card_link_sent_at: null, customer_id: 'cust-1' }));
+    resolveExemption.mockResolvedValueOnce({ exempt: true, reason: 'payer_billed' });
+    const exempt = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(exempt.eligible).toBe(false);
+    expect(exempt.reason).toBe('exempt:payer_billed');
+    expect(resolveExemption).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'ss-1' });
+
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', card_link_sent_at: null, customer_id: 'cust-1' }));
+    resolveExemption.mockResolvedValueOnce({ exempt: false });
+    const stillOn = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(stillOn.eligible).toBe(true);
+  });
+
+  test('contact confirmation recheck (r19): the queued phone must still be an authorized, opted-in contact', async () => {
+    const meta = { scheduled_service_id: 'ss-1', customer_id: 'cust-1', to_phone: '+19415557777' };
+
+    // Slot intact (formatting differences aside): replay eligible.
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    const present = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', meta);
+    expect(present.eligible).toBe(true);
+    expect(mockGetAppointmentContacts).toHaveBeenCalled();
+
+    // Contact removed/replaced overnight: the frozen number no longer
+    // occupies a notification slot — suppress, never text a third party.
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain(null));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '+19415550000' }]);
+    const removed = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', meta);
+    expect(removed.eligible).toBe(false);
+    expect(removed.reason).toBe('contact-removed');
+
+    // Rows without the executor's to_phone/customer_id merge keep the
+    // visit-only gate (no blind suppression on missing linkage).
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    const legacy = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', { scheduled_service_id: 'ss-1' });
+    expect(legacy.eligible).toBe(true);
+  });
+
+  test('completion terminal (r19): restore failure propagates AFTER arming the review fallback', async () => {
+    const { terminalDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
+    const { markInlineRetryable } = require('../services/review-request');
+    terminalDeferredCompletionSend.mockRejectedValueOnce(new Error('service_records down'));
+    const res = await onTerminalDeferredReplay('dispatch_completion_deferred', {
+      service_record_id: 'rec-1', bundled_review_request_id: 'rev-1',
+    });
+    // ok:false keeps terminal_pending stamped → the bounded sweep retries
+    // the restore; a success here would strand the record at 'deferred'.
+    expect(res.ok).toBe(false);
+    // The review fallback still armed — the customer-facing obligation
+    // does not wait on the bookkeeping retry.
+    expect(markInlineRetryable).toHaveBeenCalledWith('rev-1', expect.any(Date));
+  });
+
+  test('voicemail terminal (r19): a swallowed-false claim release fails the hook onto the sweep', async () => {
+    mockVmClaims.releasePhoneClaim.mockResolvedValueOnce(false);
+    const res = await onTerminalDeferredReplay('voicemail_lead_sms_deferred', {
+      lead_id: 'lead-1', voicemail_phone: '+15551234567',
+    });
+    expect(res.ok).toBe(false);
+    // Both releases were still ATTEMPTED — no short-circuit skips the phone.
+    expect(mockVmClaims.clearLeadClaim).toHaveBeenCalledWith('lead-1');
+    expect(mockVmClaims.releasePhoneClaim).toHaveBeenCalledWith('+15551234567');
+  });
+
+  test('cancellation confirmation (r19): a transient email failure fails the hook; deterministic skips settle', async () => {
+    const { sendCancellationReceived } = require('../services/account-membership-email');
+    const request = { id: 'req-1', customer_id: 'cust-1' };
+    const meta = { is_cancellation: true, service_request_id: 'req-1', waves_customer_id: 'cust-1' };
+
+    // Transient provider/template failure reports {ok:false} without
+    // throwing — the hook must fail so the sweep retries, else the
+    // deactivated customer gets neither channel and no retry obligation.
+    db.mockReturnValueOnce(firstChain(request));
+    sendCancellationReceived.mockResolvedValueOnce({ ok: false, error: 'smtp 500' });
+    const transient = await onTerminalDeferredReplay('customer_service_request_deferred', meta);
+    expect(transient.ok).toBe(false);
+
+    // Deterministic skip (no email on file): retrying cannot fix it — settle.
+    db.mockReturnValueOnce(firstChain(request));
+    sendCancellationReceived.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
+    const skipped = await onTerminalDeferredReplay('customer_service_request_deferred', meta);
+    expect(skipped.ok).toBe(true);
   });
 
   test('completion terminal (r15): resets the stuck deferred status FIRST, then arms the review fallback', async () => {

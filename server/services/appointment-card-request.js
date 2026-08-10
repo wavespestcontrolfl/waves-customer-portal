@@ -234,6 +234,12 @@ async function planInviteApplies(visitId, request = null) {
   }
 }
 
+// Last-10-digit comparison for recipient identity (US numbers with/without
+// the +1 prefix must compare equal).
+function last10Digits(v) {
+  return String(v || '').replace(/\D/g, '').slice(-10);
+}
+
 // Check 1 — policy exemption. Payer check fails toward EXEMPT (never risk
 // securing the homeowner's card for invoices that route to a third-party
 // payer); the autopay-active check fails toward REQUIRING the card (a
@@ -723,7 +729,18 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
               trigger,
               original_block_code: result.code,
               replay_purpose: 'card_request',
-              refresh_customer_phone: true,
+              // The send-time primary-phone refresh only applies when the
+              // recipient IS the account holder's number — an explicit
+              // recipientPhone (the consented inbound caller when the saved
+              // customer phone is a spouse/alternate slot, Codex #2771) is
+              // a per-send recipient DECISION, and swapping it for
+              // customers.phone at replay would text the bearer link to a
+              // different person than the immediate path chose. The frozen
+              // number still passes the full send-time validator chain
+              // (opt-out, suppressions, line type) at replay.
+              ...(recipientPhone && last10Digits(recipientPhone) !== last10Digits(customer?.phone)
+                ? { explicit_recipient: true }
+                : { refresh_customer_phone: true }),
               resolve_from_by_customer: true,
               card_claim_stamp: stamp.toISOString(),
               // For the finalize's email twin (both-channels rule). The
@@ -2766,6 +2783,7 @@ module.exports = {
   resettleAppointmentFeeFromPi,
   isWithinApptCancelWindow,
   sendDeferredInvitationEmailLeg,
+  resolveExemption,
   _test: {
     dateLineFor,
     resolveExemption,

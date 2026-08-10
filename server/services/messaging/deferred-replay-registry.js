@@ -97,21 +97,32 @@ const REGISTRY = {
       // Reset the record's 'deferred' status to 'failed' FIRST — the
       // completion dedupe treats 'deferred' as an owned obligation, so a
       // dead replay must hand the send back to the next completion attempt
-      // (same restore the decline-notice entry runs).
+      // (same restore the decline-notice entry runs). A transient restore
+      // failure is captured (not swallowed) and rethrown AFTER the review
+      // fallback arms: a hook that reported success on a failed restore
+      // would clear terminal_pending and strand the record at 'deferred'
+      // forever — the bounded terminal sweep must retry the restore.
       const { terminalDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      await terminalDeferredCompletionSend(meta).catch((err) => {
-        logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'}: ${err.message}`);
-      });
+      let restoreErr = null;
+      try {
+        await terminalDeferredCompletionSend(meta);
+      } catch (err) {
+        restoreErr = err;
+        logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'} — will retry via terminal sweep: ${err.message}`);
+      }
       // The completion text (and the bundled review link inside it) will
       // never deliver — arm the standalone review sender. Armed ONLY here,
       // never on a timer, so it can't race a still-retryable replay.
-      if (!meta.bundled_review_request_id) return;
-      const ReviewService = require('../review-request');
-      await ReviewService.markInlineRetryable(
-        meta.bundled_review_request_id,
-        new Date(Date.now() + 5 * 60 * 1000),
-      );
-      logger.info(`[deferred-replay] completion terminally blocked — standalone review fallback armed for ${meta.bundled_review_request_id}`);
+      // Idempotent, so a restore-retry re-run re-arms harmlessly.
+      if (meta.bundled_review_request_id) {
+        const ReviewService = require('../review-request');
+        await ReviewService.markInlineRetryable(
+          meta.bundled_review_request_id,
+          new Date(Date.now() + 5 * 60 * 1000),
+        );
+        logger.info(`[deferred-replay] completion terminally blocked — standalone review fallback armed for ${meta.bundled_review_request_id}`);
+      }
+      if (restoreErr) throw restoreErr;
     },
     durableFinalize: true,
   },
@@ -371,9 +382,16 @@ const REGISTRY = {
       // The text-back provably never delivered — release BOTH one-shot
       // claims so a repeat caller (or the suppressed-replay path) can
       // re-arm instead of the phone staying consumed with no text sent.
+      // The helpers swallow their own DB errors and return false — a
+      // failed release reported as success would clear terminal_pending
+      // with the lead/phone permanently marked consumed, so either false
+      // fails the hook onto the bounded terminal sweep (releases are
+      // idempotent deletes/clears; re-running is harmless).
       const { _deferredClaims } = require('../voicemail-lead-sms');
-      if (meta.lead_id) await _deferredClaims.clearLeadClaim(meta.lead_id);
-      if (meta.voicemail_phone) await _deferredClaims.releasePhoneClaim(meta.voicemail_phone);
+      let ok = true;
+      if (meta.lead_id) ok = (await _deferredClaims.clearLeadClaim(meta.lead_id)) && ok;
+      if (meta.voicemail_phone) ok = (await _deferredClaims.releasePhoneClaim(meta.voicemail_phone)) && ok;
+      if (!ok) throw new Error(`voicemail claim release incomplete for lead ${meta.lead_id || 'unknown'} — retrying via terminal sweep`);
       logger.info(`[deferred-replay] voicemail text-back for lead ${meta.lead_id || 'unknown'} terminally blocked — claims released`);
     },
   },
@@ -395,12 +413,24 @@ const REGISTRY = {
       }
       const AccountMembershipEmail = require('../account-membership-email');
       // Idempotent by its own key (account.cancellation_received:<request id>),
-      // so a double-fired terminal hook can't double-email.
-      await AccountMembershipEmail.sendCancellationReceived({
+      // so a double-fired terminal hook can't double-email. The sender
+      // reports transient provider/template failures as {ok:false} rather
+      // than throwing — treat those as hook failure so the bounded terminal
+      // sweep retries (else the deactivated customer gets neither channel
+      // and no retry obligation). Deterministic skips ({skipped:true}: no
+      // email on file, customer missing) settle — retrying cannot fix them.
+      const emailRes = await AccountMembershipEmail.sendCancellationReceived({
         customerId: meta.waves_customer_id || request.customer_id,
         request,
       });
-      logger.info(`[deferred-replay] cancellation confirmation for request ${request.id} terminally blocked — cancellation-safe email fallback sent`);
+      if (emailRes?.ok === false && emailRes?.skipped !== true) {
+        throw new Error(`cancellation confirmation fallback email failed for request ${request.id}: ${emailRes?.error || 'unknown'}`);
+      }
+      if (emailRes?.skipped === true) {
+        logger.warn(`[deferred-replay] cancellation confirmation for request ${request.id} terminally blocked — email fallback skipped (${emailRes.reason || 'unknown'}); no reachable channel`);
+      } else {
+        logger.info(`[deferred-replay] cancellation confirmation for request ${request.id} terminally blocked — cancellation-safe email fallback sent`);
+      }
     },
   },
 
@@ -412,7 +442,7 @@ const REGISTRY = {
         if (!meta.scheduled_service_id) return { eligible: true };
         const svc = await db('scheduled_services')
           .where({ id: meta.scheduled_service_id })
-          .first('status', 'card_link_sent_at');
+          .first('status', 'card_link_sent_at', 'customer_id');
         if (!svc) return { eligible: false, reason: 'visit-missing' };
         const status = String(svc.status || '').toLowerCase();
         if (['cancelled', 'completed', 'skipped'].includes(status)) {
@@ -431,6 +461,22 @@ const REGISTRY = {
           if (String(row.status) !== 'pending' || row.stripe_setup_intent_id) {
             return { eligible: false, reason: 'card-captured' };
           }
+        }
+        // Re-run the policy exemption the immediate path enforces: a
+        // third-party payer assigned (or autopay enrolled) while the row
+        // sat overnight means the homeowner must not be asked for a card.
+        // Same fail-closed direction as requestCardForAppointment —
+        // resolveExemption exempts on payer-lookup uncertainty, and an
+        // exempt verdict suppresses the replay (onTerminal releases the
+        // claim, so the previsit backstop re-evaluates fresh if policy
+        // changes back).
+        if (svc.customer_id) {
+          const { resolveExemption } = require('../appointment-card-request');
+          const exemption = await resolveExemption({
+            customerId: svc.customer_id,
+            scheduledServiceId: meta.scheduled_service_id,
+          });
+          if (exemption?.exempt) return { eligible: false, reason: `exempt:${exemption.reason || 'policy'}` };
         }
         return { eligible: true };
       } catch (err) {
@@ -560,12 +606,35 @@ const REGISTRY = {
 
   // Booking-confirmation fan-out to a SECONDARY service contact whose send
   // crossed the 20:00 cutoff after the primary already delivered. The
-  // queued row carries the contact's own rendered body/phone; only the
-  // visit's continued existence gates the replay (consent/opt-in were
-  // checked at enqueue, and the pipeline re-checks suppressions at send).
+  // queued row carries the contact's own rendered body/phone (frozen at
+  // enqueue — no send-time refresh, the row belongs to the CONTACT's
+  // number), so the morning replay re-runs the SAME contact resolution the
+  // fan-out used: the queued phone must still occupy an authorized,
+  // opted-in contact slot. A contact removed or replaced overnight would
+  // otherwise receive a personalized confirmation + appointment link for a
+  // household they no longer represent. The executor merges the row's
+  // to_phone/customer_id into the recheck meta, so pre-fix queued rows
+  // revalidate too.
   call_booking_contact_confirmation_deferred: {
     async recheck(meta) {
-      return visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation');
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation');
+      if (visit.eligible === false) return visit;
+      try {
+        if (!meta.customer_id || !meta.to_phone) return visit;
+        const customer = await db('customers').where({ id: meta.customer_id }).first();
+        if (!customer) return { eligible: false, reason: 'customer-missing' };
+        const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
+        const { getAppointmentContacts } = require('../customer-contact');
+        const { filterRecipientsByOptin } = require('../recipient-optin');
+        const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+        const stillAuthorized = (await filterRecipientsByOptin(
+          getAppointmentContacts(customer, prefsRow), meta.customer_id
+        )).some((c) => digits(c.phone) === digits(meta.to_phone));
+        if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('call-contact-confirmation', meta.scheduled_service_id, err);
+      }
     },
   },
 

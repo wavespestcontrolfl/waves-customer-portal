@@ -2617,7 +2617,15 @@ function initScheduledJobs() {
             // (not in metadata), and a recheck that keys on customer state
             // — the lead-menu intake status, quiet-hours prefs — would
             // silently pass as eligible without it.
-            const recheckMeta = { ...claimMeta, customer_id: claimMeta.customer_id || msg.customer_id || null };
+            // to_phone rides along too: recipient-frozen rows (contact
+            // fan-out) revalidate that the queued number still belongs to
+            // an authorized recipient, and the row column is the only
+            // durable home of that number.
+            const recheckMeta = {
+              ...claimMeta,
+              customer_id: claimMeta.customer_id || msg.customer_id || null,
+              to_phone: claimMeta.to_phone || msg.to_phone || null,
+            };
             const recheck = await recheckDeferredReplay(claimMeta.entry_point, recheckMeta);
             if (recheck && recheck.eligible === false) {
               // A recheck that names its own retry time (a customer quiet
