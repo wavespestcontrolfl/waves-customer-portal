@@ -34,6 +34,11 @@ function edgeShift(x) {
 export default function MarkedPhotoCard({ marked, live = true }) {
   const stageRef = useRef(null);
   const [pinsLive, setPinsLive] = useState(false);
+  // Fail-closed on a broken image, matching the PDF document (codex P2).
+  // Without this the card keeps "Where we treated", the caption, the legend,
+  // and positioned pins over a broken-image frame — pins over nothing is a
+  // worse claim than no card at all.
+  const [imageFailed, setImageFailed] = useState(false);
 
   const marks = Array.isArray(marked?.marks) ? marked.marks : [];
   const hasMarks = marks.length > 0;
@@ -56,7 +61,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
 
   // No marks means no card — the optional-marks ruling. The photo still
   // appears in the ordinary gallery; nothing here signals an absence.
-  if (!marked?.url || !hasMarks) return null;
+  if (!marked?.url || !hasMarks || imageFailed) return null;
 
   const legend = Array.isArray(marked.legend) ? marked.legend : [];
   const caption = markedPhotoCaption(marks, marked.captionKey);
@@ -86,6 +91,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
         <img
           src={marked.url}
           alt={marked.caption || 'Photograph of the treated area with the treated points marked'}
+          onError={() => setImageFailed(true)}
           style={{ width: '100%', display: 'block' }}
         />
         {pinsLive && (
