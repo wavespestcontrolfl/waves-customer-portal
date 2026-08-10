@@ -996,10 +996,8 @@ const PROJECT_TYPES = {
       // send gate.
       { key: 'treatment_time', label: 'Time of treatment', type: 'time', section: 'Application 1 — product & chemistry' },
       { key: 'treatment_method', label: 'Method of treatment', type: 'select', section: 'Application 1 — product & chemistry', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
-      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
       { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'multi_select', section: 'Application 1 — product & chemistry', options: WDO_TARGET_OPTIONS },
-      { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
-      { key: 'product_name_other', label: 'Product (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
       { key: 'epa_registration', label: 'EPA registration #', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 7969-210' },
       { key: 'active_ingredient', label: 'Active ingredient', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. fipronil' },
       { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 0.060' },

@@ -588,9 +588,14 @@ function certAdditionalApplications(findings) {
 // Runs once over the flat primary-application keys (the original cert_*
 // keys/labels) and once per additional application row.
 function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
-  const productName = app.product_name === 'Other' ? app.product_name_other : app.product_name;
+  // The "(if Other)" free-text fields were removed from the primary
+  // application's form (the method/product pickers carry the value directly);
+  // certificates saved before that still carry them, so they win when present.
+  const productName = app.product_name === 'Other'
+    ? (app.product_name_other || app.product_name)
+    : app.product_name;
   const rawMethod = app.treatment_method;
-  const method = rawMethod === 'Other' ? app.treatment_method_other : rawMethod;
+  const method = rawMethod === 'Other' ? (app.treatment_method_other || rawMethod) : rawMethod;
   // Coverage requirements vary by application method. Liquid soil barriers
   // (chemical) are sized by gallons of finished solution applied across a
   // measured area. Wood treatments (borate) are measured by treated area
