@@ -14,6 +14,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { mowingAlertText } = require('../utils/mowing-schedule');
 const { loadLastServices } = require('../utils/last-line-service');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
@@ -2352,6 +2353,10 @@ router.get('/:date?', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
       if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
       if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
+      // Mowing schedule — a cut right before/after an application undoes it,
+      // so the tech needs to know when the mower comes through.
+      const mowingAlert = mowingAlertText(prefs);
+      if (mowingAlert) alerts.push(mowingAlert);
       // Ops sessions write scheduling-audit trails into notes; those are
       // internal and never belong on the tech-facing alerts block.
       const displayNotes = stripSchedulerAuditText(s.notes);
