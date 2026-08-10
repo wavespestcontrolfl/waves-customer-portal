@@ -84,12 +84,6 @@ const PROGRAM_FAMILY_OPTIONS = [
 const programRowIsPriced = (p) => String(p.label || '').trim()
   && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
 
-// A row the operator has STARTED authoring — ANY field, not just the
-// label. Generation's fill-only emptiness check keys on this: a price or
-// inclusions typed before the name must not be silently replaced by the
-// generated draft (codex 1A-ii r15).
-const programRowHasContent = (p) => [p.label, p.note, p.inclusionsText, p.exclusionsText, p.coversText]
-  .some((v) => String(v || '').trim()) || Number(p.pricePerApplication) > 0;
 
 // Mirrors server computeProposalTotals so totals update live as you type.
 function computeTotals(buildings, taxRate, correctiveWork = [], programs = []) {
@@ -764,14 +758,15 @@ export default function CommercialProposalPage() {
         // synchronously, so formRef is committed before this continuation
         // runs.)
         const genAtSave = editGenRef.current;
-        // A program row with ANY content but no valid price/frequency would
-        // be FILTERED from the payload and silently deleted by the reload —
-        // surface the server's minimum-price rule instead (codex 1A-ii r3).
-        // The ONE content predicate (programRowHasContent) decides, so a
-        // note-only or covers-only row can never slip past a narrower
-        // second definition (codex 1A-ii r16).
+        // EVERY existing unpriced program row is incomplete — a row exists
+        // only because the operator added or loaded it, and family/
+        // frequency/tax edits leave no text for a content predicate to see
+        // (codex 1A-ii r19b, same rule as generation's fill-only check).
+        // Unpriced rows would be FILTERED from the payload and silently
+        // deleted by the reload — surface the server's minimum-price rule
+        // instead (codex 1A-ii r3).
         const incompleteProgram = formRef.current.programsState.find(
-          (row) => programRowHasContent(row) && !programRowIsPriced(row),
+          (row) => !programRowIsPriced(row),
         );
         if (incompleteProgram) {
           setError(`Program “${incompleteProgram.label?.trim() || '(unnamed)'}” needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.`);
