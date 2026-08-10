@@ -376,9 +376,28 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     const cardB = { id: 'b', call_extraction: v2('100 Example Condo Court'), call_extraction_v1: null };
     const other = { id: 'c', call_extraction: v2('4200 Other Sample Blvd'), call_extraction_v1: null };
     expect(selectUnitCardsToResolve([cardA, cardB, other], accepted('100 Example Condo Ct'))).toEqual([]);
-    // A single matching card resolves; non-matching cards never count against it.
+    // A single matching card resolves; provably-different buildings never count against it.
     expect(selectUnitCardsToResolve([cardA, other], accepted('100 Example Condo Ct'))).toEqual([cardA]);
     expect(selectUnitCardsToResolve([], accepted('100 Example Condo Ct'))).toEqual([]);
+  });
+
+  test('an unattributable sibling card blocks ALL resolution (multi-property or unknown building)', () => {
+    const ordinary = { id: 'a', call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
+    const multi = {
+      id: 'm',
+      call_extraction: JSON.stringify({
+        property: {
+          service_address: { street_line_1: '4200 Other Sample Blvd', city: 'Bradenton', postal_code: '34212' },
+          additional_properties: [{ raw_text: 'another unit somewhere' }],
+        },
+      }),
+      call_extraction_v1: null,
+    };
+    // The multi-property call could concern the accepted building even though
+    // its primary street differs — the lone ordinary match must NOT resolve.
+    expect(selectUnitCardsToResolve([ordinary, multi], accepted('100 Example Condo Ct'))).toEqual([]);
+    const unknown = { id: 'u', call_extraction: '{not json', call_extraction_v1: null };
+    expect(selectUnitCardsToResolve([ordinary, unknown], accepted('100 Example Condo Ct'))).toEqual([]);
   });
 
   test('multi-property call → ambiguous which unit was answered; card kept', () => {

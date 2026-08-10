@@ -374,18 +374,22 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 // customer-address-fanout documents); NO corroborating pair at all fails
 // closed, so an identically-numbered street in another city/ZIP never
 // resolves this building's card (pre-push audit P1 r4).
-function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
+const streetLineKey = (line) => {
   const { streetCompareKey } = require('./call-triage-flags');
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
-  const accepted = (acceptedAddress && typeof acceptedAddress === 'object') ? acceptedAddress : {};
-  const key = (line) => {
-    const street = splitStreetLineUnit(line).street;
-    return street ? streetCompareKey(street) : '';
-  };
-  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
-  const acceptedKey = key(accepted.street_line_1);
-  if (!acceptedKey) return false;
+  const street = splitStreetLineUnit(line).street;
+  return street ? streetCompareKey(street) : '';
+};
+const placeNameKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const zip5Of = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
+
+// Building identity of a card, from its call's extractions:
+//   { key, zip, city }     — the extractions unambiguously name ONE building
+//   { multiProperty: true } — the call mentioned additional properties, so it
+//                             could concern ANY building (incl. the accepted)
+//   null                    — identity cannot be established (unparseable
+//                             extraction, no street, V1/V2 disagreement)
+function unitCardBuildingIdentity(row) {
   const parse = (raw) => {
     if (raw == null) return null;
     if (typeof raw !== 'string') return raw;
@@ -396,34 +400,64 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
     }
   };
   const v2 = parse(row.call_extraction);
-  if (v2 === undefined) return false;
+  if (v2 === undefined) return null;
   const v1 = parse(row.call_extraction_v1);
-  if (v1 === undefined) return false;
-  // Multi-property call → ambiguous which unit the later acceptance answers.
+  if (v1 === undefined) return null;
   if (Array.isArray(v2?.property?.additional_properties) && v2.property.additional_properties.length > 0) {
-    return false;
+    return { multiProperty: true };
   }
   const v2Addr = v2?.property?.service_address || {};
-  const v2Key = key(String(v2Addr.street_line_1 || '').trim());
-  const v1Key = key(String(v1?.address_line1 || '').trim());
-  if (v2Key && v1Key && v2Key !== v1Key) return false;
-  const authoritative = v2Key || v1Key;
-  if (!authoritative || authoritative !== acceptedKey) return false;
-  // Place corroboration from the same side that supplied the street.
-  const cardZip = v2Key ? zip5(v2Addr.postal_code || v2Addr.zip) : zip5(v1?.zip);
-  const cardCity = v2Key ? placeKey(v2Addr.city) : placeKey(v1?.city);
-  const acceptedZip = zip5(accepted.postal_code);
-  const acceptedCity = placeKey(accepted.city);
-  if (acceptedZip && cardZip) return acceptedZip === cardZip;
-  return !!acceptedCity && !!cardCity && acceptedCity === cardCity;
+  const v2Key = streetLineKey(String(v2Addr.street_line_1 || '').trim());
+  const v1Key = streetLineKey(String(v1?.address_line1 || '').trim());
+  if (v2Key && v1Key && v2Key !== v1Key) return null;
+  const key = v2Key || v1Key; // V2 (AV's input) outranks; V1 only when V2 silent
+  if (!key) return null;
+  return {
+    key,
+    zip: v2Key ? zip5Of(v2Addr.postal_code || v2Addr.zip) : zip5Of(v1?.zip),
+    city: v2Key ? placeNameKey(v2Addr.city) : placeNameKey(v1?.city),
+  };
 }
 
-// Pure selection over the loaded candidate rows, exported for tests: the
-// building-matched cards, EMPTY when more than one matches (ambiguous
-// attribution — see the fail-closed rules above).
+// Does an identified card name the accepted building? Street key equality +
+// place corroboration: ZIP when both sides carry one (strong discriminator),
+// else city (postal-city aliases); no corroborating pair fails closed.
+function identityMatchesAcceptedAddress(identity, acceptedAddress) {
+  const accepted = (acceptedAddress && typeof acceptedAddress === 'object') ? acceptedAddress : {};
+  const acceptedKey = streetLineKey(accepted.street_line_1);
+  if (!acceptedKey || !identity?.key || identity.key !== acceptedKey) return false;
+  const acceptedZip = zip5Of(accepted.postal_code);
+  if (acceptedZip && identity.zip) return acceptedZip === identity.zip;
+  const acceptedCity = placeNameKey(accepted.city);
+  return !!acceptedCity && !!identity.city && acceptedCity === identity.city;
+}
+
+// Pure per-card predicate, kept exported for tests: identified,
+// single-property, and naming the accepted building.
+function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
+  const identity = unitCardBuildingIdentity(row);
+  return !!identity && !identity.multiProperty && identityMatchesAcceptedAddress(identity, acceptedAddress);
+}
+
+// Pure selection over the loaded candidate rows, exported for tests.
+// Building matching is separate from resolution eligibility (pre-push audit
+// P1 r5): EVERY candidate must be positively attributable before anything
+// resolves. A card whose building cannot be established, or a multi-property
+// call that could concern the accepted building, makes the attribution
+// ambiguous and blocks ALL resolution — a lone "ordinary" match next to a
+// multi-property sibling must not resolve. Among identified cards, exactly
+// one may name the accepted building.
 function selectUnitCardsToResolve(candidates, acceptedAddress) {
-  const answered = (candidates || []).filter((row) => unitCardAnsweredByAcceptedStreet(row, acceptedAddress));
-  return answered.length === 1 ? answered : [];
+  let match = null;
+  for (const row of candidates || []) {
+    const identity = unitCardBuildingIdentity(row);
+    if (!identity || identity.multiProperty) return [];
+    if (identityMatchesAcceptedAddress(identity, acceptedAddress)) {
+      if (match) return []; // two same-building asks — cannot attribute the one validated door
+      match = row;
+    }
+  }
+  return match ? [match] : [];
 }
 
 // Never throws on a no-op; returns the number of cards resolved. Shares the
