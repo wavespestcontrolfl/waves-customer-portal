@@ -397,7 +397,7 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
   'address_validation_unavailable',  // deterministic (AV api error)
   'out_of_service_area',             // model + deterministic
   'address_unverifiable',            // MODEL flag (schema enum / prompt). The model marks nearly every call address_unverifiable; AV accept/correct authoritatively resolves the address, so this must clear too or clean addresses never auto-route.
-  'missing_unit_number',             // deterministic (AV premise w/ missing subpremise) — an accept/correct means the exact premise (incl. any unit) validated, so the stale ask clears.
+  'missing_unit_number',             // deterministic (AV premise w/ missing subpremise) — clears ONLY on a SUB_PREMISE-granularity accept (exact door validated); see the filter's granularity exception below.
 ]);
 
 // AV resolved a real building (PREMISE) but Google lists the unit designator
@@ -414,13 +414,14 @@ function isMissingUnitNumber(av) {
 function suppressAddressFlagsForAV(flags, addressValidation) {
   const s = addressValidation?.status;
   if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
-  // A recovery-produced accept can still CARRY the original verdict's
-  // missing-subpremise evidence (the processor merges it onto the effective
-  // result before the flags run) — the unit ask is the one address flag such
-  // an accept does not answer, so it survives the suppression. A true accept
-  // has no missing components and clears it as documented above.
+  // The unit ask only clears on AFFIRMATIVE unit validation: an accept at
+  // SUB_PREMISE granularity means Google confirmed the exact door. A
+  // PREMISE-level accept proves only the building (pre-push audit P1) — and a
+  // recovery-produced accept still CARRYING the original missing-subpremise
+  // evidence (the processor merges it onto the effective result) is exactly
+  // such a building-only verdict, so the ask survives the suppression there.
   return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f)
-    || (f === 'missing_unit_number' && isMissingUnitNumber(addressValidation)));
+    || (f === 'missing_unit_number' && addressValidation?.granularity !== 'SUB_PREMISE'));
 }
 
 function mergeTriageFlags(modelFlags, deterministicFlags) {
@@ -1389,11 +1390,13 @@ function deriveEmailReview(extracted = {}) {
  * snapshot, so a quick follow-up call was wiping address_unverified /
  * email_unverified off the lead). Union of both, with two supersede rules: an
  * address recovered-and-validated on the newer call replaces the stale
- * address_unverified, and a newer call whose AV verdict accepted the EXACT
- * premise (accept/corrected with no missing subpremise — i.e. the caller
- * finally supplied the unit and it validated) answers the prior call's
- * standing missing_unit_number ask. A recovery-produced accept that still
- * carries the original missing-subpremise evidence clears nothing — recovery
+ * address_unverified, and a newer call whose AV verdict AFFIRMATIVELY
+ * validated down to the unit (accept/corrected at SUB_PREMISE granularity —
+ * the caller finally supplied the unit and Google confirmed that exact door)
+ * answers the prior call's standing missing_unit_number ask. A PREMISE-level
+ * accept proves only the building and clears nothing (pre-push audit P1), and
+ * a recovery-produced accept that still carries the original
+ * missing-subpremise evidence is PREMISE-level by construction — recovery
  * fixes a garbled street, not a missing unit.
  */
 function mergeNeedsConfirmation(prior, next, addressValidation = null) {
@@ -1404,7 +1407,7 @@ function mergeNeedsConfirmation(prior, next, addressValidation = null) {
   }
   const avStatus = addressValidation?.status;
   if ((avStatus === 'validated_accept' || avStatus === 'corrected')
-      && !isMissingUnitNumber(addressValidation)) {
+      && addressValidation?.granularity === 'SUB_PREMISE') {
     merged = merged.filter((r) => r !== 'missing_unit_number');
   }
   return merged;

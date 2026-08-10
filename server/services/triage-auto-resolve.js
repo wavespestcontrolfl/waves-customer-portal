@@ -349,7 +349,15 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 // (V1 address_line1 or V2 street_line_1, unit designators stripped, compared
 // suffix-insensitively) as the accepted verdict resolve — a multi-property
 // customer's acceptance for a different address must not clear the condo's
-// unit ask. Fail closed: missing/unparseable streets keep the card.
+// unit ask. A card whose call carried multi-property evidence
+// (additional_properties) is never auto-resolved either: one validated unit
+// cannot prove which of a landlord's several units in the SAME building it
+// answers (pre-push audit P1). Fail closed: missing/unparseable streets keep
+// the card. Residual limit, accepted: repeat unit-less calls about ONE
+// property are indistinguishable from separate unit-less calls about two
+// units in one building when neither call mentioned other properties — the
+// caller guard requires an affirmative SUB_PREMISE acceptance, so at least
+// one exact door was validated for the building being cleared.
 
 // Pure per-card predicate, exported for tests. `row` carries the card's
 // call extractions (call_extraction = V2 enriched, call_extraction_v1 = V1).
@@ -363,9 +371,10 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
   const acceptedKey = key(acceptedStreetLine);
   if (!acceptedKey) return false;
   const heard = [];
-  for (const [raw, pick] of [
-    [row.call_extraction, (p) => p?.property?.service_address?.street_line_1],
-    [row.call_extraction_v1, (p) => p?.address_line1],
+  for (const [raw, pick, multiProp] of [
+    [row.call_extraction, (p) => p?.property?.service_address?.street_line_1,
+      (p) => Array.isArray(p?.property?.additional_properties) && p.property.additional_properties.length > 0],
+    [row.call_extraction_v1, (p) => p?.address_line1, () => false],
   ]) {
     if (raw == null) continue;
     let parsed = raw;
@@ -376,6 +385,8 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedStreetLine) {
         continue; // unparseable side contributes nothing; fail closed overall
       }
     }
+    // Multi-property call → ambiguous which unit the later acceptance answers.
+    if (multiProp(parsed)) return false;
     const line = String(pick(parsed) || '').trim();
     if (line) heard.push(key(line));
   }
@@ -408,7 +419,7 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedStreetLine, sour
       .whereIn('status', ['open', 'in_progress'])
       .update({
         status: 'resolved',
-        resolution_note: `Auto-resolved: ${String(source).slice(0, 150)} (Address Validation accepted with no missing unit).`,
+        resolution_note: `Auto-resolved: ${String(source).slice(0, 150)} (Address Validation confirmed the exact unit — SUB_PREMISE accept).`,
         resolved_at: now,
         updated_at: now,
       });

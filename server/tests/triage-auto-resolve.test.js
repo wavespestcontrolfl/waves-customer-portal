@@ -343,6 +343,16 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: '{not json', call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
     expect(unitCardAnsweredByAcceptedStreet({ call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null }, '')).toBe(false);
   });
+
+  test('multi-property call → ambiguous which unit was answered; card kept', () => {
+    const multi = JSON.stringify({
+      property: {
+        service_address: { street_line_1: '100 Example Condo Ct' },
+        additional_properties: [{ raw_text: '100 Example Condo Ct, another unit' }],
+      },
+    });
+    expect(unitCardAnsweredByAcceptedStreet({ call_extraction: multi, call_extraction_v1: null }, '100 Example Condo Ct')).toBe(false);
+  });
 });
 
 describe('runTriageAutoResolve — gate', () => {

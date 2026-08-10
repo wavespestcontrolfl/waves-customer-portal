@@ -7368,17 +7368,20 @@ const CallRecordingProcessor = {
       }
     }
 
-    // A subpremise-complete AV acceptance on THIS call answers a standing
-    // unit-number ask an earlier call filed for the same building — mirror of
-    // the email fanout's later-call resolution above; the nightly sweep
-    // deliberately never moots missing_unit_number, so this is the only path
-    // that closes the card once the unit is finally supplied. Same-building
-    // corroboration + fail-closed matching live in the resolver. A recovery-
-    // produced accept still carries the missing-subpremise evidence and is
-    // excluded by the isMissingUnitNumber guard.
+    // An AV acceptance that AFFIRMATIVELY validated down to the unit
+    // (SUB_PREMISE granularity — Google confirmed the exact door) answers a
+    // standing unit-number ask an earlier call filed for the same building —
+    // mirror of the email fanout's later-call resolution above; the nightly
+    // sweep deliberately never moots missing_unit_number, so this is the only
+    // path that closes the card once the unit is finally supplied. A
+    // PREMISE-level accept proves only the building and resolves nothing
+    // (pre-push audit P1) — which also excludes every recovery-produced
+    // accept, PREMISE-level by construction. Same-building corroboration +
+    // fail-closed matching (incl. the multi-property guard) live in the
+    // resolver.
     if (customerId
         && (effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
-        && !isMissingUnitNumber(effectiveAddressValidation)
+        && effectiveAddressValidation?.granularity === 'SUB_PREMISE'
         && effectiveAddressValidation?.normalized?.street_line_1) {
       try {
         await require('./triage-auto-resolve').resolveOpenUnitNumberCards({

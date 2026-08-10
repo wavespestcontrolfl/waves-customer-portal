@@ -336,11 +336,17 @@ describe('mergeNeedsConfirmation — reasons persist across calls on a lead', ()
     expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
   });
 
-  test('a subpremise-complete accept on the newer call clears the standing unit ask', () => {
+  test('a SUB_PREMISE accept on the newer call (exact door validated) clears the standing unit ask', () => {
     const accepted = { status: 'validated_accept', granularity: 'SUB_PREMISE', missingComponents: [] };
     const merged = mergeNeedsConfirmation(['missing_unit_number', 'email_unverified'], [], accepted);
     expect(merged).not.toContain('missing_unit_number');
     expect(merged).toContain('email_unverified');
+  });
+
+  test('a PREMISE-level accept proves only the building and clears nothing', () => {
+    const buildingOnly = { status: 'validated_accept', granularity: 'PREMISE', missingComponents: [] };
+    expect(mergeNeedsConfirmation(['missing_unit_number'], [], buildingOnly))
+      .toContain('missing_unit_number');
   });
 
   test('a recovery-produced accept still carrying missing-subpremise evidence clears nothing', () => {

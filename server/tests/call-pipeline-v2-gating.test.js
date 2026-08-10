@@ -244,12 +244,15 @@ describe('computeDeterministicTriageFlags', () => {
       expect(suppressAddressFlagsForAV(['missing_unit_number'], carried)).toContain('missing_unit_number');
     });
 
-    test('a true accept (no missing components) emits and suppresses nothing unit-related', () => {
+    test('a true accept (no missing components) emits no unit flag; only a SUB_PREMISE accept supersedes a stale one', () => {
       const e = validV2Extraction();
-      const clean = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: [] };
-      expect(computeDeterministicTriageFlags(e, { addressValidation: clean })).not.toContain('missing_unit_number');
-      // A STALE unit flag from another source is still superseded by a clean accept.
-      expect(suppressAddressFlagsForAV(['missing_unit_number'], clean)).not.toContain('missing_unit_number');
+      const buildingAccept = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County', granularity: 'PREMISE', missingComponents: [] };
+      expect(computeDeterministicTriageFlags(e, { addressValidation: buildingAccept })).not.toContain('missing_unit_number');
+      // A PREMISE-level accept proves only the building — a stale unit flag
+      // survives; the exact-door SUB_PREMISE accept is what clears it.
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], buildingAccept)).toContain('missing_unit_number');
+      const unitAccept = { ...buildingAccept, granularity: 'SUB_PREMISE' };
+      expect(suppressAddressFlagsForAV(['missing_unit_number'], unitAccept)).not.toContain('missing_unit_number');
     });
 
     test('api_unavailable holds for review (address_validation_unavailable) and still applies model signals', () => {
