@@ -166,6 +166,28 @@ describe('triage surfacing', () => {
     expect(buildTriageItem({ callLogId: 'c1', flag: 'auto_booking_skipped_after_approval', extraction }).category).toBe('time_ambiguous');
   });
 
+  // "Ask which unit" is unactionable without the building. The enforce lane
+  // files this card through the generic flags loop with no extraPayload, so
+  // the stamp has to come from buildTriageItem itself.
+  test('missing_unit_number cards name the building the unit is needed for', () => {
+    const unitExtraction = {
+      meta: { call_summary: 'condo flea call' },
+      property: { service_address: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' } },
+    };
+    const payload = JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'missing_unit_number', extraction: unitExtraction }).payload);
+    expect(payload.unit_ask_building).toEqual({
+      street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212',
+    });
+    // The shadow bridge overrides it with the LEGACY address it holds.
+    const overridden = JSON.parse(buildTriageItem({
+      callLogId: 'c1', flag: 'missing_unit_number', extraction: unitExtraction,
+      extraPayload: { unit_ask_building: { street_line_1: '100 Example Condo Court', city: 'Bradenton', postal_code: null } },
+    }).payload);
+    expect(overridden.unit_ask_building.street_line_1).toBe('100 Example Condo Court');
+    // Other flags are untouched.
+    expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'address_unverified', extraction: unitExtraction }).payload).unit_ask_building).toBeUndefined();
+  });
+
   test('scheduling-shaped cards carry the captured window fields', () => {
     const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction });
     const payload = JSON.parse(item.payload);

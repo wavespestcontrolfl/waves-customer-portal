@@ -158,6 +158,27 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(out.needsConfirmation).not.toContain('missing_unit_number');
   });
 
+  test('same street name in a different city/ZIP is a different building → no unit ask', () => {
+    const differentZip = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', zip: '34209', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(differentZip.needsConfirmation).not.toContain('missing_unit_number');
+    const differentCity = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Sarasota', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(differentCity.needsConfirmation).not.toContain('missing_unit_number');
+    // Aliased postal city under one agreeing ZIP still corroborates.
+    const aliasCity = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Lakewood Ranch', zip: '34212', lead_quality: 'warm' },
+    });
+    expect(aliasCity.needsConfirmation).toContain('missing_unit_number');
+  });
+
   test('V1 heard no street → NO unit ask even when the V2 pass flagged it (nothing on the record to attach it to)', () => {
     const out = deriveCallReviewBridge({
       addressValidation: UNIT_AV(),

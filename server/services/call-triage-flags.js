@@ -412,11 +412,13 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
  * only true — when those are the same building, so the ask is filed just when
  * AV's resolved building corroborates the legacy street (suffix-insensitive,
  * unit designators irrelevant here since the whole point is that there is no
- * unit). Fails closed: a V1/V2 disagreement, a legacy record with no street,
- * or an AV result with no normalized street files nothing — the generic
- * address_unverified hold already covers the call, and a unit task pointing at
- * a building the record does not hold is worse than none (it is human-only
- * work, never auto-resolved).
+ * unit) AND the place agrees where both sides state one — the same rule the
+ * adoption path's sameLocation uses, because "100 Main St" exists in several
+ * cities (codex r13 P1). Fails closed: a V1/V2 street or place disagreement, a
+ * legacy record with no street, or an AV result with no normalized street
+ * files nothing — the generic address_unverified hold already covers the call,
+ * and a unit task pointing at a building the record does not hold is worse
+ * than none (it is human-only work, never auto-resolved).
  *
  * The enforce lane does NOT use this: there V2 IS the record, so
  * computeDeterministicTriageFlags takes isMissingUnitNumber directly.
@@ -425,7 +427,18 @@ function unitAskCorroborated(av, extracted = {}) {
   if (!isMissingUnitNumber(av)) return false;
   const avKey = streetCompareKey(av?.normalized?.street_line_1);
   const legacyKey = streetCompareKey(extracted.address_line1);
-  return !!avKey && !!legacyKey && avKey === legacyKey;
+  if (!avKey || !legacyKey || avKey !== legacyKey) return false;
+  const placeKey = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = (z) => (String(z || '').match(/^\d{5}/) || [''])[0];
+  const avZip = zip5(av?.normalized?.postal_code);
+  const legacyZip = zip5(extracted.zip);
+  if (avZip && legacyZip && avZip !== legacyZip) return false;
+  const avCity = placeKey(av?.normalized?.city);
+  const legacyCity = placeKey(extracted.city);
+  // Postal-city names alias (Bradenton / Lakewood Ranch share 34211), so a
+  // city mismatch only disqualifies when no ZIP pair already agreed.
+  if (!(avZip && legacyZip) && avCity && legacyCity && avCity !== legacyCity) return false;
+  return true;
 }
 
 function isMissingUnitNumber(av) {

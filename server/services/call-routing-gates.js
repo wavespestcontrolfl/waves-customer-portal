@@ -308,6 +308,22 @@ function buildTriageItem({
     };
   }
 
+  // "Ask which unit" is useless without saying which building — and the
+  // enforce lane files this card through the generic deterministic-flags
+  // loop, which passes no extraPayload. Same argument as the secondary
+  // contact above: attach it HERE, where every insert site flows through
+  // (the open-row unique index makes the first insert win). The shadow
+  // bridge passes its own extraPayload to override this with the LEGACY V1
+  // address, which is what the record holds in that mode.
+  if (flag === 'missing_unit_number') {
+    const sa = extraction?.property?.service_address || {};
+    flagPayload.unit_ask_building = {
+      street_line_1: sa.street_line_1 ?? null,
+      city: sa.city ?? null,
+      postal_code: sa.postal_code ?? sa.zip ?? null,
+    };
+  }
+
   return {
     call_log_id: callLogId,
     category: flagToCategoryMap[flag] || 'service_unknown',
