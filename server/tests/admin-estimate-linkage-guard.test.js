@@ -32,36 +32,36 @@ function fakeDb({ customers = [], properties = [], propertiesThrow = false } = {
   };
 }
 
-const JAY = {
-  id: 'cust-jay',
-  first_name: 'Jay',
-  last_name: 'Fogg',
-  address_line1: '1472 Hickory View Cir',
-  city: 'Parrish',
-  zip: '34219',
+const MEMBER = {
+  id: 'cust-1001',
+  first_name: 'Pat',
+  last_name: 'Harbor',
+  address_line1: '4821 Samplewave Ct',
+  city: 'Palmetto',
+  zip: '34221',
   waveguard_tier: 'Bronze',
   monthly_rate: 55,
 };
 
 describe('detectUnlinkedMemberAddress', () => {
   test('warns when the address matches an active member and no customerId was sent', async () => {
-    const database = fakeDb({ customers: [JAY] });
+    const database = fakeDb({ customers: [MEMBER] });
     const warning = await detectUnlinkedMemberAddress(database, {
-      address: '1472 Hickory View Cir, Parrish, FL 34219',
+      address: '4821 Samplewave Ct, Palmetto, FL 34221',
     });
     expect(warning).toMatchObject({
-      customerId: 'cust-jay',
-      customerName: 'Jay Fogg',
+      customerId: 'cust-1001',
+      customerName: 'Pat Harbor',
       waveguardTier: 'Bronze',
     });
     expect(warning.message).toContain('NOT applied');
   });
 
   test('a linked save never warns', async () => {
-    const database = fakeDb({ customers: [JAY] });
+    const database = fakeDb({ customers: [MEMBER] });
     expect(await detectUnlinkedMemberAddress(database, {
-      customerId: 'cust-jay',
-      address: '1472 Hickory View Cir, Parrish, FL 34219',
+      customerId: 'cust-1001',
+      address: '4821 Samplewave Ct, Palmetto, FL 34221',
     })).toBeNull();
   });
 
@@ -69,9 +69,9 @@ describe('detectUnlinkedMemberAddress', () => {
     const database = fakeDb({
       customers: [],
       properties: [{
-        id: 'cust-jay',
-        first_name: 'Jay',
-        last_name: 'Fogg',
+        id: 'cust-1001',
+        first_name: 'Pat',
+        last_name: 'Harbor',
         waveguard_tier: 'Bronze',
         monthly_rate: 55,
         address_line1: '900 Rental Ave',
@@ -82,30 +82,30 @@ describe('detectUnlinkedMemberAddress', () => {
     const warning = await detectUnlinkedMemberAddress(database, {
       address: '900 Rental Ave, Palmetto, FL 34221',
     });
-    expect(warning).toMatchObject({ customerId: 'cust-jay' });
+    expect(warning).toMatchObject({ customerId: 'cust-1001' });
   });
 
   test('environments without customer_properties fall back to the primary-address leg only', async () => {
-    const database = fakeDb({ customers: [JAY], propertiesThrow: true });
+    const database = fakeDb({ customers: [MEMBER], propertiesThrow: true });
     const warning = await detectUnlinkedMemberAddress(database, {
-      address: '1472 Hickory View Cir, Parrish, FL 34219',
+      address: '4821 Samplewave Ct, Palmetto, FL 34221',
     });
-    expect(warning).toMatchObject({ customerId: 'cust-jay' });
+    expect(warning).toMatchObject({ customerId: 'cust-1001' });
   });
 
   test('a non-member match (no tier, no rate) never warns', async () => {
     const database = fakeDb({
-      customers: [{ ...JAY, waveguard_tier: null, monthly_rate: null }],
+      customers: [{ ...MEMBER, waveguard_tier: null, monthly_rate: null }],
     });
     expect(await detectUnlinkedMemberAddress(database, {
-      address: '1472 Hickory View Cir, Parrish, FL 34219',
+      address: '4821 Samplewave Ct, Palmetto, FL 34221',
     })).toBeNull();
   });
 
   test('a different street never warns', async () => {
-    const database = fakeDb({ customers: [JAY] });
+    const database = fakeDb({ customers: [MEMBER] });
     expect(await detectUnlinkedMemberAddress(database, {
-      address: '1472 Oak Hollow Dr, Parrish, FL 34219',
+      address: '4821 Oak Hollow Dr, Palmetto, FL 34221',
     })).toBeNull();
   });
 });

@@ -971,12 +971,52 @@ describe('existing-service tier extension snapshot', () => {
     const view = publicMembershipView(snapshot);
     expect(view.existingServices).toEqual([]);
     expect(view.discountAppliesTo).toBe('new_services_only');
-    // COMMITTED estimates are the exception (codex #3338 r15 sibling): an
-    // accepted/price-locked row's extension already moved money — its
-    // permanent recap keeps the record even with the gate off.
-    const committedView = publicMembershipView(snapshot, { committed: true });
-    expect(committedView.existingServices).toHaveLength(1);
-    expect(committedView.discountAppliesTo).toBe('new_and_existing_services');
+    // COMMITTED estimates follow the persisted OUTCOME, not the gate
+    // (codex #3338 r19): only an extension that actually APPLIED keeps its
+    // permanent record — an accept whose plan parked moved no money and
+    // must not read as repriced, and legacy accepted rows (no outcome)
+    // project nothing.
+    const appliedSnapshot = {
+      ...snapshot,
+      extensionOutcome: { applied: true, repricedRowCount: 3, creditAmount: 0 },
+    };
+    const committedApplied = publicMembershipView(appliedSnapshot, { committed: true });
+    expect(committedApplied.existingServices).toHaveLength(1);
+    expect(committedApplied.discountAppliesTo).toBe('new_and_existing_services');
+    const committedParked = publicMembershipView(
+      { ...snapshot, extensionOutcome: { applied: false, reviewFamilies: ['Pest Control'] } },
+      { committed: true },
+    );
+    expect(committedParked.existingServices).toEqual([]);
+    expect(committedParked.discountAppliesTo).toBe('new_services_only');
+    const committedLegacy = publicMembershipView(snapshot, { committed: true });
+    expect(committedLegacy.existingServices).toEqual([]);
+  });
+
+  test('gate on: a mixed-price contract freezes only the appointments sharing the displayed basis', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+        // Drifted and unpriced siblings must not be LISTED as covered —
+        // accept would skip them (codex #3338 r19 sibling).
+        { id: 's3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 135 },
+        { id: 's4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: null },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices[0]).toMatchObject({
+      currentPerVisit: 120,
+      newPerVisit: 108,
+      remainingVisits: 2,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05'],
+      rowIds: ['s1', 's2'],
+    });
   });
 
   test('gate on: no tier change means no extension rows', async () => {

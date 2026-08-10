@@ -4278,6 +4278,48 @@ const EstimateConverter = {
       }
     }
 
+    // Persist the extension OUTCOME onto the frozen snapshot (codex #3338
+    // r19): the accepted read-only recap keeps showing the extension ONLY
+    // when it actually applied — an accept whose plan parked for review
+    // moved no money and must not read as repriced. Stamped HERE, the
+    // single choke point every conversion entrypoint passes through;
+    // read-modify-write inside the caller's transaction, so the accept
+    // path's own estimate_data write (which lands before conversion) is
+    // extended, never clobbered. Outcome is written only when a frozen
+    // plan was actually in play — legacy/plan-less accepts stay untouched.
+    // Never blocks the accept.
+    const extensionHadPlanInPlay = !!extension
+      && (extension.applied === true
+        || extension.reviewFamilies.length > 0
+        || extension.skippedFamilies.length > 0
+        || extension.monthlyRateReviewNeeded === true);
+    if (extensionHadPlanInPlay) {
+      try {
+        const outcomeRow = await database('estimates').where({ id: estimateId }).first('estimate_data');
+        const outcomeIsString = typeof outcomeRow?.estimate_data === 'string';
+        const outcomeData = outcomeIsString
+          ? JSON.parse(outcomeRow.estimate_data)
+          : (outcomeRow?.estimate_data || null);
+        if (outcomeData?.membershipSnapshot) {
+          outcomeData.membershipSnapshot.extensionOutcome = {
+            applied: extension.applied === true,
+            repricedRowCount: extension.repricedRowCount,
+            creditAmount: extension.creditAmount,
+            familyLines: extension.familyLines,
+            creditLines: extension.creditLines,
+            reviewFamilies: extension.reviewFamilies,
+            skippedFamilies: extension.skippedFamilies,
+            monthlyRateReviewNeeded: extension.monthlyRateReviewNeeded === true,
+          };
+          await database('estimates').where({ id: estimateId }).update({
+            estimate_data: outcomeIsString ? JSON.stringify(outcomeData) : outcomeData,
+          });
+        }
+      } catch (outcomeErr) {
+        logger.warn(`[estimate-converter] extension outcome stamp skipped: ${outcomeErr.message}`);
+      }
+    }
+
     // Plan-rate review alert (owner ruling 2026-08-06): a legacy multi-plan
     // customer's re-quote landed on the un-splittable path — their scalar
     // was REPLACED with this accept's slices while other live plan families

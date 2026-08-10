@@ -699,44 +699,63 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     if (upgraded && oldTier.discount === 0 && !monthlyLaneMember && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
       const today = etDateString();
-      for (const svc of currentSpend.currentServices) {
-        if (!svc || svc.qualifiesForWaveGuard !== true) continue;
-        const componentKeys = Array.isArray(svc.keys) && svc.keys.length ? svc.keys : [svc.key];
+      // The plan is built from the CATALOG-AUTHORITATIVE enriched qualifying
+      // rows — the SAME loader + classifier the accept-time apply matches
+      // with (codex #3338 r18: a stale service_type label must never freeze
+      // a family the apply then fails to find). Rules per family:
+      //  - only upcoming, non-callback, single-family rows (a combined
+      //    multi-family row cannot carry one family's extension; belt only —
+      //    a combined row implies ≥2 families, which the Bronze-origin
+      //    check already excludes);
+      //  - one property (distinct stamped addresses are separate contracts
+      //    one figure cannot honestly cover);
+      //  - only appointments SHARING the displayed basis freeze (codex
+      //    #3338 r19 sibling: a mixed-price contract must not list
+      //    appointments the apply would then skip);
+      //  - the PERSISTED price is the rounded tier rate; the savings figure
+      //    derives from it (codex #3338 r20 — never an extra half-cent of
+      //    discount from rounding the savings first).
+      for (const [familyKey, familyRows] of existingByKey) {
         // A family this estimate re-quotes is already a priced line of the
         // estimate itself — never also listed as an existing extension.
-        if (componentKeys.some((k) => newKeys.includes(k))) continue;
-        // Multi-property contracts sum per-contract prices into ONE figure —
-        // advertising that sum as "per visit" would be wrong, so those stay
-        // on the manual review path (the accept notification still names
-        // them for the owner).
-        if (Array.isArray(svc.contracts) && svc.contracts.length > 1) continue;
-        // EXTENSION basis is the ROW price the accept-time frozen-price
-        // check verifies against (codex #3338 r13) — the staff spend view
-        // prefers the last-paid invoice, but freezing that here would
-        // advertise a figure accept immediately parks as drift whenever
-        // invoice and scheduled rows disagree. Unpriced rows have no
-        // billable basis to discount and are skipped.
-        const currentPerVisit = Number(svc.scheduledPerVisit);
-        if (!(currentPerVisit > 0)) continue; // no honest price to discount
-        const perVisitSavings = round2(currentPerVisit * delta);
+        if (newKeys.includes(familyKey)) continue;
+        const eligibleRows = familyRows.filter((row) => {
+          if (isCallbackServiceRow(row)) return false;
+          const day = visitDateKey(row.scheduled_date);
+          if (!day || day < today) return false;
+          return qualifyingKeysForRow(row).length === 1;
+        });
+        if (!eligibleRows.length) continue;
+        const distinctAddresses = new Set(eligibleRows.map((row) => row.effective_service_address).filter(Boolean));
+        if (distinctAddresses.size > 1) continue;
+        const basisRow = eligibleRows.find((row) => Number(row.estimated_price) > 0);
+        const basis = Number(basisRow?.estimated_price);
+        if (!(basis > 0)) continue; // no billable basis to discount
+        const frozenRows = eligibleRows.filter((row) => Math.abs(Number(row.estimated_price) - basis) <= 0.01);
+        const newPerVisit = round2(basis * (1 - delta));
+        const perVisitSavings = round2(basis - newPerVisit);
         if (!(perVisitSavings > 0)) continue;
-        const upcomingVisitDates = (svc.scheduledVisitDates || []).filter((d) => d >= today);
+        const upcomingVisitDates = [...new Set(frozenRows.map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort();
         existingServices.push({
-          key: svc.key,
-          keys: componentKeys,
-          label: svc.label,
-          currentPerVisit: round2(currentPerVisit),
+          key: familyKey,
+          keys: [familyKey],
+          label: SERVICE_LABEL[familyKey] || accountServiceLabel(familyKey, frozenRows[0]?.service_type),
+          currentPerVisit: round2(basis),
           extraDiscountPct: deltaPct,
           perVisitSavings,
-          newPerVisit: round2(currentPerVisit - perVisitSavings),
-          remainingVisits: upcomingVisitDates.length || svc.activeScheduledVisits || null,
+          newPerVisit,
+          remainingVisits: upcomingVisitDates.length || null,
           upcomingVisitDates,
           // Frozen appointment identities the accept-time apply is pinned
           // to (staff-side; deliberately NOT in publicMembershipView).
-          rowIds: Array.isArray(svc.scheduledRowIds) ? svc.scheduledRowIds : [],
-          prepaid: svc.prepaid === true,
+          // Sorted for determinism — DB row order carries no meaning.
+          rowIds: frozenRows.map((row) => row.id).filter(Boolean)
+            .sort((a, b) => String(a).localeCompare(String(b))),
+          prepaid: frozenRows.some((row) => !!row.annual_prepay_term_id),
         });
       }
+      // Deterministic family order regardless of DB row order.
+      existingServices.sort((a, b) => String(a.key).localeCompare(String(b.key)));
     }
 
     // ── New-service member discount ────────────────────────────
@@ -809,16 +828,23 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 // snapshot field defaults to staff-only unless it is projected here.
 function publicMembershipView(snapshot, { committed = false } = {}) {
   if (!snapshot || typeof snapshot !== 'object') return null;
-  // Gate checked at PROJECTION time too (codex #3338 r1): a plan frozen
-  // while the gate was on must not keep displaying after the kill switch
-  // turns the accept-side apply off. EXCEPT committed estimates (codex
-  // #3338 r15 sibling): an accepted/price-locked estimate whose extension
-  // already applied is a permanent record — hiding it would tell the
-  // customer their current prices stayed unchanged after money moved.
-  // Callers pass committed=true for accepted / price-locked rows.
+  // Which snapshots may project their frozen extension rows:
+  //  - LIVE estimates follow the kill switch (codex #3338 r1) — a plan
+  //    frozen while the gate was on must not keep displaying after the
+  //    switch turns the accept-side apply off.
+  //  - COMMITTED estimates (accepted/price-locked; callers pass
+  //    committed=true) follow the persisted OUTCOME instead (codex #3338
+  //    r19): only an extension that actually APPLIED is a permanent record
+  //    the recap must keep showing regardless of the gate — an accept
+  //    whose plan merely parked for review moved no money, so its recap
+  //    must not read as repriced. Legacy accepted rows carry no outcome
+  //    and project nothing, correctly.
   // Computed first so the discountAppliesTo discriminator below can follow
   // the PROJECTED rows.
-  const projectedExistingServices = ((committed === true || isEnabled('waveguardExtendExisting')) && Array.isArray(snapshot.existingServices)
+  const showFrozenExtension = committed === true
+    ? snapshot.extensionOutcome?.applied === true
+    : isEnabled('waveguardExtendExisting');
+  const projectedExistingServices = (showFrozenExtension && Array.isArray(snapshot.existingServices)
     ? snapshot.existingServices
     : [])
     .map((service) => ({

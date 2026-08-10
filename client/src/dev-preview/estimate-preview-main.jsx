@@ -318,12 +318,12 @@ function lawnMemberUpgradeScenario() {
     ...lawn,
     estimate: {
       ...lawn.estimate,
-      customerFirstName: 'Jay',
-      customerName: 'Jay F.',
+      customerFirstName: 'Riley',
+      customerName: 'Riley H.',
       showOneTimeOption: false,
       membership: {
         isExistingCustomer: true,
-        firstName: 'Jay',
+        firstName: 'Riley',
         tier: 'silver',
         tierLabel: 'Silver',
         tierDiscountPct: 10,
