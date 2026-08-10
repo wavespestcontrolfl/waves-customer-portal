@@ -8110,7 +8110,33 @@ const CallRecordingProcessor = {
                     ? (JSON.parse(owned.metadata) || {})
                     : (owned.metadata || {});
                 } catch { ownedMd = {}; }
-                if (ownedMd.attribution_transfer_pending) return;
+                if (ownedMd.attribution_transfer_pending) {
+                  // REFRESH the deferred decision before deferring (codex
+                  // P1 r14): this pass may have re-classified the service
+                  // or referral — the sweep writes the MARKER's saved
+                  // fields, so leaving the old payload would record stale
+                  // channel/service attribution once the blocker resolves.
+                  // from_lead_id and last_attempt_at are preserved; only
+                  // the funnel decision is re-supplied from THIS pass.
+                  const refreshed = {
+                    ...ownedMd.attribution_transfer_pending,
+                    lead_source: callAttr.leadSource,
+                    is_paid: callAttr.isPaid,
+                    detail: leadSourceRow.name || 'inbound call',
+                    service_interest: extracted.matched_service || extracted.requested_service || null,
+                  };
+                  await trx('call_log')
+                    .where({ id: call.id })
+                    .where('processing_token', procToken)
+                    .update({
+                      metadata: db.raw(
+                        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
+                        [JSON.stringify(refreshed)],
+                      ),
+                      updated_at: new Date(),
+                    });
+                  return;
+                }
                 const attrRes = await require('./ads/call-attribution').recordCallPpcAttribution({
                 // The locked owner EXACTLY (GH P1 r6) — an unassigned
                 // lead's live owner is NULL and recordCallPpcAttribution

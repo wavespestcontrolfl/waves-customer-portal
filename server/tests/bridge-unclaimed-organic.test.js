@@ -184,8 +184,25 @@ describe('scheduler wiring', () => {
     // genuine no-Google-Ads installs opt in explicitly.
     expect(block).toMatch(/bridgeBlockedReason = 'google_ads_unconfigured'/);
     expect(block).toMatch(/BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED/);
+    // Ambiguity blocks too (codex P1, PR #3303 r14): strong-but-non-unique
+    // paid evidence deliberately left the call unclaimed — sweeping its
+    // lead organic would be an irreversible mislabel.
+    expect(block).toMatch(/bridgeBlockedReason = 'ambiguous_matches'/);
     expect(block).toMatch(/if \(bridgeBlockedReason\)/);
     expect(block.indexOf('if (bridgeBlockedReason)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
+  });
+
+  test('selection excludes deleted and customer-less leads (codex P1+P2, PR #3303 r14)', () => {
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
+    // Soft-deleted leads must not gain organic funnel rows — selection AND
+    // the locked reread.
+    expect(sweep).toMatch(/\.whereNull\('l\.deleted_at'\)/);
+    expect(sweep).toMatch(/\.whereNull\('deleted_at'\)/);
+    // Customer-less leads defer to the claim-time backfill instead of
+    // occupying the limited oldest-first window with daily no_customer
+    // refusals.
+    expect(sweep).toMatch(/\.whereNotNull\('l\.customer_id'\)/);
   });
 
   test('manual admin bridge-apply is serialized under the same lease', () => {

@@ -74,6 +74,31 @@ function makeLeadsTable({ lead = LEAD, sharedLead = undefined } = {}) {
   };
 }
 
+// Replay a grouped where-callback against a recorder that logs every
+// predicate call (nested groups stay as [method, fn] entries for the caller
+// to replay further).
+const makeGroupRecorder = (log) => {
+  const g = {};
+  ['where', 'whereNot', 'whereNull', 'whereRaw', 'whereNotNull',
+    'orWhere', 'orWhereRaw', 'orWhereNotNull'].forEach((m) => {
+    g[m] = (...args) => { log.push([m, ...args]); return g; };
+  });
+  return g;
+};
+
+// The sid arm (codex P1 r14) is an orWhere(function) group whose first
+// predicate is the sid match — find and replay it.
+const findSidArm = (recorded) => {
+  for (const c of recorded) {
+    if (c[0] === 'orWhere' && typeof c[1] === 'function') {
+      const sub = [];
+      c[1].call(makeGroupRecorder(sub));
+      if (sub.some((s) => s[0] === 'where' && s[1] === 'twilio_call_sid')) return sub;
+    }
+  }
+  return null;
+};
+
 describe('GET /admin/leads/:id — call reference (recording + transcript)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -158,7 +183,20 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     };
     callLogWhereFns.forEach((fn) => fn.call(group));
 
-    expect(recorded).toContainEqual(['orWhere', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    // The sid arm is a GROUP since codex P1 r14: the sid match MINUS a
+    // settled dissenting stamp (a repointed call must not surface on the
+    // obsolete lead's card).
+    const sidArm = findSidArm(recorded);
+    expect(sidArm).toBeTruthy();
+    expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    const notGroup = sidArm.find((s) => s[0] === 'whereNot' && typeof s[1] === 'function');
+    expect(notGroup).toBeTruthy();
+    const dissent = [];
+    notGroup[1].call(makeGroupRecorder(dissent));
+    expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' IS NOT NULL"]);
+    expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' != ?", [String(LEAD.id)]]);
+    expect(dissent).toContainEqual(['whereNull', 'processing_token']);
+    expect(dissent).toContainEqual(['whereRaw', "COALESCE(processing_status, '') = 'processed'"]);
     const rawMatches = recorded.filter(
       (c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892',
     );
@@ -200,8 +238,11 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     };
     callLogWhereFns.forEach((fn) => fn.call(group));
 
-    // The SID linkage stays; no phone-leg predicates were added.
-    expect(recorded).toContainEqual(['orWhere', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    // The SID linkage stays (as the grouped arm); no phone-leg predicates
+    // were added.
+    const sidArm = findSidArm(recorded);
+    expect(sidArm).toBeTruthy();
+    expect(sidArm).toContainEqual(['where', 'twilio_call_sid', LEAD.twilio_call_sid]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
 

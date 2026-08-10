@@ -3838,9 +3838,18 @@ function initScheduledJobs() {
             // Any write failure means a claim the bridge ATTEMPTED may not have
             // repointed the lead yet — the sweep must not take it organic today.
             const writeFailed = (r.skipped || []).some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
+            // Ambiguity is uncertainty, not absence (codex P1 r14): an
+            // 'ambiguous' match means the scan found STRONG but non-unique
+            // paid-call evidence and deliberately left the CRM call
+            // unclaimed — sweeping its lead organic today would
+            // irreversibly label a probably-paid lead. Same doctrine as
+            // every other doubt: the fallback waits until the ambiguity
+            // resolves (a later scan usually separates the scores).
+            const ambiguousCount = r.summary?.ambiguous || 0;
             if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
             else if (capHit) bridgeBlockedReason = 'row_cap_hit';
             else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
+            else if (ambiguousCount > 0) bridgeBlockedReason = 'ambiguous_matches';
             logger.info(`[google-call-bridge cron] ${JSON.stringify({
               configured: r.configured,
               scanFailed: !!r.scanFailed,
@@ -3848,6 +3857,7 @@ function initScheduledJobs() {
               skipped: r.skippedCount,
               googleCalls: r.summary?.googleCalls,
               crmMainLineCalls: r.summary?.crmMainLineCalls,
+              ambiguous: ambiguousCount,
             })}`);
           } else if (process.env.BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED !== 'true') {
             // Fail closed on an UNCONFIGURED Google Ads API: a missing/rotated

@@ -898,7 +898,28 @@ router.get('/:id', async (req, res, next) => {
         // metadata arm below is always present (codex P1 r13).
         const rows = await db('call_log')
           .where(function () {
-            if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+            // The SID arm YIELDS to a settled dissenting stamp (codex P1
+            // r14, same precedence as the bridge and whereCallStillLinked):
+            // a successful force-reprocess that repointed this call to a
+            // DIFFERENT lead leaves the sid on the obsolete row, and the
+            // unconditional sid match surfaced the same transcript on both
+            // cards — including the lead the processor rejected. Settled =
+            // the same predicate as the inclusion arm below; a mid-flight
+            // pass's provisional stamp does not suppress the sid match.
+            if (lead.twilio_call_sid) {
+              this.orWhere(function sidArm() {
+                this.where('twilio_call_sid', lead.twilio_call_sid)
+                  .whereNot(function settledDissentingStamp() {
+                    // Every leg NULL-proof: a NULL processing_status would
+                    // make the NOT-group evaluate to SQL NULL and silently
+                    // drop the row from the sid arm.
+                    this.whereRaw("metadata->>'lead_id' IS NOT NULL")
+                      .whereRaw("metadata->>'lead_id' != ?", [String(lead.id)])
+                      .whereNull('processing_token')
+                      .whereRaw("COALESCE(processing_status, '') = 'processed'");
+                  });
+              });
+            }
             // Phone-less reuse: a later call that reused this lead carries a
             // DIFFERENT sid and no matchable phone — the processor links it
             // via the durable metadata stamp instead (the lead keeps its

@@ -165,16 +165,23 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(markerClearUpdates()).toHaveLength(1);
   });
 
-  test('an extraction_failed call (NULL token but a FAILED retryable attempt) is skipped entirely', async () => {
+  test('an extraction_failed call (NULL token but a FAILED retryable attempt) is skipped — but attempt-stamped', async () => {
     // codex P1 r13: token-NULL alone is not settled-successful — the same
     // allowlist as callStillAttributable (processed / legacy NULL only).
+    // codex P2 r14: the skip still stamps last_attempt_at — a call whose
+    // retry budget is exhausted stays extraction_failed forever, and an
+    // unstamped marker would sort first every scan and starve the lane.
     lockedCallRow.processing_status = 'extraction_failed';
 
     const s = await sweepPendingAttributionTransfers();
 
     expect(s.skipped).toBe(1);
     expect(inserts).toHaveLength(0);
-    expect(updates).toHaveLength(0); // neither cleared nor attempt-stamped
+    expect(markerClearUpdates()).toHaveLength(0); // marker survives
+    const attemptStamps = updates.filter((u) => u.table === 'call_log'
+      && typeof u.patch.metadata === 'string'
+      && u.patch.metadata.includes('last_attempt_at'));
+    expect(attemptStamps).toHaveLength(1);
   });
 
   test('a stamp repointed since the scan is skipped — the next run locks the right lead', async () => {

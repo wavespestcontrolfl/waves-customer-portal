@@ -530,6 +530,17 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
 
   const leads = await db('leads as l')
     .whereIn('l.lead_source_id', bridgeSources.map((s) => s.id))
+    // Live leads only (codex P1 r14): a soft-deleted lead with a customer
+    // still passed recordCallPpcAttribution, so deleted leads kept feeding
+    // acquisition/ROI data after deletion. Revalidated under the lock too.
+    .whereNull('l.deleted_at')
+    // Customer-less leads are DEFERRED to the claim-time backfill (codex
+    // P2 r14): recordCallPpcAttribution refuses them ('no_customer'), so
+    // this oldest-first limited scan re-selected the same refusable rows
+    // every day — `limit` of them would permanently starve every newer
+    // claimed lead. backfillCallLeadAttribution writes their row at the
+    // moment they gain a customer, so exclusion loses nothing.
+    .whereNotNull('l.customer_id')
     // CALL leads only. Bridge suppression only ever applied to the call path;
     // web leads on this source row got their funnel row at webhook time — and
     // the LEGACY ones link it by customer_id with lead_id NULL, which the
@@ -634,6 +645,10 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
         // the LOCKED row; a source that left the bridge set skips.
         const locked = await trx('leads')
           .where({ id: lead.id })
+          // Live-lead predicate re-applied under the lock (codex P1 r14):
+          // a lead soft-deleted between selection and lock must not gain
+          // an organic funnel row.
+          .whereNull('deleted_at')
           .forUpdate()
           .first('id', 'customer_id', 'lead_source_id', 'service_interest', 'first_contact_at', 'created_at', 'twilio_call_sid');
         if (!locked) return { recorded: false, reason: 'lead_gone' };
@@ -837,15 +852,6 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         const pending = md.attribution_transfer_pending;
         if (!pending) return 'skipped'; // resolved since the scan
         if (lockedCall.processing_token) return 'skipped'; // in-flight pass owns it
-        // SUCCESSFUL settled passes only — the same allowlist as
-        // callStillAttributable (codex P1 r13): extraction_failed also
-        // carries a NULL token, but it is a retryable FAILED attempt whose
-        // retry re-derives linkage; attributing (or clearing) from it
-        // would act on an unfinished verdict. '' covers the intentional
-        // legacy NULL status.
-        const status = String(lockedCall.processing_status || '').toLowerCase();
-        if (status !== 'processed' && status !== '') return 'skipped';
-        const liveLeadId = md.lead_id ? String(md.lead_id) : null;
         const clearMarker = () => trx('call_log')
           .where({ id: row.id })
           .whereNull('processing_token')
@@ -853,19 +859,7 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
             metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'attribution_transfer_pending'"),
             updated_at: new Date(),
           });
-        // Positively-established dead linkage: a settled call with no live
-        // stamp (or a durable non-lead verdict) can never take the write.
-        if (!liveLeadId || md.no_attribution === true) {
-          await clearMarker();
-          return 'cleared';
-        }
-        if (liveLeadId !== scannedLeadId) return 'skipped'; // repointed since the scan — next run locks the right lead
-        if (!lockedLead) {
-          // The stamp still names this lead but the row is gone/soft-deleted.
-          await clearMarker();
-          return 'cleared';
-        }
-        // A blocked/unclaimed marker stamps last_attempt_at so the fair
+        // A deferred/blocked marker stamps last_attempt_at so the fair
         // ordering rotates it behind never-tried markers (codex P2 r13).
         const stampAttempt = () => trx('call_log')
           .where({ id: row.id })
@@ -878,6 +872,34 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
             updated_at: new Date(),
           });
         const blocked = async () => { await stampAttempt(); return 'blocked'; };
+        // SUCCESSFUL settled passes only — the same allowlist as
+        // callStillAttributable (codex P1 r13): extraction_failed also
+        // carries a NULL token, but it is a retryable FAILED attempt whose
+        // retry re-derives linkage; attributing (or clearing) from it
+        // would act on an unfinished verdict. '' covers the intentional
+        // legacy NULL status. The skip still stamps last_attempt_at
+        // (codex P2 r14): a call whose retry budget is exhausted stays
+        // extraction_failed forever, and without the stamp its marker
+        // sorts first every day — `limit` such markers would permanently
+        // starve every actionable transfer behind them.
+        const status = String(lockedCall.processing_status || '').toLowerCase();
+        if (status !== 'processed' && status !== '') {
+          await stampAttempt();
+          return 'skipped';
+        }
+        const liveLeadId = md.lead_id ? String(md.lead_id) : null;
+        // Positively-established dead linkage: a settled call with no live
+        // stamp (or a durable non-lead verdict) can never take the write.
+        if (!liveLeadId || md.no_attribution === true) {
+          await clearMarker();
+          return 'cleared';
+        }
+        if (liveLeadId !== scannedLeadId) return 'skipped'; // repointed since the scan — next run locks the right lead
+        if (!lockedLead) {
+          // The stamp still names this lead but the row is gone/soft-deleted.
+          await clearMarker();
+          return 'cleared';
+        }
         const existing = await trx('ad_service_attribution')
           .where({ source_call_id: row.id })
           .first('id', 'lead_id');
