@@ -710,7 +710,13 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
         // on the manual review path (the accept notification still names
         // them for the owner).
         if (Array.isArray(svc.contracts) && svc.contracts.length > 1) continue;
-        const currentPerVisit = Number(svc.currentPerVisit);
+        // EXTENSION basis is the ROW price the accept-time frozen-price
+        // check verifies against (codex #3338 r13) — the staff spend view
+        // prefers the last-paid invoice, but freezing that here would
+        // advertise a figure accept immediately parks as drift whenever
+        // invoice and scheduled rows disagree. Unpriced rows have no
+        // billable basis to discount and are skipped.
+        const currentPerVisit = Number(svc.scheduledPerVisit);
         if (!(currentPerVisit > 0)) continue; // no honest price to discount
         const perVisitSavings = round2(currentPerVisit * delta);
         if (!(perVisitSavings > 0)) continue;
@@ -801,13 +807,18 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 // actually renders (EstimateViewPage MembershipCard / estimateAddServiceOffer
 // and the SSR membership block). WHITELIST, never blacklist: an additive
 // snapshot field defaults to staff-only unless it is projected here.
-function publicMembershipView(snapshot) {
+function publicMembershipView(snapshot, { committed = false } = {}) {
   if (!snapshot || typeof snapshot !== 'object') return null;
   // Gate checked at PROJECTION time too (codex #3338 r1): a plan frozen
   // while the gate was on must not keep displaying after the kill switch
-  // turns the accept-side apply off. Computed first so the
-  // discountAppliesTo discriminator below can follow the PROJECTED rows.
-  const projectedExistingServices = (isEnabled('waveguardExtendExisting') && Array.isArray(snapshot.existingServices)
+  // turns the accept-side apply off. EXCEPT committed estimates (codex
+  // #3338 r15 sibling): an accepted/price-locked estimate whose extension
+  // already applied is a permanent record — hiding it would tell the
+  // customer their current prices stayed unchanged after money moved.
+  // Callers pass committed=true for accepted / price-locked rows.
+  // Computed first so the discountAppliesTo discriminator below can follow
+  // the PROJECTED rows.
+  const projectedExistingServices = ((committed === true || isEnabled('waveguardExtendExisting')) && Array.isArray(snapshot.existingServices)
     ? snapshot.existingServices
     : [])
     .map((service) => ({

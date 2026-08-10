@@ -600,8 +600,6 @@ async function applyFrozenExistingServiceExtension({
     reviewFamilies: [],
     monthlyRateReviewNeeded: false,
   };
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('waveguardExtendExisting')) return summary;
   const snapshot = estimateData?.membershipSnapshot;
   const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
     .filter((svc) => Number(svc?.currentPerVisit) > 0
@@ -614,6 +612,19 @@ async function applyFrozenExistingServiceExtension({
   // its numbers.
   if (String(snapshot?.tierLabel || '').trim().toLowerCase()
     !== String(activatedTier || '').trim().toLowerCase()) {
+    return summary;
+  }
+  // Kill switch off but a tier-matching frozen plan exists (saved while it
+  // was on): an already-open estimate tab can still promise the extension
+  // — projection-time hiding can't reach a rendered page (codex #3338
+  // r15) — so the accept parks the plan for review instead of going
+  // silent. No plan (every legacy accept) returns above and stays a
+  // silent no-op; no money moves either way with the gate off.
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('waveguardExtendExisting')) {
+    for (const svc of plan) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (extension gate off at accept — not applied)`);
+    }
     return summary;
   }
   const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
@@ -694,7 +705,18 @@ async function applyFrozenExistingServiceExtension({
       }
       const next = Number(svc.newPerVisit);
       if (!(next > 0) || next >= price) continue;
-      await database('scheduled_services').where({ id: row.id }).update({ estimated_price: next });
+      // Concurrency guard (codex #3338 r14): the frozen-or-review invariant
+      // must hold against a price edit landing between the row read and
+      // this write — the predicate re-asserts the exact price the match
+      // was computed on (raw value, so pg numeric comparison is exact).
+      // Zero rows updated = the price moved underneath us = drift.
+      const changed = await database('scheduled_services')
+        .where({ id: row.id, estimated_price: row.estimated_price })
+        .update({ estimated_price: next });
+      if (!changed) {
+        driftRows += 1;
+        continue;
+      }
       repriced += 1;
     }
     if (driftRows > 0) {
@@ -4149,7 +4171,23 @@ const EstimateConverter = {
         }));
       } catch (extErr) {
         logger.warn(`[estimate-converter] existing-service tier extension failed (falling back to review notice): ${extErr.message}`);
-        extension = null;
+        // A throw here means the gate/plan/tier preconditions all passed
+        // (the plan-less paths return before the first await), so the
+        // customer accepted an ADVERTISED extension — a failed apply must
+        // page staff, never vanish with the rolled-back savepoint (codex
+        // #3338 r16: on a tier-equal customer neither notification operand
+        // would otherwise be true).
+        extension = {
+          applied: false,
+          repricedRowCount: 0,
+          families: [],
+          familyLines: [],
+          creditAmount: 0,
+          creditLines: [],
+          skippedFamilies: [],
+          reviewFamilies: ['existing-service extension failed at accept — apply manually'],
+          monthlyRateReviewNeeded: false,
+        };
       }
     }
     const extensionApplied = extension?.applied === true;

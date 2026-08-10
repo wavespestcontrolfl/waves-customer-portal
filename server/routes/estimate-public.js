@@ -8388,7 +8388,12 @@ async function handleEstimateView(req, res, next) {
       // Same PUBLIC boundary as /data: renderPage only reads whitelisted
       // fields today, but projecting here keeps a future SSR embed from
       // shipping the staff account context to the unauthenticated page.
-    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
+    }, estData, publicMembershipView(membership, {
+      // Accepted/price-locked estimates keep their committed extension
+      // record even with the gate off (codex #3338 r15 sibling) — same
+      // committed definition the snapshot reconciler uses.
+      committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
   } catch (err) { next(err); }
 }
 
@@ -20898,7 +20903,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // Project the frozen snapshot down to the fields the customer page
         // renders — the staff account context (per-property addresses,
         // per-contract prices, payment/visit dates) stays server-side.
-        membership: publicMembershipView(membership),
+        // Accepted/price-locked estimates keep their committed extension
+        // record even with the gate off (codex #3338 r15 sibling) — same
+        // committed definition the snapshot reconciler uses.
+        membership: publicMembershipView(membership, {
+          committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
+        }),
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),

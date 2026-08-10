@@ -30,7 +30,7 @@ jest.mock('../services/customer-credit', () => ({
 
 const { applyFrozenExistingServiceExtension } = require('../services/estimate-converter');
 
-function fakeTrx() {
+function fakeTrx({ concurrentPrices = {} } = {}) {
   const updates = [];
   const auditRows = [];
   const database = (table) => {
@@ -38,6 +38,16 @@ function fakeTrx() {
       return {
         where: (criteria) => ({
           update: async (patch) => {
+            // Honor the frozen-price predicate the way pg would: the live
+            // price is the mocked row's — or a concurrent override, for the
+            // read-to-write race tests (codex #3338 r14).
+            const live = Object.prototype.hasOwnProperty.call(concurrentPrices, String(criteria.id))
+              ? concurrentPrices[String(criteria.id)]
+              : mockRowsState.rows.find((r) => String(r.id) === String(criteria.id))?.estimated_price;
+            if (criteria.estimated_price !== undefined
+              && Number(live) !== Number(criteria.estimated_price)) {
+              return 0;
+            }
             updates.push({ id: criteria.id, ...patch });
             return 1;
           },
@@ -92,7 +102,7 @@ beforeEach(() => {
 });
 
 describe('applyFrozenExistingServiceExtension', () => {
-  test('gate off applies nothing', async () => {
+  test('gate off with a frozen plan: no writes, but the plan parks for review (open-tab flip)', async () => {
     mockExtendExistingGate = false;
     const { database, updates, auditRows } = fakeTrx();
     mockRowsState.rows = [pestRow()];
@@ -103,6 +113,38 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(summary.applied).toBe(false);
     expect(updates).toEqual([]);
     expect(auditRows).toEqual([]);
+    // codex #3338 r15: a rendered page can still promise the extension
+    // after the flip — the accept must page staff, never go silent.
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (extension gate off at accept — not applied)',
+    ]);
+  });
+
+  test('gate off with NO frozen plan stays a silent no-op (every legacy accept)', async () => {
+    mockExtendExistingGate = false;
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow()];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: {}, activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+
+  test('a price changed between read and write loses the race and parks as drift (predicate-guarded update)', async () => {
+    const { database, updates } = fakeTrx({ concurrentPrices: { 'row-1': 61 } });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit priced differently than quoted — apply manually)',
+    ]);
   });
 
   test('frozen plan reprices matching upcoming rows to the displayed figure and audits atomically', async () => {

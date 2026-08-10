@@ -19,6 +19,7 @@ function fakeDb({ customers = [], properties = [], propertiesThrow = false } = {
       join: () => builder,
       where: () => builder,
       whereNull: () => builder,
+      orderBy: () => builder,
       limit: () => builder,
       select: async () => {
         if (String(table).startsWith('customer_properties') && propertiesThrow) {

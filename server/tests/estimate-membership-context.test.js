@@ -826,13 +826,17 @@ describe('existing-service tier extension snapshot', () => {
       customerId: 'cust-1',
       estData: lawnEstimateData(),
     });
+    // Basis is the ROW scheduled price (120), NOT the last-paid invoice
+    // (117) — the accept-time frozen-price check verifies against the row,
+    // so an invoice-derived figure would park as drift on arrival (codex
+    // #3338 r13).
     expect(ctx.existingServices).toEqual([expect.objectContaining({
       key: 'pest_control',
       label: 'Pest Control',
-      currentPerVisit: 117,
+      currentPerVisit: 120,
       extraDiscountPct: 10,
-      perVisitSavings: 11.7,
-      newPerVisit: 105.3,
+      perVisitSavings: 12,
+      newPerVisit: 108,
       remainingVisits: 3,
       upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
       // Frozen appointment identities the accept-time apply pins to
@@ -967,6 +971,12 @@ describe('existing-service tier extension snapshot', () => {
     const view = publicMembershipView(snapshot);
     expect(view.existingServices).toEqual([]);
     expect(view.discountAppliesTo).toBe('new_services_only');
+    // COMMITTED estimates are the exception (codex #3338 r15 sibling): an
+    // accepted/price-locked row's extension already moved money — its
+    // permanent recap keeps the record even with the gate off.
+    const committedView = publicMembershipView(snapshot, { committed: true });
+    expect(committedView.existingServices).toHaveLength(1);
+    expect(committedView.discountAppliesTo).toBe('new_and_existing_services');
   });
 
   test('gate on: no tier change means no extension rows', async () => {
@@ -1002,10 +1012,10 @@ describe('existing-service tier extension snapshot', () => {
     expect(view.existingServices).toEqual([{
       key: 'pest_control',
       label: 'Pest Control',
-      currentPerVisit: 117,
-      newPerVisit: 105.3,
+      currentPerVisit: 120,
+      newPerVisit: 108,
       extraDiscountPct: 10,
-      perVisitSavings: 11.7,
+      perVisitSavings: 12,
       remainingVisits: 3,
       upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
       prepaid: false,

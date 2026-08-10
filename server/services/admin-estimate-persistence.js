@@ -1867,11 +1867,17 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
     // House-number prefix narrows cheaply; the street comparator (the same
     // canonical one the membership snapshot uses) decides the real match.
     const { sameStreetAddress } = require('./estimator-engine/address-compare');
+    // Bounded but generous (codex #3338 r17): a common house number can
+    // match many active addresses, and an unordered small limit could drop
+    // the true member before the street comparator runs. 50 per leg with a
+    // deterministic order keeps the scan bounded while making a same-house-
+    // number collision that deep implausible.
     const candidates = await database('customers')
       .where((q) => q.where('active', true).orWhereNull('active'))
       .whereNull('deleted_at')
       .where('address_line1', 'ilike', `${houseNumber} %`)
-      .limit(8)
+      .orderBy('id')
+      .limit(50)
       .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip', 'waveguard_tier', 'monthly_rate');
     // A member's NON-PRIMARY addresses live in customer_properties, not
     // customers.address_line1 (codex #3338 r12) — a secondary-property
@@ -1884,7 +1890,8 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
         .where((q) => q.where('c.active', true).orWhereNull('c.active'))
         .whereNull('c.deleted_at')
         .where('cp.address_line1', 'ilike', `${houseNumber} %`)
-        .limit(8)
+        .orderBy('cp.id')
+        .limit(50)
         .select(
           'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate',
           'cp.address_line1', 'cp.city', 'cp.zip',
