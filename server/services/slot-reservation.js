@@ -217,8 +217,13 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
+      // Containment, not equality: engine_keys is a jsonb ARRAY because the
+      // engine emits versioned aliases for one catalog service
+      // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
+      // #3328 r2 P1.
       const row = await sp('services')
-        .where({ engine_key: engineKey, is_active: true })
+        .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
+        .andWhere({ is_active: true })
         .first('id');
       resolved = row?.id || null;
     });
