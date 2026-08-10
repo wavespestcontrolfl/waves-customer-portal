@@ -3865,6 +3865,21 @@ function initScheduledJobs() {
           const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days });
           logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}`);
         }
+
+        // Retry lane for processor repoints blocked by a legacy
+        // (NULL-provenance) row (codex P1, PR #3303 r12): dedicated/organic
+        // calls have no rescan of their own, so a durable
+        // metadata.attribution_transfer_pending marker defers the funnel
+        // write until the operator resolves the blocking row; this drain
+        // completes it against the live stamped lead. Self-guarded and
+        // independent of the day's bridge health — it repairs calls the
+        // bridge never scans, so a blocked bridge pass must not starve it.
+        try {
+          const { sweepPendingAttributionTransfers } = require('./ads/call-attribution');
+          await sweepPendingAttributionTransfers({ limit: 100 });
+        } catch (err) {
+          logger.warn(`[attribution-transfer-sweep] failed: ${err.message}`);
+        }
       });
     } catch (err) {
       logger.error(`Google Ads call bridge / unclaimed-organic sweep failed: ${err.message}`);

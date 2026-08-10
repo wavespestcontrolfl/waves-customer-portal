@@ -764,6 +764,144 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
   return 'retired_cleared';
 }
 
+// Drain the durable retry markers the processor writes when a repoint found
+// the FORMER lead holding a legacy (NULL source_call_id) row (codex P1,
+// PR #3303 r12): the funnel write was suppressed to avoid double-counting,
+// but a dedicated/organic call finalizes as 'processed' and nothing ever
+// rescans it — so once an operator resolves the legacy row, the new lead
+// would stay unattributed forever. This sweep (daily, after the bridge/
+// organic pair) completes the write against the LIVE stamped lead.
+//
+// Per row, in ONE transaction under the repo lock order (leads →
+// call_log): re-verify the call is still SETTLED (a held processing_token
+// means an in-flight pass owns the decision — skip), the marker still
+// present, and the live stamp still names the lead we locked (a repoint
+// since the scan retries next run against the right lead). The marker is
+// CLEARED without writing when the linkage is positively gone (no stamp /
+// dead lead / durable no_attribution verdict) or the row already exists —
+// a later pass, or provenance recovery, beat us to it and the partial
+// UNIQUE on source_call_id would refuse a second insert anyway. A still-
+// present legacy row, or an unclaimed live lead (recordCallPpcAttribution
+// refuses a NULL owner), leaves the marker for the next run. Failures keep
+// the marker too — this IS the retry lane.
+async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
+  const summary = { scanned: 0, recorded: 0, cleared: 0, blocked: 0, skipped: 0, failed: 0 };
+  const parseMd = (raw) => {
+    if (!raw) return {};
+    if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return {}; } }
+    return raw;
+  };
+  let rows = [];
+  try {
+    rows = await db('call_log')
+      // NOT the jsonb `?` existence operator — knex.raw consumes a bare ?
+      // as a binding placeholder.
+      .whereRaw("metadata->'attribution_transfer_pending' IS NOT NULL")
+      .whereNull('processing_token')
+      .orderBy('created_at', 'asc')
+      .limit(limit)
+      .select('id', 'metadata', 'created_at');
+  } catch (e) {
+    logger.warn(`[attribution-transfer-sweep] scan failed: ${e.code || e.name || 'db_error'}`);
+    return summary;
+  }
+  for (const row of rows) {
+    summary.scanned += 1;
+    const scannedMd = parseMd(row.metadata);
+    const scannedLeadId = scannedMd.lead_id ? String(scannedMd.lead_id) : null;
+    try {
+      const outcome = await db.transaction(async (trx) => {
+        // Leads FIRST (repo-wide order): the scanned stamp names the lead
+        // to lock; the locked call row below re-verifies the stamp still
+        // points there before the lock is trusted.
+        const lockedLead = scannedLeadId
+          ? await trx('leads')
+            .where({ id: scannedLeadId })
+            .whereNull('deleted_at')
+            .forUpdate()
+            .first('id', 'customer_id')
+          : null;
+        const lockedCall = await trx('call_log')
+          .where({ id: row.id })
+          .forUpdate()
+          .first('id', 'processing_token', 'metadata', 'created_at');
+        if (!lockedCall) return 'skipped';
+        const md = parseMd(lockedCall.metadata);
+        const pending = md.attribution_transfer_pending;
+        if (!pending) return 'skipped'; // resolved since the scan
+        if (lockedCall.processing_token) return 'skipped'; // in-flight pass owns it
+        const liveLeadId = md.lead_id ? String(md.lead_id) : null;
+        const clearMarker = () => trx('call_log')
+          .where({ id: row.id })
+          .whereNull('processing_token')
+          .update({
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'attribution_transfer_pending'"),
+            updated_at: new Date(),
+          });
+        // Positively-established dead linkage: a settled call with no live
+        // stamp (or a durable non-lead verdict) can never take the write.
+        if (!liveLeadId || md.no_attribution === true) {
+          await clearMarker();
+          return 'cleared';
+        }
+        if (liveLeadId !== scannedLeadId) return 'skipped'; // repointed since the scan — next run locks the right lead
+        if (!lockedLead) {
+          // The stamp still names this lead but the row is gone/soft-deleted.
+          await clearMarker();
+          return 'cleared';
+        }
+        const existing = await trx('ad_service_attribution')
+          .where({ source_call_id: row.id })
+          .first('id');
+        if (existing) {
+          await clearMarker();
+          return 'cleared';
+        }
+        const legacy = await trx('ad_service_attribution')
+          .where({ lead_id: pending.from_lead_id })
+          .whereNull('source_call_id')
+          .first('id');
+        if (legacy) return 'blocked'; // operator hasn't resolved it yet
+        const owner = lockedLead.customer_id || null;
+        if (!owner) return 'blocked'; // unclaimed lead — retry once claimed
+        const res = await recordCallPpcAttribution({
+          customerId: owner,
+          leadId: liveLeadId,
+          leadSource: pending.lead_source,
+          isPaid: pending.is_paid !== false,
+          leadSourceDetail: pending.detail || 'inbound call',
+          serviceInterest: pending.service_interest || null,
+          leadDate: lockedCall.created_at || row.created_at || null,
+          sourceCallId: row.id,
+          dbc: trx,
+        });
+        if (res && res.recorded) {
+          await clearMarker();
+          return 'recorded';
+        }
+        // Definitive refusals can never take the write on this lead: the
+        // lead already carries another call's / another channel's
+        // first-touch row ('other_call' / 'other_source' /
+        // 'web_attributed' — the lead is counted once by design). Clear
+        // rather than retry forever. 'unprovenanced_row' (a legacy row on
+        // the LIVE lead) and transient errors keep the marker — the same
+        // operator-resolution retry lane as the former lead's block.
+        if (res && ['other_call', 'other_source', 'web_attributed'].includes(res.reason)) {
+          await clearMarker();
+          return 'cleared';
+        }
+        return 'blocked';
+      });
+      summary[outcome] += 1;
+    } catch (e) {
+      summary.failed += 1;
+      logger.warn(`[attribution-transfer-sweep] call ${row.id} failed: ${e.code || e.name || 'error'}`);
+    }
+  }
+  if (summary.scanned) logger.info(`[attribution-transfer-sweep] ${JSON.stringify(summary)}`);
+  return summary;
+}
+
 module.exports = {
   recordCallPpcAttribution,
   attributionForSourceType,
@@ -772,5 +910,6 @@ module.exports = {
   retireCallAttributionRow,
   retireAllCallAttributionRows,
   reconcileMovedCallAttributionRow,
+  sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };

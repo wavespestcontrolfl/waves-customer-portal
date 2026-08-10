@@ -8841,6 +8841,46 @@ const CallRecordingProcessor = {
                       .first('id');
                     if (stranded) {
                       attributionConflictRetired = true;
+                      // The suppressed write stays in a RETRY LANE (codex
+                      // P1 r12): the call finalizes as 'processed' and —
+                      // unlike a bridge-target call, which the daily bridge
+                      // scan keeps re-detecting — nothing ever rescans a
+                      // dedicated/organic call, so once the operator
+                      // resolved the legacy row the new lead stayed
+                      // unattributed forever. Persist a durable marker
+                      // carrying the CALL-TIME funnel decision (source /
+                      // paid / detail / service) in the SAME fenced
+                      // transaction as the stamp; the daily attribution
+                      // sweep (sweepPendingAttributionTransfers) completes
+                      // the write against the LIVE stamped lead once the
+                      // blocking row is gone. Gated on the exact predicate
+                      // the suppressed write ran under — a non-attributing
+                      // source or bridge target would never have written,
+                      // so it gets no marker.
+                      const attrMod = require('./ads/call-attribution');
+                      const markerAttr = leadSourceRow
+                        ? attrMod.attributionForSourceType(leadSourceRow.source_type)
+                        : null;
+                      const markerBridgeTarget = leadSourceRow
+                        && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+                      if (customerId && markerAttr && !markerBridgeTarget) {
+                        await trx('call_log')
+                          .where({ id: call.id })
+                          .where('processing_token', procToken)
+                          .update({
+                            metadata: db.raw(
+                              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
+                              [JSON.stringify({
+                                from_lead_id: String(preSettleStampedLeadId),
+                                lead_source: markerAttr.leadSource,
+                                is_paid: markerAttr.isPaid,
+                                detail: leadSourceRow.name || 'inbound call',
+                                service_interest: extracted.matched_service || extracted.requested_service || null,
+                              })],
+                            ),
+                            updated_at: new Date(),
+                          });
+                      }
                       logger.warn(`[call-proc] repoint of ${callSid} left a legacy unprovenanced row on lead ${preSettleStampedLeadId} — funnel write suppressed to avoid double-counting`);
                     }
                   }
