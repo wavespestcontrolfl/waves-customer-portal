@@ -47,4 +47,41 @@ describe('TechPhotoMarksModal click containment', () => {
     fireEvent.click(await findByText('Skip'));
     expect(backdropClick).not.toHaveBeenCalled();
   });
+
+  it('stops accepting marks when the source photo fails to load', async () => {
+    // A broken <img> keeps a nonzero rect, so without this the tech could
+    // place and SAVE customer-facing coordinates against a frame they cannot
+    // see. Live card and PDF already fail closed; this is the third surface.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        supported: true,
+        kinds: [{ kind: 'foam_injection', label: 'Drilled & foamed' }],
+        defaultKind: 'foam_injection',
+        maxMarks: 60,
+        marksByS3Key: {},
+      }),
+    })));
+    const { container, findByText, getByText } = render(
+      <TechPhotoMarksModal serviceId="svc-1" photo={PHOTO} onClose={() => {}} />,
+    );
+    await findByText('Drilled & foamed');
+    const img = container.querySelector('img[src="https://cdn.example.com/abc.jpg"]');
+    // jsdom reports a zero rect, and pointToNormalized rejects that — give the
+    // image a real one so a click maps to a coordinate.
+    img.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 150, right: 200, bottom: 150, x: 0, y: 0,
+    });
+
+    fireEvent.click(img, { clientX: 100, clientY: 75 });
+    expect(container.textContent).toMatch(/1 mark/);
+
+    fireEvent.error(img);
+    expect(container.textContent).toMatch(/could not be loaded/);
+    expect(getByText('Save marks')).toBeDisabled();
+
+    // Further clicks are ignored — the count must not move.
+    fireEvent.click(img, { clientX: 120, clientY: 80 });
+    expect(container.textContent).toMatch(/1 mark/);
+  });
 });

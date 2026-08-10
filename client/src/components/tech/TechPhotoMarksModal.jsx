@@ -21,6 +21,11 @@
 // placed.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+// The SHARED palette (codex P1). A local copy made the comment below a lie:
+// a correction to markColor would have updated the live card and the PDF and
+// left the capture UI showing the technician different colours from the ones
+// the customer sees.
+import { markColor } from '../report/markedPhotoCopy';
 
 const DARK = {
   bg: '#0f1923',
@@ -32,14 +37,6 @@ const DARK = {
   muted: '#94a3b8',
 };
 
-// Mirrors MarkedPhotoCard's palette so the tech sees what the customer will.
-// Never alert red — a treated point is a record of work, not a warning.
-const KIND_COLOR = {
-  foam_injection: '#0A7EC2',
-  spot_treatment: '#157A5B',
-  wood_treatment: '#A9690C',
-};
-const DEFAULT_COLOR = '#0A7EC2';
 const API = import.meta.env.VITE_API_URL || '';
 const LONG_PRESS_MS = 500;
 
@@ -51,6 +48,11 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  // A broken <img> can keep a nonzero rect, so clicks would still normalize
+  // against a frame the technician cannot see — persisting customer-facing
+  // treatment coordinates blind. The live card and the PDF already fail closed
+  // on this; the capture surface is the third of that trio (codex P2).
+  const [imageFailed, setImageFailed] = useState(false);
   const imgRef = useRef(null);
   const pressRef = useRef(null);
   const removedRef = useRef(false);
@@ -101,13 +103,13 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   const addMark = useCallback((event) => {
     // Swallow exactly one click after a long-press removal.
     if (removedRef.current) { removedRef.current = false; return; }
-    if (!activeKind) return;
+    if (!activeKind || imageFailed) return;
     const point = pointToNormalized(event);
     if (!point) return;
     setMarks((prev) => (prev.length >= maxMarks
       ? prev
       : [...prev, { x: point.x, y: point.y, kind: activeKind }]));
-  }, [activeKind, maxMarks, pointToNormalized]);
+  }, [activeKind, maxMarks, pointToNormalized, imageFailed]);
 
   // Long-press a mark to remove it. Held on the mark itself so a stray press
   // on open photo area can never delete a point the tech placed.
@@ -200,6 +202,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
                 ref={imgRef}
                 src={photo?.url}
                 alt="Treated area"
+                onError={() => setImageFailed(true)}
                 style={{ width: '100%', display: 'block', touchAction: 'manipulation' }}
                 draggable={false}
               />
@@ -235,7 +238,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
                     transform: `translateX(${mark.x < 0.04 ? '-10%' : (mark.x > 0.96 ? '-90%' : '-50%')})`,
                     minWidth: 25, height: 25, padding: '0 6px', borderRadius: 999,
                     border: '2px solid rgba(255,255,255,.94)',
-                    background: KIND_COLOR[mark.kind] || DEFAULT_COLOR,
+                    background: markColor(mark.kind),
                     color: '#fff', fontSize: 12, fontWeight: 600, lineHeight: 1,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     boxShadow: '0 2px 7px rgba(6,16,24,.5)',
@@ -260,6 +263,12 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
               ))}
             </div>
 
+            {imageFailed && (
+              <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>
+                This photo could not be loaded, so marks can&apos;t be placed on it.
+                Close and reopen to try again.
+              </p>
+            )}
             <p style={{ color: DARK.muted, fontSize: 12, marginTop: 10 }}>
               Tap to add · hold a mark to remove
               {marks.length >= maxMarks ? ` · limit ${maxMarks} reached` : ''}
@@ -289,7 +298,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
           <button
             type="button"
             onClick={save}
-            disabled={saving || loading || !kinds.length}
+            disabled={saving || loading || !kinds.length || imageFailed}
             style={{
               flex: 1, padding: 10, borderRadius: 8, fontSize: 13.5, fontWeight: 600,
               border: `1px solid ${DARK.teal}`, background: DARK.teal,
