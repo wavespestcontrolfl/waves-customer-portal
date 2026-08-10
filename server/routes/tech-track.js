@@ -51,6 +51,16 @@ const {
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
+const {
+  photoMarksGateOn,
+  markKindsForLane,
+  defaultKindForLane,
+  laneSupportsMarks,
+  validateMarks,
+  saveMarksForPhoto,
+  loadMarksByS3Key,
+  MAX_MARKS_PER_PHOTO,
+} = require('../services/service-report/photo-marks');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -568,6 +578,202 @@ router.get('/:id/photos', async (req, res, next) => {
     next(err);
   }
 });
+
+// ── Treated-point marks on a service photo (GATE_PHOTO_MARKS, dark) ────────────
+// The technician photographs the area they actually treated and taps the
+// treated points on it. Marks are metadata keyed on the photo's S3 KEY — never
+// composited into the image (that would break the service_photos hash chain)
+// and never keyed on service_photos.id (promotion of a staged photo deletes
+// and re-inserts that row under a new id mid-visit).
+//
+// Marks are OPTIONAL by owner ruling: a visit with none is complete, so these
+// endpoints exist to be skipped without consequence.
+// 'before' is definitionally pre-treatment, so it can never carry treated
+// points. The rest ('after', 'progress', 'issue') depict the visit's own work
+// or findings and can legitimately show where treatment was applied.
+const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
+
+// The lane whose mark vocabulary applies to this visit. The PRIMARY wins when
+// it supports marks; otherwise any ADD-ON line that resolves to a photo lane
+// does (codex P1 r3) — a termite-bait primary with a foam add-on is a foam
+// visit for marking purposes, and checking only the primary left those techs
+// with no way to record the points they drilled.
+async function markLaneForService(svc) {
+  const { addonVerdictsFromLines, resolveAddonVerdicts } = require('../services/service-report/trace-eligibility');
+
+  // A COMPLETED visit resolves from the identity frozen into its record, not
+  // from the mutable schedule row (codex P2 r4). The report renders from
+  // completedServiceKey / completedAddonLines, so resolving live here lets an
+  // admin repoint via update-details desynchronize the two: the route would
+  // accept marks for a lane that never renders, or reject a clear for a
+  // removed lane while its old pins stay customer-visible.
+  let frozen = null;
+  try {
+    const record = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('service_data');
+    const data = record?.service_data
+      ? (typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data)
+      : null;
+    // The primary and the add-on snapshot freeze INDEPENDENTLY (codex P2 r7).
+    // Completion's add-on freezer is fail-soft, so a record can carry
+    // completedServiceKey with no completedAddonLines. Requiring both
+    // discarded a perfectly good frozen primary and fell back to the mutable
+    // schedule row — so after an admin repoint the report still resolved the
+    // frozen foam key and showed its pins while this route reported marks
+    // unsupported. Mirrors report-data: frozen primary wins, absent add-on
+    // snapshot falls back to live rows.
+    if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) frozen = data;
+  } catch { /* fall through to the live resolution below */ }
+
+  let primaryKey = null;
+  let addonVerdicts = null;   // null = not yet resolved
+  if (frozen) {
+    primaryKey = frozen.completedServiceKey || null;
+    // Only when the add-on snapshot actually froze; otherwise leave null so
+    // the live fallback below still runs (codex P2 r7).
+    if (Array.isArray(frozen.completedAddonLines)) {
+      addonVerdicts = await addonVerdictsFromLines(frozen.completedAddonLines, db).catch(() => []);
+    }
+  } else {
+    const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+    const profile = await resolveCompletionProfileForScheduledService(svc, db);
+    primaryKey = profile?.serviceKey || null;
+  }
+  if (laneSupportsMarks(primaryKey)) return primaryKey;
+
+  try {
+    // Scan every line for a photo lane — not combineLineVerdicts, which stops
+    // at the primary or the first eligible add-on (codex P1 r4). Must match
+    // the report's scan or the two disagree about whether marks may exist.
+    if (addonVerdicts === null) addonVerdicts = await resolveAddonVerdicts(svc.id, db);
+    const photoLine = (addonVerdicts || []).find(
+      (v) => v?.eligible && v.variant === 'photo' && laneSupportsMarks(v.serviceKey),
+    );
+    if (photoLine) return photoLine.serviceKey;
+  } catch { /* fail-soft: the primary key stands, marks simply aren't offered */ }
+  return primaryKey;
+}
+
+router.get('/:id/photo-marks', async (req, res, next) => {
+  try {
+    if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    // Lane resolution failure is not a 500: the tech simply gets no marking
+    // affordance, same fail-soft posture as the rest of the tech portal.
+    const serviceKey = await markLaneForService(svc).catch(() => null);
+    const byKey = await loadMarksByS3Key({ scheduledServiceId: svc.id });
+    res.json({
+      supported: laneSupportsMarks(serviceKey),
+      kinds: markKindsForLane(serviceKey),
+      defaultKind: defaultKindForLane(serviceKey),
+      maxMarks: MAX_MARKS_PER_PHOTO,
+      marksByS3Key: Object.fromEntries(byKey),
+    });
+  } catch (err) {
+    logger.error(`[tech-track] photo-marks list failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Whole-set replace for ONE photo: the stored set always equals what the tech
+// last saw. An empty array clears the marks, which is how Skip is honoured
+// after a previous save.
+router.put('/:id/photo-marks', async (req, res, next) => {
+  try {
+    if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const s3Key = typeof req.body?.s3Key === 'string' ? req.body.s3Key.trim() : '';
+    if (!s3Key) return res.status(400).json({ error: 's3Key is required' });
+
+    // The posted key must belong to THIS visit — either a staged photo or a
+    // promoted one. Without this check a caller could attach marks to another
+    // customer's photo by guessing its key.
+    const visitPhoto = await findVisitPhotoByKey(svc.id, s3Key);
+    if (!visitPhoto) return res.status(404).json({ error: 'Photo not found on this service' });
+    // A 'before' photo documents the state BEFORE any treatment, so marks on
+    // it would publish a pre-treatment image under copy calling it the treated
+    // area (codex P1). Rejected server-side, not merely hidden in the UI —
+    // the render is the customer-facing guarantee.
+    if (!MARKABLE_PHOTO_TYPES.has(String(visitPhoto.photo_type || ''))) {
+      return res.status(400).json({
+        error: 'Treated-point marks can only go on a photo taken during or after treatment.',
+        code: 'photo_not_markable',
+      });
+    }
+
+    const serviceKey = await markLaneForService(svc).catch(() => null);
+    const validation = validateMarks(req.body?.marks, { serviceKey });
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    const saved = await saveMarksForPhoto({
+      scheduledServiceId: svc.id,
+      s3Key,
+      marks: validation.marks,
+      technicianId: req.technicianId || null,
+    });
+    logger.info(
+      `[tech-track] photo marks saved service=${svc.id} tech=${req.technicianId} count=${saved.length}`
+    );
+
+    // Marks render on the report, so a completed visit's cached PDF is stale
+    // the moment they are saved, edited, or cleared — and the cache key is
+    // content-insensitive, so without this the customer keeps downloading a
+    // PDF with the old pins (or no card at all) indefinitely (codex P1).
+    // Same best-effort contract as the treatment-zone write below.
+    try {
+      const completedRecord = await db('service_records')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'desc')
+        .first('id');
+      if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
+    } catch (err) {
+      // Never fail the save on a cache-invalidation hiccup; the marks are
+      // written and the live report is already correct.
+      logger.warn(`[tech-track] pdf cache invalidation after marks failed: ${err.message}`);
+    }
+
+    res.json({ marks: validation.marks });
+  } catch (err) {
+    logger.error(`[tech-track] photo-marks save failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// A photo belongs to the visit if it is still staged against the scheduled
+// service, or was promoted onto that visit's service_record. Returns the
+// photo_type too — the card publishes the image as the TREATED area, so the
+// type is a correctness input, not metadata.
+async function findVisitPhotoByKey(scheduledServiceId, s3Key) {
+  const staged = await db('scheduled_service_photo_staging')
+    .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
+    .first('id', 'photo_type')
+    .catch(() => null);
+  if (staged) return staged;
+  const record = await db('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id')
+    .catch(() => null);
+  if (!record) return null;
+  return db('service_photos')
+    .where({ service_record_id: record.id, s3_key: s3Key })
+    .first('id', 'photo_type')
+    .catch(() => null);
+}
 
 // ── Recap clip capture DURING the visit (pest-recap lane, P4b) ──────────────────
 // Mirrors the admin-dispatch recap-media endpoints but tech-portal-scoped to the
