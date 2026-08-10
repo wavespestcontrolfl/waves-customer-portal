@@ -597,9 +597,11 @@ violations at the severity noted.
   unconditional 409 `{ exemptReason: 'deposits_retired' }` — the accept
   client consults this after a non-superseding card/hold 409 and reads a
   409-with-exemptReason as "nothing owed"; no PaymentIntent, no Stripe
-  call, no DB write. The other deposit routes — `/deposit-quote`,
-  `/deposit-finalize`, `/deposit-reset` — were REMOVED outright (only
-  reachable from inside the deposit modal, which can no longer open). The
+  call, no DB write. `/deposit-quote`, `/deposit-finalize`, and
+  `/deposit-reset` carry the SAME verdict stub — a 409 with exemptReason
+  is exactly what their kill-switch check returned while the flag was
+  off, so the retirement preserves the live contract for any stale open
+  page. The
   deposit LEDGER — credit roll-forward, void-restore, refunds, webhook
   recording — stays for the 2026-06/07 historical rows; the 2026-07-13
   surcharge ruling and 2026-07-05 commercial-prepay exemption remain the

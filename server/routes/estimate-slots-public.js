@@ -547,13 +547,20 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
 // with an exemptReason as "nothing owed — proceed to accept". A 404 here
 // would read as a failure and BLOCK those accepts. No PI is minted; no
 // Stripe code exists behind this route.
-router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
-  const token = req.params.token;
-  if (!token || !TOKEN_RE.test(token)) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_retired' });
-});
+// The quote/finalize/reset legs get the SAME verdict (pre-push P1): they
+// were only reachable from inside an open deposit modal — impossible in
+// live prod since the flag went dark 2026-07-10 — but a 409 here is also
+// exactly what the kill-switch check returned when the flag was off, so
+// the stubs preserve the live contract instead of swapping it for 404s.
+for (const retiredDepositLeg of ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']) {
+  router.post(`/:token/${retiredDepositLeg}`, depositLimiter, async (req, res) => {
+    const token = req.params.token;
+    if (!token || !TOKEN_RE.test(token)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_retired' });
+  });
+}
 
 // POST /:token/card-hold-intent — Stripe SetupIntent to capture the card that
 // HOLDS a one-time visit (dark until ONE_TIME_CARD_HOLD). No money is taken:
