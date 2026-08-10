@@ -260,11 +260,12 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.warnings).toContain('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
   });
 
-  test('bed cap triggers manual review warning', () => {
+  test('the review threshold triggers manual review, priced unchanged', () => {
     const quote = priceTreeShrub({ bedArea: 8000 }, { tier: 'standard' });
 
     expect(quote.requiresManualReview).toBe(true);
-    expect(quote.warnings.some((w) => w.includes('estimator cap'))).toBe(true);
+    expect(quote.bedAreaUsed).toBe(8000);
+    expect(quote.warnings.some((w) => w.includes('review threshold'))).toBe(true);
   });
 
   test('6-visit standard is the mandated default recommendation regardless of property signals', () => {
@@ -345,7 +346,6 @@ describe('Tree & Shrub Pricing v4.4', () => {
     // distinguish a customer-confirmed estimate from a lot-density inference.
     expect(quote.bedAreaSource).toBe('lot_based');
     expect(quote.bedAreaUsed).toBe(1000);
-    expect(quote.bedAreaCapped).toBe(false);
     // materials = max(60, 15 + 0.055*1000) = 70 (features.trees 'light' → 3-tree fallback adds $12)
     expect(quote.costs.materialCost).toBeCloseTo(82, 2);
   });
@@ -457,7 +457,6 @@ describe('Tree & Shrub estimator hardening', () => {
       const quote = priceTreeShrub({ bedArea: 3500 }, { tier: 'standard' });
       expect(quote.bedAreaUsed).toBe(3500);
       expect(quote.bedAreaSource).toBe('explicit');
-      expect(quote.bedAreaCapped).toBe(false);
       expect(quote.manualReview).toBe(false);
       expect(quote.manualReviewReasons).toEqual([]);
     });
@@ -466,7 +465,6 @@ describe('Tree & Shrub estimator hardening', () => {
       const quote = priceTreeShrub({ estimatedBedAreaSf: 2200 }, { tier: 'standard' });
       expect(quote.bedAreaUsed).toBe(2200);
       expect(quote.bedAreaSource).toBe('estimated');
-      expect(quote.bedAreaCapped).toBe(false);
     });
 
     test('lot-based bed area is reported as lot_based', () => {
@@ -486,20 +484,19 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(quote.manualReviewReasons).toContain('missing_bed_area_fallback');
     });
 
-    test('lot-based cap reports uncapped estimate and bed_area_cap_reached', () => {
-      // Heavy shrubs + complex landscape on a 40k lot ⇒ raw ≈ 12,000 sqft,
-      // which exceeds the 8,000 BED_AREA_CAP.
+    test('lot-based inference above the review threshold prices IN FULL and routes to review (owner ruling 2026-08-10: no caps)', () => {
+      // Heavy shrubs + complex landscape on a 40k lot ⇒ raw ≈ 12,000 sqft.
+      // The old 8,000 clamp priced this ~33% low; now the full area prices
+      // and the review marker keeps it out of autonomous sends.
       const quote = priceTreeShrub(
         { lotSqFt: 40000, features: { shrubs: 'heavy', complexity: 'complex' } },
         { tier: 'standard' }
       );
       expect(quote.bedAreaSource).toBe('lot_based');
-      expect(quote.bedAreaUsed).toBe(8000);
-      expect(quote.bedAreaCapped).toBe(true);
-      expect(quote.uncappedBedAreaEstimate).toBeGreaterThan(8000);
+      expect(quote.bedAreaUsed).toBe(12000);
       expect(quote.manualReview).toBe(true);
-      expect(quote.manualReviewReasons).toContain('bed_area_cap_reached');
       expect(quote.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+      expect(quote.warnings.join(' ')).toMatch(/priced IN FULL/);
     });
 
     test('generateEstimate preserves lot_based bedAreaSource through calculatePropertyProfile', () => {
@@ -524,15 +521,12 @@ describe('Tree & Shrub estimator hardening', () => {
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
       expect(ts.bedAreaSource).toBe('lot_based');
       expect(ts.bedAreaUsed).toBeGreaterThan(0);
-      expect(ts.bedAreaCapped).toBe(false);
     });
 
-    test('generateEstimate preserves cap metadata when property-calculator pre-caps oversized estimatedBedAreaSf', () => {
-      // Regression for Codex P2 review on PR #960: generateEstimate runs
-      // calculatePropertyProfile first, which converts estimatedBedAreaSf:
-      // 9000 into bedArea: 8000 + bedAreaCapped: true. The T&S pricer must
-      // honor that upstream cap signal — otherwise production estimates for
-      // very large landscapes silently miss bed_area_cap_reached.
+    test('an oversized estimatedBedAreaSf prices the FULL area through generateEstimate and routes to review', () => {
+      // estimatedBedAreaSf: 9000 used to be clamped to 8,000 by
+      // calculatePropertyProfile; owner ruling 2026-08-10 removed the clamp
+      // on every path — the full 9,000 prices and the review marker stands.
       const estimate = generateEstimate({
         homeSqFt: 2400,
         stories: 1,
@@ -545,19 +539,14 @@ describe('Tree & Shrub estimator hardening', () => {
         },
       });
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
-      expect(ts.bedAreaUsed).toBe(8000);
-      expect(ts.bedAreaCapped).toBe(true);
-      expect(ts.uncappedBedAreaEstimate).toBe(9000);
+      expect(ts.bedAreaUsed).toBe(9000);
       expect(ts.manualReview).toBe(true);
-      expect(ts.manualReviewReasons).toContain('bed_area_cap_reached');
       expect(ts.manualReviewReasons).toContain('bed_area_at_or_above_8000');
     });
 
-    test('generateEstimate preserves cap metadata when lot-density estimate exceeds the cap', () => {
-      // Same regression scope but via the lot-derived path:
-      // calculatePropertyProfile derives ~13,500 from a 60k lot with heavy
-      // shrubs + complex landscape, then caps to 8,000 with the raw value
-      // recorded as uncappedBedAreaEstimate.
+    test('a large lot-density estimate prices the FULL derived area through generateEstimate', () => {
+      // ~18,000 derived from a 60k lot with heavy shrubs + complex
+      // landscape — previously clamped to 8,000 (silently ~55% low).
       const estimate = generateEstimate({
         homeSqFt: 2400,
         stories: 1,
@@ -569,10 +558,8 @@ describe('Tree & Shrub estimator hardening', () => {
         },
       });
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
-      expect(ts.bedAreaUsed).toBe(8000);
-      expect(ts.bedAreaCapped).toBe(true);
-      expect(ts.uncappedBedAreaEstimate).toBeGreaterThan(8000);
-      expect(ts.manualReviewReasons).toContain('bed_area_cap_reached');
+      expect(ts.bedAreaUsed).toBeGreaterThan(8000);
+      expect(ts.manualReviewReasons).toContain('bed_area_at_or_above_8000');
     });
 
     test('tree_count_at_or_above_15 trips manual review even with explicit bed area', () => {
@@ -1478,13 +1465,13 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
 });
 
 describe('Tree & Shrub prose warnings reach the operator review panel', () => {
-  // The reason TOKENS were already hoisted (§6b). What never reached the
-  // admin "Pricing Review Notes" box was each pricer's prose sentence, so
-  // the operator saw "Bed area cap reached" with no explanation and no
-  // number — on a quote whose bed area had been silently clamped.
+  // The reason TOKENS were already hoisted (§6b); the pricer's prose
+  // sentence rides with them. Since the owner ruling 2026-08-10 nothing
+  // clamps — large areas price IN FULL and the prose says so with the
+  // number, keeping the quote out of autonomous sends via the reason code.
   const { generateEstimate: gen } = require('../services/pricing-engine');
 
-  test('an ESTIMATED bed area above the cap is clamped and both the reason and the prose warning surface', () => {
+  test('an ESTIMATED bed area above the threshold prices IN FULL (owner ruling 2026-08-10: no caps) and the reason + prose surface', () => {
     const est = gen({
       homeSqFt: 2400,
       lotSqFt: 60000,
@@ -1492,42 +1479,32 @@ describe('Tree & Shrub prose warnings reach the operator review panel', () => {
       services: { treeShrub: { tier: 'standard' } },
     });
     const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
-    expect(ts.bedArea).toBe(8000);
-    expect(ts.bedAreaCapped).toBe(true);
-    expect(ts.uncappedBedAreaEstimate).toBe(9000);
-    expect(est.pricingMetadata.manualReviewReasons).toEqual(
-      expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
-    );
-    // The capped warning names BOTH numbers and says plainly that the quote
-    // is under-priced until reviewed.
-    const capWarning = est.pricingMetadata.warnings.find((w) => w.includes('was clamped'));
-    expect(capWarning).toContain('8,000 sq ft');
-    expect(capWarning).toContain('9,000 sq ft');
-    expect(capWarning).toContain('UNDER-priced');
+    expect(ts.bedArea).toBe(9000);
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    const warning = est.pricingMetadata.warnings.find((w) => w.includes('9,000 sq ft'));
+    expect(warning).toContain('priced IN FULL');
+    // Nothing clamps anymore, so no warning may claim otherwise.
+    expect(est.pricingMetadata.warnings.join(' ')).not.toContain('was clamped');
+    expect(est.pricingMetadata.warnings.join(' ')).not.toContain('UNDER-priced');
   });
 
-  test('an area EXACTLY at the cap is flagged but never called under-priced (nothing was clamped off)', () => {
+  test('an area EXACTLY at the threshold is flagged for review, priced unchanged', () => {
     const est = gen({
       homeSqFt: 2400, lotSqFt: 60000, estimatedBedAreaSf: 8000,
       services: { treeShrub: { tier: 'standard' } },
     });
-    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_cap_reached');
-    const warning = est.pricingMetadata.warnings.find((w) => w.includes('estimator cap'));
-    expect(warning).toContain('nothing was clamped off');
-    expect(warning).not.toContain('UNDER-priced');
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(8000);
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
   });
 
-  test('an EXPLICIT oversized bed area is priced in full but still flagged for review', () => {
+  test('an EXPLICIT oversized bed area is priced in full and flagged for review', () => {
     const est = gen({ homeSqFt: 2400, lotSqFt: 60000, bedArea: 14000, services: { treeShrub: { tier: 'standard' } } });
     const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
-    expect(ts.bedArea).toBe(14000); // a measurement is never silently clamped
+    expect(ts.bedArea).toBe(14000); // a measurement is never clamped
     expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
-    // Distinct copy: nothing was clamped here, so the operator must not be
-    // sent hunting for a clamp that never happened.
     const warning = est.pricingMetadata.warnings.find((w) => w.includes('14,000 sq ft'));
     expect(warning).toContain('priced IN FULL');
-    // It must not claim a clamp happened ("never clamped" is the explanation).
-    expect(warning).not.toContain('was clamped');
   });
 
   test('the missing-bed-area fallback and high plant counts surface too', () => {
