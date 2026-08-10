@@ -9935,6 +9935,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             rowServiceType: existingAppointmentRow.service_type,
           });
           if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
+          // NOTE (deferred, see PR #3328): the adopted-appointment path does NOT
+          // stamp catalog identity. Adding it here is blocked on a PRE-EXISTING
+          // eligibility bug, not on this change: the preflight lookup above
+          // (:8595) and the locked revalidation just above both family-check
+          // with the RAW `serviceMode`, while the contract lookup at :8262 uses
+          // adoptionServiceModesForContract. For a structurally one-time
+          // estimate whose request mode defaults to 'recurring', the valid
+          // appointment is rejected 409 before any stamp could run. Aligning
+          // those checks changes WHICH appointments may be adopted — an owner
+          // decision, tracked separately. Until then an adopted visit keeps
+          // service_id NULL exactly as it does today.
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])

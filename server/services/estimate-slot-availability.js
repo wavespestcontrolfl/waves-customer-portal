@@ -466,12 +466,18 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   const rows = [];
   const seen = new Set();
   // `service` is the category (used for the row's service field + label dedup).
-  const add = (service, label) => {
+  const add = (service, label, engineKey = null) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    rows.push({ service, label: clean, visitsPerYear: null });
+    // `service` is the CATEGORY (pest specialties all collapse to
+    // 'pest_control'), which is right for labelling but destroys the identity
+    // the catalog is keyed on. `engineKey` preserves the row's RAW pricing-engine
+    // key so slot-reservation's catalogServiceIdForProfile can stamp service_id
+    // for specialties like german_roach / stinging_insect — without it, both
+    // query engine_key='pest_control' and stay unstamped (codex #3328 r1 P1).
+    rows.push({ service, label: clean, visitsPerYear: null, engineKey: engineKey || null });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -512,7 +518,9 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
     }
-    add(category || service || 'one_time_service', label);
+    // Third arg is the RAW engine key off the breakdown item — the catalog's
+    // identity, distinct from the display category passed first.
+    add(category || service || 'one_time_service', label, service || null);
   }
   return rows;
 }
