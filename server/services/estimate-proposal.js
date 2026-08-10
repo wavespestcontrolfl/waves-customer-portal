@@ -220,6 +220,14 @@ function normalizeProgram(raw = {}) {
     note: cleanString(raw.note, 300),
     inclusions: cleanStringList(raw.inclusions, { maxItems: 12, maxLen: 200 }),
     exclusions: cleanStringList(raw.exclusions, { maxItems: 8, maxLen: 160 }),
+    // Per-program provenance of GENERATED narrative lines — the builder's
+    // family-change resync prunes ONLY lines this program's generation
+    // installed, never catalog membership (a hand-authored line matching a
+    // stock sentence must survive — codex 1A-ii r17, same doctrine as
+    // generatedResponsibilities). Builder-consumed metadata: written by
+    // generation, read on reload, rendered on no customer surface.
+    generatedInclusions: cleanStringList(raw.generatedInclusions, { maxItems: 12, maxLen: 200 }),
+    generatedExclusions: cleanStringList(raw.generatedExclusions, { maxItems: 8, maxLen: 160 }),
     buildings: (Array.isArray(raw.buildings) ? raw.buildings : [])
       .map((b) => ({ name: cleanString(b?.name, 120), note: cleanString(b?.note, 300) }))
       .filter((b) => b.name)

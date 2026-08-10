@@ -304,6 +304,10 @@ export default function CommercialProposalPage() {
       inclusionsText: (program.inclusions || []).join('\n'),
       exclusionsText: (program.exclusions || []).join('\n'),
       coversText: (program.buildings || []).map((b) => (b.note ? `${b.name} | ${b.note}` : b.name)).join(', '),
+      // Persisted per-program provenance (codex 1A-ii r17): only lines THIS
+      // program's generation installed are prunable on a family switch.
+      genInclusions: program.generatedInclusions || [],
+      genExclusions: program.generatedExclusions || [],
     })));
     // Pruning provenance is the proposal's OWN persisted record of what
     // generation installed (codex 1A-ii r15) — never the static catalog,
@@ -411,6 +415,8 @@ export default function CommercialProposalPage() {
           inclusionsText: (program.inclusions || []).join('\n'),
           exclusionsText: (program.exclusions || []).join('\n'),
           coversText: '',
+          genInclusions: program.inclusions || [],
+          genExclusions: program.exclusions || [],
         })));
         filled += 1;
         monetaryFilled += 1;
@@ -537,44 +543,53 @@ export default function CommercialProposalPage() {
   // Changing a program's FAMILY must not keep the old family's generated
   // copy beside the new label — a generated pest program switched to Lawn
   // would otherwise save a lawn agreement still promising interior pest
-  // treatment and pest-specific exclusions (codex 1A-ii r14). Exact-line
-  // matching against the served family registry, same doctrine as
-  // removeProgram: generated lines swap to the new family's stack;
-  // hand-authored/edited lines are never in the registry, so they survive
-  // untouched. The dynamic cadence bullet is family-independent and stays.
+  // treatment and pest-specific exclusions (codex 1A-ii r14). Pruning is
+  // exact-line against the row's own persisted provenance
+  // (generatedInclusions/generatedExclusions — codex 1A-ii r17); the
+  // served family registry is only the INSTALL source for the new
+  // family's stack. Hand-authored lines are never in provenance, so they
+  // survive untouched.
   const changeProgramFamily = (idx, nextFamily) => {
     const prev = programsState[idx];
     if (!prev || prev.service === nextFamily) return;
     markEdit();
-    const oldReg = familyRegistryRef.current?.[prev.service];
     const newReg = familyRegistryRef.current?.[nextFamily];
-    // Prune lines generated for the OLD family (keeping ones the new family
-    // also carries); when the row held generated copy, install the new
-    // family's stack so the narrative matches the promise being sold.
-    const swapLines = (text, oldLines = [], newLines = []) => {
-      const oldSet = new Set(oldLines);
+    // Prune ONLY lines THIS program's generation installed (its persisted
+    // per-program provenance — never catalog membership, which would eat a
+    // hand-authored line that happens to match a stock sentence: codex
+    // 1A-ii r17, same doctrine as generatedResponsibilities). When the row
+    // held generated copy, the new family's stack installs from the served
+    // registry and becomes the row's new provenance. The dynamic cadence
+    // bullet is family-independent and always survives.
+    const cadenceRe = /^\d+ scheduled applications? per year$/;
+    const swapLines = (text, provLines = [], newLines = []) => {
+      const provSet = new Set(provLines);
       const newSet = new Set(newLines);
       const lines = text.split('\n');
-      const hadGenerated = lines.some((line) => oldSet.has(line.trim()));
-      const kept = lines.filter((line) => !(oldSet.has(line.trim()) && !newSet.has(line.trim())));
+      const hadGenerated = lines.some((line) => provSet.has(line.trim()));
+      const kept = lines.filter((line) => {
+        const t = line.trim();
+        return !(provSet.has(t) && !newSet.has(t) && !cadenceRe.test(t));
+      });
       const present = new Set(kept.map((line) => line.trim()));
-      const installed = hadGenerated
-        ? [...kept, ...newLines.filter((line) => !present.has(line))]
-        : kept;
-      return { text: installed.join('\n'), hadGenerated };
+      const installed = hadGenerated ? newLines.filter((line) => !present.has(line)) : [];
+      const provenance = hadGenerated
+        ? [...provLines.filter((line) => present.has(line)), ...installed]
+        : provLines;
+      return { text: [...kept, ...installed].join('\n'), hadGenerated, provenance };
     };
     setProgramsState((list) => list.map((p, i) => {
       if (i !== idx) return p;
       const next = { ...p, service: nextFamily };
-      if (oldReg && newReg) {
-        const inc = swapLines(p.inclusionsText, oldReg.inclusions, newReg.inclusions);
-        const exc = swapLines(p.exclusionsText, oldReg.exclusions, newReg.exclusions);
-        next.inclusionsText = inc.text;
-        next.exclusionsText = exc.text;
-        // Generated taxability is family-derived — resync it to the new
-        // family's default (the visible Tax switch stays operator-editable).
-        if (inc.hadGenerated || exc.hadGenerated) next.taxable = newReg.taxable === true;
-      }
+      const inc = swapLines(p.inclusionsText, p.genInclusions, newReg?.inclusions);
+      const exc = swapLines(p.exclusionsText, p.genExclusions, newReg?.exclusions);
+      next.inclusionsText = inc.text;
+      next.genInclusions = inc.provenance;
+      next.exclusionsText = exc.text;
+      next.genExclusions = exc.provenance;
+      // Generated taxability is family-derived — resync it to the new
+      // family's default (the visible Tax switch stays operator-editable).
+      if (newReg && (inc.hadGenerated || exc.hadGenerated)) next.taxable = newReg.taxable === true;
       return next;
     }));
     // Generated responsibilities follow the same swap, pruning ONLY via the
@@ -644,6 +659,11 @@ export default function CommercialProposalPage() {
         note: p.note.trim() || null,
         inclusions: p.inclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
         exclusions: p.exclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
+        // Per-program provenance persists with the program (codex 1A-ii
+        // r17) — PUT stores the normalizer output exactly, so omitting
+        // these would delete the provenance on every save.
+        generatedInclusions: p.genInclusions || [],
+        generatedExclusions: p.genExclusions || [],
         // "Name | note" entries keep subdivision notes through the
         // round-trip — name-only parsing silently dropped authored scope
         // like "Exterior only" (codex 1A-ii r13).
@@ -1235,7 +1255,7 @@ export default function CommercialProposalPage() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '' }]); }}>
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
                   <Plus size={14} /> Add program
                 </Button>
               )}

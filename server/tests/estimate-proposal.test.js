@@ -286,6 +286,19 @@ describe('structured proposal sections (slice 1A-i)', () => {
       buildings: [{ name: 'Tower A', note: null }],
     });
     expect(p.programs[1].service).toBe('other'); // unknown family demotes
+    // Per-program provenance round-trips (r17): absent → [], present →
+    // cleaned — the builder prunes ONLY these lines on a family switch.
+    expect(p.programs[0].generatedInclusions).toEqual([]);
+    const withProv = normalizeProposal(authored({
+      buildings: [],
+      programs: [{
+        service: 'pest', label: 'P', frequencyPerYear: 4, pricePerApplication: 100,
+        generatedInclusions: ['4 scheduled applications per year', '  '],
+        generatedExclusions: ['Termite treatment or monitoring — separate program, quoted on inspection'],
+      }],
+    }));
+    expect(withProv.programs[0].generatedInclusions).toEqual(['4 scheduled applications per year']);
+    expect(withProv.programs[0].generatedExclusions).toHaveLength(1);
     // A programs-only stored proposal is authoritative — it must NOT fall
     // through to the synthesized fallback.
     expect(p.synthesized).toBe(false);

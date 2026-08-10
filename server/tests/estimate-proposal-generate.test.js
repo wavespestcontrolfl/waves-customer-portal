@@ -828,6 +828,37 @@ describe('deriveProposalDraft', () => {
     expect(green.warnings).toEqual([]);
   });
 
+  test('r17: same-container rows that CANONICALIZE together fail the draft — literal-name counting hid the collision', async () => {
+    // "Pest — Tower A"/"Pest — Tower B" are distinct charges whose names
+    // both normalize to pest_control; the collector merges them into one
+    // hybrid program, so the multiplicity detector must count by the
+    // collector's own canonical identity.
+    const towers = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [
+          { name: 'Pest — Tower A', visitsPerYear: 4, annualAfterDiscount: 468 },
+          { name: 'Pest — Tower B', visitsPerYear: 4, annualAfterDiscount: 520 },
+        ] } },
+      },
+    });
+    expect(towers.programs).toBeNull();
+    expect(towers.warnings[0]).toMatch(/multiple separately priced rows/i);
+  });
+
+  test('r17: engineInputs is authoritative over stale legacy inputs for scope facts', async () => {
+    // Pricing replay treats engineInputs as authoritative (rawEngineInputs)
+    // — a stale legacy inputs.homeSqFt must not put the wrong building
+    // size in a contractual scope row.
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        inputs: { homeSqFt: 5000 },
+        engineInputs: { buildingSqFt: '12000' },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
+      },
+    });
+    expect(draft.propertyScope.items[0]).toEqual({ label: 'Building', value: '12,000 sq ft' });
+  });
+
   test('r16: an empty legacy inputs {} beside engineInputs must not hide the scope facts (union, not short-circuit)', async () => {
     const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {

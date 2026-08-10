@@ -31,7 +31,18 @@ const {
   recurringLineAnnualAmount,
   recurringServicesFromEstimateData,
   resolveCommercialPrepayBaseRate,
+  recurringServiceKey,
 } = require('./estimate-converter');
+
+// The canonical collector dedupes recurring rows through
+// recurringServiceKey — every service-identity set in derivePrograms MUST
+// use the same normalization, or rows whose raw names differ but
+// canonicalize together ("Pest — Tower A"/"Pest — Tower B" →
+// pest_control) slip past the collision/gating checks the collector's
+// dedupe makes load-bearing (codex 1A-ii r17).
+function canonicalRecurringKey(row = {}) {
+  return recurringServiceKey(row);
+}
 
 // The estimator's COMPLETE review authority — draft-builder's canonical
 // predicate (quoteRequired / requiresManualReview / requiresMeasurement /
@@ -281,8 +292,12 @@ function derivePropertyScope(estimateData) {
   // short-circuit hides the facts the engine priced from (codex 1A-ii r16;
   // same union rule as estimate-public's
   // inferScopeCategoriesFromEngineInputs). Every present source is scanned;
-  // first positive value per fact wins.
-  const inputSources = [estimateData.inputs, estimateData.engineInputs]
+  // first positive value per fact wins — with engineInputs FIRST, because
+  // pricing replay treats it as authoritative (rawEngineInputs,
+  // estimate-public) and a stale legacy inputs.homeSqFt beside the priced
+  // engineInputs.buildingSqFt must not put the wrong building size in a
+  // contractual scope row (codex 1A-ii r17).
+  const inputSources = [estimateData.engineInputs, estimateData.inputs]
     .filter((source) => source && typeof source === 'object');
   const inputValue = (...keys) => {
     for (const source of inputSources) {
@@ -357,7 +372,7 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // key so mixed shapes can't silently omit a priced service (codex 1A-ii
   // r3c). One-time lineItems rows (no recurring evidence) stay out; they
   // belong to deriveCorrectiveWork.
-  const canonicalKeys = new Set(canonicalRows.map((row) => String(row.service || row.name || '').toLowerCase()));
+  const canonicalKeys = new Set(canonicalRows.map((row) => canonicalRecurringKey(row)));
   // BOTH containers contribute raw line items — a truthy ancillary
   // `result` must not hide engineResult.lineItems (codex 1A-ii r3d).
   const rawLineItemsMerged = [
@@ -375,7 +390,7 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   // r12).
   const gatedRawKeys = new Set(rawLineItemsMerged
     .filter((line) => rowIsReviewGated(line))
-    .map((line) => String(line.service || line.name || '').toLowerCase()));
+    .map((line) => canonicalRecurringKey(line)));
   const extraSeenKeys = new Set();
   const extraLineItemRows = rawLineItemsMerged
     .map((line) => ({
@@ -386,11 +401,11 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
       name: line.displayName ?? line.name ?? line.service,
       annualAfterDiscount: line.annualAfterDiscount ?? line.annual,
     }))
-    .filter((row) => !canonicalKeys.has(String(row.service || row.name || '').toLowerCase()))
+    .filter((row) => !canonicalKeys.has(canonicalRecurringKey(row)))
     // Both containers can mirror the SAME row — dedupe extras by service
     // key so an alias-priced row never doubles (codex 1A-ii r4).
     .filter((row) => {
-      const key = String(row.service || row.name || '').toLowerCase();
+      const key = canonicalRecurringKey(row);
       if (extraSeenKeys.has(key)) return false;
       extraSeenKeys.add(key);
       return true;
@@ -487,7 +502,12 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     if (!Array.isArray(container)) continue;
     const perContainer = new Map();
     for (const row of container) {
-      const key = String(row.service || row.name || '').toLowerCase();
+      // Canonical identity, NOT the literal name — the collector dedupes
+      // through recurringServiceKey, so name-only rows "Pest — Tower A"/
+      // "Pest — Tower B" collapse to one pest_control program while their
+      // literal labels each count once here, hiding exactly the collision
+      // this detector exists to fail on (codex 1A-ii r17).
+      const key = canonicalRecurringKey(row);
       if (!key) continue;
       const aliased = { ...row, annualAfterDiscount: row.annualAfterDiscount ?? row.annual };
       const annual = row.manualFinalAnnual != null
@@ -532,7 +552,7 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // whole draft (silent exclusion would save an itemization missing the
     // gated service — codex 1A-ii r5b).
     if (rowIsReviewGated(row)
-      || gatedRawKeys.has(String(row.service || row.name || '').toLowerCase())) {
+      || gatedRawKeys.has(canonicalRecurringKey(row))) {
       unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional or low-confidence)`);
       continue;
     }
