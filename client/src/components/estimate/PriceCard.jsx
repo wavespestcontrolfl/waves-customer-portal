@@ -54,8 +54,10 @@ const SERVICE_INCLUSIONS = {
 };
 
 
-// Row-level WaveGuard tags mirror the server's TIER_BADGE_ELIGIBLE_KEYS —
-// palm/rodent lines never tag (they're outside the WaveGuard plan).
+// Row-level WaveGuard tags mirror the server's canonical tier membership
+// (discount-engine serviceCountsTowardWaveGuardTier over
+// WAVEGUARD.qualifyingServices) — palm/rodent lines never tag (they're
+// outside the WaveGuard plan).
 const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
 
 function normalizedTier(value) {
