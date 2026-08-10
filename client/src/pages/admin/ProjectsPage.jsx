@@ -390,18 +390,16 @@ function deliverySummary(channels = {}) {
 // per additional_applications row — mirror of the server gate in
 // server/routes/admin-projects.js.
 function certApplicationChecks(app = {}, labelPrefix = "") {
-  // "Other" is a sentinel, not a valid entry — a legacy draft carrying it is
-  // incomplete with or without a `_other` description, since neither the bare
-  // sentinel nor a description the applicator can no longer see belongs on an
-  // issued certificate. Mirror of the server comment in admin-projects.js.
-  // `hard` only for the sentinel failure — a blank field stays overridable.
-  // Mirrors the server's hardMissing so the UI doesn't walk the admin into an
-  // override prompt the send route will 422 anyway.
-  const productIsSentinel = app.product_name === "Other";
-  const methodIsSentinel = app.treatment_method === "Other";
-  const productName = productIsSentinel ? null : app.product_name;
+  // Unchanged from main on purpose — see the note in the server mirror
+  // (admin-projects.js): re-gating stored "Other" records is a separate
+  // business decision, not part of removing the form inputs.
+  const productName = app.product_name === "Other"
+    ? app.product_name_other
+    : app.product_name;
   const rawMethod = app.treatment_method;
-  const treatmentMethod = methodIsSentinel ? null : rawMethod;
+  const treatmentMethod = rawMethod === "Other"
+    ? app.treatment_method_other
+    : rawMethod;
   // Method-aware coverage requirements — bait systems have no gallons, borate
   // wood treatments may not either.
   const isBaitSystem = rawMethod === "Bait system";
@@ -423,12 +421,10 @@ function certApplicationChecks(app = {}, labelPrefix = "") {
     {
       label: `${labelPrefix}Method of treatment`,
       ok: hasMeaningfulValue(treatmentMethod),
-      hard: methodIsSentinel,
     },
     {
       label: `${labelPrefix}Product used`,
       ok: hasMeaningfulValue(productName),
-      hard: productIsSentinel,
     },
     {
       label: `${labelPrefix}${
