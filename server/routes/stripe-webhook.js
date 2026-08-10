@@ -75,6 +75,24 @@ async function sendBillingSms(customer, body, metadata = {}) {
     && result.nextAllowedAt) {
     try {
       const TWILIO_NUMBERS = require('../config/twilio-numbers');
+      // Stable invoice identity for the replay recheck (codex r21): the
+      // PaymentIntent is NOT durable linkage — a customer who switches
+      // tender overnight repoints the invoice to a NEW card PI, so a
+      // PI-keyed lookup at 8 AM finds nothing and the notice would read as
+      // "invoice-less" and replay a frozen bank-failure text over a
+      // successfully paid invoice. Resolve the invoice ONCE here, while
+      // the association is still current, and persist its id.
+      let resolvedInvoiceId = metadata.invoice_id || null;
+      if (!resolvedInvoiceId && metadata.stripe_payment_intent_id) {
+        try {
+          const inv = await db('invoices')
+            .where({ stripe_payment_intent_id: metadata.stripe_payment_intent_id })
+            .first('id');
+          resolvedInvoiceId = inv?.id || null;
+        } catch (lookupErr) {
+          logger.warn(`[stripe-webhook] invoice lookup for held billing SMS failed: ${lookupErr.message} — queueing without stable invoice id`);
+        }
+      }
       await db('sms_log').insert({
         customer_id: customer.id,
         direction: 'outbound',
@@ -86,6 +104,7 @@ async function sendBillingSms(customer, body, metadata = {}) {
         message_type: metadata.original_message_type || 'billing_reminder',
         metadata: JSON.stringify({
           ...metadata,
+          ...(resolvedInvoiceId ? { invoice_id: resolvedInvoiceId } : {}),
           entry_point: 'stripe_webhook_billing_deferred',
           original_block_code: result.code,
           replay_purpose: 'payment_failure',

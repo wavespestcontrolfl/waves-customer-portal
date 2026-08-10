@@ -324,6 +324,18 @@ const REGISTRY = {
           return { eligible: true };
         }
         if (!invoiceId) {
+          // A notice that CARRIED a PaymentIntent but resolves to no
+          // invoice is a superseded association, not an invoice-less
+          // notice (codex r21): the replacement-tender flow repoints the
+          // invoice onto a new PI and may have PAID it overnight, and
+          // this row's whole premise is that invoice's state. Enqueue now
+          // persists invoice_id, so this is the legacy/lookup-race path —
+          // fail CLOSED rather than text a frozen failure notice over a
+          // settled invoice. ('ach_payment_processing' returned above;
+          // customer-level notices that never carried a PI are unaffected.)
+          if (meta.stripe_payment_intent_id) {
+            return { eligible: false, reason: 'pi-association-superseded' };
+          }
           if (meta.original_message_type === 'bank_verification_failed' && meta.waves_customer_id) {
             const verified = await db('payment_methods')
               .where({ customer_id: meta.waves_customer_id })

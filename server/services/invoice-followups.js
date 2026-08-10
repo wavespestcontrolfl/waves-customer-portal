@@ -736,6 +736,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let smsSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
+  // The held SMS leg failed to reach the scheduled rail: nothing durable
+  // owns it, so this touch must stay retryable (codex r21).
+  let smsHoldUnowned = false;
   if (customer?.phone) {
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
@@ -774,9 +777,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           // won't run and step_index advances, so the held SMS leg must be
           // persisted NOW or it is never retried. Queue the exact rendered
           // body on the scheduled-SMS rail for the window open — one
-          // enqueue per touch fire (the step advances right after, so this
-          // can't loop). Enqueue failure just loses the SMS leg loudly;
-          // the email still delivered the touch.
+          // enqueue per touch fire. An enqueue FAILURE leaves the pay-link
+          // text with no owner at all, so the step is held back for a
+          // retry instead of advancing (the email's per-step idempotency
+          // key dedupes its leg on the re-fire).
           if (smsDeferUntil && emailResult.ok) {
             try {
               const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -801,7 +805,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
               });
               logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
             } catch (queueErr) {
-              logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — SMS leg lost, email delivered`);
+              smsHoldUnowned = true;
+              logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — holding the step for retry at the window open (email leg already delivered, idempotency-keyed)`);
             }
           }
         }
@@ -846,6 +851,23 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         logger.warn(`[invoice-followups] credit reversal after undelivered dun skipped for ${row.invoice_id}: ${e.message}`);
       }
     }
+    return;
+  }
+
+  // Held SMS with no durable owner (codex r21): the email carried its own
+  // leg, but advancing step_index here would retire a pay-link text that
+  // was never queued and is never retried. Keep THIS step current and move
+  // the touch to the window open — the re-fire re-renders the SMS and
+  // re-attempts the enqueue, while the email's per-step idempotency key
+  // (invoice_followup_email:<invoice>:<step>) suppresses a second email.
+  // No credit reversal: unlike the nothing-delivered defer above, the email
+  // leg DID deliver against this draw.
+  if (smsHoldUnowned && smsDeferUntil) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
+      next_touch_at: smsDeferUntil,
+    });
+    logger.warn(`[invoice-followups] sequence ${row.id} step ${row.step_index} held at its current index — the deferred SMS leg never reached the rail; retrying at ${smsDeferUntil.toISOString()}`);
     return;
   }
 

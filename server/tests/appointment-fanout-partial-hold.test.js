@@ -112,6 +112,35 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     expect(outcome.blockedCode).toBe('QUIET_HOURS_HOLD');
   });
 
+  test('r21: operator provenance rides the fan-out — an authenticated action is exempt from the window', async () => {
+    sendCustomerMessage.mockResolvedValue(ACCEPTED);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Missed you', 'appointment_no_show', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, { operatorInitiated: true },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ operatorInitiated: true }));
+
+    // Default stays FENCED — an automated caller must never inherit it.
+    sendCustomerMessage.mockClear();
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Reminder', 'appointment_reminder', 'appointment_reminder_24h',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ operatorInitiated: true }));
+  });
+
+  test('r21: a one-shot notice with no re-fire path queues EVERY held contact on a full hold', async () => {
+    sendCustomerMessage.mockResolvedValue(HELD);
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async (c) => `Missed you ${c.role}`, 'appointment_no_show', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, { queueHeldContactsOnFullHold: true },
+    );
+    expect(sent).toBe(false);
+    expect(db._inserts).toHaveLength(2);
+    expect(db._inserts.map((r) => r.to_phone)).toEqual([PRIMARY.phone, SPOUSE.phone]);
+    expect(JSON.parse(db._inserts[0].metadata).entry_point).toBe('appointment_notice_contact_deferred');
+  });
+
   test('a later NON-hold block (opt-out) is not misread as held — nothing queued for it', async () => {
     sendCustomerMessage
       .mockResolvedValueOnce(ACCEPTED)

@@ -3879,6 +3879,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
           feeOutcome: noShowFeeOutcome,
+          // Authenticated dispatcher action with an explicit notify
+          // choice — operator provenance for the 8AM-8PM send window
+          // (same contract as the rain-out/quick-move moves).
+          operatorInitiated: true,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 

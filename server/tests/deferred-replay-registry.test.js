@@ -524,6 +524,46 @@ describe('deferred-replay registry', () => {
     expect(release.del).toHaveBeenCalled();
   });
 
+  test('billing notice (r21): a PI that no longer resolves to an invoice is superseded, not invoice-less', async () => {
+    // Tender switch overnight repoints the invoice to a new card PI and
+    // pays it — the old PI resolves to nothing, and a frozen bank-failure
+    // text over a settled invoice is the failure this guard prevents.
+    db.mockReturnValueOnce(firstChain(null));
+    const superseded = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_retry_notice',
+      stripe_payment_intent_id: 'pi_old',
+    });
+    expect(superseded.eligible).toBe(false);
+    expect(superseded.reason).toBe('pi-association-superseded');
+
+    // New rows carry the stable invoice id, so the collectibility check
+    // owns the decision: paid overnight → suppressed.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid', payer_id: null }));
+    const paid = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_retry_notice',
+      invoice_id: 'inv-1',
+      stripe_payment_intent_id: 'pi_old',
+    });
+    expect(paid.eligible).toBe(false);
+
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    const stillOwed = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_retry_notice',
+      invoice_id: 'inv-1',
+      stripe_payment_intent_id: 'pi_old',
+    });
+    expect(stillOwed.eligible).toBe(true);
+
+    // Setup-intent notices never carried a PI — unaffected by the guard.
+    db.mockReturnValueOnce(firstChain(null));
+    const setupFailure = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'bank_verification_failed',
+      stripe_setup_intent_id: 'seti_1',
+      waves_customer_id: 'cust-1',
+    });
+    expect(setupFailure.eligible).toBe(true);
+  });
+
   test("card request recheck (r20): a 'rescheduled' pending-rebook placeholder suppresses — the replay must not consume the claim the re-slotted visit needs", async () => {
     db.mockReturnValueOnce(firstChain({ status: 'rescheduled', card_link_sent_at: null, customer_id: 'cust-1' }));
     const res = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });

@@ -356,4 +356,44 @@ describe('invoice follow-up email sidecar', () => {
       status: 'active',
     }));
   });
+
+  test('r21: a held SMS leg whose enqueue FAILS holds the step at its current index for retry', async () => {
+    // Email delivered, the text crossed the 20:00 ET cutoff, and the
+    // scheduled-rail insert then failed — nothing durable owns the
+    // pay-link SMS, so step_index must NOT advance (the email's per-step
+    // idempotency key dedupes its leg when the touch re-fires at 8 AM).
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false,
+      blocked: true,
+      code: 'QUIET_HOURS_HOLD',
+      deferred: true,
+      nextAllowedAt: '2026-05-27T12:00:00.000Z',
+    });
+    const emailInteraction = chain();
+    const sequenceUpdate = chain();
+    const failingSmsLog = chain();
+    failingSmsLog.insert = jest.fn(async () => { throw new Error('sms_log insert failed'); });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: customer() })],
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [emailInteraction],
+      sms_log: [failingSmsLog],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }), // touch claim
+        sequenceUpdate, // held-step defer (NOT a cadence advance)
+        chain({ result: 1 }), // claim clear
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(failingSmsLog.insert).toHaveBeenCalled();
+    const patch = sequenceUpdate.update.mock.calls[0][0];
+    expect(patch.next_touch_at).toEqual(new Date('2026-05-27T12:00:00.000Z'));
+    expect(patch).not.toHaveProperty('step_index');
+    expect(patch).not.toHaveProperty('status');
+  });
 });

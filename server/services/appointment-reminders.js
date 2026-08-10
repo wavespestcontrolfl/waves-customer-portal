@@ -881,7 +881,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null) {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null, operatorInitiated = false) {
   // Per-contact phase state (codex r19): dispatchStarted must reflect THIS
   // attempt only — a prior contact's handoff must not classify a later
   // contact's pre-dispatch throw as uncertain. (retryable/dispatchUncertain
@@ -914,6 +914,13 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     purpose,
     customerId,
     identityTrustLevel,
+    // Send-window exemption for AUTHENTICATED operator actions only (the
+    // rain-out/quick-move contract): a dispatcher marking a visit no-show
+    // at 20:30 and explicitly asking to notify is acting live, and the
+    // window exists to stop AUTOMATED night sends. Threaded from the
+    // route through the handler — never defaulted true, and cron/
+    // customer-driven callers leave it false so they stay fenced.
+    ...(operatorInitiated === true ? { operatorInitiated: true } : {}),
     metadata: { original_message_type: messageType, ...metaExtra },
     // Canonical visit linkage for the audit row (messaging_audit_log.
     // appointment_id) — sms_log metadata does NOT survive the provider
@@ -1036,7 +1043,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     sharedOutcome.lastCode = null;
     sharedOutcome.lastDeferred = false;
     sharedOutcome.lastNextAllowedAt = null;
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sharedOutcome);
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sharedOutcome, sendOptions.operatorInitiated === true);
     if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
@@ -1049,7 +1056,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // rail (call-booking secondary precedent). When NOTHING was accepted the
   // callers' own defer/skip paths re-fire the whole notice, so queueing
   // here too would double-text — rows are queued only on partial success.
-  if (sentAny && heldContacts.length) {
+  // EXCEPT for callers that HAVE no re-fire path (codex r21): a terminal
+  // one-shot notice (no-show) is dropped outright by a full hold, so those
+  // callers opt into queueing every held contact by passing
+  // queueHeldContactsOnFullHold. Safe only where no cron/sweep re-sends.
+  if ((sentAny || sendOptions.queueHeldContactsOnFullHold === true) && heldContacts.length) {
     await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
   }
   return sentAny;
@@ -3163,7 +3174,19 @@ const AppointmentReminders = {
         // 'appointment_cancellation' profile (a no-show notice is the same
         // class of "your appointment isn't happening — let's rebook" comms,
         // and 'appointment_no_show' is not a registered MessagePurpose).
-      }, 'appointment_no_show', 'appointment_cancellation');
+      }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+        // Authenticated dispatcher click with an explicit notify choice —
+        // exempt from the send window (rain-out/quick-move contract).
+        // options.operatorInitiated is threaded by the route; a future
+        // autonomous caller that omits it stays fenced AND keeps its
+        // notice via the hold rail below.
+        operatorInitiated: options.operatorInitiated === true,
+        // A no-show notice is a one-shot: no cron re-fires it and the
+        // status is already terminal, so a full after-hours hold would
+        // drop it permanently for phone-only customers (codex r21).
+        // Queue every held contact for the window open instead.
+        queueHeldContactsOnFullHold: true,
+      });
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
 
       // Email twin (appointment.no_show template) — second channel like the
