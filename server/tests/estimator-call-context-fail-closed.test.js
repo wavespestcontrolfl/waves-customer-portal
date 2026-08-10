@@ -20,6 +20,15 @@ let mockCustomerFirstRow;
 let mockCustomerFirstFail = false;
 // Rows for the phone-scoped history loads (conflict-suppression pins).
 let mockLeadRow = null;
+// loadLeadForCall's three lookups all end in leads.first() — these
+// discriminate them: the stamp branch's by-id read and the sid read
+// resolve separately (undefined = miss); everything phone-shaped keeps
+// the pre-existing mockLeadRow contract.
+let mockLeadByIdRow;
+let mockLeadBySidRow;
+// The shared-line overlap probe on call_log (whereRaw-shaped, unlike the
+// by-id call load) — null = no concurrent call.
+let mockConcurrentCallRow = null;
 let mockEstimateRows = [];
 // created_at '>=' bounds seen by the sms_log transcript query.
 let mockSmsSinceBounds = [];
@@ -31,7 +40,13 @@ jest.mock('../models/db', () => {
   const db = (table) => ({
     select() { return this; },
     where(arg, op, val) {
-      if (typeof arg === 'function') arg.call(this);
+      // knex invokes where-group callbacks as fn.call(builder, builder) —
+      // both `this`-style and `(qb) =>`-style callbacks must work.
+      if (typeof arg === 'function') arg.call(this, this);
+      if (arg && typeof arg === 'object' && table === 'leads') {
+        if ('id' in arg) this._leadById = true;
+        if ('twilio_call_sid' in arg) this._leadBySid = true;
+      }
       // Records the transcript window's lower bound so the burst-scope
       // pins can assert WHICH window the grounded path used.
       if (table === 'sms_log' && arg === 'created_at' && op === '>=') mockSmsSinceBounds.push(val);
@@ -39,25 +54,35 @@ jest.mock('../models/db', () => {
     },
     whereRaw(sql) {
       if (table === 'customers') mockCustomerWhereSql.push(sql);
+      if (table === 'call_log') this._concurrentProbe = true;
       return this;
     },
     orWhereRaw(sql) {
       if (table === 'customers') mockCustomerWhereSql.push(sql);
+      if (table === 'call_log') this._concurrentProbe = true;
       return this;
     },
     orWhere() { return this; },
+    whereIn() { return this; },
     whereNull() { return this; },
     whereNot() { return this; },
     orderBy() { return this; },
     limit() { return this; },
     async first() {
-      if (table === 'call_log') return mockCallRow;
+      if (table === 'call_log') {
+        if (this._concurrentProbe) return mockConcurrentCallRow;
+        return mockCallRow;
+      }
       if (table === 'customers') {
         if (mockCustomersFail || mockCustomerFirstFail) throw new Error('db down');
         if (mockCustomerFirstRow !== undefined) return mockCustomerFirstRow;
         return mockCustomerRows[0] || null;
       }
-      if (table === 'leads') return mockLeadRow;
+      if (table === 'leads') {
+        if (this._leadById) return mockLeadByIdRow === undefined ? null : mockLeadByIdRow;
+        if (this._leadBySid) return mockLeadBySidRow === undefined ? null : mockLeadBySidRow;
+        return mockLeadRow;
+      }
       return null;
     },
     then(resolve, reject) {
@@ -96,6 +121,9 @@ beforeEach(() => {
   mockCustomerFirstRow = undefined;
   mockCustomerFirstFail = false;
   mockLeadRow = null;
+  mockLeadByIdRow = undefined;
+  mockLeadBySidRow = undefined;
+  mockConcurrentCallRow = null;
   mockEstimateRows = [];
   mockSmsSinceBounds = [];
   mockCustomerWhereSql = [];
@@ -915,5 +943,140 @@ describe('buildSmsThreadContext isExistingCustomer requires active (gate on)', (
     mockCustomerRows = [{ ...ROW, active: false }];
     const context = await buildSmsThreadContext(SMS_ARGS);
     expect(context.isExistingCustomer).toBe(true);
+  });
+});
+
+describe('email-owner guard covers every customer email slot (PR #3275)', () => {
+  // A blocked-ID spouse/tenant/property manager stating an email held in
+  // service_contact{,2,3}_email is an existing account's caller. Matching
+  // the primary `email` column alone let that call reach the estimator and
+  // draft a PROSPECT-priced estimate for a live customer.
+  // ENRICHED (V2 valid) shape — the guard deliberately ignores the
+  // unvalidated V1 fallback (codex P1, PR #3304), so the fixtures must
+  // carry the email at caller.email under a valid enriched payload.
+  const ANON_CALL = (caller) => CALL({
+    from_phone: 'Anonymous',            // suppressed caller ID → no phone key
+    to_phone: '+19413187612',           // a Waves line, so it is never the caller
+    v2_extraction_status: 'valid',
+    ai_extraction_enriched: JSON.stringify({ property: {}, caller }),
+  });
+
+  test('the guard queries all four email columns', async () => {
+    mockCallRow = ANON_CALL({ email: 'spouse@example.com' });
+    mockCustomerRows = [];
+
+    await buildCallContext('call-1');
+
+    const joined = mockCustomerWhereSql.join('\n');
+    expect(joined).toContain('service_contact_email');
+    expect(joined).toContain('service_contact2_email');
+    expect(joined).toContain('service_contact3_email');
+    expect(joined).toContain('LOWER(TRIM(email))');
+  });
+
+  test('an anonymous caller stating a slot email fails CLOSED to identity review', async () => {
+    mockCallRow = ANON_CALL({ email: 'spouse@example.com' });
+    mockCustomerRows = [{ id: 'cust-7' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).toBe('email_matches_existing_customer');
+  });
+
+  test('no email in the extraction leaves the guard dormant', async () => {
+    mockCallRow = ANON_CALL({ first_name: 'Dana' });
+    mockCustomerRows = [];
+
+    await buildCallContext('call-1');
+
+    expect(mockCustomerWhereSql.join('\n')).not.toContain('service_contact_email');
+  });
+
+  test('a shared manager email across several accounts is not a phantom conflict', async () => {
+    // One email legitimately sits on many accounts (a property manager in
+    // each building's contact slots). Taking only the first owner would
+    // red-lane a phone match that IS one of them.
+    mockCallRow = CALL({ ai_extraction: JSON.stringify({ email: 'manager@acme.com' }) });
+    mockCustomerRows = [{ id: 'cust-1' }, { id: 'cust-2' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).not.toBe('email_identity_conflict');
+  });
+});
+
+describe('stamped-lead linkage fails CLOSED when its target no longer resolves (codex P1)', () => {
+  // The stamp is the AUTHORITATIVE call→lead linkage. When its target is
+  // deleted (or a repoint is mid-flight), falling through to phone matching
+  // would let a shared/reused line hand the estimator a DIFFERENT lead's
+  // address, email, and estimate linkage for this call.
+  const STAMPED_CALL = () => CALL({
+    metadata: JSON.stringify({ lead_id: 'lead-stamped' }),
+  });
+  // What the fall-through would have selected: a phone-matched lead inside
+  // the call's processing window, no sid of its own.
+  const FOREIGN_LEAD = {
+    id: 'lead-foreign', first_name: 'Other', last_name: 'Caller', phone: '+19415550123',
+    email: 'other@example.test', address: '9 Wrong Parcel Rd', city: 'Venice', zip: '34285',
+    service_interest: 'pest control', urgency: null, is_commercial: false, status: 'new',
+    created_at: '2026-06-30T12:00:00.000Z', updated_at: '2026-07-01T12:05:00.000Z',
+    twilio_call_sid: null,
+  };
+
+  test('stamp present + target gone ⇒ unavailable, never the phone-matched lead', async () => {
+    mockCallRow = STAMPED_CALL();
+    mockLeadRow = FOREIGN_LEAD;
+    // mockLeadByIdRow stays undefined: the stamped lead does not resolve.
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).toBeUndefined();
+    expect(context.lead).toBeNull();
+    expect(context.leadIsForThisCall).toBe(false);
+    expect(context.leadLinkage).toBeNull();
+    // Reconcilers must read this as INDETERMINATE, not established absence.
+    expect(context.leadLookupUnavailable).toBe(true);
+  });
+
+  test('control: without a stamp the SAME phone-matched lead IS selected (fall-through reachable)', async () => {
+    mockCallRow = CALL();
+    mockLeadRow = FOREIGN_LEAD;
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.lead).toMatchObject({ id: 'lead-foreign' });
+    expect(context.leadLookupUnavailable).toBe(false);
+  });
+
+  test('a resolving stamp target is THIS call\'s lead (linkage stamp)', async () => {
+    mockCallRow = STAMPED_CALL();
+    mockLeadByIdRow = { ...FOREIGN_LEAD, id: 'lead-stamped', first_name: 'Stamped' };
+    mockLeadRow = FOREIGN_LEAD;
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.lead).toMatchObject({ id: 'lead-stamped' });
+    expect(context.leadIsForThisCall).toBe(true);
+    expect(context.leadLinkage).toBe('stamp');
+    expect(context.leadLookupUnavailable).toBe(false);
+  });
+});
+
+describe('email-owner guard ignores the unvalidated V1 shape (PR #3304)', () => {
+  test('a V1-only email never triggers the veto', async () => {
+    // The V1 blob is a raw text-parse fallback — a stale or hallucinated
+    // email matching an active customer must not red-lane an otherwise
+    // draftable call; V1 calls keep their normal review path.
+    mockCallRow = CALL({
+      from_phone: 'Anonymous',
+      to_phone: '+19413187612',
+      ai_extraction: JSON.stringify({ email: 'spouse@example.com' }),
+    });
+    mockCustomerRows = [{ id: 'cust-7' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).not.toBe('email_matches_existing_customer');
+    expect(context.error).not.toBe('email_identity_conflict');
   });
 });
