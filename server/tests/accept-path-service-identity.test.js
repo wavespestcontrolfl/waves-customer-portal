@@ -55,6 +55,61 @@ describe('accept-path engine-key mapping (static)', () => {
   });
 });
 
+// The REAL profile-building path (codex #3328 r1 P1). Fabricated profiles hid
+// the bug entirely: oneTimeProfileServices stores serviceCategoryForOneTimeItem
+// in `service`, and every pest specialty collapses to 'pest_control' — so
+// german_roach and stinging_insect would have queried engine_key='pest_control'
+// and silently stayed unstamped, i.e. 2 of the 3 production cases unfixed.
+describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
+  const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+
+  const estimateWith = (service, name) => ({
+    id: 'est-1',
+    service_interest: 'Pest Control',
+    estimate_data: {
+      result: { oneTime: { specItems: [{ service, name, price: 250 }], total: 250 } },
+    },
+  });
+
+  const primaryOf = (estimate) => {
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = profile?.services || [];
+    return services.find((s) => s?.service === 'pest_control') || services[0] || null;
+  };
+
+  test('german_roach: category collapses to pest_control but engineKey survives', () => {
+    const primary = primaryOf(estimateWith('german_roach', 'German Roach Cleanout'));
+    expect(primary).toBeTruthy();
+    // The collapse that caused the bug — pinned so a future change is visible.
+    expect(primary.service).toBe('pest_control');
+    expect(primary.engineKey).toBe('german_roach');
+  });
+
+  test('stinging_insect: category collapses to pest_control but engineKey survives', () => {
+    const primary = primaryOf(estimateWith('stinging_insect', 'Wasp Nest Removal'));
+    expect(primary).toBeTruthy();
+    expect(primary.service).toBe('pest_control');
+    expect(primary.engineKey).toBe('stinging_insect');
+  });
+
+  test('pre_slab_termiticide keeps its own category AND engine key', () => {
+    const primary = primaryOf(estimateWith('pre_slab_termiticide', 'Pre-Slab Termiticide Treatment'));
+    expect(primary).toBeTruthy();
+    expect(primary.engineKey).toBe('pre_slab_termiticide');
+  });
+
+  test('the resolver queries the RAW key, not the collapsed category', async () => {
+    // End-to-end through the real builder: what would actually hit the DB.
+    const estimate = estimateWith('german_roach', 'German Roach Cleanout');
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    let queried = null;
+    const conn = () => ({ where: (w) => { queried = w; return { first: async () => null }; } });
+    conn.transaction = async (cb) => cb(conn);
+    await catalogServiceIdForProfile(conn, profile);
+    expect(queried).toEqual({ engine_key: 'german_roach', is_active: true });
+  });
+});
+
 describe('catalogServiceIdForProfile', () => {
   // The helper runs its read inside conn.transaction(...) — a SAVEPOINT when
   // the caller already holds a transaction — so the fake connection must model

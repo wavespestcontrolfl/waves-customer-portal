@@ -9857,6 +9857,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             rowServiceType: existingAppointmentRow.service_type,
           });
           if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
+          // Catalog identity for the ADOPTED row (codex #3328 r1 P1). The
+          // reserve/commit stamp never runs on this path — there is no held
+          // reservation to graduate — so a pre-slab (or other one-time
+          // specialty) accepted onto a legacy free-text appointment kept
+          // service_id NULL and resolved to the GENERIC completion profile,
+          // losing its completion invoice/card charge and its required
+          // certificate. Only ever FILLS A NULL: the T&S tier stamp above and
+          // any identity already on the row are authoritative. Single-service
+          // accepts only — see catalogServiceIdForAcceptedEstimate.
+          if (!updates.service_id && !lockedAdoptRow?.service_id) {
+            const adoptedCatalogServiceId = await slotReservation
+              .catalogServiceIdForAcceptedEstimate(trx, estimate, {
+                serviceMode,
+                selectedFrequency,
+                requireSingleService: true,
+              });
+            if (adoptedCatalogServiceId) updates.service_id = adoptedCatalogServiceId;
+          }
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])

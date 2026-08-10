@@ -203,7 +203,16 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
 async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
-  const engineKey = primary?.service ? String(primary.service).trim() : '';
+  // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
+  // stinging_insect) all collapse to 'pest_control', which is keyed to nothing
+  // in the catalog. `engineKey` is the row's RAW pricing-engine key, carried
+  // through by oneTimeProfileServices for exactly this lookup (codex #3328 r1
+  // P1); recurring rows have no engineKey, so their category IS their identity.
+  // NO fallback from an unmapped engineKey to the category: stamping a
+  // specialty visit with the generic category's catalog row would be a WRONG
+  // identity (wrong billing, wrong completion profile), which is worse than
+  // leaving it null and failing open.
+  const engineKey = String(primary?.engineKey || primary?.service || '').trim();
   if (!conn || typeof conn.transaction !== 'function' || !engineKey) return null;
   let resolved = null;
   try {
@@ -222,6 +231,42 @@ async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
     return null;
   }
   return resolved;
+}
+
+// Catalog identity for an ACCEPTED estimate, resolved from the estimate itself.
+//
+// reserveSlot/commitReservation already hold a resolved profile and call
+// catalogServiceIdForProfile directly. The ADOPTED-appointment path
+// (estimate-public, `existingAppointmentId`) has no reservation to graduate —
+// it updates a pre-existing row — so it never reached that stamp and a
+// pre-slab accepted onto a legacy free-text appointment stayed on the generic
+// completion profile (codex #3328 r1 P1). It resolves the same profile here
+// and reuses the same lookup, so the two accept shapes cannot drift apart.
+//
+// requireSingleService (adoption ONLY): the adopted row PRE-EXISTS, so in a
+// split bundle it may be a different visit than the profile's primary —
+// stamping pre-slab identity onto the pest visit would be a WRONG identity,
+// worse than none. Adoption therefore stamps only an unambiguous, single-
+// service accept. reserve/commit create the row FOR the profile, so they have
+// no such ambiguity and do not pass this.
+async function catalogServiceIdForAcceptedEstimate(conn, estimate, {
+  serviceMode = 'one_time',
+  selectedFrequency = '',
+  requireSingleService = false,
+} = {}) {
+  if (!conn || !estimate) return null;
+  let profile = null;
+  try {
+    profile = typeof estimateSlotAvailability.resolveEstimateSlotProfile === 'function'
+      ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode, selectedFrequency })
+      : null;
+  } catch (err) {
+    logger.warn(`[slot-reservation] accepted-estimate profile resolve failed: ${err.message}`);
+    return null;
+  }
+  const services = Array.isArray(profile?.services) ? profile.services : [];
+  if (requireSingleService && services.length !== 1) return null;
+  return catalogServiceIdForProfile(conn, profile);
 }
 
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
@@ -1178,6 +1223,9 @@ module.exports = {
   // estimate-backed label recovery compares stored fall-through values
   // against this exact transform, so it must reuse it, never re-implement.
   cappedServiceType,
+  // Adopted-appointment accepts (estimate-public) stamp catalog identity
+  // through this — the SAME authority the reserve/commit paths use.
+  catalogServiceIdForAcceptedEstimate,
   _internals: {
     parseSlotId,
     addMinutesToTime,
