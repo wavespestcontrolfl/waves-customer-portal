@@ -265,6 +265,25 @@ Both are in the mock; neither is recommended.
 
 ---
 
+## 7a. Known limitation — foam must be a LINKED visit
+
+Foam resolves to the photo lane by its **catalog service key** (`foam_drill` /
+`foam_recurring`). The registry's display-name fallback deliberately does **not**
+recognise foam names: unknown names resolve to `unclassified_service`, which is the
+module's fail-closed bias ("no claim until classified"), and adding a name regex would
+widen eligibility on editable text.
+
+Consequence: a foam visit with **no `service_id` link** gets no marked-photo card. It
+is also ineligible for a satellite trace, so it cannot make a false claim — the failure
+is a missing card, not a wrong one, which is the right direction.
+
+Not reachable today: `booking_enabled: false` on both foam keys, the estimate converter
+resolves `foam_recurring` through `remainingUnitCatalogKey` so accepted estimates
+schedule *with* `service_id`, and there are zero foam visits all-time. Worth knowing if
+a foam visit is ever hand-created on the schedule without linking the catalog row.
+
+---
+
 ## 8. Decisions on record
 
 | | Ruling | Date |

@@ -472,3 +472,68 @@ describe('foam routes to the photo variant', () => {
       .toMatchObject({ eligible: true, variant: 'spray' });
   });
 });
+
+describe('a foam trace re-keys its cached PDF (caller audit)', () => {
+  // Consumer audit of resolveTraceRenderVerdict: treatmentZonePdfSignature is
+  // the one caller not exercised by the other suites. The render suppresses a
+  // foam visit's legacy trace, so the cached PDF must re-key or the customer
+  // keeps downloading the perimeter map the live report just removed.
+  const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
+  const TRACED = {
+    updated_at: new Date(1700000000000),
+    created_at: new Date(1700000000000),
+    capture_mode: 'perimeter',
+  };
+  // Linked identity — how a real foam visit resolves (#3306 links service_id).
+  const foamRecord = {
+    scheduled_service_id: 'ss-foam-sig',
+    service_type: 'Drill-and-Foam Termite',
+    service_data: JSON.stringify({ completedServiceKey: 'foam_drill', completedAddonLines: [] }),
+  };
+  const knexStub = (name) => ({
+    where: () => ({
+      first: async () => (name === 'treatment_zone_maps' ? TRACED
+        : (name === 'scheduled_services'
+          ? { id: 'ss-foam-sig', service_id: 'cat-foam', service_type: 'Drill-and-Foam Termite' }
+          : null)),
+      select: async () => [],
+      orderBy: () => ({ orderBy: () => ({ select: async () => [] }) }),
+    }),
+    whereIn: () => ({ select: async () => [], where: () => ({ select: async () => [] }) }),
+  });
+
+  const sigWith = async (env) => {
+    const prev = {
+      GATE_TRACE_ELIGIBILITY: process.env.GATE_TRACE_ELIGIBILITY,
+      GATE_PHOTO_MARKS: process.env.GATE_PHOTO_MARKS,
+    };
+    for (const k of Object.keys(prev)) delete process.env[k];
+    Object.assign(process.env, env);
+    try {
+      return await treatmentZonePdfSignature(foamRecord, knexStub);
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  };
+
+  test('dark: the pre-flip key is untouched', async () => {
+    expect(await sigWith({})).toBe('-tz1700000000000');
+  });
+
+  test('marks gate alone re-keys the traced foam record', async () => {
+    // Without this the live report drops the spray map while every download
+    // keeps serving it.
+    expect(await sigWith({ GATE_PHOTO_MARKS: 'true' })).toMatch(/-te0-cmperimeter$/);
+  });
+
+  test('either gate produces the same suppressed key', async () => {
+    const marks = await sigWith({ GATE_PHOTO_MARKS: 'true' });
+    const elig = await sigWith({ GATE_TRACE_ELIGIBILITY: 'true' });
+    const both = await sigWith({ GATE_PHOTO_MARKS: 'true', GATE_TRACE_ELIGIBILITY: 'true' });
+    expect(elig).toBe(marks);
+    expect(both).toBe(marks);
+  });
+});
