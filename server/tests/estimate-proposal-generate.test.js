@@ -777,6 +777,33 @@ describe('deriveProposalDraft', () => {
     expect(draft.propertyScope.items[0]).toEqual({ label: 'Building', value: '12,000 sq ft' });
   });
 
+  test('r15: a non-green estimatorEngine lane fails the whole draft — estimate-level review evidence gates generation', async () => {
+    // Yellow-lane reasons (fallback sqft, comps drift, existing-customer)
+    // are estimate-level — no line marker carries them, and a sent
+    // estimate's public token is live, so generation must refuse.
+    const yellow = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        estimatorEngine: { lane: 'yellow', laneReasons: ['home/building sqft from fallback source (zip_median)'] },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(yellow.programs).toBeNull();
+    expect(yellow.correctiveWork).toBeNull();
+    expect(yellow.propertyScope).toBeNull();
+    expect(yellow.warnings[0]).toMatch(/yellow review lane/i);
+    expect(yellow.warnings[0]).toMatch(/fallback source/i);
+
+    // A green lane generates normally.
+    const green = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        estimatorEngine: { lane: 'green', laneReasons: [] },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(green.programs).toHaveLength(1);
+    expect(green.warnings).toEqual([]);
+  });
+
   test('r14: mapped specialty `det` scope survives into corrective-work includes', async () => {
     // Mapped rows persist customer-facing scope under the `det` alias —
     // public extraction resolves detail || det, and generation must match

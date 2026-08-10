@@ -243,6 +243,11 @@ function buildFamilyRegistry(taxabilityMap = null) {
     registry[family] = {
       inclusions: family === 'pest' ? COMMERCIAL_PEST_INCLUSIONS : [VISIT_DOCUMENTATION_LINE],
       exclusions: PROGRAM_EXCLUSIONS[family] || [],
+      // Install source for a family switch's responsibility lines — the
+      // builder PRUNES only via the proposal's own persisted provenance
+      // (generatedResponsibilities), never via catalog membership
+      // (codex 1A-ii r15).
+      responsibilities: FAMILY_RESPONSIBILITIES[family] || [],
       // Family-level default only — a family switch has no source service
       // key, so this mirrors commercialTaxableDefault's family fallback.
       taxable: commercialTaxableDefault(family, undefined, { taxabilityMap }),
@@ -897,6 +902,30 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
     };
   }
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
+  // Estimate-LEVEL review evidence (fallback/disputed property facts, comps
+  // drift, existing-customer warnings) lives in estimatorEngine.lane —
+  // created separately from line markers in draft-builder's lane
+  // classifier, so rowIsReviewGated cannot see it. assertEstimateSendable
+  // skips its yellow prompt once sent_at exists, so a generated draft
+  // saved onto an already-sent estimate would expose derived prices on the
+  // LIVE public token with that evidence unresolved (codex 1A-ii r15).
+  // Any non-green lane fails the whole draft — property scope included,
+  // since disputed/fallback sqft taints the scope rows too. The operator
+  // can still author the proposal manually after reviewing.
+  const engineLane = String(estimateData?.estimatorEngine?.lane || '').toLowerCase();
+  if (engineLane && engineLane !== 'green') {
+    const laneReasons = (estimateData.estimatorEngine.laneReasons || [])
+      .slice(0, 6).map((r) => String(r)).join('; ');
+    return {
+      propertyScope: null,
+      programs: null,
+      correctiveWork: null,
+      customerResponsibilities: null,
+      responsibilitiesByFamily: null,
+      suggestedTaxRate: null,
+      warnings: [`Nothing was generated: the estimate is in the ${engineLane} review lane${laneReasons ? ` (${laneReasons})` : ''}. Resolve the review evidence in AI Draft Review, then author the proposal manually.`],
+    };
+  }
   const taxabilityMap = await loadTaxabilityMap(database);
   const { programs, warning } = derivePrograms(estimateData, estimate, taxabilityMap);
   const { correctiveWork, warning: oneTimeWarning } = deriveCorrectiveWork(estimateData, estimate, taxabilityMap);

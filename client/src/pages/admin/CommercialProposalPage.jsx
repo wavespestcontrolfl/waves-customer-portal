@@ -84,6 +84,13 @@ const PROGRAM_FAMILY_OPTIONS = [
 const programRowIsPriced = (p) => String(p.label || '').trim()
   && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
 
+// A row the operator has STARTED authoring — ANY field, not just the
+// label. Generation's fill-only emptiness check keys on this: a price or
+// inclusions typed before the name must not be silently replaced by the
+// generated draft (codex 1A-ii r15).
+const programRowHasContent = (p) => [p.label, p.note, p.inclusionsText, p.exclusionsText, p.coversText]
+  .some((v) => String(v || '').trim()) || Number(p.pricePerApplication) > 0;
+
 // Mirrors server computeProposalTotals so totals update live as you type.
 function computeTotals(buildings, taxRate, correctiveWork = [], programs = []) {
   let annualRecurring = 0, oneTime = 0, taxableAnnual = 0, taxableOneTime = 0;
@@ -242,11 +249,12 @@ export default function CommercialProposalPage() {
   // a concurrent edit skipped applyLoaded (loadedAuthored still false), so
   // a save retry must not treat them as discardable (codex 1A-ii r2f).
   const persistedBuildingsRef = React.useRef(false);
-  // Family → generated responsibility lines, captured when Generate
-  // installs responsibilities so a later program deletion can prune the
-  // deleted family's lines (codex 1A-ii r12). Null until generation fills
-  // responsibilities; hand-authored lines are never in the map, so pruning
-  // can never touch them.
+  // Family → generated responsibility lines THIS proposal's generation
+  // actually installed (codex 1A-ii r12), persisted with the proposal as
+  // `generatedResponsibilities` so a reopened proposal prunes exactly what
+  // its generation wrote — never static-catalog membership, which would
+  // eat a hand-authored line that matches a stock sentence (codex 1A-ii
+  // r15). Null until generation fills responsibilities.
   const generatedRespByFamilyRef = React.useRef(null);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
@@ -292,12 +300,11 @@ export default function CommercialProposalPage() {
       exclusionsText: (program.exclusions || []).join('\n'),
       coversText: (program.buildings || []).map((b) => (b.note ? `${b.name} | ${b.note}` : b.name)).join(', '),
     })));
-    // Provenance for generated responsibility pruning survives reload: the
-    // load response carries the server's static family registry, so
-    // deleting a program from a REOPENED proposal still prunes its
-    // family's generated lines (codex 1A-ii r13). Exact-line matching
-    // keeps hand-authored text untouchable regardless.
-    if (data.responsibilityRegistry) generatedRespByFamilyRef.current = data.responsibilityRegistry;
+    // Pruning provenance is the proposal's OWN persisted record of what
+    // generation installed (codex 1A-ii r15) — never the static catalog,
+    // which would misclassify a hand-authored line that happens to match a
+    // stock sentence. Legacy proposals without it simply never prune.
+    generatedRespByFamilyRef.current = p.generatedResponsibilities || null;
     if (data.familyRegistry) familyRegistryRef.current = data.familyRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
       label: w.label || '',
@@ -384,7 +391,7 @@ export default function CommercialProposalPage() {
       // fallback lines, which generation may freely replace (codex 1A-ii r1).
       const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
         && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
-      if (draft?.programs?.length && !live.programsState.some((p) => p.label.trim()) && !hasAuthoredBuildingLines) {
+      if (draft?.programs?.length && !live.programsState.some(programRowHasContent) && !hasAuthoredBuildingLines) {
         setProgramsState(draft.programs.map((program) => ({
           service: program.service,
           label: program.label,
@@ -417,10 +424,10 @@ export default function CommercialProposalPage() {
       // by the programs branch above.
       if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim() && programsInstalled) {
         setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
-        // MERGE over the load-time registry, never replace — the draft map
-        // carries only the generated families, and a later family switch
-        // needs the FULL registry to install the new family's lines
-        // (pre-push codex r14b).
+        // MERGE over any persisted provenance, never replace (pre-push
+        // codex r14b) — this map is the proposal's own record of what
+        // generation installed, saved as `generatedResponsibilities`;
+        // family-switch installs come from the served familyRegistry.
         generatedRespByFamilyRef.current = {
           ...(generatedRespByFamilyRef.current || {}),
           ...(draft.responsibilitiesByFamily || {}),
@@ -508,6 +515,12 @@ export default function CommercialProposalPage() {
     setResponsibilitiesText((text) => text.split('\n')
       .filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())))
       .join('\n'));
+    // Persisted provenance follows the agreement: the last program of a
+    // family leaving drops its provenance entry (codex 1A-ii r15).
+    if (!remainingFamilies.has(removed.service)) {
+      const { [removed.service]: _gone, ...rest } = byFamily;
+      generatedRespByFamilyRef.current = Object.keys(rest).length ? rest : null;
+    }
   };
 
   // Changing a program's FAMILY must not keep the old family's generated
@@ -553,10 +566,12 @@ export default function CommercialProposalPage() {
       }
       return next;
     }));
-    // Family-derived generated responsibilities follow the same swap: prune
-    // the old family's lines (unless another remaining program still needs
-    // them) and, when any generated lines were present, install the new
-    // family's lines. Hand-authored lines are never in the registry.
+    // Generated responsibilities follow the same swap, pruning ONLY via the
+    // proposal's own persisted provenance (never catalog membership — codex
+    // 1A-ii r15): lines this generation installed for the old family leave
+    // (unless another remaining program's family still needs them), and the
+    // new family's lines install from the served registry, recorded back
+    // into provenance so a later removal/switch can prune them too.
     const byFamily = generatedRespByFamilyRef.current;
     if (!byFamily) return;
     const removedLines = byFamily[prev.service] || [];
@@ -566,14 +581,22 @@ export default function CommercialProposalPage() {
     const keep = new Set(Object.entries(byFamily)
       .filter(([family]) => remainingFamilies.has(family))
       .flatMap(([, lines]) => lines));
-    setResponsibilitiesText((text) => {
-      const lines = text.split('\n');
-      const hadGenerated = lines.some((line) => removedLines.includes(line.trim()));
-      if (!hadGenerated) return text;
+    const lines = responsibilitiesText.split('\n');
+    const hadGenerated = lines.some((line) => removedLines.includes(line.trim()));
+    const nextProvenance = { ...byFamily };
+    if (!remainingFamilies.has(prev.service)) delete nextProvenance[prev.service];
+    if (hadGenerated) {
       const kept = lines.filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())));
       const present = new Set(kept.map((line) => line.trim()));
-      return [...kept, ...(byFamily[nextFamily] || []).filter((line) => !present.has(line))].join('\n');
-    });
+      const installLines = (newReg?.responsibilities || []).filter((line) => !present.has(line));
+      // Only the lines we actually append are provenance — a pre-existing
+      // identical line may be hand-authored and must stay unprunable.
+      if (installLines.length) {
+        nextProvenance[nextFamily] = [...new Set([...(nextProvenance[nextFamily] || []), ...installLines])];
+      }
+      setResponsibilitiesText([...kept, ...installLines].join('\n'));
+    }
+    generatedRespByFamilyRef.current = Object.keys(nextProvenance).length ? nextProvenance : null;
   };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
@@ -643,6 +666,12 @@ export default function CommercialProposalPage() {
       ...(programsPayload.length ? { programs: programsPayload } : {}),
       ...(work.length ? { correctiveWork: work } : {}),
       ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
+      // Provenance of generation-installed responsibility lines — persisted
+      // with the proposal so a reopened one prunes exactly what generation
+      // wrote (codex 1A-ii r15). PUT persists the payload exactly, so
+      // omitting this would delete the stored provenance on every save.
+      ...(generatedRespByFamilyRef.current && Object.keys(generatedRespByFamilyRef.current).length
+        ? { generatedResponsibilities: generatedRespByFamilyRef.current } : {}),
       ...(hasTerms ? { commercialTerms: ct } : {}),
     };
   };
@@ -1181,6 +1210,14 @@ export default function CommercialProposalPage() {
                     size="sm" placeholder="Covers (optional) — comma-separated names, add a note with | (e.g. Tower A | Exterior only, Clubhouse)" maxLength={400}
                     value={p.coversText} disabled={!!locked}
                     onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, coversText: e.target.value } : it))); }}
+                  />
+                  {/* Customer-visible on every proposal surface — a loaded
+                      note must be editable here, not silently round-tripped
+                      out of sight (codex 1A-ii r15). */}
+                  <Input
+                    size="sm" placeholder="Program note (optional, shown on the proposal)" maxLength={300}
+                    value={p.note} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, note: e.target.value } : it))); }}
                   />
                 </div>
               ))}

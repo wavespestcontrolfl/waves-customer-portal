@@ -208,8 +208,27 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.propertyScope).toBeNull();
     expect(p.correctiveWork).toBeNull();
     expect(p.customerResponsibilities).toBeNull();
+    expect(p.generatedResponsibilities).toBeNull();
     expect(p.commercialTerms).toBeNull();
     expect(p.accountManager).toBeUndefined();
+  });
+
+  it('round-trips generatedResponsibilities provenance (r15): builder-consumed metadata, bounded, null when absent/hostile', () => {
+    const p = normalizeProposal(authored({
+      generatedResponsibilities: {
+        pest: ['Report pest activity between visits through the Waves app or office line', '  '],
+        lawn: [],
+        '': ['orphan'],
+      },
+    }));
+    // Empty families and blank lines drop; the map itself survives the
+    // PUT round-trip so a reopened proposal prunes exactly what its
+    // generation installed — never static-catalog membership.
+    expect(p.generatedResponsibilities).toEqual({
+      pest: ['Report pest activity between visits through the Waves app or office line'],
+    });
+    const hostile = normalizeProposal(authored({ generatedResponsibilities: ['not-an-object'] }));
+    expect(hostile.generatedResponsibilities).toBeNull();
   });
 
   it('keeps a BLANK initial term unset — Number(null)/Number("") must never coerce to the month-to-month claim', () => {

@@ -157,6 +157,24 @@ function normalizeCustomerResponsibilities(raw) {
   return cleaned.length ? cleaned : null;
 }
 
+// Per-proposal provenance of GENERATED responsibility lines, keyed by
+// program family — the builder prunes a removed/switched family's lines
+// only when THIS proposal's generation actually installed them, never by
+// static-catalog membership (a hand-authored line that happens to match a
+// stock sentence must survive — codex 1A-ii r15). Builder-consumed
+// metadata: written by generation, read by pruning, deliberately rendered
+// on no customer surface. Legacy proposals without it simply never prune.
+function normalizeGeneratedResponsibilities(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [family, lines] of Object.entries(raw).slice(0, 12)) {
+    const key = cleanString(family, 40);
+    const cleaned = cleanStringList(lines, { maxItems: 16, maxLen: 200 });
+    if (key && cleaned.length) out[key] = cleaned;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Canonical payment-terms vocabulary — CONSUMED from the payer mechanism
 // (payer.js PAYMENT_TERMS), never a local copy: proposals, payer statements,
 // and acceptance invoicing must speak one term language (codex #3297
@@ -623,6 +641,7 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     programs: normalizePrograms(base.programs),
     correctiveWork: normalizeCorrectiveWork(base.correctiveWork),
     customerResponsibilities: normalizeCustomerResponsibilities(base.customerResponsibilities),
+    generatedResponsibilities: normalizeGeneratedResponsibilities(base.generatedResponsibilities),
     commercialTerms: normalizeCommercialTerms(base.commercialTerms),
   };
 }

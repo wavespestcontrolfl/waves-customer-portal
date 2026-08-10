@@ -1884,17 +1884,13 @@ router.get('/:id/proposal', async (req, res, next) => {
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
       prospectBrief: parseEstimateData(estimate.estimate_data)?.commercialProspect || null,
-      // Static family → generated-responsibility-line registry so the
-      // builder can prune a deleted program's generated lines even on a
-      // REOPENED proposal, where the in-memory generation capture is gone
-      // (codex 1A-ii r13). Exact-line matching client-side keeps
-      // hand-authored text untouchable.
-      responsibilityRegistry: require('../services/estimate-proposal-generate').FAMILY_RESPONSIBILITIES,
-      // Per-family inclusions/exclusions/taxability registry for the
-      // builder's family-change resync — switching a generated program's
-      // family prunes the old family's generated lines and installs the new
-      // family's stack by exact match (codex 1A-ii r14). Same reload-safe
-      // served-registry pattern as responsibilityRegistry.
+      // Per-family inclusions/exclusions/responsibilities/taxability
+      // registry: the INSTALL source for the builder's family-change resync
+      // (codex 1A-ii r14). Pruning of generated responsibility lines rides
+      // the proposal's own persisted generatedResponsibilities provenance,
+      // never catalog membership (codex 1A-ii r15 — a hand-authored line
+      // matching a stock sentence must survive), so reopened proposals
+      // prune exactly what their generation installed.
       familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
         await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
       ),
