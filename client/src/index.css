@@ -73,6 +73,36 @@ body {
   }
 }
 
+/* iOS WebKit sizes native date/time controls from their shadow DOM, and that
+   intrinsic width can EXCEED an author width:100% — the field then renders
+   wider than every sibling input and spills out of its column (owner report
+   2026-08-10: the Pre-Treatment Certificate's "Time of treatment" field on the
+   tech sheet). Dropping the native appearance makes the control track its
+   container like an ordinary text input; min-width:0 lets it shrink as a flex
+   item (min-width:auto otherwise pins a flex:1 date/time field to its
+   intrinsic width and blows out the row); max-width caps the overflow for
+   everything else.
+
+   Unscoped on purpose, same reasoning as the pointer:coarse block above: this
+   started as a per-call-site inline fix in CreateProjectModal, was missed by
+   the schema-driven renderer it delegates to, and a repo sweep found ~90 more
+   unhardened date/time inputs across all three portals plus pass-through
+   <Input>/<BrandInput> primitives that forward `type` with no call site to
+   grep. One rule retires the class instead of re-fixing it per field.
+
+   Desktop is unaffected in practice — appearance:none leaves the value and the
+   calendar/clock picker indicator rendering unchanged in Chromium. */
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"],
+input[type="month"],
+input[type="week"] {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */
 .border-hairline {

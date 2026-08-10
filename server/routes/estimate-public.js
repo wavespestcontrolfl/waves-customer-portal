@@ -5806,7 +5806,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
   .date-finder-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .date-finder-row input[type=text]{flex:1;min-width:200px;min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#F8FCFE;box-sizing:border-box}
-  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#fff}
+  /* appearance/min-width/max-width: iOS WebKit sizes this control from its shadow DOM and the intrinsic width can exceed the row, so clamp it the way the client bundle does globally. */
+  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#fff;-webkit-appearance:none;appearance:none;min-width:0;max-width:100%;box-sizing:border-box}
   .date-finder-label{font-size:13px;color:#64748B;font-weight:600}
   .date-finder-btn{min-height:44px;border:0;border-radius:10px;padding:0 18px;background:#1B2C5B;color:#fff;font-size:14px;font-weight:700;cursor:pointer}
   .date-finder-btn[disabled]{opacity:.6;cursor:not-allowed}
