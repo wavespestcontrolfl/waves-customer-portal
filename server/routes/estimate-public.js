@@ -9857,32 +9857,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             rowServiceType: existingAppointmentRow.service_type,
           });
           if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
-          // Catalog identity for the ADOPTED row (codex #3328 r1 P1). The
-          // reserve/commit stamp never runs on this path — there is no held
-          // reservation to graduate — so a pre-slab (or other one-time
-          // specialty) accepted onto a legacy free-text appointment kept
-          // service_id NULL and resolved to the GENERIC completion profile,
-          // losing its completion invoice/card charge and its required
-          // certificate. Only ever FILLS A NULL: the T&S tier stamp above and
-          // any identity already on the row are authoritative. Single-service
-          // accepts only — see catalogServiceIdForAcceptedEstimate.
-          // The SAME resolved inputs the reservation paths pass (see the
-          // commitReservation calls above): the ACCEPTED estimate data, the
-          // normalized mode, and the frequency KEY. Passing the raw request
-          // values instead is a money bug (codex #3328 r4 P0) — a structurally
-          // one-time estimate defaults `serviceMode` to 'recurring', so a
-          // pre-slab accept would resolve pest_control, match no seeded row,
-          // and leave service_id null: exactly the billing/compliance failure
-          // this PR exists to close.
-          if (!updates.service_id && !lockedAdoptRow?.service_id) {
-            const adoptedCatalogServiceId = await slotReservation
-              .catalogServiceIdForAcceptedEstimate(trx, acceptedEstimateForScheduling, {
-                serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
-                selectedFrequency: acceptedSchedulingFrequencyKey,
-                requireSingleService: true,
-              });
-            if (adoptedCatalogServiceId) updates.service_id = adoptedCatalogServiceId;
-          }
+          // NOTE (deferred, see PR #3328): the adopted-appointment path does NOT
+          // stamp catalog identity. Adding it here is blocked on a PRE-EXISTING
+          // eligibility bug, not on this change: the preflight lookup above
+          // (:8595) and the locked revalidation just above both family-check
+          // with the RAW `serviceMode`, while the contract lookup at :8262 uses
+          // adoptionServiceModesForContract. For a structurally one-time
+          // estimate whose request mode defaults to 'recurring', the valid
+          // appointment is rejected 409 before any stamp could run. Aligning
+          // those checks changes WHICH appointments may be adopted — an owner
+          // decision, tracked separately. Until then an adopted visit keeps
+          // service_id NULL exactly as it does today.
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])
