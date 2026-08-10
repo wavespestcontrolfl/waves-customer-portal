@@ -7411,6 +7411,10 @@ const CallRecordingProcessor = {
         await require('./triage-auto-resolve').resolveOpenUnitNumberCards({
           customerId,
           acceptedAddress: effectiveAddressValidation.normalized,
+          // Chronology bound: a reprocess of an OLDER call must not erase a
+          // unit ask a LATER call raised (its acceptance predates that work).
+          acceptingCallId: call.id,
+          acceptingCallAt: call.created_at,
         });
       } catch (e) {
         logger.warn(`[call-proc] unit-number card resolution failed for customer ${customerId}: ${e.code || e.name || 'db_error'}`);

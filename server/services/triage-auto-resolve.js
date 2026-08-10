@@ -45,7 +45,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { lockTriageCall } = require('../utils/triage-locks');
+const { lockTriageCall, lockTriageCustomer } = require('../utils/triage-locks');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -443,6 +443,24 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
   return !!identity && !identity.multiProperty && identityMatchesAcceptedAddress(identity, acceptedAddress);
 }
 
+// Can this call's acceptance speak for a card at all? Only for work that
+// already existed when the call came in: a REPROCESS of an older call must
+// not erase a unit ask a LATER call raised, since its evidence predates that
+// work (codex r9 P1). The accepting call's own cards are always eligible
+// (same-call reprocess). Mirrors the SQL bound exactly: no accepting-call
+// identity at all = no bound requested (the call processor always supplies
+// both); an id without a timestamp admits only that call's own cards; a
+// card with an unusable timestamp fails closed.
+function unitCardWithinAcceptanceChronology(row, { acceptingCallId = null, acceptingCallAt = null } = {}) {
+  if (!acceptingCallId && !acceptingCallAt) return true;
+  if (acceptingCallId && row?.call_log_id && String(row.call_log_id) === String(acceptingCallId)) return true;
+  if (!acceptingCallAt) return false;
+  const created = row?.created_at ? new Date(row.created_at) : null;
+  const accepted = new Date(acceptingCallAt);
+  if (!created || Number.isNaN(created.getTime()) || Number.isNaN(accepted.getTime())) return false;
+  return created <= accepted;
+}
+
 // Pure selection over the loaded candidate rows, exported for tests.
 // Building matching is separate from resolution eligibility (pre-push audit
 // P1 r5): EVERY candidate must be positively attributable before anything
@@ -450,10 +468,13 @@ function unitCardAnsweredByAcceptedStreet(row, acceptedAddress) {
 // call that could concern the accepted building, makes the attribution
 // ambiguous and blocks ALL resolution — a lone "ordinary" match next to a
 // multi-property sibling must not resolve. Among identified cards, exactly
-// one may name the accepted building.
-function selectUnitCardsToResolve(candidates, acceptedAddress) {
+// one may name the accepted building. Chronology-ineligible cards are not
+// candidates at all (the SQL applies the same bound; this is the tested
+// statement of the rule and a safety net if the query ever loosens).
+function selectUnitCardsToResolve(candidates, acceptedAddress, chronology = {}) {
   let match = null;
   for (const row of candidates || []) {
+    if (!unitCardWithinAcceptanceChronology(row, chronology)) continue;
     const identity = unitCardBuildingIdentity(row);
     if (!identity || identity.multiProperty) return [];
     if (identityMatchesAcceptedAddress(identity, acceptedAddress)) {
@@ -493,23 +514,54 @@ async function hasOpenUnitNumberCards(customerId, conn = db) {
 // holds it. Shares the per-call lock contract (utils/triage-locks.js) and
 // the review_status re-sync with the sweep, admin-triage, and the email
 // resolver.
-async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source = 'later call validated the full unit address' }, conn = db) {
+async function resolveOpenUnitNumberCards({
+  customerId, acceptedAddress, acceptingCallId = null, acceptingCallAt = null,
+  source = 'later call validated the full unit address',
+}, conn = db) {
   const none = { resolved: 0, remainingOpen: null };
   if (!customerId || !String(acceptedAddress?.street_line_1 || '').trim()) return none;
   const now = new Date();
-  const candidates = await conn('triage_items as t')
-    .join('call_log as cl', 'cl.id', 't.call_log_id')
-    .where('t.reason_code', 'missing_unit_number')
-    .whereIn('t.status', ['open', 'in_progress'])
-    .where('cl.customer_id', customerId)
-    .select(
-      't.id', 't.call_log_id',
+  const resolveCards = async (trx) => {
+    // Customer-scoped lock FIRST (global order, see utils/triage-locks.js):
+    // candidate selection and the update must see the SAME card set, or a
+    // concurrent resolver's phantom insert breaks the "two same-building
+    // asks resolve none" rule (codex r9 P1). Selection therefore happens
+    // INSIDE this transaction, under this lock.
+    await lockTriageCustomer(trx, customerId);
+    const candidateQuery = trx('triage_items as t')
+      .join('call_log as cl', 'cl.id', 't.call_log_id')
+      .where('t.reason_code', 'missing_unit_number')
+      .whereIn('t.status', ['open', 'in_progress'])
+      .where('cl.customer_id', customerId);
+    // Chronology bound (codex r9 P1): a REPROCESS of an older call must not
+    // erase owed work a LATER call filed — its acceptance is stale evidence
+    // for anything raised after it. Cards from the accepting call itself are
+    // always eligible (the same-call reprocess case). Fail closed: with no
+    // accepting-call timestamp, only that call's own cards are eligible.
+    if (acceptingCallAt) {
+      candidateQuery.where((qb) => {
+        qb.where('t.created_at', '<=', acceptingCallAt);
+        if (acceptingCallId) qb.orWhere('t.call_log_id', acceptingCallId);
+      });
+    } else if (acceptingCallId) {
+      candidateQuery.where('t.call_log_id', acceptingCallId);
+    }
+    const candidates = await candidateQuery.select(
+      't.id', 't.call_log_id', 't.created_at',
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
     );
-  const answered = selectUnitCardsToResolve(candidates, acceptedAddress);
-  if (!answered.length) return none;
-  const resolveCards = async (trx) => {
+    const answered = selectUnitCardsToResolve(candidates, acceptedAddress, { acceptingCallId, acceptingCallAt });
+    if (!answered.length) {
+      const remainingNoop = await trx('triage_items as t')
+        .join('call_log as cl', 'cl.id', 't.call_log_id')
+        .where('t.reason_code', 'missing_unit_number')
+        .whereIn('t.status', ['open', 'in_progress'])
+        .where('cl.customer_id', customerId)
+        .count('* as n')
+        .first();
+      return { resolved: 0, remainingOpen: parseInt(remainingNoop?.n || 0, 10) };
+    }
     const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
     for (const callId of callIds) await lockTriageCall(trx, callId);
     const updated = await trx('triage_items')
@@ -531,8 +583,8 @@ async function resolveOpenUnitNumberCards({ customerId, acceptedAddress, source 
         .where({ id: callId })
         .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
     }
-    // How many unit asks are STILL outstanding for this customer — the
-    // caller's license (or not) to clear the lead's rolled-up reason.
+    // Point-in-time report of what is still outstanding (logs/tests only —
+    // the lead-reason license re-reads the ledger live at the lead write).
     const remaining = await trx('triage_items as t')
       .join('call_log as cl', 'cl.id', 't.call_log_id')
       .where('t.reason_code', 'missing_unit_number')
@@ -717,6 +769,7 @@ module.exports = {
   hasOpenUnitNumberCards,
   unitCardAnsweredByAcceptedStreet,
   selectUnitCardsToResolve,
+  unitCardWithinAcceptanceChronology,
   classifyTriageItem,
   hasNewAddressEvidence,
   callSuppliedAddress,

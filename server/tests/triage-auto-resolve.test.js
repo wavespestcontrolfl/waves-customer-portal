@@ -12,6 +12,7 @@ const {
   classifyTriageItem,
   unitCardAnsweredByAcceptedStreet,
   selectUnitCardsToResolve,
+  unitCardWithinAcceptanceChronology,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
@@ -419,6 +420,46 @@ describe('unitCardAnsweredByAcceptedStreet', () => {
     expect(unitCardAnsweredByAcceptedStreet(row, accepted('100 Example Condo Ct'))).toBe(false);
     const ordinary = { id: 'a', call_extraction: v2('100 Example Condo Ct'), call_extraction_v1: null };
     expect(selectUnitCardsToResolve([ordinary, row], accepted('100 Example Condo Ct'))).toEqual([]);
+  });
+});
+
+// A reprocess of an OLDER call must not erase a unit ask a LATER call raised.
+describe('unitCardWithinAcceptanceChronology', () => {
+  const CALL_AT_T = new Date(NOW.getTime() - 5 * 24 * 3600 * 1000).toISOString();
+  const BEFORE = new Date(new Date(CALL_AT_T).getTime() - 3600 * 1000).toISOString();
+  const AFTER = new Date(new Date(CALL_AT_T).getTime() + 3600 * 1000).toISOString();
+  const bound = { acceptingCallId: 'call-accept', acceptingCallAt: CALL_AT_T };
+
+  test('a card raised BEFORE the accepting call is eligible; one raised AFTER is not', () => {
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: BEFORE }, bound)).toBe(true);
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: AFTER }, bound)).toBe(false);
+  });
+
+  test('the accepting call\'s OWN card is always eligible (same-call reprocess)', () => {
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'call-accept', created_at: AFTER }, bound)).toBe(true);
+  });
+
+  test('fail closed on an unusable card timestamp, and on an id with no accepting timestamp', () => {
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: null }, bound)).toBe(false);
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: 'not-a-date' }, bound)).toBe(false);
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: BEFORE }, { acceptingCallId: 'call-accept' })).toBe(false);
+  });
+
+  test('no accepting-call identity at all → no bound requested', () => {
+    expect(unitCardWithinAcceptanceChronology({ call_log_id: 'other', created_at: AFTER })).toBe(true);
+  });
+
+  test('the selector drops chronology-ineligible cards before attribution', () => {
+    const v2j = (street) => JSON.stringify({ property: { service_address: { street_line_1: street, city: 'Bradenton', postal_code: '34212' } } });
+    const acceptedAddr = { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' };
+    const older = { id: 'old', call_log_id: 'c-old', created_at: BEFORE, call_extraction: v2j('100 Example Condo Ct'), call_extraction_v1: null };
+    const newer = { id: 'new', call_log_id: 'c-new', created_at: AFTER, call_extraction: v2j('100 Example Condo Ct'), call_extraction_v1: null };
+    // Without the bound the two same-building cards are ambiguous → none resolve.
+    expect(selectUnitCardsToResolve([older, newer], acceptedAddr)).toEqual([]);
+    // With it, the newer card is not a candidate and the older one resolves.
+    expect(selectUnitCardsToResolve([older, newer], acceptedAddr, bound)).toEqual([older]);
+    // A newer card ALONE resolves nothing.
+    expect(selectUnitCardsToResolve([newer], acceptedAddr, bound)).toEqual([]);
   });
 });
 
