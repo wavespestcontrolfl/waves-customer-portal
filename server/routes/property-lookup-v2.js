@@ -2941,8 +2941,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // non-multifamily record can't produce copy asserting county master-parcel
   // provenance it doesn't have — commercialSignalRecord inside these helpers
   // already strips untrusted web-sourced type strings (the Gateway Ave
-  // guard), so "record alone" means trusted-record evidence.
-  if (rc && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
+  // guard), so "record alone" means trusted-record evidence. The copy
+  // asserts COUNTY-ROLL provenance, so it additionally requires
+  // hasCountyEvidence — a legacy AI-cache record with no field evidence is
+  // trusted for classification but must not produce county-master copy.
+  if (rc && hasCountyEvidence(rc)
+      && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
     const masterParcelSubtype = resolveCommercialSubtype(rc, {});
     if (masterParcelSubtype === 'multifamily_common_area_residential'
         || masterParcelSubtype === 'hoa_common_area_residential') {

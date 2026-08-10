@@ -409,6 +409,16 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
   });
 
+  test('legacy AI record without field evidence classifies commercial but gets no county-master copy (codex P1)', () => {
+    // No _fieldEvidence → recordCommercialSignalTrusted trusts it for
+    // CLASSIFICATION (legacy-cache compatibility), but the guidance asserts
+    // county-roll provenance the record does not have.
+    const legacy = { formattedAddress: '2 Example Building Way, Testville, FL 00000', propertyType: 'Multifamily', unitCount: 8, _source: 'ai' };
+    expect(detectCategory(legacy, {})).toBe('COMMERCIAL');
+    const flags = buildFieldVerifyFlags(legacy, null, null);
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
   test('satellite-AI multifamily signal on a county single-family record → no master-parcel guidance (codex P1)', () => {
     // The AI signal may legitimately flip the CATEGORY, but the guidance copy
     // asserts county master-parcel provenance — it must only fire when the
