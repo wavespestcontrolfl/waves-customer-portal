@@ -1948,9 +1948,14 @@ router.get('/', async (req, res, next) => {
     // suppresses ineligible traces regardless.
     const {
       resolveTraceEligibility: rowTraceEligibility,
-      combineLineVerdicts: combineRowVerdicts,
       traceEligibilityGateOn,
+      traceFeedFields,
     } = require('../services/service-report/trace-eligibility');
+    const { photoMarksGateOn } = require('../services/service-report/photo-marks');
+    // The verdict is also needed when ONLY the marks gate is on, so a photo
+    // lane can hide the satellite tracer (codex P2). traceFeedFields keeps
+    // every other lane's pre-gate behavior in that configuration.
+    const rowTraceNeeded = traceEligibilityGateOn() || photoMarksGateOn();
     let serviceKeyByServiceId = new Map();
     let dayPointerByKey = new Map();
     // Pointer OUTAGE ≠ no pointer rows (codex P2 r27): on failure the
@@ -1959,7 +1964,13 @@ router.get('/', async (req, res, next) => {
     // still fails closed via the unresolved sentinel — capture's own
     // catalog rule (r18) rejects those ids the same way.
     let dayPointerLookupFailed = false;
-    if (traceEligibilityGateOn()) {
+    // rowTraceNeeded, not the eligibility gate alone (codex P2 r5): with only
+    // GATE_PHOTO_MARKS on, skipping this batch left every linked add-on
+    // resolving to `unresolved:<id>`, so a foam add-on never read as a photo
+    // lane and traceFeedFields defaulted to traceEligible:true — the tech was
+    // offered a satellite workflow the save endpoint then rejects. The week
+    // feed already batches under either gate.
+    if (rowTraceNeeded) {
       // Primary AND add-on catalog ids in one batch — a grouped visit with
       // an ineligible primary but a spray-capable add-on line still traces
       // (codex P2 r11).
@@ -2144,18 +2155,25 @@ router.get('/', async (req, res, next) => {
         }),
       };
 
-      const rowTraceVerdict = traceEligibilityGateOn()
+      // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
+      // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
+      // the order-dependence the capability resolver exists to remove — a
+      // photo line ahead of a satellite line collapsed to 'photo' and hid a
+      // tracer that traceCaptureBlockPayload now permits.
+      const rowTraceUsable = rowTraceNeeded
         && !dayPointerLookupFailed
-        && !projectCompletionContext?.completionProfileLookupFailed
-        ? combineRowVerdicts(
-          rowTraceEligibility({
+        && !projectCompletionContext?.completionProfileLookupFailed;
+      const rowPrimaryVerdict = rowTraceUsable
+        ? rowTraceEligibility({
             serviceKey: serviceKeyByServiceId.get(s.service_id)
               || projectCompletionContext?.completionProfile?.serviceKey
               || null,
             findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
             displayName: s.service_type || '',
-          }),
-          (addonsByServiceId.get(s.id) || []).map((addon) => {
+          })
+        : null;
+      const rowAddonVerdicts = rowTraceUsable
+        ? (addonsByServiceId.get(s.id) || []).map((addon) => {
             // A LINKED add-on whose batched catalog lookup failed or
             // omitted it fails closed via the unresolved sentinel — the
             // save route's shared resolver rejects the same id, so name
@@ -2169,9 +2187,8 @@ router.get('/', async (req, res, next) => {
               findingsType: (addonKey && dayPointerByKey.get(addonKey)) || null,
               displayName: addon.serviceName || '',
             });
-          }),
-        )
-        : null;
+          })
+        : [];
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
@@ -2181,8 +2198,10 @@ router.get('/', async (req, res, next) => {
         // Unlinked rows (null service_id) fall back to the profile's
         // resolved key (codex P2 r2), and typed keys classify by their
         // findings pointer (codex P2 r1).
-        traceEligible: !rowTraceVerdict || rowTraceVerdict.eligible,
-        traceVariant: rowTraceVerdict?.eligible ? rowTraceVerdict.variant : null,
+        // traceEligible means "offer the SATELLITE tracer"; a photo lane is
+        // mapped by marking a photo instead, so the helper reports false
+        // (codex P2).
+        ...traceFeedFields(rowPrimaryVerdict, rowAddonVerdicts),
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -2459,9 +2478,12 @@ router.get('/week', async (req, res, next) => {
       // resolved profile supplies both identities — no extra queries.
       const {
         resolveTraceEligibility: weekTraceEligibility,
-        combineLineVerdicts: weekCombineVerdicts,
-        traceEligibilityGateOn: weekTraceGateOn,
+        traceEligibilityGateOn: weekTraceGateOnRaw,
+        traceFeedFields,
       } = require('../services/service-report/trace-eligibility');
+      const { photoMarksGateOn: weekPhotoMarksGateOn } = require('../services/service-report/photo-marks');
+      // Same reason as the day feed (codex P2).
+      const weekTraceGateOn = () => weekTraceGateOnRaw() || weekPhotoMarksGateOn();
       // Add-on lines resolve by CATALOG KEY + typed pointer, like the day
       // feed — name-only classification gave fire_ant/flea_tick add-ons
       // the fallback spray variant when their rules require lawn outline
@@ -2616,16 +2638,20 @@ router.get('/week', async (req, res, next) => {
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
           ...(() => {
-            const v = weekTraceGateOn()
+            // Primary and add-ons stay SEPARATE through traceFeedFields
+            // (codex P1 r7) — same reason as the day feed.
+            const weekUsable = weekTraceGateOn()
               && !weekPointerLookupFailed
-              && !projectCompletionContext?.completionProfileLookupFailed
-              ? weekCombineVerdicts(
-                weekTraceEligibility({
+              && !projectCompletionContext?.completionProfileLookupFailed;
+            const weekPrimary = weekUsable
+              ? weekTraceEligibility({
                   serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
                   findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
                   displayName: s.service_type || '',
-                }),
-                serviceAddons.map((addon) => {
+                })
+              : null;
+            const weekAddons = weekUsable
+              ? serviceAddons.map((addon) => {
                   // Same unresolved-sentinel rule as the day feed (codex P2 r24)
                   const addonKey = addon.serviceId
                     ? (weekKeyByCatalogId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
@@ -2635,13 +2661,9 @@ router.get('/week', async (req, res, next) => {
                     findingsType: (addonKey && weekPointerByKey.get(addonKey)) || null,
                     displayName: addon.serviceName || '',
                   });
-                }),
-              )
-              : null;
-            return {
-              traceEligible: !v || v.eligible,
-              traceVariant: v?.eligible ? v.variant : null,
-            };
+                })
+              : [];
+            return traceFeedFields(weekPrimary, weekAddons);
           })(),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
