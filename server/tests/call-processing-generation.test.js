@@ -250,6 +250,32 @@ describe('callSideBlockForEstimateData (live token + linkage compare)', () => {
     expect(await callSideBlockForEstimateData(dbc, DATA())).toBe('call_reprocessing');
   });
 
+  test('a QUEUED retry (token NULL, budgeted extraction_failed) is in-flight, not settled', async () => {
+    // The queue-to-claim window: the retry that will claim this row can
+    // change the call's identity and linkage — public reads and the
+    // deposit confirm must fail closed through it (pre-push P0).
+    const dbc = dbcFor({
+      callRow: {
+        metadata: {}, processing_token: null, twilio_call_sid: null,
+        processing_status: 'extraction_failed', extraction_attempts: 0,
+        created_at: new Date().toISOString(),
+      },
+    });
+    expect(await callSideBlockForEstimateData(dbc, DATA())).toBe('call_reprocessing');
+  });
+
+  test('an EXHAUSTED retry row is settled — the linkage compare decides', async () => {
+    const dbc = dbcFor({
+      callRow: {
+        metadata: { lead_id: 'lead-B' }, processing_token: null, twilio_call_sid: null,
+        processing_status: 'extraction_failed', extraction_attempts: 99,
+        created_at: new Date().toISOString(),
+      },
+      stampLead: { id: 'lead-B' },
+    });
+    expect(await callSideBlockForEstimateData(dbc, DATA())).toBeNull();
+  });
+
   test('a durably linked draft whose call now resolves a DIFFERENT lead is blocked', async () => {
     const dbc = dbcFor({
       callRow: { metadata: { lead_id: 'lead-C' }, processing_token: null, twilio_call_sid: null },

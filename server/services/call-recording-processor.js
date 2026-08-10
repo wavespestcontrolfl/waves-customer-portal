@@ -6197,6 +6197,13 @@ const CallRecordingProcessor = {
         const { invalidateDraftForCall: invalidateAgain } = require('./estimator-engine');
         await invalidateAgain(call.id, {
           reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
+          // Generation-fenced like the first invalidation (pre-push P1,
+          // PR #3304): the terminal write cleared this pass's token, so a
+          // newer force-reprocess can claim the call and start composing
+          // a valid replacement — an unfenced sweep would stamp the old
+          // rejection and archive that replacement. Same generation =
+          // still ours; a newer claim wins.
+          ownershipFence: { callLogId: call.id, procToken, procGeneration },
         });
       } catch (sweepErr) {
         logger.warn(`[call-proc] post-terminal draft sweep failed (non-blocking): ${sweepErr.message}`);

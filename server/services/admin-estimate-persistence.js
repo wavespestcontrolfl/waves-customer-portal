@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight } = require('../utils/estimate-claim-sql');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -235,26 +235,10 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
 // 'processing' claim (codex P1, PR #3304 GH r8c). A legacy NULL status
 // stays SETTLED: those are pre-pipeline rows with no retry lane, and
 // blocking them would wedge sends on historical estimates.
-const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'pending', 'no_transcription']);
-const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
-const CALL_EXTRACTION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
-function callReprocessInFlight(callRow, nowMs = Date.now()) {
-  if (callRow.processing_token != null) return true;
-  const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
-  if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
-  if (status === 'extraction_failed') {
-    // Mirrors the sweep's own eligibility EXACTLY: attempts under the cap
-    // AND inside the 7-day window. An exhausted or aged-out row is settled
-    // — treating it as forever-retrying blocked send, accept, and decline
-    // on its draft permanently.
-    const attemptsLeft = (Number(callRow.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS;
-    const created = callRow.created_at ? Date.parse(callRow.created_at) : NaN;
-    const withinWindow = !Number.isFinite(created) || (nowMs - created) < CALL_EXTRACTION_RETRY_WINDOW_MS;
-    return attemptsLeft && withinWindow;
-  }
-  return false;
-}
+// callReprocessInFlight now lives in ../utils/estimate-claim-sql (the ONE
+// dependency-free in-flight verdict, shared with the public money guard —
+// pre-push P0, PR #3304) and is imported above; this module keeps
+// re-exporting it so every existing consumer is unchanged.
 
 // Shared live call-linkage revalidation for engine-drafted rows: re-resolve
 // the call's current lead with the pipeline's own precedence (sid-owned

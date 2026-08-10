@@ -29,6 +29,35 @@ const DELIVERY_CLAIM_NOT_LIVE_SQL = `(
 const LINKAGE_INVALIDATION_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''";
 const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''";
 
+// The ONE in-flight verdict for a call's processing state — lives here
+// (dependency-free) so both the persistence layer and this module's public
+// money guard share it; admin-estimate-persistence re-exports it. A held
+// claim token OR a queued retry lane counts: a retryable extraction_failed
+// / pending / no_transcription row with a NULL token is NOT settled — the
+// retry that will claim it can change the call's identity and linkage
+// (pre-push P0, PR #3304 — the guard below treated the queue-to-claim
+// window as settled and could disclose or charge during it).
+const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'pending', 'no_transcription']);
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
+const CALL_EXTRACTION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function callReprocessInFlight(callRow, nowMs = Date.now()) {
+  if (callRow.processing_token != null) return true;
+  const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
+  if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
+  if (status === 'extraction_failed') {
+    // Mirrors the sweep's own eligibility EXACTLY: attempts under the cap
+    // AND inside the 7-day window. An exhausted or aged-out row is settled
+    // — treating it as forever-retrying blocked send, accept, and decline
+    // on its draft permanently.
+    const attemptsLeft = (Number(callRow.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS;
+    const created = callRow.created_at ? Date.parse(callRow.created_at) : NaN;
+    const withinWindow = !Number.isFinite(created) || (nowMs - created) < CALL_EXTRACTION_RETRY_WINDOW_MS;
+    return attemptsLeft && withinWindow;
+  }
+  return false;
+}
+
 // The DURABLE call-side verdict as seen from an ESTIMATE row: when a
 // quarantine could not write its estimate-side marker, the block lives on
 // the call, and the public surfaces — which only ever read the estimate —
@@ -41,7 +70,7 @@ async function callSideBlockForEstimateData(dbc, data) {
   if (!callLogId) return null;
   try {
     const row = await dbc('call_log').where({ id: callLogId })
-      .first('metadata', 'processing_token', 'twilio_call_sid');
+      .first('metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'twilio_call_sid');
     // A MISSING call row fails closed (codex P1, PR #3304 GH r10) — the
     // same verdict staleCallLinkageReason gives it: an engine draft whose
     // call is gone has no provenance left to validate.
@@ -49,13 +78,14 @@ async function callSideBlockForEstimateData(dbc, data) {
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
     if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
-    // A LIVE claim token means a pass is actively re-deciding this call's
-    // verdict RIGHT NOW — its block marker may be milliseconds away, and
-    // the marker read above ran before that write. The public surfaces
-    // this guard protects must fail closed until the pass settles (local
-    // audit P0, PR #3304): the two markers alone cover only verdicts that
-    // already persisted.
-    if (row.processing_token != null) return 'call_reprocessing';
+    // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
+    // mid-decision: its block marker may be milliseconds (or one sweep)
+    // away, and the marker read above ran before that write. The public
+    // surfaces this guard protects must fail closed until the call
+    // settles (local audit + pre-push P0s, PR #3304): the two markers
+    // alone cover only verdicts that already persisted, and a NULL token
+    // on a retryable row is a queue, not a settlement.
+    if (callReprocessInFlight(row)) return 'call_reprocessing';
     // Live-linkage comparison for durably linked drafts (same P0): a
     // repoint whose estimate-side marker AND call-side marker both failed
     // to persist leaves only the linkage itself as evidence. Mirrors
@@ -97,5 +127,6 @@ module.exports = {
   DELIVERY_CLAIM_NOT_LIVE_SQL,
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
+  callReprocessInFlight,
   callSideBlockForEstimateData,
 };
