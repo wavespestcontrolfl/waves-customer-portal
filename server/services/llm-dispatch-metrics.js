@@ -336,7 +336,11 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
       exceptions.push({
         policy: s.policy,
         kind: 'all_providers_failed',
-        detail: `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`,
+        // Single-leg policies (pinned sealed-exam lanes) have no fallback BY
+        // DESIGN — "failed on BOTH providers" would be false for them.
+        detail: s.singleLeg
+          ? `${s.failed} of ${s.total} calls failed (single-leg policy, no fallback configured — callers fell back to safe copy or errored)`
+          : `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`,
       });
     }
     if (s.total >= FALLBACK_MIN_VOLUME && s.fallbacks / s.total >= FALLBACK_RATE_THRESHOLD) {
@@ -376,12 +380,19 @@ async function loadStats(db, start, end) {
     .select('policy')
     .count({ total: '*' })
     .sum({ fallbacks: db.raw('CASE WHEN fallback_used THEN 1 ELSE 0 END') })
-    .sum({ failed: db.raw('CASE WHEN ok THEN 0 ELSE 1 END') });
+    .sum({ failed: db.raw('CASE WHEN ok THEN 0 ELSE 1 END') })
+    // Legs actually attempted on the worst failed chain: pinned single-leg
+    // policies (the sealed exams disable cross-provider fallback so provider
+    // A's exam can't be graded on provider B's draft) record exactly one
+    // failure entry, and the digest must not report their misses as "failed
+    // on BOTH providers".
+    .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") });
   return rows.map((r) => ({
     policy: r.policy,
     total: Number(r.total),
     fallbacks: Number(r.fallbacks || 0),
     failed: Number(r.failed || 0),
+    singleLeg: Number(r.failed || 0) > 0 && Number(r.max_failure_legs) === 1,
   }));
 }
 

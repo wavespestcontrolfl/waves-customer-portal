@@ -4909,8 +4909,10 @@ function priceTrapOnlyRetainer(options = {}) {
     warrantyEligible: false,
     rodentExclusionDeclined: true,
     discountEligible: false,
+    // WaveGuard exclusion rides discountEligible:false (read by the
+    // estimate-public line predicates) — there is no separate
+    // excludedFromWaveGuardDiscounts flag; nothing ever read one.
     excludedFromCoupons: true,
-    excludedFromWaveGuardDiscounts: true,
     excludedFromBundleDiscounts: true,
     lineItems: [
       {
