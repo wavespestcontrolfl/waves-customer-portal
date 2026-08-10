@@ -349,17 +349,17 @@ describe('buildEnrichedProfile end-to-end', () => {
   });
 });
 
-// Condo/townhome resident misclassification (2026-08-10): county rolls file
-// these communities as building-level "Multifamily" master parcels, so a
-// unit-less address resolves to the association's whole building and a
-// resident's lookup prices commercial. The guidance flag names the fix
-// without touching the classification itself.
+// Condo/townhome resident misclassification: county rolls file these
+// communities as building-level "Multifamily" master parcels, so a unit-less
+// address resolves to the association's whole building and a resident's
+// lookup prices commercial. The guidance flag names the fix without touching
+// the classification itself. Fixture address is synthetic.
 describe('multifamily master-parcel guidance flag', () => {
   const { buildFieldVerifyFlags } = routePrivate;
 
   function countyMultifamilyBuilding(overrides = {}) {
     return {
-      formattedAddress: '100 Harbour Isle Ct, Bradenton, FL 34212',
+      formattedAddress: '1 Example Building Way, Testville, FL 00000',
       propertyType: 'Multifamily',
       unitCount: 8,
       squareFootage: 63096,
@@ -426,6 +426,11 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flag.reason).toMatch(/set Property Type to the actual unit type/i);
     expect(flag.reason).toMatch(/set Commercial to No/i);
     expect(flag.reason).toMatch(/clear the Commercial Subtype/i);
+    // The prefilled dimensions are the building's — the copy must demand
+    // unit-specific dimensions (re-lookup with the unit, or replace them)
+    // before the resident path is priced (codex P0).
+    expect(flag.reason).toMatch(/WHOLE BUILDING/);
+    expect(flag.reason).toMatch(/re-run the lookup|replace home\/lot/i);
   });
 
   test('the instructed exit actually leaves commercial pricing per the real classifier (codex P1)', () => {
