@@ -1380,20 +1380,10 @@ async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, call
 // referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
 // Returns that name, or '' when there's no referral — used to override the dialed-
 // number source with the 'referral' channel so word-of-mouth is attributed.
-const REFERRAL_PLACEHOLDER_VALUES = new Set([
-  'null', 'none', 'n/a', 'na', 'no', 'false', 'true', 'unknown', 'undefined',
-  'not mentioned', 'not stated', 'not specified', 'not provided', 'nobody', 'no one',
-]);
-function referrerNameFromExtracted(extracted = {}) {
-  // Model-generated JSON has no schema enforcement — fail CLOSED: a non-string
-  // sentinel (e.g. boolean false) or a placeholder phrase must NOT be read as a
-  // referrer name and flip a normal call to lead_source='referral'.
-  const v = extracted?.referred_by;
-  if (typeof v !== 'string') return '';
-  const raw = v.trim();
-  if (!raw || REFERRAL_PLACEHOLDER_VALUES.has(raw.toLowerCase())) return '';
-  return raw.slice(0, 100); // sane cap for a name/'unnamed' (detail is clamped again at write)
-}
+// Extracted VERBATIM to the shared util (codex P1 r24) so the attribution
+// retire's successor rehome judges referral evidence the SAME way; never
+// re-inline it here.
+const { referrerNameFromExtracted, REFERRAL_PLACEHOLDER_VALUES } = require('../utils/call-lead-source');
 
 // Additional properties discussed on the call (multi-property callers: a
 // landlord's rental + home, two units, a second house). Prefer the V1

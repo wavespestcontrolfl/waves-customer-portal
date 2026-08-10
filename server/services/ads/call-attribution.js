@@ -27,6 +27,10 @@ const { isNonLeadCallContent } = require('../../utils/non-lead-call-content');
 // phone-successor linkage check (codex P1 r19) — same shared-definition
 // rule as the content veto above.
 const { shouldCreateCallLeadForCustomer } = require('../../utils/call-lead-customer-gate');
+// Referral-aware source resolution, shared with the processor (codex P1
+// r24): the successor rehome must classify a referral successor the same
+// way the original write would have.
+const { resolveCallLeadSource, referrerNameFromExtracted } = require('../../utils/call-lead-source');
 // The processor's customer-LESS lead-creation gate (pre-push P1 r20) —
 // same shared-definition rule: a customer-less call only ever linked via
 // hasWorkableLeadSignal (concrete service intent + reachability), so the
@@ -822,7 +826,9 @@ async function attributeUnclaimedBridgeLeads({
 // UNIQUE on source_call_id forbids a second. Errors PROPAGATE: this runs
 // inside the caller's fenced transaction, and swallowing a statement
 // error would let the caller commit-continue on an aborted transaction.
-const SUCCESSOR_COLS = ['id', 'to_phone', 'created_at', 'google_ads_call_resource_name', 'metadata'];
+// ai_extraction rides EVERY arm (codex P1 r24): the rehome reads the
+// successor's own referral evidence, not just its dialed number.
+const SUCCESSOR_COLS = ['id', 'to_phone', 'created_at', 'google_ads_call_resource_name', 'metadata', 'ai_extraction'];
 
 // Durable lead-content evidence for the PHONE successor arm (codex P1 r18):
 // an ordinary support/billing/scheduling call from the lead's number
@@ -1025,7 +1031,7 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
       .limit(10)
-      .select([...SUCCESSOR_COLS, 'ai_extraction', 'customer_id', 'from_phone']);
+      .select([...SUCCESSOR_COLS, 'customer_id', 'from_phone']);
     if (!batch || !batch.length) return null;
     for (const cand of batch) {
       if (!callCarriesDurableLeadEvidence(cand.ai_extraction)) continue;
@@ -1033,7 +1039,7 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
       const locked = await eligibilityFilters(phoneArm().where('call_log.id', cand.id))
         .orderBy('created_at', 'desc')
         .forUpdate()
-        .first(...SUCCESSOR_COLS, 'ai_extraction', 'customer_id', 'from_phone');
+        .first(...SUCCESSOR_COLS, 'customer_id', 'from_phone');
       if (locked && callCarriesDurableLeadEvidence(locked.ai_extraction)
         && await phoneSuccessorActuallyLinked(dbc, locked)) return locked;
     }
@@ -1088,13 +1094,20 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
       patch.lead_source_detail = bridgeMd.campaignName || 'inbound call';
       refreshed = true;
     } else {
-      const ten = String(successor.to_phone || '').replace(/\D/g, '').slice(-10);
-      const src = ten
-        ? await dbc('lead_sources')
-          .whereRaw("RIGHT(regexp_replace(COALESCE(twilio_phone_number, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
-          .where('is_active', true)
-          .first('source_type', 'name', 'twilio_phone_number')
-        : null;
+      // The SHARED resolver, referral-aware (codex P1 r24): a successor
+      // that explicitly names a referrer belongs to the referral channel,
+      // not the dialed line's — resolving the number alone relabelled it
+      // and corrupted referral ROI. Same helper the original write uses,
+      // so the rehome can never classify differently.
+      let successorExtraction = successor.ai_extraction;
+      if (typeof successorExtraction === 'string') {
+        try { successorExtraction = JSON.parse(successorExtraction); } catch { successorExtraction = {}; }
+      }
+      const { row: src } = await resolveCallLeadSource({
+        dbc,
+        toPhone: successor.to_phone,
+        preferReferral: !!referrerNameFromExtracted(successorExtraction || {}),
+      });
       const channel = src ? attributionForSourceType(src.source_type) : null;
       const bridgeTarget = (() => {
         // Lazy require — google-call-bridge lazily requires this module.
@@ -1122,6 +1135,16 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
         patch.service_bucket = inferServiceBucket(interest);
       }
     }
+    // The OWNER moves with the provenance (codex P1 r24). A lead claimed
+    // or reassigned after its original call created the row keeps that
+    // row's old customer_id, and ad-attribution-sync loads attribution BY
+    // that column while recordCallPpcAttribution and the stage bridge only
+    // FILL a missing owner — never replace one — so revenue stayed
+    // permanently associated with the former customer. Read under the
+    // lead's row lock, exactly as reconcileMovedCallAttributionRow does
+    // for the same reason.
+    const ownerRow = await dbc('leads').where({ id: leadId }).forUpdate().first('customer_id');
+    if (ownerRow && ownerRow.customer_id) patch.customer_id = ownerRow.customer_id;
     const moved = await dbc('ad_service_attribution')
       .where({ lead_id: leadId, source_call_id: callLogId })
       .update(patch);

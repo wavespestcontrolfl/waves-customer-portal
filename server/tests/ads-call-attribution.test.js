@@ -11,7 +11,7 @@ const deleteCalls = [];
 const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
-  ['where', 'whereNot', 'whereRaw', 'whereNull', 'whereNotExists', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
+  ['where', 'whereIn', 'whereNot', 'whereRaw', 'whereNull', 'whereNotExists', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
   // Real knex .modify invokes the callback with the builder.
   b.modify = jest.fn((fn) => { fn(b); return b; });
   // Ordered .first reads consume a per-table queue when one is set (the

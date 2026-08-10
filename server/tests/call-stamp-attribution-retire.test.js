@@ -17,7 +17,7 @@ const mockUpdates = [];
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
     const b = { _wheres: [] };
-    for (const m of ['where', 'whereNull', 'whereNot', 'whereRaw', 'whereNotExists', 'forUpdate', 'orderBy', 'limit', 'select', 'modify']) {
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereRaw', 'whereNotExists', 'forUpdate', 'orderBy', 'limit', 'select', 'modify']) {
       b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
     }
     b.first = async (...cols) => {
