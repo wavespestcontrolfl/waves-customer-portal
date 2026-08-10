@@ -588,7 +588,10 @@ function certAdditionalApplications(findings) {
 // Runs once over the flat primary-application keys (the original cert_*
 // keys/labels) and once per additional application row.
 function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
-  // "Other" is gone from both pickers, so nothing NEW can be saved with it.
+  // "Other" is gone from both pickers, so it can no longer be SELECTED
+  // (product_name is a free-text search, so the literal string is still
+  // typeable like any other junk value — it fails this check rather than
+  // passing silently, which is more than an arbitrary typo gets).
   // These two lines are main's, unchanged, and deliberately so: they decide
   // whether ALREADY-STORED records may still be sent, and tightening them
   // retroactively broke paid customers. A held report whose pay link is
