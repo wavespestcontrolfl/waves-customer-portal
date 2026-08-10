@@ -33,6 +33,7 @@ const {
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
@@ -1883,6 +1884,16 @@ router.get('/:id/proposal', async (req, res, next) => {
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
       prospectBrief: parseEstimateData(estimate.estimate_data)?.commercialProspect || null,
+      // Per-family inclusions/exclusions/responsibilities/taxability
+      // registry: the INSTALL source for the builder's family-change resync
+      // (codex 1A-ii r14). Pruning of generated responsibility lines rides
+      // the proposal's own persisted generatedResponsibilities provenance,
+      // never catalog membership (codex 1A-ii r15 — a hand-authored line
+      // matching a stock sentence must survive), so reopened proposals
+      // prune exactly what their generation installed.
+      familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
+        await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
+      ),
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
@@ -1908,6 +1919,19 @@ router.get('/:id/proposal', async (req, res, next) => {
         category: estimate.category,
       },
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/proposal/generated — DRAFT structured
+// sections derived from what the estimator already priced/knows (slice
+// 1A-ii "generate from estimate"). Read-only; nothing becomes customer-
+// visible until the operator edits and saves through PUT /:id/proposal.
+router.get('/:id/proposal/generated', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const { deriveProposalDraft } = require('../services/estimate-proposal-generate');
+    res.json({ draft: await deriveProposalDraft(estimate, { database: db }) });
   } catch (err) { next(err); }
 });
 
@@ -1941,13 +1965,70 @@ router.put('/:id/proposal', async (req, res, next) => {
     }
 
     const incoming = req.body?.proposal || req.body || {};
-    if (!Array.isArray(incoming.buildings) || incoming.buildings.length === 0) {
-      return res.status(400).json({ error: 'proposal.buildings must be a non-empty array.' });
+    // Programs-only callers may omit buildings entirely — normalize once
+    // and use the array everywhere (pre-push codex P1: undefined.some threw).
+    const incomingBuildings = Array.isArray(incoming.buildings) ? incoming.buildings : [];
+    const hasBuildings = incomingBuildings.length > 0;
+    const incomingPrograms = Array.isArray(incoming.programs) ? incoming.programs : null;
+    const hasPrograms = Boolean(incomingPrograms && incomingPrograms.length);
+    // One recurring itemization, never two that can disagree (slice 1A-ii):
+    // a proposal is priced by its building line items OR by its service
+    // programs. Program subdivisions carry the multi-building labels.
+    // Corrective work ALONE is a valid itemization too — a one-time-only
+    // commercial proposal has no recurring side (codex 1A-ii r2g).
+    const hasCorrective = Array.isArray(incoming.correctiveWork) && incoming.correctiveWork.length > 0;
+    if (!hasBuildings && !hasPrograms && !hasCorrective) {
+      return res.status(400).json({ error: 'Add building line items, service programs, or corrective work — a proposal needs a priced itemization.' });
+    }
+    if (hasPrograms && hasBuildings
+      && incomingBuildings.some((b) => Array.isArray(b?.lineItems || b?.line_items) && (b.lineItems || b.line_items).length > 0)) {
+      return res.status(400).json({ error: 'Service programs are the recurring itemization — remove the building line items (use program subdivisions for building labels).' });
+    }
+    if (hasPrograms) {
+      if (incomingPrograms.length > 10) {
+        return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
+      }
+      for (const program of incomingPrograms) {
+        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
+        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
+          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
+        }
+        // Finite, positive, cent-representable — 0.001 or Infinity would
+        // normalize to a dropped program and rewrite the authoritative
+        // totals to zero (pre-push codex P0).
+        const price = Number(program?.pricePerApplication ?? program?.perApplication);
+        if (!Number.isFinite(price) || price < 0.01
+          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
+          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
+        }
+        if (String(program?.label ?? program?.name ?? '').length > 120) {
+          return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
+        }
+        const overList = (arr, maxItems, maxLen) => Array.isArray(arr)
+          && (arr.length > maxItems || arr.some((line) => String(line ?? '').length > maxLen));
+        if (overList(program?.inclusions, 12, 200)) {
+          return res.status(400).json({ error: 'Program inclusions are limited to 12 lines of 200 characters.' });
+        }
+        if (overList(program?.exclusions, 8, 160)) {
+          return res.status(400).json({ error: 'Program exclusions are limited to 8 lines of 160 characters.' });
+        }
+        // Notes and subdivisions clamp silently in the normalizer — reject
+        // oversize here so customer-facing scope can't vanish on save
+        // (codex 1A-ii r1b).
+        if (String(program?.note ?? '').length > 300) {
+          return res.status(400).json({ error: 'Program notes are limited to 300 characters.' });
+        }
+        if (Array.isArray(program?.buildings)
+          && (program.buildings.length > 12
+            || program.buildings.some((b) => String(b?.name ?? '').length > 120 || String(b?.note ?? '').length > 300))) {
+          return res.status(400).json({ error: 'Program subdivisions are limited to 12 buildings (names 120 chars, notes 300 chars).' });
+        }
+      }
     }
     // Reject negative line pricing outright so the operator sees the error
     // rather than a silently-clamped zero. (normalizeLineItem also clamps as a
     // last-resort safety net for any other entry path.)
-    const hasNegativeLine = incoming.buildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
+    const hasNegativeLine = incomingBuildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
       && (b.lineItems || b.line_items).some((i) => Number(i?.unitPrice ?? i?.unit_price ?? i?.price) < 0
         || Number(i?.quantity) < 0));
     if (hasNegativeLine) {
@@ -1959,6 +2040,23 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (Array.isArray(incoming.correctiveWork)
       && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
       return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
+    }
+    // Every corrective amount must be finite and cent-representable, and a
+    // corrective-ONLY itemization needs at least one positive amount — an
+    // all-zero (or NaN/Infinity) payload would normalize to nothing, clear
+    // the quote-required flags, and rewrite the authoritative totals to
+    // zero (codex 1A-ii r2i).
+    if (Array.isArray(incoming.correctiveWork) && incoming.correctiveWork.length) {
+      for (const w of incoming.correctiveWork) {
+        const amount = Number(w?.amount ?? w?.price ?? 0);
+        if (!Number.isFinite(amount) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) {
+          return res.status(400).json({ error: 'Corrective work amounts must be whole-cent dollar values.' });
+        }
+      }
+      if (!hasBuildings && !hasPrograms
+        && !incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) >= 0.01)) {
+        return res.status(400).json({ error: 'A corrective-work-only proposal needs at least one item priced at $0.01 or more.' });
+      }
     }
     // Oversized structured-section lists get a 400, not a silent clamp —
     // normalizeProposal truncates lines and drops over-limit entries as a
@@ -2055,7 +2153,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // carries no visitsPerYear, so such a line annualizes to $0 and the UPDATE
     // below would write that into the estimate's authoritative annual_total
     // (codex #3120 r1, re-flagged pre-push r5 at the normalizer level).
-    const hasRenderingOnlyCadence = incoming.buildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
+    const hasRenderingOnlyCadence = incomingBuildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
       && (b.lineItems || b.line_items).some((i) => String(i?.frequency || '')
         .trim().toLowerCase().replace(/[\s-]+/g, '_') === 'per_application'));
     if (hasRenderingOnlyCadence) {
@@ -2071,7 +2169,41 @@ router.put('/:id/proposal', async (req, res, next) => {
     });
     normalized.enabled = true;
     normalized.synthesized = false;
+    // Belt to the field checks above: if the normalizer dropped ANY
+    // submitted program, persisting would silently rewrite the
+    // authoritative totals without it (pre-push codex P0). Fail loud.
+    if (hasPrograms && (normalized.programs?.length ?? 0) !== incomingPrograms.length) {
+      return res.status(400).json({ error: 'One or more service programs failed validation and would be dropped — fix or remove them, then save again.' });
+    }
+    if (hasCorrective && (normalized.correctiveWork?.length ?? 0) !== incoming.correctiveWork.length) {
+      return res.status(400).json({ error: 'One or more corrective-work items failed validation and would be dropped — fix or remove them, then save again.' });
+    }
     const totals = computeProposalTotals(normalized);
+    // estimates.monthly_total/annual_total/onetime_total are decimal(10,2)
+    // — a finite-but-huge authored price (e.g. $2,000,000 × 52
+    // applications) would overflow the UPDATE with a raw numeric error
+    // instead of actionable validation (codex 1A-ii r10).
+    const DB_TOTAL_MAX = 99999999.99;
+    for (const [totalLabel, totalValue] of [
+      ['annual recurring', totals.annualRecurring],
+      ['monthly equivalent', totals.monthlyEquivalent],
+      ['one-time', totals.oneTime],
+    ]) {
+      if (Number(totalValue) > DB_TOTAL_MAX) {
+        return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
+      }
+    }
+    // The acceptance invoice bills every program's first application PLUS all
+    // corrective work (and tax) on ONE invoice — each estimate column can
+    // pass the per-column bound while the combined first invoice overflows
+    // invoices.subtotal/total, also decimal(10,2), at mark-won (codex 1A-ii
+    // r14). Reuse the canonical builder so the bound matches exactly what a
+    // win would bill. Checked regardless of the current billing mode —
+    // bill_by_invoice can flip after authoring.
+    const firstInvoice = buildProposalFirstInvoice(normalized);
+    if (firstInvoice.subtotal > DB_TOTAL_MAX || firstInvoice.total > DB_TOTAL_MAX) {
+      return res.status(400).json({ error: 'The combined acceptance invoice (first applications plus corrective work and tax) exceeds $99,999,999.99 — reduce the amounts before saving.' });
+    }
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const nextData = {

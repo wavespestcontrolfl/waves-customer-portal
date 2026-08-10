@@ -129,6 +129,34 @@ function buildProposalFirstInvoice(proposal) {
     }
   }
 
+  // Service programs (slice 1A-ii) are the recurring itemization when
+  // authored — the acceptance invoice bills each program's FIRST
+  // APPLICATION, exactly like the first period of a recurring line item
+  // (pre-push codex P0: a programs-only invoice-mode win either failed as
+  // unbillable or omitted every program).
+  // Program tax rounds PER APPLICATION — the same rounding every ongoing
+  // per-application invoice applies and computeProposalTotals now displays
+  // (annual = per-app tax × cadence). Folding programs into the recurring
+  // BUCKET instead could collect a different cent than the agreement shows
+  // (pre-push codex r15b P0: $100.07 at 7% → $7.00 per application, never
+  // a share of a bucket-rounded total).
+  let taxableProgramSubtotal = 0;
+  let programTaxAmount = 0;
+  for (const program of (Array.isArray(proposal?.programs) ? proposal.programs : [])) {
+    const amount = roundMoney(program?.pricePerApplication);
+    if (!(amount > 0)) continue;
+    lineItems.push({
+      description: cleanStr(`${program.label || 'Service program'} (first application)`, 300),
+      quantity: 1,
+      unit_price: amount,
+    });
+    subtotal = roundMoney(subtotal + amount);
+    if (program.taxable === true) {
+      taxableProgramSubtotal = roundMoney(taxableProgramSubtotal + amount);
+      programTaxAmount = roundMoney(programTaxAmount + roundMoney(amount * taxRate));
+    }
+  }
+
   // Structured corrective-work lines (slice 1A-i) are one-time charges inside
   // computeProposalTotals' one-time totals — the acceptance invoice must bill
   // them too, or a marked-won bill-by-invoice proposal underbills exactly the
@@ -146,10 +174,12 @@ function buildProposalFirstInvoice(proposal) {
   }
 
   // Same cent-rounding policy as computeProposalTotals: each bucket's tax
-  // rounds on its own, then the two sum.
-  const taxableSubtotal = roundMoney(taxableRecurringSubtotal + taxableOneTimeSubtotal);
+  // rounds on its own (programs per line, per the note above), then all sum.
+  const taxableSubtotal = roundMoney(taxableRecurringSubtotal + taxableOneTimeSubtotal + taxableProgramSubtotal);
   const taxAmount = roundMoney(
-    roundMoney(taxableRecurringSubtotal * taxRate) + roundMoney(taxableOneTimeSubtotal * taxRate),
+    roundMoney(taxableRecurringSubtotal * taxRate)
+    + roundMoney(taxableOneTimeSubtotal * taxRate)
+    + programTaxAmount,
   );
   // Blended rate so InvoiceService (single-rate) reproduces the exact tax
   // dollars across mixed-taxability lines. round(subtotal * (taxAmount/subtotal))

@@ -789,26 +789,59 @@ function estimateLineItemsFromData(estimateData = {}) {
     || [];
 }
 
-function estimateOneTimeItemsFromData(estimateData = {}) {
+function estimateOneTimeItemsFromData(estimateData = {}, { collapseMirrored = false } = {}) {
   const data = normalizeEstimateData(estimateData);
   const result = data.result && typeof data.result === 'object' ? data.result : data;
   const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
   const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  const rows = [
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
-    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
-    ...(Array.isArray(result.specItems) ? result.specItems : []),
-    ...(Array.isArray(data.one_time?.items) ? data.one_time.items : []),
-    ...(Array.isArray(data.oneTimeItems) ? data.oneTimeItems : []),
-  ].filter((item) => item && item.onProg !== true && item.includedOnProgram !== true);
+  const keepRow = (item) => item && item.onProg !== true && item.includedOnProgram !== true;
+  const containers = [
+    Array.isArray(oneTime.items) ? oneTime.items.filter(keepRow) : [],
+    Array.isArray(oneTime.specItems) ? oneTime.specItems.filter(keepRow) : [],
+    Array.isArray(nestedOneTime.items) ? nestedOneTime.items.filter(keepRow) : [],
+    Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems.filter(keepRow) : [],
+    Array.isArray(result.specItems) ? result.specItems.filter(keepRow) : [],
+    Array.isArray(data.one_time?.items) ? data.one_time.items.filter(keepRow) : [],
+    Array.isArray(data.oneTimeItems) ? data.oneTimeItems.filter(keepRow) : [],
+  ];
+  const rows = containers.flat();
   const seen = new Set();
-  return rows.filter((item) => {
+  const objectDeduped = rows.filter((item) => {
     if (seen.has(item)) return false;
     seen.add(item);
+    return true;
+  });
+  if (!collapseMirrored) return objectDeduped;
+  // Mapped estimates mirror the SAME specialty row into several containers
+  // as distinct objects (oneTime.specItems + root specItems). Collapse
+  // those mirrors by content identity WITHOUT erasing legitimate repeated
+  // charges (two identical unit treatments in ONE container): each
+  // identity's final count = the MAX occurrences seen within any single
+  // container (slice 1A-ii, codex r3c).
+  const identityOf = (item) => [
+    String(item.service || '').toLowerCase(),
+    String(item.name || item.label || '').toLowerCase(),
+    String(item.price ?? item.amount ?? item.total ?? ''),
+  ].join('|');
+  const maxPerContainer = new Map();
+  for (const container of containers) {
+    const counts = new Map();
+    for (const item of container) {
+      const key = identityOf(item);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    for (const [key, count] of counts) {
+      maxPerContainer.set(key, Math.max(maxPerContainer.get(key) || 0, count));
+    }
+  }
+  const emitted = new Map();
+  return objectDeduped.filter((item) => {
+    const key = identityOf(item);
+    const already = emitted.get(key) || 0;
+    if (already >= (maxPerContainer.get(key) || 0)) return false;
+    emitted.set(key, already + 1);
     return true;
   });
 }
@@ -4104,6 +4137,10 @@ module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
+module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;
+module.exports.recurringLineAnnualAmount = recurringLineAnnualAmount;
+module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
+module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;

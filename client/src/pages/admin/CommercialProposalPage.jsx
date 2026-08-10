@@ -4,7 +4,7 @@ import { Button, Input, Select, Switch, Textarea, Badge, Card, CardHeader, CardT
 import {
   ArrowLeft, Plus, Trash2, Download, Building2, Loader2,
   Send as SendIcon, Link as LinkIcon, CheckCircle2, Copy,
-  ClipboardList, ChevronDown, ChevronUp,
+  ClipboardList, ChevronDown, ChevronUp, Wand2,
 } from 'lucide-react';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -74,8 +74,19 @@ function buildingSubtotals(b) {
   return { annual, oneTime };
 }
 
+const PROGRAM_FAMILY_OPTIONS = [
+  ['pest', 'Pest'], ['lawn', 'Lawn'], ['tree_shrub', 'Tree & shrub'], ['mosquito', 'Mosquito'],
+  ['termite', 'Termite'], ['rodent', 'Rodent'], ['other', 'Other'],
+];
+
+// A builder program row counts (totals, payload) once it is actually
+// priced — same predicate everywhere so the sidebar shows what will save.
+const programRowIsPriced = (p) => String(p.label || '').trim()
+  && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
+
+
 // Mirrors server computeProposalTotals so totals update live as you type.
-function computeTotals(buildings, taxRate, correctiveWork = []) {
+function computeTotals(buildings, taxRate, correctiveWork = [], programs = []) {
   let annualRecurring = 0, oneTime = 0, taxableAnnual = 0, taxableOneTime = 0;
   for (const b of buildings) {
     for (const li of b.lineItems) {
@@ -101,10 +112,22 @@ function computeTotals(buildings, taxRate, correctiveWork = []) {
     oneTime += amount;
     if (w.taxable) taxableOneTime += amount;
   }
+  // Service programs (slice 1A-ii): annual = per-application × frequency,
+  // derived exactly like normalizeProgram. Program tax rounds PER
+  // APPLICATION × cadence, mirroring computeProposalTotals — billing
+  // invoices each application and rounds its tax there, so an annual-bucket
+  // preview could show cents the invoices never collect (codex 1A-ii r15b).
+  const rate = Number(taxRate) || 0;
+  let programTax = 0;
+  for (const p of programs.filter(programRowIsPriced)) {
+    const perApp = roundMoney(p.pricePerApplication);
+    const freq = Math.round(Number(p.frequencyPerYear));
+    annualRecurring += roundMoney(perApp * freq);
+    if (p.taxable) programTax += roundMoney(perApp * rate) * freq;
+  }
   // Per-bucket cent rounding, mirroring computeProposalTotals — a merged
   // bucket can drift a cent from the saved proposal/PDF (codex 1A-i r3).
-  const rate = Number(taxRate) || 0;
-  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate));
+  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate) + programTax);
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   return {
@@ -172,6 +195,11 @@ export default function CommercialProposalPage() {
   const [markingWon, setMarkingWon] = useState(false);
   const [error, setError] = useState(null);
   const [savedOnce, setSavedOnce] = useState(false);
+  // True when the LOADED proposal was operator-authored (enabled, not the
+  // synthesized fallback) — the fallback's building lines are the server's
+  // own generated rows, and generation must not treat them as authored
+  // content it refuses to replace (codex 1A-ii r1).
+  const [loadedAuthored, setLoadedAuthored] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
@@ -185,6 +213,11 @@ export default function CommercialProposalPage() {
   // card empty omits its section from the saved proposal, and the customer
   // surfaces render exactly as before.
   const [scopeItems, setScopeItems] = useState([]);
+  // Service programs (slice 1A-ii) — when any priced program exists it IS
+  // the recurring itemization: the buildings editor collapses and the
+  // payload omits buildings (the server rejects both together).
+  const [programsState, setProgramsState] = useState([]);
+  const [generating, setGenerating] = useState(false);
   const [correctiveWork, setCorrectiveWork] = useState([]);
   const [responsibilitiesText, setResponsibilitiesText] = useState('');
   const [commercialTerms, setCommercialTerms] = useState({
@@ -205,6 +238,28 @@ export default function CommercialProposalPage() {
   // keystrokes made after clicking Save (codex #3297 r5).
   const editGenRef = React.useRef(0);
   const markEdit = () => { editGenRef.current += 1; setDirty(true); };
+  // Building-ITEMIZATION edits specifically — generation's authored-lines
+  // guard keys on this, never on the global dirty flag (an unrelated
+  // title/scope edit must not block program generation — codex 1A-ii r2).
+  const buildingsEditedRef = React.useRef(false);
+  const markBuildingsEdit = () => { buildingsEditedRef.current = true; markEdit(); };
+  // Building lines this PAGE has successfully persisted — a first save of
+  // the synthesized fallback makes those lines authored server-side even if
+  // a concurrent edit skipped applyLoaded (loadedAuthored still false), so
+  // a save retry must not treat them as discardable (codex 1A-ii r2f).
+  const persistedBuildingsRef = React.useRef(false);
+  // Family → generated responsibility lines THIS proposal's generation
+  // actually installed (codex 1A-ii r12), persisted with the proposal as
+  // `generatedResponsibilities` so a reopened proposal prunes exactly what
+  // its generation wrote — never static-catalog membership, which would
+  // eat a hand-authored line that matches a stock sentence (codex 1A-ii
+  // r15). Null until generation fills responsibilities.
+  const generatedRespByFamilyRef = React.useRef(null);
+  // Family → generated inclusions/exclusions/taxability registry, served on
+  // load like responsibilityRegistry — the family-change resync prunes the
+  // old family's generated lines and installs the new family's stack by
+  // exact match (codex 1A-ii r14). Reload-safe for the same reason.
+  const familyRegistryRef = React.useRef(null);
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -233,6 +288,27 @@ export default function CommercialProposalPage() {
     setScopeItems((p.propertyScope?.items || []).map((item) => ({
       label: item.label || '', value: item.value || '',
     })));
+    setProgramsState((p.programs || []).map((program) => ({
+      service: program.service || 'other',
+      label: program.label || '',
+      frequencyPerYear: program.frequencyPerYear ?? 4,
+      pricePerApplication: program.pricePerApplication ?? 0,
+      taxable: program.taxable === true,
+      note: program.note || '',
+      inclusionsText: (program.inclusions || []).join('\n'),
+      exclusionsText: (program.exclusions || []).join('\n'),
+      coversText: (program.buildings || []).map((b) => (b.note ? `${b.name} | ${b.note}` : b.name)).join(', '),
+      // Persisted per-program provenance (codex 1A-ii r17): only lines THIS
+      // program's generation installed are prunable on a family switch.
+      genInclusions: program.generatedInclusions || [],
+      genExclusions: program.generatedExclusions || [],
+    })));
+    // Pruning provenance is the proposal's OWN persisted record of what
+    // generation installed (codex 1A-ii r15) — never the static catalog,
+    // which would misclassify a hand-authored line that happens to match a
+    // stock sentence. Legacy proposals without it simply never prune.
+    generatedRespByFamilyRef.current = p.generatedResponsibilities || null;
+    if (data.familyRegistry) familyRegistryRef.current = data.familyRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
       label: w.label || '',
       amount: w.amount ?? 0,
@@ -251,6 +327,10 @@ export default function CommercialProposalPage() {
     setProspectBrief(data.prospectBrief || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
+    setLoadedAuthored(p.enabled === true && p.synthesized !== true);
+    buildingsEditedRef.current = false;
+    persistedBuildingsRef.current = p.enabled === true && p.synthesized !== true
+      && (p.buildings || []).some((b) => (b.lineItems || []).length > 0);
     setDirty(false);
   }, []);
 
@@ -274,15 +354,142 @@ export default function CommercialProposalPage() {
   }, [estimateId, applyLoaded]);
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
+  const programsMode = programsState.some(programRowIsPriced);
+  // Sidebar mirrors what SAVES: in programs mode the payload omits the
+  // buildings entirely, so their (hidden) line items must not count.
   const totals = useMemo(
-    () => computeTotals(buildings, taxRate, correctiveWork),
-    [buildings, taxRate, correctiveWork],
+    () => computeTotals(programsMode ? [] : buildings, taxRate, correctiveWork, programsState),
+    [programsMode, buildings, taxRate, correctiveWork, programsState],
   );
+
+  // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived
+  // from what the estimator priced/knows. Fills only sections that are
+  // currently EMPTY — never overwrites operator-authored content — and
+  // everything stays editable until Save publishes it.
+  const generateFromEstimate = async () => {
+    setGenerating(true);
+    setError(null);
+    try {
+      const { draft } = await adminFetch(`/admin/estimates/${estimateId}/proposal/generated`);
+      // Emptiness checks read the LIVE render-assigned formRef, not the
+      // state captured when the request began — the form stays editable
+      // during the fetch and fill-only must mean "empty NOW", never
+      // "empty when I clicked" (codex 1A-ii r1b).
+      const live = formRef.current;
+      let filled = 0;
+      // Monetary fills (programs/corrective) tracked separately — only they
+      // justify clearing the synthesized building pricing (codex 1A-ii r2h).
+      let monetaryFilled = 0;
+      let programsInstalled = false;
+      // ANY existing row in a section blocks its fill — rows exist only
+      // because the operator added or loaded them, and content predicates
+      // can't see field edits that leave no text (family/frequency/tax —
+      // codex 1A-ii r17b). Fill-only means fill EMPTY sections.
+      if (draft?.propertyScope?.items?.length && live.scopeItems.length === 0) {
+        setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
+        filled += 1;
+      }
+      // NEVER install programs over an authored building itemization —
+      // programs mode omits buildings from the save, so generating here
+      // would silently erase the prior lines and rewrite the totals
+      // (pre-push codex P0). Lines count as authored only when the loaded
+      // proposal was actually operator-authored or the operator edited this
+      // session — a never-saved draft shows the server's SYNTHESIZED
+      // fallback lines, which generation may freely replace (codex 1A-ii r1).
+      const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
+        && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
+      // ANY existing program row blocks the fill — a row exists only
+      // because the operator added or loaded it, and family/frequency/tax
+      // edits leave no text for a content predicate to see (codex 1A-ii
+      // r17b). Fill-only means fill EMPTY sections.
+      // The MONETARY sides install all-or-nothing at the client too (codex
+      // 1A-ii r19): they jointly replace ONE synthesized itemization, so
+      // installing half while a leftover placeholder row blocks the other
+      // half would clear building lines carrying BOTH charges — the blank
+      // row then saves as nothing and the PUT recomputes the missing total
+      // to ZERO.
+      const monetaryInstallBlocked = hasAuthoredBuildingLines
+        || (draft?.programs?.length && live.programsState.length !== 0)
+        || (draft?.correctiveWork?.length && live.correctiveWork.length !== 0);
+      if (draft?.programs?.length && !monetaryInstallBlocked) {
+        setProgramsState(draft.programs.map((program) => ({
+          service: program.service,
+          label: program.label,
+          frequencyPerYear: program.frequencyPerYear,
+          pricePerApplication: program.pricePerApplication,
+          taxable: program.taxable === true,
+          note: '',
+          inclusionsText: (program.inclusions || []).join('\n'),
+          exclusionsText: (program.exclusions || []).join('\n'),
+          coversText: '',
+          genInclusions: program.inclusions || [],
+          genExclusions: program.exclusions || [],
+        })));
+        filled += 1;
+        monetaryFilled += 1;
+        programsInstalled = true;
+      }
+      if (draft?.correctiveWork?.length && !monetaryInstallBlocked) {
+        setCorrectiveWork(draft.correctiveWork.map((w) => ({
+          label: w.label,
+          amount: w.amount,
+          taxable: w.taxable === true,
+          includesText: (w.includes || []).join('\n'),
+        })));
+        filled += 1;
+        monetaryFilled += 1;
+      }
+      // Responsibilities derive from the generated programs' families —
+      // installing them when programs were BLOCKED would describe scope the
+      // proposal doesn't carry (codex 1A-ii r3d). programsInstalled is set
+      // by the programs branch above.
+      if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim() && programsInstalled) {
+        setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
+        // MERGE over any persisted provenance, never replace (pre-push
+        // codex r14b) — this map is the proposal's own record of what
+        // generation installed, saved as `generatedResponsibilities`;
+        // family-switch installs come from the served familyRegistry.
+        generatedRespByFamilyRef.current = {
+          ...(generatedRespByFamilyRef.current || {}),
+          ...(draft.responsibilitiesByFamily || {}),
+        };
+        filled += 1;
+      }
+      if (filled > 0) {
+        // Taxable generated items need a rate beside them — fill the canonical
+        // FL commercial default only when the current rate is zero/unset
+        // (codex 1A-ii r3); the operator reviews it like everything else.
+        if (monetaryFilled > 0 && draft?.suggestedTaxRate && !(Number(live.taxRate) > 0)) {
+          setTaxRatePct(String(draft.suggestedTaxRate * 100));
+        }
+        // Monetary sections were installed — the on-screen SYNTHESIZED
+        // building lines describe the same charges and would double-count
+        // on save (codex 1A-ii r2g). Authored/edited/persisted lines never
+        // reach here (the guards above), so clearing is safe.
+        if (monetaryFilled > 0
+          && !(live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)) {
+          setBuildings([emptyBuilding(0)]);
+        }
+        markEdit();
+        // Partial generation still surfaces the programs warning.
+        if (draft?.warnings?.length) setError(draft.warnings.join(' '));
+      } else if (draft?.warnings?.length) setError(draft.warnings.join(' '));
+      else if (draft?.programs?.length && hasAuthoredBuildingLines) {
+        setError('Programs were not generated: this proposal already has building line items. Clear them first to switch to generated programs.');
+      } else if ((draft?.programs?.length || draft?.correctiveWork?.length) && monetaryInstallBlocked) {
+        setError('Programs and corrective work were not generated: those sections already have rows. Generation replaces both monetary sections together — remove the started rows first.');
+      } else setError('Nothing to generate — the estimate has no derivable sections this proposal is missing.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const touch = () => markEdit();
 
   const mutateBuilding = useCallback((bi, fn) => {
-    markEdit();
+    markBuildingsEdit();
     setBuildings((prev) => prev.map((b, i) => (i === bi ? fn(b) : b)));
   }, []);
 
@@ -295,9 +502,9 @@ export default function CommercialProposalPage() {
   const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine()] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { markEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
+  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
   const duplicateBuilding = (bi) => {
-    markEdit();
+    markBuildingsEdit();
     setBuildings((prev) => {
       const src = prev[bi];
       const copy = {
@@ -308,7 +515,121 @@ export default function CommercialProposalPage() {
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });
   };
-  const removeBuilding = (bi) => { markEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  const removeBuilding = (bi) => { markBuildingsEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  // Removing a program also prunes ITS family's GENERATED responsibility
+  // lines — a pest+lawn draft that loses the lawn program must not save
+  // mowing/watering/re-entry obligations for a service the agreement no
+  // longer carries (codex 1A-ii r12). Exact-line matching against the
+  // generated registry only: lines shared by a remaining program family
+  // stay, and hand-authored/edited lines are never in the registry so
+  // pruning cannot touch them.
+  const removeProgram = (idx) => {
+    markEdit();
+    const removed = programsState[idx];
+    const next = programsState.filter((_, i) => i !== idx);
+    setProgramsState(next);
+    const byFamily = generatedRespByFamilyRef.current;
+    const removedLines = (byFamily && removed && byFamily[removed.service]) || [];
+    if (!removedLines.length) return;
+    const remainingFamilies = new Set(next.map((p) => p.service));
+    const keep = new Set(Object.entries(byFamily)
+      .filter(([family]) => remainingFamilies.has(family))
+      .flatMap(([, lines]) => lines));
+    setResponsibilitiesText((text) => text.split('\n')
+      .filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())))
+      .join('\n'));
+    // Persisted provenance follows the agreement: the last program of a
+    // family leaving drops its provenance entry (codex 1A-ii r15).
+    if (!remainingFamilies.has(removed.service)) {
+      const { [removed.service]: _gone, ...rest } = byFamily;
+      generatedRespByFamilyRef.current = Object.keys(rest).length ? rest : null;
+    }
+  };
+
+  // Changing a program's FAMILY must not keep the old family's generated
+  // copy beside the new label — a generated pest program switched to Lawn
+  // would otherwise save a lawn agreement still promising interior pest
+  // treatment and pest-specific exclusions (codex 1A-ii r14). Pruning is
+  // exact-line against the row's own persisted provenance
+  // (generatedInclusions/generatedExclusions — codex 1A-ii r17); the
+  // served family registry is only the INSTALL source for the new
+  // family's stack. Hand-authored lines are never in provenance, so they
+  // survive untouched.
+  const changeProgramFamily = (idx, nextFamily) => {
+    const prev = programsState[idx];
+    if (!prev || prev.service === nextFamily) return;
+    markEdit();
+    const newReg = familyRegistryRef.current?.[nextFamily];
+    // Prune ONLY lines THIS program's generation installed (its persisted
+    // per-program provenance — never catalog membership, which would eat a
+    // hand-authored line that happens to match a stock sentence: codex
+    // 1A-ii r17, same doctrine as generatedResponsibilities). When the row
+    // held generated copy, the new family's stack installs from the served
+    // registry and becomes the row's new provenance. The dynamic cadence
+    // bullet is family-independent and always survives.
+    const cadenceRe = /^\d+ scheduled applications? per year$/;
+    const swapLines = (text, provLines = [], newLines = []) => {
+      const provSet = new Set(provLines);
+      const newSet = new Set(newLines);
+      const lines = text.split('\n');
+      const hadGenerated = lines.some((line) => provSet.has(line.trim()));
+      const kept = lines.filter((line) => {
+        const t = line.trim();
+        return !(provSet.has(t) && !newSet.has(t) && !cadenceRe.test(t));
+      });
+      const present = new Set(kept.map((line) => line.trim()));
+      const installed = hadGenerated ? newLines.filter((line) => !present.has(line)) : [];
+      const provenance = hadGenerated
+        ? [...provLines.filter((line) => present.has(line)), ...installed]
+        : provLines;
+      return { text: [...kept, ...installed].join('\n'), hadGenerated, provenance };
+    };
+    setProgramsState((list) => list.map((p, i) => {
+      if (i !== idx) return p;
+      const next = { ...p, service: nextFamily };
+      const inc = swapLines(p.inclusionsText, p.genInclusions, newReg?.inclusions);
+      const exc = swapLines(p.exclusionsText, p.genExclusions, newReg?.exclusions);
+      next.inclusionsText = inc.text;
+      next.genInclusions = inc.provenance;
+      next.exclusionsText = exc.text;
+      next.genExclusions = exc.provenance;
+      // Generated taxability is family-derived — resync it to the new
+      // family's default (the visible Tax switch stays operator-editable).
+      if (newReg && (inc.hadGenerated || exc.hadGenerated)) next.taxable = newReg.taxable === true;
+      return next;
+    }));
+    // Generated responsibilities follow the same swap, pruning ONLY via the
+    // proposal's own persisted provenance (never catalog membership — codex
+    // 1A-ii r15): lines this generation installed for the old family leave
+    // (unless another remaining program's family still needs them), and the
+    // new family's lines install from the served registry, recorded back
+    // into provenance so a later removal/switch can prune them too.
+    const byFamily = generatedRespByFamilyRef.current;
+    if (!byFamily) return;
+    const removedLines = byFamily[prev.service] || [];
+    const remainingFamilies = new Set(
+      programsState.map((p, i) => (i === idx ? nextFamily : p.service)),
+    );
+    const keep = new Set(Object.entries(byFamily)
+      .filter(([family]) => remainingFamilies.has(family))
+      .flatMap(([, lines]) => lines));
+    const lines = responsibilitiesText.split('\n');
+    const hadGenerated = lines.some((line) => removedLines.includes(line.trim()));
+    const nextProvenance = { ...byFamily };
+    if (!remainingFamilies.has(prev.service)) delete nextProvenance[prev.service];
+    if (hadGenerated) {
+      const kept = lines.filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())));
+      const present = new Set(kept.map((line) => line.trim()));
+      const installLines = (newReg?.responsibilities || []).filter((line) => !present.has(line));
+      // Only the lines we actually append are provenance — a pre-existing
+      // identical line may be hand-authored and must stay unprunable.
+      if (installLines.length) {
+        nextProvenance[nextFamily] = [...new Set([...(nextProvenance[nextFamily] || []), ...installLines])];
+      }
+      setResponsibilitiesText([...kept, ...installLines].join('\n'));
+    }
+    generatedRespByFamilyRef.current = Object.keys(nextProvenance).length ? nextProvenance : null;
+  };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
   // runs inside ONE async closure, whose captured state variables freeze at
@@ -319,7 +640,8 @@ export default function CommercialProposalPage() {
   const formRef = React.useRef(null);
   formRef.current = {
     title, preparedFor, propertyAddress, taxRate, terms,
-    buildings, scopeItems, correctiveWork, responsibilitiesText, commercialTerms,
+    buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
+    loadedAuthored, dirty,
   };
 
   // Structured sections serialize only when actually authored — an empty
@@ -329,6 +651,35 @@ export default function CommercialProposalPage() {
     const items = f.scopeItems
       .map((item) => ({ label: item.label.trim(), value: item.value.trim() }))
       .filter((item) => item.label && item.value);
+    const programsPayload = f.programsState
+      .filter(programRowIsPriced)
+      .map((p) => ({
+        service: p.service,
+        label: p.label.trim(),
+        // UNROUNDED — a fractional entry (4.5) must reach the server's
+        // whole-number validation and 400, never silently round to a
+        // different promised cadence (codex 1A-ii r1).
+        frequencyPerYear: Number(p.frequencyPerYear),
+        pricePerApplication: Number(p.pricePerApplication) || 0,
+        taxable: p.taxable === true,
+        note: p.note.trim() || null,
+        inclusions: p.inclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
+        exclusions: p.exclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
+        // Per-program provenance persists with the program (codex 1A-ii
+        // r17) — PUT stores the normalizer output exactly, so omitting
+        // these would delete the provenance on every save.
+        generatedInclusions: p.genInclusions || [],
+        generatedExclusions: p.genExclusions || [],
+        // "Name | note" entries keep subdivision notes through the
+        // round-trip — name-only parsing silently dropped authored scope
+        // like "Exterior only" (codex 1A-ii r13).
+        buildings: p.coversText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).map((entry) => {
+          const [rawName, ...noteParts] = entry.split('|');
+          const name = rawName.trim();
+          const note = noteParts.join('|').trim();
+          return name ? { name, ...(note ? { note } : {}) } : null;
+        }).filter(Boolean),
+      }));
     const work = f.correctiveWork
       .map((w) => ({
         label: w.label.trim(),
@@ -349,8 +700,15 @@ export default function CommercialProposalPage() {
     const hasTerms = Object.values(ct).some((v) => v !== null);
     return {
       ...(items.length ? { propertyScope: { items } } : {}),
+      ...(programsPayload.length ? { programs: programsPayload } : {}),
       ...(work.length ? { correctiveWork: work } : {}),
       ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
+      // Provenance of generation-installed responsibility lines — persisted
+      // with the proposal so a reopened one prunes exactly what generation
+      // wrote (codex 1A-ii r15). PUT persists the payload exactly, so
+      // omitting this would delete the stored provenance on every save.
+      ...(generatedRespByFamilyRef.current && Object.keys(generatedRespByFamilyRef.current).length
+        ? { generatedResponsibilities: generatedRespByFamilyRef.current } : {}),
       ...(hasTerms ? { commercialTerms: ct } : {}),
     };
   };
@@ -363,7 +721,10 @@ export default function CommercialProposalPage() {
       taxRate: f.taxRate,
       terms: f.terms.trim() || null,
       ...structuredSectionsPayload(f),
-      buildings: f.buildings.map((b) => ({
+      // Priced programs ARE the recurring itemization — the server rejects
+      // building line items beside them, so the payload omits buildings
+      // entirely in programs mode (the UI collapses that editor too).
+      buildings: f.programsState.some(programRowIsPriced) ? [] : f.buildings.map((b) => ({
         name: b.name.trim() || 'Building',
         note: b.note.trim() || null,
         lineItems: b.lineItems
@@ -397,15 +758,45 @@ export default function CommercialProposalPage() {
         // synchronously, so formRef is committed before this continuation
         // runs.)
         const genAtSave = editGenRef.current;
+        // EVERY existing unpriced program row is incomplete — a row exists
+        // only because the operator added or loaded it, and family/
+        // frequency/tax edits leave no text for a content predicate to see
+        // (codex 1A-ii r19b, same rule as generation's fill-only check).
+        // Unpriced rows would be FILTERED from the payload and silently
+        // deleted by the reload — surface the server's minimum-price rule
+        // instead (codex 1A-ii r3).
+        const incompleteProgram = formRef.current.programsState.find(
+          (row) => !programRowIsPriced(row),
+        );
+        if (incompleteProgram) {
+          setError(`Program “${incompleteProgram.label?.trim() || '(unnamed)'}” needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.`);
+          return false;
+        }
         const payload = buildPayload();
-        if (payload.proposal.buildings.length === 0) {
-          setError('Add at least one building with a described line item.');
+        if (payload.proposal.buildings.length === 0 && !(payload.proposal.programs || []).length
+          && !(payload.proposal.correctiveWork || []).length) {
+          setError('Add a service program, corrective work, or a building with a described line item.');
+          return false;
+        }
+        // Programs mode omits buildings from the payload — refuse to save
+        // while authored/edited building lines still exist so a manually
+        // added program can never silently discard the prior itemization
+        // and rewrite the totals without it (codex 1A-ii r2d). The
+        // synthesized fallback's own lines don't count.
+        if ((payload.proposal.programs || []).length
+          && (formRef.current.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
+          && formRef.current.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()))) {
+          setError('Programs replace building line items. Use “Clear building lines” (or remove the programs) before saving — building lines are never silently discarded.');
           return false;
         }
         await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
           method: 'PUT',
           body: JSON.stringify(payload),
         });
+        // What this PUT just persisted is now the server-side truth — a
+        // retry (concurrent edit) must guard against discarding it even
+        // before applyLoaded refreshes loadedAuthored.
+        persistedBuildingsRef.current = payload.proposal.buildings.length > 0;
         // Swap in the NORMALIZED state before download/send can proceed —
         // the operator must see exactly what persisted (the server clamps
         // string lengths as a safety net; approving un-normalized local
@@ -733,6 +1124,13 @@ export default function CommercialProposalPage() {
             </Card>
           )}
 
+          {!locked && (
+            <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
+              {generating ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+              Generate from estimate
+            </Button>
+          )}
+
           <Card>
             <CardHeader>
               <CardTitle>Property scope</CardTitle>
@@ -771,7 +1169,122 @@ export default function CommercialProposalPage() {
             </CardBody>
           </Card>
 
-          {buildings.map((b, bi) => {
+          <Card>
+            <CardHeader>
+              <CardTitle>Service programs</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <div className="text-12 text-zinc-500">
+                Per-service programs with per-application pricing — when any program is priced, programs
+                replace the building line items as the recurring itemization (use &ldquo;Covers&rdquo; for
+                building labels). Annual totals derive from price × frequency.
+              </div>
+              {programsState.map((p, idx) => (
+                <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <Select
+                      size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family"
+                      onChange={(e) => changeProgramFamily(idx, e.target.value)}
+                    >
+                      {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </Select>
+                    <Input
+                      size="sm" className="flex-1 min-w-[180px]" placeholder="Program name (e.g. Quarterly pest program)" maxLength={120}
+                      value={p.label} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                    />
+                    <Input
+                      size="sm" className="w-20 shrink-0" type="number" min="1" max="52" step="1" title="Visits per year"
+                      value={p.frequencyPerYear} disabled={!!locked}
+                      onChange={(e) => {
+                        markEdit();
+                        const nextFreq = e.target.value;
+                        setProgramsState((prev) => prev.map((it, i) => {
+                          if (i !== idx) return it;
+                          // Keep the generated cadence bullet in sync — a
+                          // stale "4 scheduled service visits per year" line
+                          // beside a changed frequency is a wrong promise
+                          // (codex 1A-ii r6).
+                          const n = Math.round(Number(nextFreq));
+                          const synced = Number.isFinite(n) && n >= 1
+                            ? it.inclusionsText.replace(/^\d+ scheduled applications? per year$/m, `${n} scheduled application${n === 1 ? '' : 's'} per year`)
+                            : it.inclusionsText;
+                          return { ...it, frequencyPerYear: nextFreq, inclusionsText: synced };
+                        }));
+                      }}
+                    />
+                    <Input
+                      size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Price per application"
+                      value={p.pricePerApplication} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, pricePerApplication: e.target.value } : it))); }}
+                    />
+                    <div className="flex items-center gap-1 shrink-0" title="Taxable program">
+                      <Switch checked={p.taxable} disabled={!!locked}
+                        onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
+                      <span className="text-12 text-zinc-500">Tax</span>
+                    </div>
+                    <span className="text-12 text-zinc-500 tabular-nums shrink-0">
+                      {money(roundMoney((Number(p.pricePerApplication) || 0) * (Math.round(Number(p.frequencyPerYear)) || 0)))}/yr
+                    </span>
+                    {!locked && (
+                      <Button variant="ghost" size="sm" title="Remove program"
+                        onClick={() => removeProgram(idx)}>
+                        <Trash2 size={14} />
+                      </Button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <Textarea
+                      rows={3} value={p.inclusionsText} disabled={!!locked}
+                      placeholder={'What this program includes — one per line'}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, inclusionsText: e.target.value } : it))); }}
+                    />
+                    <Textarea
+                      rows={3} value={p.exclusionsText} disabled={!!locked}
+                      placeholder={'Not included / quoted separately — one per line'}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, exclusionsText: e.target.value } : it))); }}
+                    />
+                  </div>
+                  <Input
+                    size="sm" placeholder="Covers (optional) — comma-separated names, add a note with | (e.g. Tower A | Exterior only, Clubhouse)" maxLength={400}
+                    value={p.coversText} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, coversText: e.target.value } : it))); }}
+                  />
+                  {/* Customer-visible on every proposal surface — a loaded
+                      note must be editable here, not silently round-tripped
+                      out of sight (codex 1A-ii r15). */}
+                  <Input
+                    size="sm" placeholder="Program note (optional, shown on the proposal)" maxLength={300}
+                    value={p.note} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, note: e.target.value } : it))); }}
+                  />
+                </div>
+              ))}
+              {!locked && (
+                <Button variant="ghost" size="sm"
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
+                  <Plus size={14} /> Add program
+                </Button>
+              )}
+            </CardBody>
+          </Card>
+
+          {programsMode && (
+            <div className="flex flex-wrap items-center gap-3 text-13 text-zinc-600 bg-zinc-50 border border-hairline border-zinc-200 rounded px-3 py-2">
+              <span className="flex-1 min-w-[240px]">
+                Service programs are the recurring itemization — the building line-item editor is hidden and
+                building lines are not saved alongside programs. Use each program&rsquo;s &ldquo;Covers&rdquo; field for building labels.
+              </span>
+              {!locked && buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim())) && (
+                <Button variant="secondary" size="sm"
+                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0)]); }}>
+                  <Trash2 size={14} /> Clear building lines
+                </Button>
+              )}
+            </div>
+          )}
+
+          {!programsMode && buildings.map((b, bi) => {
             const sub = buildingSubtotals(b);
             return (
               <Card key={bi}>
@@ -881,7 +1394,7 @@ export default function CommercialProposalPage() {
             );
           })}
 
-          {!locked && (
+          {!locked && !programsMode && (
             <Button variant="secondary" size="sm" onClick={addBuilding}>
               <Plus size={15} /> Add building
             </Button>

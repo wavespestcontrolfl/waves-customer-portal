@@ -242,6 +242,65 @@ function buildingBlock(ctx, building, y, taxRate) {
   return y;
 }
 
+// Service programs (slice 1A-ii) — the recurring itemization when authored.
+// Fallback parity: program totals are inside computeProposalTotals, so the
+// rows must be visible here too.
+function programsBlock(ctx, programs, y) {
+  const { doc } = ctx;
+  if (!Array.isArray(programs) || programs.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Service programs', L, y);
+  for (const program of programs) {
+    doc.fontSize(11);
+    const labelH = doc.heightOfString(program.label, { width: W - 160 });
+    y = ensureSpace(ctx, y, labelH + 22);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(NAVY).text(program.label, L, y, { width: W - 160 });
+    doc.fontSize(10).font('Helvetica').fillColor(INK).text(
+      `${currency(program.pricePerApplication)}${program.taxable ? ' *' : ''} per application`,
+      L + W - 150, y, { width: 150, align: 'right' },
+    );
+    y += Math.max(labelH, 12) + 2;
+    doc.fontSize(9).font('Helvetica').fillColor(BODY).text(
+      `${program.frequencyPerYear} application${program.frequencyPerYear === 1 ? '' : 's'} per year · ${currency(program.annual)} annual program total`,
+      L, y, { width: W },
+    );
+    y += 13;
+    if (program.note) {
+      doc.fontSize(9).font('Helvetica-Oblique').fillColor(MUTED);
+      const noteH = doc.heightOfString(program.note, { width: W });
+      y = ensureSpace(ctx, y, noteH + 3);
+      doc.fontSize(9).font('Helvetica-Oblique').fillColor(MUTED).text(program.note, L, y, { width: W });
+      y += noteH + 2;
+    }
+    if ((program.buildings || []).length) {
+      const covers = `Covers: ${program.buildings.map((b) => (b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}`;
+      doc.fontSize(9).font('Helvetica').fillColor(MUTED);
+      const coversH = doc.heightOfString(covers, { width: W });
+      y = ensureSpace(ctx, y, coversH + 3);
+      doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(covers, L, y, { width: W });
+      y += coversH + 2;
+    }
+    for (const inc of (program.inclusions || [])) {
+      const line = `• ${inc}`;
+      doc.fontSize(9).font('Helvetica');
+      const lineH = doc.heightOfString(line, { width: W - 10 });
+      y = ensureSpace(ctx, y, lineH + 3);
+      doc.fontSize(9).font('Helvetica').fillColor(BODY).text(line, L + 6, y, { width: W - 10 });
+      y += lineH + 2;
+    }
+    if ((program.exclusions || []).length) {
+      const excl = `Not included (quoted separately): ${program.exclusions.join(' · ')}`;
+      doc.fontSize(9).font('Helvetica');
+      const exclH = doc.heightOfString(excl, { width: W });
+      y = ensureSpace(ctx, y, exclH + 3);
+      doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(excl, L, y, { width: W });
+      y += exclH + 2;
+    }
+    y += 6;
+  }
+  return y + 4;
+}
+
 // Property scope (slice 1A-i) — the label/value facts the proposal was
 // scoped against. Rendered by the fallback too: a browser-render failure
 // must not email an agreement missing the scoped facts the React document
@@ -414,7 +473,8 @@ function termsBlock(ctx, proposal, totals, y) {
   const lines = [];
   if (totals.hasTax
     || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))
-    || (proposal.correctiveWork || []).some((w) => w.taxable)) {
+    || (proposal.correctiveWork || []).some((w) => w.taxable)
+    || (proposal.programs || []).some((p) => p.taxable)) {
     lines.push('* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.');
   }
   lines.push(`Licensed & insured — Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}. Certificate of Insurance available on request.`);
@@ -423,7 +483,7 @@ function termsBlock(ctx, proposal, totals, y) {
   // operator terms that may state the opposite. The neutral licensed-line
   // above stays — it makes no plan claims.
   const structuredTermLines = commercialTermLines(proposal.commercialTerms);
-  if (!proposal.terms && structuredTermLines.length === 0) {
+  if (!proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length) {
     lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
   }
   lines.push(...structuredTermLines);
@@ -495,6 +555,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   let y = Math.max(yLeft, yRight) + 18;
 
   y = propertyScopeBlock(ctx, proposal.propertyScope, y);
+  y = programsBlock(ctx, proposal.programs, y);
 
   for (const building of proposal.buildings) {
     y = buildingBlock(ctx, building, y, proposal.taxRate);
