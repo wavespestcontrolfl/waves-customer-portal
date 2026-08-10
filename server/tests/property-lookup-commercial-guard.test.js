@@ -378,7 +378,7 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flag.reason).toMatch(/8-unit/);
     expect(flag.reason).toMatch(/master parcel/i);
     expect(flag.reason).toMatch(/unit number/i);
-    expect(flag.reason).toMatch(/association or property manager/i);
+    expect(flag.reason).toMatch(/association, complex owner, or property manager/i);
   });
 
   test('HOA common-area parcel subtype gets the same guidance (no unit-count prefix at 1)', () => {
@@ -431,6 +431,25 @@ describe('multifamily master-parcel guidance flag', () => {
     // before the resident path is priced (codex P0).
     expect(flag.reason).toMatch(/WHOLE BUILDING/);
     expect(flag.reason).toMatch(/re-run the lookup|replace home\/lot/i);
+  });
+
+  test('apartment complex → customer-supplied unit dimensions, never a unit re-lookup (codex P1)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Apartments', unitCount: 24 }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/no separate county parcel/i);
+    expect(flag.reason).not.toMatch(/re-run the lookup/i);
+  });
+
+  test('aggregated condo parcel labeled Apartment still gets the re-lookup path (unit parcels proven to exist)', () => {
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Apartment', _parcel: { aggregated: true } }), null, null
+    );
+    const flag = flags.find((f) => f.field === 'commercialSubtype');
+    expect(flag).toBeDefined();
+    expect(flag.reason).toMatch(/re-run the lookup/i);
   });
 
   test('the instructed exit actually leaves commercial pricing per the real classifier (codex P1)', () => {

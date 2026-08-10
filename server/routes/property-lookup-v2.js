@@ -2947,9 +2947,21 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     if (masterParcelSubtype === 'multifamily_common_area_residential'
         || masterParcelSubtype === 'hoa_common_area_residential') {
       const unitCount = Number(rc.unitCount) || 0;
+      // Apartment complexes are one owner's rental building: units have no
+      // separate county parcels, so a unit re-lookup can't find unit
+      // dimensions there — the customer is the only source. Condo/townhome
+      // communities DO parcel each unit (the stacked-parcel aggregation is
+      // built from exactly those), so a unit re-lookup is the right move.
+      const recordText = commercialSignalText(commercialSignalRecord(rc), {});
+      const apartmentComplex = /apartment/.test(recordText)
+        && !/condo|condominium|townhome|townhouse/.test(recordText)
+        && !rc._parcel?.aggregated;
+      const unitDimensionStep = apartmentComplex
+        ? 'collect the unit number and get the unit\'s own sq ft and stories from the customer — apartment units have no separate county parcel, so records can only describe the whole complex'
+        : 'collect the unit number and re-run the lookup with it (condo/townhome unit parcels carry the unit\'s own dimensions), or replace home/lot sq ft and stories with the unit\'s actual figures';
       flags.push({
         field: 'commercialSubtype',
-        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way, and the prefilled sq ft, lot, and stories are the WHOLE BUILDING'S, not one home's. If the customer is a resident of ONE unit: collect the unit number and re-run the lookup with it (unit parcels carry the unit's own dimensions), or replace home/lot sq ft and stories with the unit's actual figures; then set Property Type to the actual unit type (condo/townhome), set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association or property manager.`,
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file residential communities this way, and the prefilled sq ft, lot, and stories are the WHOLE BUILDING'S, not one home's. If the customer occupies ONE unit: ${unitDimensionStep}; then set Property Type to the actual unit type, set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps commercial pricing. Commercial applies only when the client is the association, complex owner, or property manager.`,
         priority: 'HIGH',
       });
     }
