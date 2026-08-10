@@ -51,7 +51,6 @@ const {
 const { buildEstimateMembershipContext, publicMembershipView } = require('../services/estimate-membership-context');
 const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const {
-  ensureDepositSatisfied,
   resolveDepositPolicyForEstimate,
   linkedScheduledServiceId,
   computeDepositAmount,
@@ -8857,38 +8856,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     }
     const recurringCardLaneActive = recurringCardPolicy.required
       || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicy.exemptReason || '');
-    if (recurringCardLaneActive && depositPolicy.required) {
-      depositPolicy.required = false;
-      depositPolicy.exemptReason = 'recurring_card_supersedes';
-    }
-    if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
-      return res.status(400).json({
-        error: 'Please pick your first appointment to confirm this service',
-        code: 'APPOINTMENT_REQUIRED',
-      });
-    }
-    if (depositPolicy.required) {
-      const depositPaymentIntentId = typeof req.body?.depositPaymentIntentId === 'string'
-        ? req.body.depositPaymentIntentId.trim()
-        : null;
-      // requiredAmount enforces the RESOLVED class amount, not mere presence:
-      // a $49 recurring deposit must not unlock a one-time accept that owes
-      // $99 — the accept would proceed under-collected after a mode switch.
-      const depositCheck = await ensureDepositSatisfied({
-        estimate,
-        depositPaymentIntentId,
-        requiredAmount: depositPolicy.amount,
-      });
-      if (!depositCheck.satisfied) {
-        return res.status(402).json({
-          error: 'To confirm your service, a deposit is required and will be applied toward your first visit',
-          code: 'DEPOSIT_REQUIRED',
-          depositRequired: true,
-          depositAmount: depositPolicy.amount,
-          depositReceived: depositCheck.receivedTotal || 0,
-        });
-      }
-    }
+    // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
+    // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
+    // contract) is removed — resolveDepositPolicy is permanently
+    // not-enforced, card-hold (one-time) and the recurring-card lane are
+    // the live commitment mechanisms. The deposit LEDGER (credit
+    // roll-forward, refunds) stays for historical rows.
 
     // Card-hold gate (pre-commit): a one-time accept that requires a hold must
     // have a booked appointment AND a captured card before we commit — the

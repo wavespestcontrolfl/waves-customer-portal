@@ -56,9 +56,16 @@ const {
   computeRefundSurcharge,
 } = require('./stripe-pricing');
 
+// RETIRED (owner ruling 2026-08-10): acceptance deposits are permanently
+// not-enforced — the card-hold model (ONE_TIME_CARD_HOLD) superseded them
+// for one-time work (owner choice 2026-06-24) and recurring accepts collect
+// nothing at accept. The ESTIMATE_DEPOSIT_REQUIRED env flag is dead on
+// purpose: re-enabling deposits is a build decision, not a flag flip — the
+// intent-mint and payment endpoints were removed with this retirement.
+// Everything LEDGER-side below (credit roll-forward, void-restore, refunds,
+// webhook recording for historical PIs) stays live for the 2026-06/07 rows.
 function isDepositEnforced() {
-  const flag = process.env.ESTIMATE_DEPOSIT_REQUIRED;
-  return flag === '1' || flag === 'true' || flag === 'on';
+  return false;
 }
 
 // Flat per-service-class amount. constants.DEPOSIT is overlaid from the
@@ -758,159 +765,6 @@ function depositIntentMatchesEstimate(paymentIntent, estimateId) {
     && Number(paymentIntent.amount_received) > 0;
 }
 
-// Accept-time check: webhook-recorded deposit, else live verification of the
-// PaymentIntent the client just paid (closes the webhook race). Returns
-// { satisfied, receivedTotal }. requiredAmount enforces the RESOLVED policy
-// amount, not mere presence — a $49 recurring deposit must not unlock a
-// one-time accept that owes $99 (under-collection via mode switch); without
-// it, any positive received money satisfies (legacy semantics).
-async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null, requiredAmount = null }) {
-  const requiredCents = Number.isFinite(Number(requiredAmount)) && Number(requiredAmount) > 0
-    ? Math.round(Number(requiredAmount) * 100)
-    : 1;
-  const recorded = await receivedDepositTotal(estimate.id);
-  if (Math.round(recorded * 100) >= requiredCents) {
-    return { satisfied: true, receivedTotal: recorded };
-  }
-
-  if (depositPaymentIntentId) {
-    let paymentIntent = null;
-    try {
-      paymentIntent = await StripeService.retrievePaymentIntent(depositPaymentIntentId);
-    } catch (err) {
-      logger.warn('[estimate-deposits] live PI verification failed', { error: err.message });
-    }
-    if (depositIntentMatchesEstimate(paymentIntent, estimate.id)) {
-      // Face value, not amount_received — a surcharged capture must not
-      // inflate the credit (a $49 deposit paid on a credit card captures
-      // $50.42 but credits $49; the $1.42 is the recorded fee).
-      const amountDollars = depositFaceValueDollars(paymentIntent);
-      await markDepositReceived({
-        paymentIntentId: paymentIntent.id,
-        estimateId: estimate.id,
-        amountDollars,
-        cardSurcharge: depositSurchargeDollars(paymentIntent),
-      });
-      // This live verification can WIN the race against the webhook, whose
-      // replay short-circuit then never reaches its audit — so the winner
-      // audits (Codex #2705 r6).
-      await auditDepositSurchargeBypass(paymentIntent, estimate.id);
-      // Ledger state is the authority, not Stripe's status: a refunded PI
-      // still reports succeeded/amount_received, the monotonic mark above
-      // touches 0 rows for it, and a refunded deposit must never unlock
-      // acceptance. Re-sum the whole ledger — the live PI may be a top-up
-      // beside an earlier recorded deposit.
-      const row = await db('estimate_deposits')
-        .where({ stripe_payment_intent_id: paymentIntent.id })
-        .first('status', 'amount');
-      if (row && ['received', 'credited'].includes(row.status)) {
-        const total = await receivedDepositTotal(estimate.id);
-        if (Math.round(total * 100) >= requiredCents) {
-          return { satisfied: true, receivedTotal: total };
-        }
-        logger.warn('[estimate-deposits] received deposit is below the required policy amount', {
-          receivedTotal: total,
-          requiredAmount,
-        });
-        return { satisfied: false, receivedTotal: total };
-      }
-      logger.warn('[estimate-deposits] PI succeeded on Stripe but ledger row is not received/credited — refusing to satisfy');
-    }
-  }
-
-  return { satisfied: false, receivedTotal: recorded };
-}
-
-// Create (or idempotently reuse) the deposit PaymentIntent for an estimate
-// and track it as pending. Charges only the MISSING amount: money already
-// received counts toward the policy (the gate sums the ledger the same
-// way), so a customer who paid the $49 recurring deposit and then switched
-// to one-time owes a $50 top-up, not a fresh $99 — and a switch the other
-// way owes nothing. The Stripe idempotency key includes the amount, so a
-// changed balance mints a new intent while retries at the same balance
-// reuse the old one. Returns { clientSecret, amount } for the payment UI,
-// { alreadySatisfied: true } when the ledger already covers the policy, or
-// null when Stripe isn't configured.
-async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}) {
-  const requiredAmount = computeDepositAmount({ oneTime });
-  const receivedTotal = await receivedDepositTotal(estimate.id);
-  const missingCents = Math.round(requiredAmount * 100) - Math.round(receivedTotal * 100);
-  if (missingCents <= 0) {
-    return { alreadySatisfied: true, amount: 0, requiredAmount, receivedTotal };
-  }
-  const amount = missingCents / 100;
-  // Refunded/disputed money must not poison retries: within Stripe's
-  // idempotency window the bare estimate+amount key would hand back the OLD
-  // succeeded (and refunded) PI, whose terminal ledger row can never satisfy
-  // the gate — the customer would be stuck unable to pay a replacement
-  // deposit. Terminal rows only grow, so their count is a monotonic retry
-  // generation that mints a fresh PI after every refund/failure while
-  // same-generation retries still reuse one intent.
-  const terminalCountRow = await db('estimate_deposits')
-    .where({ estimate_id: estimate.id })
-    .whereIn('status', ['refunding', 'refunded', 'failed'])
-    .count({ n: '*' })
-    .first();
-  const retryGeneration = Number(terminalCountRow?.n || 0);
-  const paymentIntent = await StripeService.createEstimateDepositIntent({
-    estimateId: estimate.id,
-    amountDollars: amount,
-    retryGeneration,
-  });
-  if (!paymentIntent) return null;
-
-  await db('estimate_deposits')
-    .insert({
-      estimate_id: estimate.id,
-      customer_id: estimate.customer_id || null,
-      amount,
-      stripe_payment_intent_id: paymentIntent.id,
-      status: 'pending',
-      updated_at: db.fn.now(),
-    })
-    .onConflict('stripe_payment_intent_id')
-    .merge({ updated_at: db.fn.now() });
-
-  // Supersede every OTHER pending intent for this estimate (Codex #2705
-  // r7): a key change (the _qac1 salt, an amount-class switch) mints a new
-  // PI while an already-open tab still holds the old one's usable client
-  // secret — if both confirm, two deposits record and both can credit.
-  // Cancel FIRST, flip the ledger row second: a cancel that loses to an
-  // in-flight success throws, the row stays pending, and the webhook
-  // records that money normally (flipping first would strand a captured
-  // payment on a terminal row). Failed rows feed retryGeneration, which is
-  // correct — they are terminal.
-  try {
-    const stalePending = await db('estimate_deposits')
-      .where({ estimate_id: estimate.id, status: 'pending' })
-      .whereNot({ stripe_payment_intent_id: paymentIntent.id })
-      .select('id', 'stripe_payment_intent_id');
-    for (const stale of stalePending) {
-      try {
-        await StripeService.cancelPaymentIntent(stale.stripe_payment_intent_id, { cancellation_reason: 'abandoned' });
-        await db('estimate_deposits')
-          .where({ id: stale.id, status: 'pending' })
-          .update({ status: 'failed', updated_at: db.fn.now() });
-        logger.info('[estimate-deposits] superseded stale pending deposit intent', {
-          estimateId: estimate.id,
-          canceledPaymentIntentId: stale.stripe_payment_intent_id,
-        });
-      } catch (cancelErr) {
-        logger.warn(`[estimate-deposits] could not cancel superseded deposit PI ${stale.stripe_payment_intent_id}: ${cancelErr.message}`);
-      }
-    }
-  } catch (sweepErr) {
-    logger.warn(`[estimate-deposits] stale-pending sweep failed for estimate ${estimate.id}: ${sweepErr.message}`);
-  }
-
-  return {
-    clientSecret: paymentIntent.client_secret,
-    amount,
-    paymentIntentId: paymentIntent.id,
-    requiredAmount,
-    receivedTotal,
-  };
-}
 
 function parseEstimateDataBlob(estimate) {
   try {
@@ -1960,8 +1814,6 @@ module.exports = {
   computeDepositAmount,
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
-  createDepositIntentForEstimate,
-  ensureDepositSatisfied,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
   handleDepositIntentCanceled,

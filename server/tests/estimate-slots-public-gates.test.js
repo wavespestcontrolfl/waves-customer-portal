@@ -268,19 +268,30 @@ describe('bermuda-suppression money/slot gate', () => {
     expect((await slots.json()).code).toBe('BERMUDA_SUPPRESSION_GATED');
     expect(getAvailableSlots).not.toHaveBeenCalled();
 
-    const deposit = await fetch(`${base}/${TOKEN}/deposit-intent`, {
+    // The retired deposit-intent VERDICT STUB answers before any estimate
+    // load, so it is exempt from the suppression gate by construction —
+    // the accept client must always get its 409-with-exemptReason
+    // "nothing owed" verdict (a 404 or other shape would block accepts
+    // that re-consult after a non-superseding card/hold 409).
+    const retiredDeposit = await fetch(`${base}/${TOKEN}/deposit-intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     });
-    expect(deposit.status).toBe(409);
-    expect((await deposit.json()).code).toBe('BERMUDA_SUPPRESSION_GATED');
+    expect(retiredDeposit.status).toBe(409);
+    expect((await retiredDeposit.json()).exemptReason).toBe('deposits_retired');
 
-    // deposit-quote/-finalize/-reset, card-hold-intent, and
-    // recurring-card-intent carry the SAME guard inserted immediately after
-    // the same estimate load (single replace-all site); deposit-intent above
-    // exercises it. Finalize's earlier param validation makes a full valid
-    // request impractical in this harness.
+    // Money boundary: card-hold-intent (the other deposit routes were
+    // REMOVED 2026-08-10 — card-hold is the live money/commitment boundary
+    // here). recurring-card-intent carries the SAME guard inserted
+    // immediately after the same estimate load (single replace-all site).
+    const hold = await fetch(`${base}/${TOKEN}/card-hold-intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(hold.status).toBe(409);
+    expect((await hold.json()).code).toBe('BERMUDA_SUPPRESSION_GATED');
   });
 
   test('gate on: the suppression gate does not fire on the slot path', async () => {
