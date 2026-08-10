@@ -168,6 +168,44 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   return cappedServiceType(fallback);
 }
 
+// Catalog link for the accepted service — the ID, not the label.
+//
+// `service_type` above is a DISPLAY string, and its whitelist silently
+// returns the estimate's `service_interest` verbatim for any engine key it
+// doesn't list. Every one-time engine key observed on accepted estimates in
+// prod falls through that way (`pre_slab_termiticide`, `german_roach`,
+// `stinging_insect`), producing a label that matches no `services` row — so
+// resolveCompletionProfileForScheduledService degrades to the GENERIC
+// profile. That silently kills typed one-time billing (no invoice ⇒ the
+// card-hold completion charge never fires, since it is gated on
+// `if (invoice?.id)`) AND the compliance-project lane (a pre-slab visit could
+// not produce its certificate of compliance).
+//
+// lookupServiceForScheduledService checks `service_id` FIRST, so stamping the
+// id makes profile resolution label-independent — without changing a single
+// customer-facing string. The primary service is chosen with the SAME rule
+// the label uses, so the id and the label can never describe different
+// services on one row.
+//
+// FAIL-OPEN by design: an unmapped engine key, a missing column (a deploy
+// that lands before the migration), or any lookup error leaves service_id
+// null and the accept books exactly as it does today.
+async function catalogServiceIdForProfile(conn, serviceProfile = {}) {
+  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
+  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const engineKey = primary?.service ? String(primary.service).trim() : '';
+  if (!conn || !engineKey) return null;
+  try {
+    const row = await conn('services')
+      .where({ engine_key: engineKey, is_active: true })
+      .first('id');
+    return row?.id || null;
+  } catch (err) {
+    logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
+    return null;
+  }
+}
+
 function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
   const label = String(serviceProfile?.serviceLabel || fallback || '')
     .replace(/\s+/g, ' ')
@@ -488,6 +526,10 @@ async function reserveSlot({
       const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+      // Catalog link — see catalogServiceIdForProfile. Stamped on the HOLD so
+      // the graduated visit carries it even if the profile can't be re-resolved
+      // at commit; commitReservation backfills it when this returns null.
+      const catalogServiceId = await catalogServiceIdForProfile(trx, serviceProfile);
 
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
@@ -747,6 +789,7 @@ async function reserveSlot({
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
+        ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
         // Geo stamp (best-effort): coords make the hold a real route anchor
         // for find-time's detour math; the zone slug lets the zone-capacity
         // conflict check see holds directly instead of via the (absent)
@@ -1016,6 +1059,14 @@ async function commitReservation({
       updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
     }
+    // Backfill the catalog link for holds taken before the mapping existed
+    // (or whose profile only became resolvable at commit). NEVER overwrites an
+    // id already on the row: an admin repoint outranks the derived value, and
+    // the reserve-path stamp is already correct when present.
+    if (!row.service_id) {
+      const catalogServiceId = await catalogServiceIdForProfile(client, serviceProfile);
+      if (catalogServiceId) updates.service_id = catalogServiceId;
+    }
 
     const [updated] = await client('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -1109,5 +1160,12 @@ module.exports = {
   // estimate-backed label recovery compares stored fall-through values
   // against this exact transform, so it must reuse it, never re-implement.
   cappedServiceType,
-  _internals: { parseSlotId, addMinutesToTime, cappedServiceType, canonicalServiceTypeForProfile, notesWithServiceMix },
+  _internals: {
+    parseSlotId,
+    addMinutesToTime,
+    cappedServiceType,
+    canonicalServiceTypeForProfile,
+    notesWithServiceMix,
+    catalogServiceIdForProfile,
+  },
 };
