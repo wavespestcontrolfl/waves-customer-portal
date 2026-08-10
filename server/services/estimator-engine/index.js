@@ -1039,6 +1039,18 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       // drafting and delivery blocked.
       const stillRejected = await callRejectedForDrafting(db, row.id, { ignoreQueuedMarkers: true });
       if (!stillRejected) {
+        // The re-qualified call must lose BOTH markers (pre-push P1, PR
+        // #3304): the rejection's invalidateDraftForCall also stamped
+        // estimator_draft_block, which every draft creator and public-
+        // estimate guard honors — clearing only the queue left a now-valid
+        // estimate suppressed forever when reprocessing took the
+        // reconcile-only path and no drafting pass ever ran the clean-
+        // context clear. Same generation-aware clear as the identity
+        // branch below; a NEWER generation-stamped marker survives.
+        await clearDraftBlockOnCall(row.id, {
+          notNewerThan: String(pending.at || new Date().toISOString()),
+          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
+        });
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the call was re-qualified (${pending.reason})`);
         continue;

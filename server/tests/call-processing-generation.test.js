@@ -76,7 +76,7 @@ jest.mock('../services/estimator-engine/draft-builder', () => ({
   createDraftEstimate: jest.fn(),
 }));
 
-const { invalidateDraftForCall, sweepPendingReconciles } = require('../services/estimator-engine/index');
+const { invalidateDraftForCall, sweepPendingReconciles, sweepPendingQuarantines } = require('../services/estimator-engine/index');
 const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 
 const fenceUpdateFor = (marker) => mockUpdates.find((u) => u.table === 'call_log'
@@ -175,6 +175,43 @@ describe('sweepPendingReconciles', () => {
     expect(clearWrite.calls).toContainEqual(
       ['whereRaw', "metadata->'estimator_reconcile_pending'->>'at' = ?", ['2026-08-10T01:00:00.000Z']],
     );
+  });
+});
+
+describe('sweepPendingQuarantines re-qualification clears the draft block too', () => {
+  test('rejection → requalification retires BOTH markers with the live generation', async () => {
+    // A queued spam quarantine whose call was since re-qualified: the
+    // sweep must not clear only its own queue entry — the durable
+    // estimator_draft_block written alongside the rejection would keep
+    // every draft creator and public-estimate guard failing closed
+    // forever (pre-push P1, PR #3304).
+    mockScanRows = [{
+      id: 'call-1',
+      metadata: {
+        estimator_quarantine_pending: { reason: 'call_rejected_spam', at: '2026-08-10T01:00:00.000Z' },
+        estimator_draft_block: { reason: 'call_rejected_spam', at: '2026-08-10T01:00:00.000Z', generation: 8 },
+      },
+    }];
+    // Settled + re-qualified: token null, terminal 'processed', no
+    // no_attribution marker — callRejectedForDrafting returns null.
+    mockCallRow = {
+      id: 'call-1', processing_token: null, processing_status: 'processed',
+      extraction_attempts: 0, created_at: '2026-08-01T00:00:00.000Z',
+      processing_generation: 9, metadata: {},
+    };
+
+    await sweepPendingQuarantines();
+
+    const blockClear = mockUpdates.find((u) => u.table === 'call_log'
+      && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_draft_block'"));
+    expect(blockClear).toBeTruthy();
+    // The clear rode the call's LIVE generation, so the gen-8 marker is
+    // clearable while a hypothetical newer one would survive.
+    expect(blockClear.calls.some(([m, , bindings]) => m === 'whereRaw'
+      && Array.isArray(bindings) && bindings[0] === 9)).toBe(true);
+    const queueClear = mockUpdates.find((u) => u.table === 'call_log'
+      && typeof u.row?.metadata === 'string' && u.row.metadata.includes("- 'estimator_quarantine_pending'"));
+    expect(queueClear).toBeTruthy();
   });
 });
 
