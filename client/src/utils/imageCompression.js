@@ -80,7 +80,12 @@ const COMPRESSIBLE_TYPES = new Set(["image/jpeg", "image/png"]);
 const SNIFF_BYTES = 64 * 1024;
 
 function mimeOf(file) {
-  return String(file?.type || "").toLowerCase();
+  const type = String(file?.type || "").toLowerCase();
+  // Some pickers report the non-standard image/jpg alias. The upload endpoint
+  // accepts it (admin-communications-attach.js ALLOWED_MIMES), so treating it
+  // as a distinct type here would silently exclude a plain JPEG from
+  // compression and refuse a batch we could have shrunk.
+  return type === "image/jpg" ? "image/jpeg" : type;
 }
 
 /** Type-level check only. PNG additionally needs `isAnimatedImage` (async). */

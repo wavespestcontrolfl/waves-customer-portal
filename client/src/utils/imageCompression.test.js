@@ -84,6 +84,13 @@ describe("isCompressibleImage", () => {
     expect(isCompressibleImage(fakeFile("a.png", 1, "image/png"))).toBe(true);
   });
 
+  it("accepts the non-standard image/jpg alias", () => {
+    // Some pickers report it, and the upload endpoint allows it — excluding
+    // it here would skip compression on an ordinary JPEG.
+    expect(isCompressibleImage(fakeFile("a.jpg", 1, "image/jpg"))).toBe(true);
+    expect(isCompressibleImage(fakeFile("a.jpg", 1, "IMAGE/JPG"))).toBe(true);
+  });
+
   it("passes every other format through rather than parsing its container", () => {
     // Deliberate scope limit: no per-format animation parser, so these are
     // never re-encoded and can never be silently flattened.
