@@ -47,7 +47,7 @@ function load() {
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
 function makeChain(rows, delCount = 0, { insertError = null, first = null, selectError = null } = {}) {
   const chain = {};
-  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum']) {
+  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum', 'max']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
@@ -210,6 +210,19 @@ describe('llm-dispatch-metrics', () => {
       const out = detectExceptions([{ policy: 'report', total: 2, fallbacks: 0, failed: 1 }], []);
       expect(out).toHaveLength(1);
       expect(out[0]).toMatchObject({ policy: 'report', kind: 'all_providers_failed' });
+      expect(out[0].detail).toMatch(/BOTH providers/);
+    });
+
+    it('describes single-leg policy failures honestly — pinned sealed lanes have no fallback by design', () => {
+      const { detectExceptions } = load();
+      const out = detectExceptions(
+        [{ policy: 'smsShadow:anthropic:sealed', total: 25, fallbacks: 0, failed: 4, singleLeg: true }],
+        []
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].kind).toBe('all_providers_failed');
+      expect(out[0].detail).toMatch(/single-leg policy, no fallback configured/);
+      expect(out[0].detail).not.toMatch(/BOTH providers/);
     });
 
     it('flags fallback-rate spikes only above threshold AND volume', () => {

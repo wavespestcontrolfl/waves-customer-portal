@@ -34,6 +34,12 @@ const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
+const {
+  serviceCountsTowardWaveGuardTier,
+  serviceExcludedFromPercentDiscount,
+  serviceManualRecurringDiscountEligible,
+  lineFlagsBlockPercentDiscount,
+} = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
@@ -51,7 +57,6 @@ const {
 const { buildEstimateMembershipContext, publicMembershipView } = require('../services/estimate-membership-context');
 const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const {
-  ensureDepositSatisfied,
   resolveDepositPolicyForEstimate,
   linkedScheduledServiceId,
   computeDepositAmount,
@@ -2866,38 +2871,31 @@ function recurringServiceKey(svc = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Service-level policy comes from the canonical discount-engine predicates;
+// only the ROUTE-specific pieces stay inline (the lawn_care legacy early
+// branch, the LAWN_V2 floor-price policy marker, and the 'rodent' alias
+// that predates the exclusion map).
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
   if (key === 'lawn_care') {
     return svc.excludeFromPctDiscount !== true;
   }
-  if (
-    svc.discountable === false ||
-    svc.discount?.discountable === false ||
-    svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE' ||
-    svc.waveGuardDiscountEligible === false ||
-    svc.discountEligible === false ||
-    svc.excludeFromPctDiscount === true
-  ) return false;
+  if (lineFlagsBlockPercentDiscount(svc) || svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE') return false;
   if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
-  if (PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true || svc.excludeFromPctDiscount === true) return false;
-  if (PRICING_WAVEGUARD.qualifyingServices.includes(key)) return true;
-  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false) return false;
-  return false;
+  if (serviceExcludedFromPercentDiscount(key)) return false;
+  return serviceCountsTowardWaveGuardTier(key);
 }
 
 function recurringServiceReceivesManualDiscount(svc = {}) {
-  const key = recurringServiceKey(svc);
-  return ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'].includes(key) &&
+  return serviceManualRecurringDiscountEligible(recurringServiceKey(svc)) &&
     svc.noRecurringDiscount !== true &&
     svc.discountEligible !== false &&
     svc.excludeFromPctDiscount !== true;
 }
 
 function recurringServiceCountsTowardTier(svc = {}) {
-  const key = recurringServiceKey(svc);
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
-  return PRICING_WAVEGUARD.qualifyingServices.includes(key);
+  return serviceCountsTowardWaveGuardTier(recurringServiceKey(svc));
 }
 
 function recurringServiceDisplayName(key) {
@@ -8857,38 +8855,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     }
     const recurringCardLaneActive = recurringCardPolicy.required
       || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicy.exemptReason || '');
-    if (recurringCardLaneActive && depositPolicy.required) {
-      depositPolicy.required = false;
-      depositPolicy.exemptReason = 'recurring_card_supersedes';
-    }
-    if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
-      return res.status(400).json({
-        error: 'Please pick your first appointment to confirm this service',
-        code: 'APPOINTMENT_REQUIRED',
-      });
-    }
-    if (depositPolicy.required) {
-      const depositPaymentIntentId = typeof req.body?.depositPaymentIntentId === 'string'
-        ? req.body.depositPaymentIntentId.trim()
-        : null;
-      // requiredAmount enforces the RESOLVED class amount, not mere presence:
-      // a $49 recurring deposit must not unlock a one-time accept that owes
-      // $99 — the accept would proceed under-collected after a mode switch.
-      const depositCheck = await ensureDepositSatisfied({
-        estimate,
-        depositPaymentIntentId,
-        requiredAmount: depositPolicy.amount,
-      });
-      if (!depositCheck.satisfied) {
-        return res.status(402).json({
-          error: 'To confirm your service, a deposit is required and will be applied toward your first visit',
-          code: 'DEPOSIT_REQUIRED',
-          depositRequired: true,
-          depositAmount: depositPolicy.amount,
-          depositReceived: depositCheck.receivedTotal || 0,
-        });
-      }
-    }
+    // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
+    // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
+    // contract) is removed — resolveDepositPolicy is permanently
+    // not-enforced, card-hold (one-time) and the recurring-card lane are
+    // the live commitment mechanisms. The deposit LEDGER (credit
+    // roll-forward, refunds) stays for historical rows.
 
     // Card-hold gate (pre-commit): a one-time accept that requires a hold must
     // have a booked appointment AND a captured card before we commit — the
@@ -16820,8 +16792,8 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
     // passes all its recurring keys). The client reads this directly.
     waveGuardTierEligible: sectionTierEligibleFromKeys(isRecurring, normalizedMemberKeys),
     memberKeys: normalizedMemberKeys,
-    isWaveGuardQualifier: PRICING_WAVEGUARD.qualifyingServices.includes(key),
-    excludeFromPctDiscount: PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true,
+    isWaveGuardQualifier: serviceCountsTowardWaveGuardTier(key),
+    excludeFromPctDiscount: serviceExcludedFromPercentDiscount(key),
     defaultFrequencyKey: defaultFrequencyKeyFor(shapedFrequencies),
     frequencies: shapedFrequencies,
     setupFee: setupFee || null,
@@ -17769,17 +17741,17 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 // Termite bait monitoring is part of the WaveGuard recurring plan (owner
 // confirmation 2026-07-10 evening — reverses the earlier same-day removal),
 // so its section badges like pest/mosquito.
-const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
-
 // A recurring section shows the tier badge iff it represents AT LEAST ONE
-// eligible service. memberKeys = the service keys the section covers ([key] for
-// a single service; all recurring keys for a combined 'bundle'). This is the one
-// source of truth, emitted per section as `waveGuardTierEligible` and read
-// directly by the client — so: palm/rodent single sections stay badge-free, a
-// bundle with an eligible service keeps the badge, and an excluded-only
-// (palm+rodent) bundle does NOT badge.
+// eligible service (canonical membership: discount-engine's
+// serviceCountsTowardWaveGuardTier — this Set was a hand-rolled copy of
+// WAVEGUARD.qualifyingServices before 2026-08-10). memberKeys = the service
+// keys the section covers ([key] for a single service; all recurring keys
+// for a combined 'bundle'). Emitted per section as `waveGuardTierEligible`
+// and read directly by the client — so: palm/rodent single sections stay
+// badge-free, a bundle with an eligible service keeps the badge, and an
+// excluded-only (palm+rodent) bundle does NOT badge.
 function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
-  return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
+  return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => serviceCountsTowardWaveGuardTier(k));
 }
 
 // Engine inputs for the buy-vs-rent comparison replays. Admin-builder saves

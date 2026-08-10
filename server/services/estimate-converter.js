@@ -12,6 +12,9 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
+// Canonical service-key tier membership (aliased: this module's local
+// serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
+const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
 const {
   customerPreservesMonthlyMembership,
   inferFrequencyKeyFromEstimateData,
@@ -499,7 +502,7 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
   if (svc.waveGuardTierEligible === false || svc.countsTowardWaveGuardTier === false) return false;
-  return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
+  return serviceKeyCountsTowardTier(recurringServiceKey(svc));
 }
 
 function tierQualifyingRecurringServiceKeys(services = []) {
@@ -539,7 +542,7 @@ function isMembershipTierUpgrade(previousTier, nextTier) {
 function priorQualifyingKeysFromSnapshot(estimateData) {
   const keys = estimateData?.membershipSnapshot?.existingServiceKeys;
   if (!Array.isArray(keys)) return null;
-  return keys.filter((k) => WAVEGUARD.qualifyingServices.includes(k));
+  return keys.filter((k) => serviceKeyCountsTowardTier(k));
 }
 
 // Distinct qualifying-family count across the customer's EXISTING plans plus
