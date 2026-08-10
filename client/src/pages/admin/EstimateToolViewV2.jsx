@@ -4238,6 +4238,16 @@ export default function EstimateToolViewV2({
             }
           : {};
       })());
+      // The profile spread above still carries the RAW baseProfile fields —
+      // when the verdict rejected the AI count and nothing explicit replaced
+      // it, strip the estimate so the server translator (which promotes
+      // estimatedPalmCount into palmInventory.palmCount) can't price it.
+      if (!palmPrefillAllowed(baseProfile) && !parsePositiveInteger(profile.palmCount)) {
+        delete profile.estimatedPalmCount;
+        if (profile.palmInventory && !parsePositiveInteger(profile.palmInventory.palmCount)) {
+          delete profile.palmInventory.palmCount;
+        }
+      }
       profile.estimatedTreeCount = treeCount;
       profile.treeCount = treeCount;
       if (measuredTurfSf !== undefined) {

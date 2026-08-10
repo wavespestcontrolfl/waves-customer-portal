@@ -379,13 +379,15 @@ describe('mergeAiAnalyses + profile — palm-count trust (owner ruling 2026-08-1
       confidenceScore: 73, _palmCountConfidence: 40, estimatedPalmCount: 9,
     }, 27.1, -82.4);
     expect(distrusted.palmCountTrusted).toBe(false);
-    // Missing stamp (legacy cache shape) is also not trusted — but the
-    // client treats only an explicit false as suppression, so legacy
-    // payloads keep their pre-existing prefill behavior.
+    // Missing stamp = legacy cached analysis rebuilt through
+    // buildEnrichedProfile: NO verdict is attached at all (an explicit
+    // false would suppress every cached address's prefill for the cache
+    // lifetime), and the client's `!== false` contract preserves the
+    // pre-existing prefill.
     const unstamped = buildProfile(null, {
       confidenceScore: 88, estimatedPalmCount: 7,
     }, 27.1, -82.4);
-    expect(unstamped.palmCountTrusted).toBe(false);
+    expect(unstamped.palmCountTrusted).toBeUndefined();
   });
 
   test('a confident ZERO reading contradicts a positive one — divergence fires, stamp zeroes (all three fields)', () => {
@@ -408,12 +410,50 @@ describe('mergeAiAnalyses + profile — palm-count trust (owner ruling 2026-08-1
       { provider: 'openai', analysis: { confidenceScore: 90, estimatedBedAreaSf: 0 } },
     ]);
     expect(beds._bedAreaConfidence).toBe(0);
-    // An ABSENT read still doesn't count as disagreement.
+    // An ABSENT read still doesn't count as disagreement — and neither
+    // does an explicit NULL (the provider didn't measure; Number(null) is
+    // 0 and must not masquerade as an observed zero).
     const absent = merge([
       { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
       { provider: 'openai', analysis: { confidenceScore: 90 } },
     ]);
     expect(absent._palmCountConfidence).toBe(92);
+    const nullRead = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 7 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: null } },
+    ]);
+    expect(nullRead._palmCountConfidence).toBe(92);
+    const nullBed = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedBedAreaSf: 2600 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedBedAreaSf: null } },
+    ]);
+    expect(nullBed._bedAreaConfidence).toBe(92);
+  });
+
+  test('the V1 translator honors the verdict — a distrusted estimate never becomes palmInventory.palmCount', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    if (!translateV2CallToV1Input) return;
+    // Distrusted: the raw field can still arrive on a spread request
+    // profile even after the UI cleared it — the promotion must skip it.
+    const distrusted = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: false,
+    }, [], {});
+    expect(distrusted.palmInventory?.palmCount).toBeUndefined();
+    // Trusted and legacy (no verdict) both promote — the `!== false`
+    // contract, same as the client prefill.
+    const trusted = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: true,
+    }, [], {});
+    expect(trusted.palmInventory?.palmCount).toBe(9);
+    const legacy = translateV2CallToV1Input({ estimatedPalmCount: 9 }, [], {});
+    expect(legacy.palmInventory?.palmCount).toBe(9);
+    // A REAL stored inventory count is not an AI read — it stands even
+    // when the vision estimate is distrusted.
+    const stored = translateV2CallToV1Input({
+      estimatedPalmCount: 9, palmCountTrusted: false,
+      palmInventory: { palmCount: 4 },
+    }, [], {});
+    expect(stored.palmInventory?.palmCount).toBe(4);
   });
 
   test("wrong-premise vetoes the prefill; the no-record 'all' flag does not (palms are pure vision)", () => {
