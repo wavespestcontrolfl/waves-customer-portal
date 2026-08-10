@@ -4,9 +4,9 @@ import { calculateEstimate } from "./estimateEngine";
 /**
  * T&S audit 2026-07-18 P2: the admin estimate builder prices from this v1
  * engine, and its lot-derived bed area had drifted from the server pricing
- * engine — a 12,000 sf cap (server: BED_AREA_CAP 8,000) and a complexity
- * bump on COMPLEX only (server: complex OR moderate). These pin the
- * server-parity semantics.
+ * engine — a stale local cap and a complexity bump on COMPLEX only
+ * (server: complex OR moderate). These pin the server-parity semantics.
+ * Owner ruling 2026-08-10: bed areas are NEVER clamped on either side.
  */
 
 function tsInput(overrides = {}) {
@@ -39,13 +39,14 @@ const tsAnnual = (input) => {
 };
 
 describe("tree & shrub lot-derived bed area — server parity", () => {
-  it("caps derived bed area at 8,000 sf (server BED_AREA_CAP), not the old 12,000", () => {
-    // 80,000 sf lot, HEAVY shrubs → raw 0.25 * 80,000 = 20,000 sf, capped.
+  it("derives the FULL lot-density bed area — no cap (owner ruling 2026-08-10)", () => {
+    // 80,000 sf lot, HEAVY shrubs → raw 0.25 * 80,000 = 20,000 sf, priced
+    // in full (the old 8,000 clamp priced this 60% low).
     const derived = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY" }));
+    const explicit20k = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 20000 }));
     const explicit8k = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 8000 }));
-    const explicit12k = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 12000 }));
-    expect(derived).toBe(explicit8k);
-    expect(derived).not.toBe(explicit12k);
+    expect(derived).toBe(explicit20k);
+    expect(derived).not.toBe(explicit8k);
   });
 
   it("MODERATE landscape complexity adds bed density like the server (complex OR moderate)", () => {
