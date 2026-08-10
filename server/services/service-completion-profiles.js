@@ -243,6 +243,35 @@ function serviceNameCandidates(serviceType) {
   return expanded;
 }
 
+// Reload the identity evidence a caller's projection omitted (codex #3334 r4
+// P1). Callers build their own `scheduled_services` projections all over the
+// codebase (pest-recap, one-time-exclusion, trace-eligibility, the dispatch
+// list views…), so making the safe path DEPEND on fields they may not have
+// selected silently downgrades them to label-only matching — the recap path can
+// even freeze a null key permanently. Migrating the three call sites named in
+// review would fix those three and leave the next one broken; reloading here
+// fixes every caller, present and future.
+//
+// `undefined` means NOT SELECTED. `null` means selected-and-empty, which is
+// real evidence of absence and must NOT trigger a reload.
+//
+// Called ONLY on the slow path — after service_id and exact-name matching have
+// both missed — so the hot path (dispatch list views resolving many visits)
+// pays nothing.
+async function reloadIdentityEvidence(scheduledService, knex) {
+  const needsSnapshot = scheduledService.service_key_snapshot === undefined;
+  const needsRecurring = scheduledService.is_recurring === undefined;
+  if (!scheduledService.id || (!needsSnapshot && !needsRecurring)) return scheduledService;
+  try {
+    const reloaded = await knex('scheduled_services')
+      .where({ id: scheduledService.id })
+      .first('service_key_snapshot', 'is_recurring');
+    return reloaded ? { ...scheduledService, ...reloaded } : scheduledService;
+  } catch (err) {
+    return scheduledService;
+  }
+}
+
 async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
   if (!scheduledService) return null;
   if (scheduledService.service_id) {
@@ -275,6 +304,20 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
       .whereRaw('lower(name) = lower(?)', [candidate])
       .first('service_key', 'name', 'category', 'billing_type');
     if (exact) return exact;
+  }
+
+  // SLOW PATH ONLY. service_id and the exact name have both missed, so this is
+  // the ambiguous-abbreviation population — the one that loses its identity
+  // without evidence. Reload what the caller's projection left out, then retry
+  // the snapshot with it. Costs one query, and only for rows that would
+  // otherwise fail closed.
+  const row = await reloadIdentityEvidence(scheduledService, knex);
+  const reloadedSnapshotKey = String(row.service_key_snapshot || '').trim();
+  if (reloadedSnapshotKey && reloadedSnapshotKey !== snapshotKey) {
+    const bySnapshot = await knex('services')
+      .where({ service_key: reloadedSnapshotKey })
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (bySnapshot) return bySnapshot;
   }
 
   // short_name is a DISPLAY abbreviation with no uniqueness constraint, and the
@@ -325,7 +368,7 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // set", and treating it as evidence of a one-time visit would re-open exactly
   // the auto-invoice hazard this change exists to close. Narrowing only ever
   // REMOVES candidates, so it can never invent an identity.
-  if (shortNameMatches.length > 1 && scheduledService.is_recurring === true) {
+  if (shortNameMatches.length > 1 && row.is_recurring === true) {
     const recurringOnly = shortNameMatches.filter((r) => r.billing_type === 'recurring');
     if (recurringOnly.length) shortNameMatches = recurringOnly;
   }

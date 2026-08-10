@@ -21,11 +21,17 @@ const profiles = require('../services/service-completion-profiles');
 
 // Minimal knex double: `knex('services')` → builder. The exact-name path uses
 // .whereRaw().first(); the short-name path uses .whereRaw().limit().select().
-function fakeKnex({ byName = [], byShortName = [], byKey = [] } = {}) {
-  const calls = { name: 0, shortName: 0, key: 0 };
-  const builder = () => ({
-    // service_id / service_key_snapshot lookups
+// `reloadRow` models a scheduled_services row the CALLER did not fully project
+// — the resolver reloads it by id on the slow path.
+function fakeKnex({ byName = [], byShortName = [], byKey = [], reloadRow = null } = {}) {
+  const calls = { name: 0, shortName: 0, key: 0, reload: 0 };
+  const builder = (table) => ({
+    // service_id / service_key_snapshot lookups, and the slow-path row reload
     where: (cond) => {
+      if (table === 'scheduled_services') {
+        calls.reload += 1;
+        return { first: async () => reloadRow || undefined };
+      }
       calls.key += 1;
       return {
         first: async () => byKey.find((r) => r.service_key === cond.service_key) || undefined,
@@ -146,6 +152,50 @@ describe('ambiguous short_name resolves NOTHING', () => {
       { service_type: 'Lawn Care', is_recurring: true }, builder,
     );
     expect(profile.serviceKey).toBeNull();
+  });
+
+  test('a caller that did NOT project the evidence still resolves (reload)', async () => {
+    // codex #3334 r4 P1: pest-recap / one-time-exclusion / trace-eligibility and
+    // the dispatch list views build their own projections. The resolver reloads
+    // what they omitted rather than each call site having to be migrated.
+    const { builder, calls } = fakeKnex({
+      byShortName: LAWN_ROWS,
+      byKey: [{ service_key: 'lawn_care_one_time', name: 'One-Time Lawn Care Service', category: 'lawn_care', billing_type: 'one_time' }],
+      reloadRow: { service_key_snapshot: 'lawn_care_one_time', is_recurring: false },
+    });
+    // Only id/service_id/service_type — exactly what the un-migrated callers select.
+    const profile = await profiles.resolveCompletionProfileForScheduledService(
+      { id: 'svc-9', service_id: null, service_type: 'Lawn Care' }, builder,
+    );
+    expect(profile.serviceKey).toBe('lawn_care_one_time');
+    expect(calls.reload).toBe(1);
+  });
+
+  test('the reload does NOT run on the fast path', async () => {
+    // Hot path (dispatch list views resolve many visits): an exact NAME match
+    // must not pay for a row reload.
+    const { builder, calls } = fakeKnex({
+      byName: [{ service_key: 'wdo_inspection', name: 'WDO Inspection Service', category: 'termite', billing_type: 'one_time' }],
+      reloadRow: { service_key_snapshot: 'something_else', is_recurring: false },
+    });
+    const profile = await profiles.resolveCompletionProfileForScheduledService(
+      { id: 'svc-10', service_type: 'WDO Inspection Service' }, builder,
+    );
+    expect(profile.serviceKey).toBe('wdo_inspection');
+    expect(calls.reload).toBe(0);
+  });
+
+  test('a row that genuinely has NO snapshot is not reloaded twice', async () => {
+    // `null` is selected-and-empty — real evidence of absence, not a gap.
+    const { builder, calls } = fakeKnex({
+      byShortName: LAWN_ROWS,
+      reloadRow: { service_key_snapshot: null, is_recurring: null },
+    });
+    const profile = await profiles.resolveCompletionProfileForScheduledService(
+      { id: 'svc-11', service_type: 'Lawn Care', service_key_snapshot: null, is_recurring: null }, builder,
+    );
+    expect(profile.serviceKey).toBeNull();
+    expect(calls.reload).toBe(0);
   });
 
   test('an exact NAME match still wins before short_name is consulted', async () => {
