@@ -6498,9 +6498,12 @@ function PropertyTab({ customer }) {
   const MOWING_TIME_SUMMARY = { morning: 'mornings', midday: 'midday', afternoon: 'afternoons', varies: 'time varies' };
   const mowingDaysList = MOWING_DAY_ORDER.filter(d => (Array.isArray(prefs.mowingDays) ? prefs.mowingDays : []).includes(d));
   const mowingTimeLabel = MOWING_TIME_SUMMARY[prefs.mowingTimeOfDay] || '';
-  const mowingSummary = mowingDaysList.length
-    ? `${mowingDaysList.join(', ')}${mowingTimeLabel ? ` · ${mowingTimeLabel}` : ''}`
-    : 'No mowing schedule listed';
+  // Summarize whichever pieces are set — a time-only or notes-only answer is
+  // a real saved preference, so the collapsed header must never read "none".
+  const mowingSummaryParts = [mowingDaysList.join(', '), mowingTimeLabel].filter(Boolean);
+  const mowingSummary = mowingSummaryParts.length
+    ? mowingSummaryParts.join(' · ')
+    : (String(prefs.mowingNotes || '').trim() ? 'Schedule notes added' : 'No mowing schedule listed');
   const hoaSummary = prefs.hoaName || prefs.hoaCompany || 'No HOA details listed';
   const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const staticMapUrl = mapsKey && customer.address?.line1
@@ -6896,7 +6899,8 @@ function PropertyTab({ customer }) {
       <PropertySection title="Mowing" icon="sprout" summary={mowingSummary}>
         <div style={{ marginBottom: 14, fontSize: 14, color: muted, lineHeight: 1.45 }}>
           Mowing right before or right after a lawn treatment can undo it. Tell us when your
-          mower or lawn crew typically comes through and we will time applications around the cut.
+          mower or lawn crew typically comes through — your service team sees it with your
+          visit details, so treatments can be planned around the cut.
         </div>
         <div>
           <label style={labelStyle}>Typical Mowing Days</label>

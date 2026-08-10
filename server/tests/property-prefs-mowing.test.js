@@ -11,6 +11,7 @@ jest.mock('../services/account-membership-email', () => ({
 }));
 
 const propertyRouter = require('../routes/property');
+const { mowingAlertText } = require('../utils/mowing-schedule');
 
 const { propertyChangeItems, displayPrefValue } = propertyRouter._private;
 
@@ -26,7 +27,14 @@ describe('property preferences — mowing schedule fields', () => {
     expect(displayPrefValue([])).toBe('Not set');
   });
 
-  test('mowing day and time changes produce account-updated email items', () => {
+  // NOTE: these items feed AccountMembershipEmail.sendAccountUpdated, which
+  // deliberately SKIPS ('self_initiated') whenever the actor is the recipient
+  // — which is every customer-initiated PUT on this route today. So this pins
+  // the change-item wiring, NOT that an email is delivered. mowing_days /
+  // mowing_time_of_day are registered exactly like the sibling watering_days
+  // entry so that if a staff-actor path is ever added, mowing notifies with
+  // the rest instead of being silently omitted.
+  test('mowing day and time changes produce account-updated change items', () => {
     const items = propertyChangeItems(
       { mowing_days: JSON.stringify(['Mon', 'Thu']), mowing_time_of_day: 'morning', mowing_notes: 'crew day' },
       { mowing_days: null, mowing_time_of_day: null, mowing_notes: null },
@@ -60,7 +68,9 @@ describe('property preferences — mowing schedule fields', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
 
     expect(src).toMatch(/mowingDays:\s*Joi\.array\(\)/);
-    expect(src).toMatch(/mowingTimeOfDay:\s*shortText/);
+    // Enum-validated, NOT shortText: the column is varchar(30) and shortText
+    // allows 200, so an over-long value would 500 instead of 400.
+    expect(src).toMatch(/mowingTimeOfDay:\s*Joi\.string\(\)[^\n]*\.valid\(/);
     expect(src).toMatch(/mowingNotes:\s*longText/);
     expect(src).toMatch(/'mowing_days',\s*'mowing_time_of_day',\s*'mowing_notes'/);
 
@@ -69,5 +79,45 @@ describe('property preferences — mowing schedule fields', () => {
 
     const defaults = src.match(/mowingDays:\s*\[\],\s*mowingTimeOfDay:\s*'',\s*mowingNotes:\s*''/);
     expect(defaults).not.toBeNull();
+  });
+});
+
+// The whole point of collecting mowing days is that the person treating the
+// lawn knows when it was (or is about to be) cut. These pin the formatting
+// and the two day-view builders that render it.
+describe('mowingAlertText — technician-facing line', () => {
+  test('days and time render together, Mon-first regardless of stored order', () => {
+    expect(mowingAlertText({ mowing_days: ['Thu', 'Mon'], mowing_time_of_day: 'afternoon' }))
+      .toBe('Mows: Mon, Thu (afternoons)');
+  });
+
+  test('a jsonb column handed back as a JSON string still formats', () => {
+    expect(mowingAlertText({ mowing_days: JSON.stringify(['Wed']), mowing_time_of_day: 'morning' }))
+      .toBe('Mows: Wed (mornings)');
+  });
+
+  test('partial answers still produce a line', () => {
+    expect(mowingAlertText({ mowing_days: ['Fri'] })).toBe('Mows: Fri');
+    expect(mowingAlertText({ mowing_time_of_day: 'varies' })).toBe('Mows: time varies');
+    expect(mowingAlertText({ mowing_notes: 'Every other week' })).toBe('Mowing: Every other week');
+    expect(mowingAlertText({ mowing_days: ['Tue'], mowing_notes: 'Skips December' }))
+      .toBe('Mows: Tue — Skips December');
+  });
+
+  test('nothing set, unknown values, and bad JSON produce no alert', () => {
+    expect(mowingAlertText({})).toBe('');
+    expect(mowingAlertText(null)).toBe('');
+    expect(mowingAlertText({ mowing_days: [], mowing_time_of_day: '', mowing_notes: '  ' })).toBe('');
+    expect(mowingAlertText({ mowing_days: '{not json', mowing_time_of_day: 'whenever' })).toBe('');
+  });
+
+  test('both day-view builders render the mowing alert', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const route of ['admin-schedule.js', 'admin-dispatch.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', route), 'utf8');
+      expect(src).toContain("require('../utils/mowing-schedule')");
+      expect(src).toMatch(/mowingAlertText\(prefs\)/);
+    }
   });
 });

@@ -10,6 +10,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { mowingAlertText } = require('../utils/mowing-schedule');
 const { loadLastServices } = require('../utils/last-line-service');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -2061,6 +2062,10 @@ router.get('/', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push({ type: 'access', text: `Side gate: ${prefs.side_gate_access}` });
       if (prefs?.parking_notes) alerts.push({ type: 'access', text: `Parking: ${prefs.parking_notes}` });
       if (prefs?.special_instructions) alerts.push({ type: 'special', text: prefs.special_instructions });
+      // Mowing schedule — a cut right before/after an application undoes it,
+      // so the tech needs to know when the mower comes through.
+      const mowingAlert = mowingAlertText(prefs);
+      if (mowingAlert) alerts.push({ type: 'mowing', text: mowingAlert });
       // Only add notes if there's meaningful content after cleaning. Ops
       // sessions write scheduling-audit trails into notes; those are internal
       // and never belong on the tech-facing alerts block.

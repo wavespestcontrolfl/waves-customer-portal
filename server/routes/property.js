@@ -55,7 +55,10 @@ const prefsSchema = Joi.object({
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
   mowingDays: Joi.array().items(Joi.string().max(20)).max(7),
-  mowingTimeOfDay: shortText,
+  // Controlled vocabulary, not free text: the column is varchar(30), so a
+  // longer value would turn a client mistake into a Postgres 22001 → 500.
+  // The four keys mirror the portal's Typical Time pills.
+  mowingTimeOfDay: Joi.string().trim().valid('', 'morning', 'midday', 'afternoon', 'varies').allow(null),
   mowingNotes: longText,
   hoaName: shortText,
   hoaRestrictions: longText,
