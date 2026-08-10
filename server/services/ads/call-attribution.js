@@ -1160,7 +1160,24 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
 // backfill the target's row), 'retired_cleared' (no target — definitive
 // unlink), 'none' (no provenanced row).
 async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLeadId, now, { toCustomerId } = {}) {
-  if (!callLogId || !fromLeadId) return 'none';
+  if (!callLogId) return 'none';
+  // ORPHANED provenance (pre-push P1 r22): ad_service_attribution.lead_id
+  // is ON DELETE SET NULL, so a hard-deleted lead leaves this call's row
+  // with a NULL lead_id. Refusing it here returned 'none' while the row
+  // still occupied the partial UNIQUE(source_call_id) slot — provenance
+  // recovery then fell through to an insert that violates the index, and
+  // the transfer sweep retried the same row forever. The row is still
+  // EXACTLY this call's by provenance, and its former lead no longer
+  // exists, so re-pointing it at the live lead preserves the history
+  // rather than inventing it. Identity is (source_call_id, lead_id) with
+  // the orphan arm expressed as IS NULL — `lead_id = 'null'` would query
+  // a uuid column with a string, the same trap the retire path hit.
+  const orphanSource = fromLeadId == null;
+  const applySourceIdentity = (qb) => {
+    qb.where({ source_call_id: callLogId });
+    if (orphanSource) qb.whereNull('lead_id');
+    else qb.where({ lead_id: fromLeadId });
+  };
   // The source row is LOCKED and the move conditioned on its expected
   // ownership (codex P1, PR #3303 r5): not every caller holds the call
   // row lock (the claim-time backfill runs on the global connection), so
@@ -1168,7 +1185,7 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
   // overwrite the newer transfer. A zero-row conditioned update means
   // ownership changed under us — report 'none' and touch nothing.
   const oldRow = await dbc('ad_service_attribution')
-    .where({ lead_id: fromLeadId, source_call_id: callLogId })
+    .modify(applySourceIdentity)
     .forUpdate()
     .first('id');
   if (!oldRow) return 'none';
@@ -1205,13 +1222,31 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
         owner = lead?.customer_id || null;
       }
       const moved = await dbc('ad_service_attribution')
-        .where({ id: oldRow.id, lead_id: fromLeadId, source_call_id: callLogId })
+        .where({ id: oldRow.id })
+        .modify(applySourceIdentity)
         .update({ lead_id: toLeadId, customer_id: owner || null, updated_at: now });
       if (!moved) return 'none';
       return 'transferred';
     }
+    if (orphanSource) {
+      // No lead to retire against and no successor could inherit for one
+      // (retireCallAttributionRow refuses a null lead) — the target
+      // already owns its row, so this orphan is unreachable history that
+      // only blocks the provenance slot. Delete it directly, exactly as
+      // retireAllCallAttributionRows does for NULL-lead rows.
+      await dbc('ad_service_attribution').where({ id: oldRow.id }).whereNull('lead_id').del();
+      return 'retired_conflict';
+    }
     await retireCallAttributionRow(dbc, callLogId, fromLeadId);
     return 'retired_conflict';
+  }
+  if (orphanSource) {
+    // Same reasoning as the conflict arm: retireCallAttributionRow refuses
+    // a null lead, so returning 'retired_cleared' here would report a
+    // definitive unlink while the orphan row still held the provenance
+    // slot and blocked every later insert for this call.
+    await dbc('ad_service_attribution').where({ id: oldRow.id }).whereNull('lead_id').del();
+    return 'retired_cleared';
   }
   await retireCallAttributionRow(dbc, callLogId, fromLeadId);
   return 'retired_cleared';

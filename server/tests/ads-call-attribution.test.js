@@ -1058,3 +1058,35 @@ describe('callCarriesDurableLeadEvidence (codex P1 r18)', () => {
     expect(callCarriesDurableLeadEvidence(JSON.stringify({ is_spam: true }))).toBe(false);
   });
 });
+
+// ad_service_attribution.lead_id is ON DELETE SET NULL, so a hard-deleted
+// lead orphans this call's row while it still occupies the partial
+// UNIQUE(source_call_id) slot (pre-push P1 r22).
+describe('orphaned provenance (NULL lead_id) in reconcileMovedCallAttributionRow', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+  const fn = src.split('async function reconcileMovedCallAttributionRow')[1].split('\nasync function ')[0];
+
+  test('a null fromLeadId is no longer refused outright', () => {
+    expect(fn).toMatch(/if \(!callLogId\) return 'none';/);
+    expect(fn).not.toMatch(/if \(!callLogId \|\| !fromLeadId\) return 'none';/);
+    expect(fn).toMatch(/const orphanSource = fromLeadId == null;/);
+  });
+
+  test('the orphan arm matches IS NULL, never the uuid-vs-string trap', () => {
+    expect(fn).toMatch(/if \(orphanSource\) qb\.whereNull\('lead_id'\);/);
+    expect(fn).not.toMatch(/lead_id: String\(fromLeadId\)/);
+  });
+
+  test('the conditioned move re-applies the SAME identity predicate it locked', () => {
+    const moveStmt = fn.split('.update({ lead_id: toLeadId')[0].slice(-260);
+    expect(moveStmt).toMatch(/\.modify\(applySourceIdentity\)/);
+  });
+
+  test('an orphan that cannot transfer is DELETED, never reported cleared while it still holds the slot', () => {
+    // Both terminal arms (target-slot conflict, and no target at all).
+    const deletes = fn.match(/whereNull\('lead_id'\)\.del\(\)/g) || [];
+    expect(deletes).toHaveLength(2);
+  });
+});

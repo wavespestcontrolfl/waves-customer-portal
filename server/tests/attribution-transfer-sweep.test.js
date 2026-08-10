@@ -20,6 +20,10 @@ const mockDb = jest.fn((table) => {
   ['where', 'whereNot', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'orderByRaw', 'limit'].forEach((m) => {
     b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
   });
+  // Real knex .modify invokes the callback with the builder — the shared
+  // source-identity predicate in reconcileMovedCallAttributionRow (orphan
+  // NULL-lead support, pre-push P1 r22) is applied through it.
+  b.modify = (fn) => { fn.call(b, b); return b; };
   const whereObj = (key) => {
     const w = b._wheres.find((x) => x[0] === 'where' && x[1] && typeof x[1] === 'object' && key in x[1]);
     return w ? w[1][key] : undefined;
