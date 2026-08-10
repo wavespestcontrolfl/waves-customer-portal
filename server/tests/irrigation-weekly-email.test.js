@@ -80,9 +80,9 @@ describe('buildWeeklyEmailDecision', () => {
       grass_label: 'St. Augustine',
       rain_last_week: '2.1',
       irrigation_inches: '1',
-      total_inches: '3', // roundQuarter(2.1 + 1) = 3.0
+      total_inches: '3.1', // printed components add exactly: 2.1 + 1
       target_inches: '1.25', // ET₀ 1.6 × Kc 0.8, peak season
-      difference_inches: '1.75', // roundQuarter(3 − 1.25)
+      difference_inches: '1.85', // printed total − printed target: 3.1 − 1.25
     });
     expect(decision.payload.customer_portal_url).toContain('tab=property');
   });
@@ -399,7 +399,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(call.recipientId).toBe('cust-1');
     expect(call.suppressionGroupKey).toBe('service_operational');
     expect(call.idempotencyKey).toMatch(new RegExp(`^irrigation\\.weekly:cust-1:${WEEK_ENDING}:[0-9a-f]{16}$`));
-    expect(call.payload.total_inches).toBe('3');
+    expect(call.payload.total_inches).toBe('3.1');
     // Raw SendGrid bodies can echo the address — the transport log must be
     // suppressed; this sweep logs its own sanitized reason.
     expect(call.suppressProviderErrorLog).toBe(true);
