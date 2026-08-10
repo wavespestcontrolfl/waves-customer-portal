@@ -125,7 +125,9 @@ const expectSettledDissent = (arm, leadId) => {
   expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' IS NOT NULL"]);
   expect(dissent).toContainEqual(['whereRaw', "metadata->>'lead_id' != ?", [String(leadId)]]);
   expect(dissent).toContainEqual(['whereNull', 'processing_token']);
-  expect(dissent).toContainEqual(['whereRaw', "COALESCE(processing_status, '') = 'processed'"]);
+  // Legacy NULL status is SETTLED too (codex P1) — the established
+  // consumer predicate, not a bare 'processed'.
+  expect(dissent).toContainEqual(['whereRaw', "(processing_status IS NULL OR processing_status = 'processed')"]);
 };
 
 describe('GET /admin/leads/:id — call reference (recording + transcript)', () => {
@@ -306,6 +308,42 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     return recorded;
   };
 
+  test('LEGACY stamped rows (processing_status NULL) count as settled in BOTH arms (codex P1)', async () => {
+    // Rows predating the status column carry token NULL and status NULL.
+    // Requiring 'processed' dropped such a call from its CURRENT lead while
+    // its stale sid/phone still surfaced it on the PRIOR lead — the
+    // wrong-card transcript the dissent guard exists to prevent.
+    const leadsTable = makeLeadsTable({
+      // SID-less: the sid/phone dissent arms are source-pinned below; the
+      // runtime assertion here targets the always-present inclusion arm.
+      lead: { id: 'lead-1', phone: null, twilio_call_sid: null },
+    });
+    db.mockImplementation((table) => {
+      if (table === 'leads') return leadsTable();
+      if (table === 'lead_activities') return makeBuilder({ rows: [] });
+      if (table === 'call_log') return makeBuilder({ rows: [] });
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/leads/lead-1`);
+      expect(res.status).toBe(200);
+    });
+
+    // Inclusion arm accepts legacy NULL.
+    const recorded = recordedCallLogPredicates();
+    expect(recorded).toContainEqual(['orWhere>whereRaw', "(processing_status IS NULL OR processing_status = 'processed')"]);
+    // Both arms use the SAME settled definition and the bare-'processed'
+    // form survives nowhere in the route.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
+    const q = src.split('const settledDissentingStamp')[1].split('.orderBy(')[0];
+    expect((q.match(/processing_status IS NULL OR processing_status = 'processed'/g) || []).length).toBe(2);
+    expect(q).not.toMatch(/COALESCE\(processing_status, ''\) = 'processed'/);
+    expect(q).not.toMatch(/\.where\('processing_status', 'processed'\)/);
+  });
+
   test('shared line without a call SID: call_log still queries via the metadata stamp — no phone legs, no sid arm', async () => {
     // A SID-less lead reused by a phone-less call links ONLY through
     // call_log.metadata.lead_id — skipping the lookup hid its transcript
@@ -335,7 +373,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     // mid-flight pass's provisional stamp never surfaces another caller's
     // transcript on the wrong card (pre-push P1).
     expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
-    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
+    expect(recorded).toContainEqual(['orWhere>whereRaw', "(processing_status IS NULL OR processing_status = 'processed')"]);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
@@ -360,7 +398,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     const recorded = recordedCallLogPredicates();
     expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
     expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
-    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
+    expect(recorded).toContainEqual(['orWhere>whereRaw', "(processing_status IS NULL OR processing_status = 'processed')"]);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
   });
 

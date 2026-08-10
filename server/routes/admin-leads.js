@@ -911,7 +911,15 @@ router.get('/:id', async (req, res, next) => {
           this.whereRaw("metadata->>'lead_id' IS NOT NULL")
             .whereRaw("metadata->>'lead_id' != ?", [String(lead.id)])
             .whereNull('processing_token')
-            .whereRaw("COALESCE(processing_status, '') = 'processed'");
+            // Legacy NULL status IS settled (codex P1): rows predating the
+            // status column carry token NULL and status NULL, and the
+            // established consumer predicate is
+            // (status IS NULL OR status = 'processed'). Requiring
+            // 'processed' let a legacy stamped call be dropped from its
+            // CURRENT lead while still surfacing on the prior lead through
+            // its stale sid/phone — the transcript on the wrong card, the
+            // exact failure this dissent guard exists to prevent.
+            .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
         const rows = await db('call_log')
           .where(function () {
@@ -935,7 +943,9 @@ router.get('/:id', async (req, res, next) => {
               // the extraction_failed retry (pre-push P1 r8).
               this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
                 .whereNull('processing_token')
-                .where('processing_status', 'processed');
+                // Same settled definition as the dissent arm above — legacy
+                // NULL status included (codex P1).
+                .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
             });
             if (ten) {
               this.orWhere(function phoneFromArm() {
