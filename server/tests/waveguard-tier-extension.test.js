@@ -4,10 +4,15 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 // existing-service tier extension (owner decision 2026-08-10, dark behind
 // GATE_WAVEGUARD_EXTEND_EXISTING). Pins the money invariants:
 //   - only the FROZEN snapshot plan applies (what the estimate displayed),
-//   - upcoming non-prepaid rows reprice (frozen figure on an exact match,
-//     proportional delta when the contracted price moved),
-//   - unpriced rows stay NULL, prices only ever go DOWN,
-//   - prepaid families credit the difference instead of repricing,
+//   - upcoming non-prepaid rows reprice to the exact frozen figure; a price
+//     that moved (or blanked) after save parks as drift — never a write the
+//     customer did not see, never $0 onto a NULL,
+//   - visits with add-ons or an already-minted invoice park (a netted price
+//     cannot take a family discount; a minted invoice keeps billing),
+//   - prepaid families credit the FROZEN per-application savings, and only
+//     while the paid allocation still equals the frozen basis,
+//   - partially-honored families land in dirtyFamilies (the committed recap
+//     projects only fully-honored families — codex #3338 r26),
 //   - the audit row commits with the writes,
 //   - gate off / tier mismatch / rows from THIS estimate apply nothing.
 
@@ -30,7 +35,9 @@ jest.mock('../services/customer-credit', () => ({
 
 const { applyFrozenExistingServiceExtension } = require('../services/estimate-converter');
 
-function fakeTrx({ concurrentPrices = {} } = {}) {
+function fakeTrx({
+  concurrentPrices = {}, addonLinks = [], invoiceLinks = [], probeThrows = false,
+} = {}) {
   const updates = [];
   const auditRows = [];
   const database = (table) => {
@@ -54,6 +61,29 @@ function fakeTrx({ concurrentPrices = {} } = {}) {
         }),
       };
     }
+    // Composite/pre-minted-invoice probes (codex #3338 r24+r25).
+    if (table === 'scheduled_service_addons') {
+      return {
+        whereIn: () => ({
+          select: async () => {
+            if (probeThrows) throw new Error('relation does not exist');
+            return addonLinks.map((id) => ({ scheduled_service_id: id }));
+          },
+        }),
+      };
+    }
+    if (table === 'invoices') {
+      return {
+        whereIn: () => ({
+          whereNot: () => ({
+            select: async () => {
+              if (probeThrows) throw new Error('relation does not exist');
+              return invoiceLinks.map((id) => ({ scheduled_service_id: id }));
+            },
+          }),
+        }),
+      };
+    }
     if (table === 'activity_log') {
       return { insert: async (row) => { auditRows.push(row); return [1]; } };
     }
@@ -63,7 +93,7 @@ function fakeTrx({ concurrentPrices = {} } = {}) {
   return { database, updates, auditRows };
 }
 
-function frozenSnapshotData({ prepaid = false, rowIds = ['row-1', 'row-2'] } = {}) {
+function frozenSnapshotData({ prepaid = false, rowIds = ['row-1', 'row-2'], svc = {} } = {}) {
   return {
     membershipSnapshot: {
       isExistingCustomer: true,
@@ -80,9 +110,20 @@ function frozenSnapshotData({ prepaid = false, rowIds = ['row-1', 'row-2'] } = {
         upcomingVisitDates: ['2099-10-28', '2100-01-27'],
         rowIds,
         prepaid,
+        ...svc,
       }],
     },
   };
+}
+
+// A prepaid family freezes the PAID allocation as its basis (the snapshot
+// builder's uniform-allocation rule) — Silver 10% off a $49 slice.
+function prepaidSnapshotData({ rowIds = ['pre-1', 'pre-2'] } = {}) {
+  return frozenSnapshotData({
+    prepaid: true,
+    rowIds,
+    svc: { currentPerVisit: 49, newPerVisit: 44.1, perVisitSavings: 4.9 },
+  });
 }
 
 function pestRow(overrides = {}) {
@@ -193,11 +234,16 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(summary.reviewFamilies).toEqual([
       'Pest Control (2 visits priced differently than quoted — apply manually)',
     ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
   });
 
-  test('unpriced rows stay NULL; matching rows apply beside a drifted sibling', async () => {
+  test('a blanked price parks as drift beside a matching sibling — the NULL is never overwritten', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [
+      // Frozen rows were priced AT the basis when the card displayed them —
+      // a NULL now means the price moved after save (codex #3338 r26: a
+      // silently skipped appointment must not leave its family reading as
+      // fully repriced). The NULL itself still never takes a write.
       pestRow({ id: 'null-price', estimated_price: null }),
       pestRow({ id: 'matches', scheduled_date: '2100-01-27', estimated_price: 55 }),
       pestRow({ id: 'drifted', scheduled_date: '2100-04-27', estimated_price: 60 }),
@@ -209,8 +255,9 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(updates).toEqual([{ id: 'matches', estimated_price: 49.5 }]);
     expect(summary.repricedRowCount).toBe(1);
     expect(summary.reviewFamilies).toEqual([
-      'Pest Control (1 visit priced differently than quoted — apply manually)',
+      'Pest Control (2 visits priced differently than quoted — apply manually)',
     ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
   });
 
   test('a same-family visit created after the estimate was saved is never touched (ID-pinned apply)', async () => {
@@ -259,24 +306,28 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(summary.repricedRowCount).toBe(1);
   });
 
-  test('prepaid family credits the tier pct of the PAID allocation, never the list price', async () => {
+  test('prepaid family credits the FROZEN per-application savings off the paid allocation, never the list price', async () => {
     const { database, updates } = fakeTrx();
     mockRowsState.rows = [
       // prepaid_amount is the DISCOUNTED splitCoverageAmount slice (codex
-      // #3338 r21): $49 paid on a $55 list row — the credit is 10% of $49,
-      // not 10% of $55.
+      // #3338 r21): $49 paid on a $55 list row. The snapshot froze the
+      // allocation as its basis, and the credit is the frozen $4.90
+      // savings per covered application — the exact figure the card
+      // displayed, never recomputed pct math (whose half-cent rounding can
+      // land a penny off the display) and never 10% of the $55 list price.
       pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
       pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData({ prepaid: true, rowIds: ['pre-1', 'pre-2'] }), activatedTier: 'Silver',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
     });
     expect(updates).toEqual([]);
     expect(summary.applied).toBe(true);
     expect(summary.creditAmount).toBe(9.8);
+    expect(summary.dirtyFamilies).toEqual([]);
     expect(summary.creditLines).toEqual([
-      'Pest Control $9.80 (2 prepaid applications × 10% of the paid allocation)',
+      'Pest Control $9.80 (2 prepaid applications × $4.90/application off the paid allocation)',
     ]);
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
     const [payload, trx] = mockPostCreditMovement.mock.calls[0];
@@ -297,12 +348,90 @@ describe('applyFrozenExistingServiceExtension', () => {
     ];
     const summary = await applyFrozenExistingServiceExtension({
       database, customerId: 'c1', estimateId: 'e1',
-      estimateData: frozenSnapshotData({ prepaid: true, rowIds: ['pre-1', 'pre-2'] }), activatedTier: 'Silver',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
     });
     expect(summary.creditAmount).toBe(4.9);
     expect(summary.reviewFamilies).toEqual([
       'Pest Control (1 prepaid visit without a usable paid allocation — credit manually)',
     ]);
+    // Partially credited → the committed recap must not show this family
+    // as covered (codex #3338 r26).
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('a prepaid allocation that changed since the estimate parks — the frozen figure no longer describes the paid slice', async () => {
+    const { database } = fakeTrx();
+    mockRowsState.rows = [
+      // Term re-split after save: this application's paid slice is now $45,
+      // not the $49 the card's math rode on. Same doctrine as price drift
+      // on the reprice path: frozen figure or nothing.
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 45 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(summary.creditAmount).toBe(4.9);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 prepaid visit whose paid allocation changed since the estimate — credit manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('a visit with add-ons parks; clean siblings still apply (netted price cannot take the family discount)', async () => {
+    const { database, updates } = fakeTrx({ addonLinks: ['row-2'] });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1' }),
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    // codex #3338 r24: row-2 nets primary + add-ons into one
+    // estimated_price — repricing it would discount the add-ons too.
+    expect(updates).toEqual([{ id: 'row-1', estimated_price: 49.5 }]);
+    expect(summary.applied).toBe(true);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit with add-ons or an already-minted invoice — apply manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('a visit whose invoice was already minted parks — a row-only reprice would keep billing the old amount', async () => {
+    const { database, updates } = fakeTrx({ invoiceLinks: ['row-1'] });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1' }),
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    // codex #3338 r25: the shared mint path REUSES an existing invoice, so
+    // repricing only the row leaves the minted invoice at the old figure.
+    expect(updates).toEqual([{ id: 'row-2', estimated_price: 49.5 }]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('probe failure parks the whole family fail-closed — never a write the probe would have blocked', async () => {
+    const { database, updates, auditRows } = fakeTrx({ probeThrows: true });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1' }),
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(auditRows).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (could not verify add-ons/invoices — apply manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
   });
 
   test('a stale snapshot whose tier disagrees with the activated tier applies nothing', async () => {

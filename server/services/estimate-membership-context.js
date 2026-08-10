@@ -744,10 +744,47 @@ async function computeMembershipContext(database, {
         if (!eligibleRows.length) continue;
         const distinctAddresses = new Set(eligibleRows.map((row) => row.effective_service_address).filter(Boolean));
         if (distinctAddresses.size > 1) continue;
-        const basisRow = eligibleRows.find((row) => Number(row.estimated_price) > 0);
-        const basis = Number(basisRow?.estimated_price);
-        if (!(basis > 0)) continue; // no billable basis to discount
-        const frozenRows = eligibleRows.filter((row) => Math.abs(Number(row.estimated_price) - basis) <= 0.01);
+        // Composite visits park at SNAPSHOT time too (codex #3338 r24):
+        // a row with scheduled_service_addons nets primary + add-ons into
+        // one estimated_price — discounting that figure would discount the
+        // non-qualifying add-ons. Accept re-probes as the belt; excluding
+        // here keeps the card from listing an appointment the apply will
+        // park. FAIL CLOSED: probe failure parks the whole family.
+        let compositeIds;
+        try {
+          const addonRows = await database('scheduled_service_addons')
+            .whereIn('scheduled_service_id', eligibleRows.map((row) => row.id))
+            .select('scheduled_service_id');
+          compositeIds = new Set(addonRows.map((row) => String(row.scheduled_service_id)));
+        } catch (probeErr) {
+          logger.warn(`[membership-context] extension addon probe failed — family ${familyKey} left to the review path: ${probeErr.message}`);
+          continue;
+        }
+        const simpleRows = eligibleRows.filter((row) => !compositeIds.has(String(row.id)));
+        if (!simpleRows.length) continue;
+        const prepaidEligible = simpleRows.filter((row) => !!row.annual_prepay_term_id);
+        // Prepaid families display the PAID allocation as the basis (codex
+        // #3338 r23 sibling): the accept-time credit is pct × prepaid_amount,
+        // so a list-price strikethrough would disclose a larger figure than
+        // the ledger movement. Honest only when the family is UNIFORMLY
+        // prepaid at one allocation — mixed prepaid/pay-per-visit or uneven
+        // allocations stay on the review path.
+        let basis;
+        let basisRows;
+        if (prepaidEligible.length > 0) {
+          if (prepaidEligible.length !== simpleRows.length) continue;
+          const firstAllocation = Number(simpleRows.find((row) => Number(row.prepaid_amount) > 0)?.prepaid_amount);
+          if (!(firstAllocation > 0)) continue;
+          if (!simpleRows.every((row) => Math.abs(Number(row.prepaid_amount) - firstAllocation) <= 0.01)) continue;
+          basis = firstAllocation;
+          basisRows = simpleRows;
+        } else {
+          const basisRow = simpleRows.find((row) => Number(row.estimated_price) > 0);
+          basis = Number(basisRow?.estimated_price);
+          if (!(basis > 0)) continue; // no billable basis to discount
+          basisRows = simpleRows.filter((row) => Math.abs(Number(row.estimated_price) - basis) <= 0.01);
+        }
+        const frozenRows = basisRows;
         const newPerVisit = round2(basis * (1 - delta));
         const perVisitSavings = round2(basis - newPerVisit);
         if (!(perVisitSavings > 0)) continue;
@@ -860,9 +897,22 @@ function publicMembershipView(snapshot, { committed = false } = {}) {
   const showFrozenExtension = committed === true
     ? snapshot.extensionOutcome?.applied === true
     : isEnabled('waveguardExtendExisting');
+  // A committed recap additionally projects ONLY the families the apply
+  // honored IN FULL (codex #3338 r26): applied=true says SOME money moved,
+  // not that every frozen family did — a family that parked (price drift,
+  // add-on visit, minted invoice, allocation gap) or was only partially
+  // repriced must not read as repriced on the read-only recap. The outcome's
+  // appliedFamilies list is authoritative; FAIL CLOSED when it is absent
+  // (no legacy applied outcomes exist — the gate has never shipped on).
+  const committedFamilyFilter = committed === true
+    ? new Set((Array.isArray(snapshot.extensionOutcome?.appliedFamilies)
+      ? snapshot.extensionOutcome.appliedFamilies
+      : []).map(String))
+    : null;
   const projectedExistingServices = (showFrozenExtension && Array.isArray(snapshot.existingServices)
     ? snapshot.existingServices
     : [])
+    .filter((service) => !committedFamilyFilter || committedFamilyFilter.has(String(service?.key)))
     .map((service) => ({
       key: service?.key ?? null,
       label: service?.label ?? null,

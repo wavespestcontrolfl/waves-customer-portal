@@ -598,6 +598,10 @@ async function applyFrozenExistingServiceExtension({
     creditLines: [],
     skippedFamilies: [],
     reviewFamilies: [],
+    // Families whose frozen plan was only PARTIALLY honored (drift, parked
+    // rows, allocation gaps) — the committed recap projects only families
+    // absent from this list (codex #3338 r26).
+    dirtyFamilies: [],
     monthlyRateReviewNeeded: false,
   };
   const snapshot = estimateData?.membershipSnapshot;
@@ -666,6 +670,7 @@ async function applyFrozenExistingServiceExtension({
   });
 
   let creditTotal = 0;
+  const creditTermIds = new Set();
   for (const svc of plan) {
     // ID-pinned apply (codex #3338 r10): only the appointments frozen at
     // save time — a same-family visit created between save and accept was
@@ -677,11 +682,47 @@ async function applyFrozenExistingServiceExtension({
       summary.reviewFamilies.push(`${svc.label || svc.key} (no frozen appointment identities — apply manually)`);
       continue;
     }
-    const familyRows = liveRows.filter((row) => frozenRowIds.includes(String(row.id))
+    let familyRows = liveRows.filter((row) => frozenRowIds.includes(String(row.id))
       && qualifyingKeysForRow(row).some((key) => svc.keys.includes(key)));
     if (!familyRows.length) {
       summary.skippedFamilies.push(svc.label || svc.key);
       continue;
+    }
+    // Composite visits and pre-minted invoices park (codex #3338 r24+r25):
+    // a row with scheduled_service_addons nets the primary + add-ons into
+    // one estimated_price (discounting the whole figure would discount the
+    // non-qualifying add-ons too), and a row whose invoice was already
+    // minted (Charge Now / pre-completion mint — the shared mint path
+    // REUSES an existing invoice rather than rebuilding it) would keep
+    // billing the old amount after a row-only reprice. Both are manual
+    // territory. FAIL CLOSED: if either probe cannot run, the whole family
+    // parks rather than risking a write the probe would have blocked.
+    let compositeOrInvoicedIds;
+    try {
+      const rowIds = familyRows.map((row) => row.id);
+      const [addonRows, invoiceRows] = await Promise.all([
+        database('scheduled_service_addons').whereIn('scheduled_service_id', rowIds).select('scheduled_service_id'),
+        database('invoices').whereIn('scheduled_service_id', rowIds)
+          .whereNot('status', 'void').select('scheduled_service_id'),
+      ]);
+      compositeOrInvoicedIds = new Set([
+        ...addonRows.map((row) => String(row.scheduled_service_id)),
+        ...invoiceRows.map((row) => String(row.scheduled_service_id)),
+      ]);
+    } catch (probeErr) {
+      logger.warn(`[estimate-converter] extension addon/invoice probe failed — parking ${svc.label || svc.key}: ${probeErr.message}`);
+      summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify add-ons/invoices — apply manually)`);
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
+    const parkedComposite = familyRows.filter((row) => compositeOrInvoicedIds.has(String(row.id)));
+    if (parkedComposite.length > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${parkedComposite.length} visit${parkedComposite.length === 1 ? '' : 's'} with add-ons or an already-minted invoice — apply manually)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+      familyRows = familyRows.filter((row) => !compositeOrInvoicedIds.has(String(row.id)));
+      if (!familyRows.length) continue;
     }
     const prepaidRows = familyRows.filter((row) => !!row.annual_prepay_term_id);
     const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
@@ -689,9 +730,16 @@ async function applyFrozenExistingServiceExtension({
     let driftRows = 0;
     for (const row of repriceRows) {
       const price = Number(row.estimated_price);
-      // Unpriced = NULL stays NULL (billing invariant 8): a blank price is
-      // manual/monthly-lane billing, never a $0 write.
-      if (!(price > 0)) continue;
+      // Unpriced = NULL stays NULL (billing invariant 8) — but a FROZEN row
+      // was priced at the basis when the card displayed it (the snapshot
+      // never freezes unpriced rows), so a blank price now means the price
+      // moved after save: park as drift (codex #3338 r26 — a silently
+      // skipped appointment must not leave its family reading as fully
+      // repriced). Never a $0 or invented write either way.
+      if (!(price > 0)) {
+        driftRows += 1;
+        continue;
+      }
       // FROZEN figure or nothing (codex #3338 r5): a row whose contracted
       // price moved after the estimate was saved gets NO automatic write —
       // a proportional delta would bill a figure the customer never saw,
@@ -723,6 +771,7 @@ async function applyFrozenExistingServiceExtension({
       summary.reviewFamilies.push(
         `${svc.label || svc.key} (${driftRows} visit${driftRows === 1 ? '' : 's'} priced differently than quoted — apply manually)`,
       );
+      summary.dirtyFamilies.push(svc.key);
     }
     if (repriced > 0) {
       summary.repricedRowCount += repriced;
@@ -739,30 +788,55 @@ async function applyFrozenExistingServiceExtension({
       // price (codex #3338 r21): a prepaid visit's prepaid_amount is the
       // DISCOUNTED splitCoverageAmount slice, so pct × estimated_price
       // would stack the tier delta on top of the prepay incentive and
-      // overcredit every covered application. A covered row without a
-      // usable allocation parks — never a guessed credit.
-      const pct = Number(svc.extraDiscountPct || 0) / 100;
+      // overcredit every covered application. Within that, FROZEN figure
+      // or nothing (same doctrine as the reprice path): the per-row credit
+      // is the exact perVisitSavings the card displayed — recomputed pct
+      // math can land a half-cent boundary a penny off the displayed
+      // figure — and it applies only while the row's paid allocation still
+      // equals the frozen basis. A re-split term, like a drifted price,
+      // parks; a row without a usable allocation parks. Never a guessed
+      // credit.
+      const frozenBasis = Number(svc.currentPerVisit);
+      const frozenSavings = Number(svc.perVisitSavings);
       let familyCredit = 0;
       let creditedRows = 0;
       let allocationGaps = 0;
+      let allocationDrift = 0;
       for (const row of prepaidRows) {
         const allocation = Number(row.prepaid_amount);
-        if (!(pct > 0) || !(allocation > 0)) {
+        if (!(frozenSavings > 0) || !(allocation > 0)) {
           allocationGaps += 1;
           continue;
         }
-        familyCredit = Math.round((familyCredit + allocation * pct) * 100) / 100;
+        if (Math.abs(allocation - frozenBasis) > 0.01) {
+          allocationDrift += 1;
+          continue;
+        }
+        familyCredit = Math.round((familyCredit + frozenSavings) * 100) / 100;
         creditedRows += 1;
+        // Term breadcrumb for the credit note (codex #3338 r27): the
+        // annual-prepay refund flow claws back only its own credit class,
+        // so the ledger note must name the term(s) this credit rode on —
+        // the manual refund review subtracts it from there. Automated
+        // integration with the refund reversal is a named fast-follow.
+        if (row.annual_prepay_term_id) creditTermIds.add(String(row.annual_prepay_term_id));
       }
       if (allocationGaps > 0) {
         summary.reviewFamilies.push(
           `${svc.label || svc.key} (${allocationGaps} prepaid visit${allocationGaps === 1 ? '' : 's'} without a usable paid allocation — credit manually)`,
         );
+        summary.dirtyFamilies.push(svc.key);
+      }
+      if (allocationDrift > 0) {
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${allocationDrift} prepaid visit${allocationDrift === 1 ? '' : 's'} whose paid allocation changed since the estimate — credit manually)`,
+        );
+        summary.dirtyFamilies.push(svc.key);
       }
       if (familyCredit > 0) {
         creditTotal = Math.round((creditTotal + familyCredit) * 100) / 100;
         summary.creditLines.push(
-          `${svc.label || svc.key} $${familyCredit.toFixed(2)} (${creditedRows} prepaid application${creditedRows === 1 ? '' : 's'} × ${Math.round(pct * 100)}% of the paid allocation)`,
+          `${svc.label || svc.key} $${familyCredit.toFixed(2)} (${creditedRows} prepaid application${creditedRows === 1 ? '' : 's'} × $${frozenSavings.toFixed(2)}/application off the paid allocation)`,
         );
         svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
       }
@@ -775,7 +849,7 @@ async function applyFrozenExistingServiceExtension({
       customerId,
       delta: creditTotal,
       source: 'adjustment',
-      note: `WaveGuard ${activatedTier} extension — prepaid-term difference (estimate #${estimateId})`,
+      note: `WaveGuard ${activatedTier} extension — prepaid-term difference (estimate #${estimateId}${creditTermIds.size ? `; terms: ${[...creditTermIds].sort().join(', ')}` : ''})`,
       createdBy: 'system:waveguard_tier_extension',
     }, database.isTransaction ? database : null);
     summary.creditAmount = creditTotal;
@@ -4209,6 +4283,7 @@ const EstimateConverter = {
           creditLines: [],
           skippedFamilies: [],
           reviewFamilies: ['existing-service extension failed at accept — apply manually'],
+          dirtyFamilies: [],
           monthlyRateReviewNeeded: false,
         };
       }
@@ -4326,6 +4401,13 @@ const EstimateConverter = {
         if (outcomeData?.membershipSnapshot) {
           outcomeData.membershipSnapshot.extensionOutcome = {
             applied: extension.applied === true,
+            // Families whose frozen plan was honored IN FULL — the
+            // committed recap projects only these (codex #3338 r26: a
+            // partially-applied accept must not display parked families or
+            // appointments as repriced).
+            appliedFamilies: extension.families.filter(
+              (key) => !extension.dirtyFamilies.includes(key),
+            ),
             repricedRowCount: extension.repricedRowCount,
             creditAmount: extension.creditAmount,
             familyLines: extension.familyLines,

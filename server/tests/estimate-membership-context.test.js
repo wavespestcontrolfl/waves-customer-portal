@@ -27,6 +27,8 @@ function fakeDb({
   paidInvoices = [],
   prepaidTerm = null,
   invoiceQueryThrows = false,
+  addonRows = [],
+  addonQueryThrows = false,
 } = {}) {
   const db = (table) => {
     const builder = {
@@ -56,6 +58,10 @@ function fakeDb({
         if (table === 'invoices') {
           if (invoiceQueryThrows) throw new Error('relation does not exist');
           return paidInvoices;
+        }
+        if (table === 'scheduled_service_addons') {
+          if (addonQueryThrows) throw new Error('relation does not exist');
+          return addonRows;
         }
         return [];
       },
@@ -847,17 +853,88 @@ describe('existing-service tier extension snapshot', () => {
     expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
   });
 
-  test('gate on: an annual-prepay family is marked prepaid (accept credits, never reprices)', async () => {
+  test('gate on: an annual-prepay family displays the PAID allocation as its basis (accept credits, never reprices)', async () => {
     mockExtendExistingGate = true;
     const database = fakeDb({
-      scheduledRows: futurePestRows().map((row) => ({ ...row, annual_prepay_term_id: 'term-1' })),
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+      })),
       paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
       estData: lawnEstimateData(),
     });
-    expect(ctx.existingServices[0]).toMatchObject({ key: 'pest_control', prepaid: true });
+    // Basis is the PAID allocation (100), never the list row price (120):
+    // the accept-time credit rides the allocation, so a list-price
+    // strikethrough would advertise a larger figure than the ledger
+    // movement (codex #3338 r23 sibling).
+    expect(ctx.existingServices[0]).toMatchObject({
+      key: 'pest_control',
+      prepaid: true,
+      currentPerVisit: 100,
+      newPerVisit: 90,
+      perVisitSavings: 10,
+    });
+  });
+
+  test('gate on: mixed prepaid/pay-per-visit and uneven-allocation families stay on the review path', async () => {
+    mockExtendExistingGate = true;
+    // One figure cannot honestly cover a family whose applications are paid
+    // two different ways (or at two different allocations).
+    const mixed = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const mixedCtx = await computeMembershipContext(mixed, { customerId: 'cust-1', estData: lawnEstimateData() });
+    expect(mixedCtx.existingServices).toEqual([]);
+    const uneven = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 95,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const unevenCtx = await computeMembershipContext(uneven, { customerId: 'cust-1', estData: lawnEstimateData() });
+    expect(unevenCtx.existingServices).toEqual([]);
+  });
+
+  test('gate on: a visit with add-ons is excluded from the frozen plan; probe failure parks the family', async () => {
+    mockExtendExistingGate = true;
+    const withAddon = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      addonRows: [{ scheduled_service_id: 's2' }],
+    });
+    const ctx = await computeMembershipContext(withAddon, { customerId: 'cust-1', estData: lawnEstimateData() });
+    // s2 nets primary + add-ons into one estimated_price — discounting it
+    // would discount the non-qualifying add-ons too (codex #3338 r24). The
+    // clean siblings still freeze.
+    expect(ctx.existingServices[0]).toMatchObject({
+      rowIds: ['s1', 's3'],
+      upcomingVisitDates: ['2099-01-05', '2099-07-05'],
+      remainingVisits: 2,
+    });
+    const probeDown = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      addonQueryThrows: true,
+    });
+    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', estData: lawnEstimateData() });
+    // FAIL CLOSED: cannot verify add-ons → the family stays on the
+    // review-bell path rather than advertising a visit the apply may park.
+    expect(parked.existingServices).toEqual([]);
   });
 
   test('gate on: a family this estimate re-quotes is never listed as an extension too', async () => {
@@ -978,7 +1055,9 @@ describe('existing-service tier extension snapshot', () => {
     // project nothing.
     const appliedSnapshot = {
       ...snapshot,
-      extensionOutcome: { applied: true, repricedRowCount: 3, creditAmount: 0 },
+      extensionOutcome: {
+        applied: true, repricedRowCount: 3, creditAmount: 0, appliedFamilies: ['pest_control'],
+      },
     };
     const committedApplied = publicMembershipView(appliedSnapshot, { committed: true });
     expect(committedApplied.existingServices).toHaveLength(1);
@@ -991,6 +1070,34 @@ describe('existing-service tier extension snapshot', () => {
     expect(committedParked.discountAppliesTo).toBe('new_services_only');
     const committedLegacy = publicMembershipView(snapshot, { committed: true });
     expect(committedLegacy.existingServices).toEqual([]);
+    // Partial application (codex #3338 r26): applied=true only says SOME
+    // money moved — the committed recap projects ONLY the families the
+    // apply honored in full, and an applied outcome carrying no
+    // appliedFamilies list projects nothing (fail closed; no legacy
+    // applied outcomes exist — the gate has never shipped on).
+    const twoFamilySnapshot = {
+      ...snapshot,
+      existingServices: [
+        ...snapshot.existingServices,
+        { ...snapshot.existingServices[0], key: 'mosquito', label: 'Mosquito Protection' },
+      ],
+    };
+    const committedPartial = publicMembershipView(
+      {
+        ...twoFamilySnapshot,
+        extensionOutcome: { applied: true, repricedRowCount: 3, appliedFamilies: ['pest_control'] },
+      },
+      { committed: true },
+    );
+    expect(committedPartial.existingServices).toHaveLength(1);
+    expect(committedPartial.existingServices[0].key).toBe('pest_control');
+    expect(committedPartial.discountAppliesTo).toBe('new_and_existing_services');
+    const committedNoFamilyList = publicMembershipView(
+      { ...snapshot, extensionOutcome: { applied: true, repricedRowCount: 3 } },
+      { committed: true },
+    );
+    expect(committedNoFamilyList.existingServices).toEqual([]);
+    expect(committedNoFamilyList.discountAppliesTo).toBe('new_services_only');
   });
 
   test('per-property scope: excluded existing rows price the estimate as standalone (grouped street unparsable)', async () => {
