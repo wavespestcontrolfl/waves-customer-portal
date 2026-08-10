@@ -3465,9 +3465,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <label style={labelStyle}>End repeating</label>{" "}
                       <select
                         value={recurringOngoing ? "never" : "count"}
-                        onChange={(e) =>
-                          setRecurringOngoing(e.target.value === "never")
-                        }
+                        onChange={(e) => {
+                          const never = e.target.value === "never";
+                          // Choosing "After count" IS choosing a plan length —
+                          // the displayed number becomes the operator's intent
+                          // even if they never touch the input (Codex #3337 r4
+                          // P1). Without this the save flipped the plan to
+                          // fixed and sent no length, freezing it at whatever
+                          // the live count happened to be.
+                          if (!never) recurringCountTouched.current = true;
+                          setRecurringOngoing(never);
+                        }}
                         className="font-medium"
                         style={inputStyle}
                       >

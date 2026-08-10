@@ -5422,14 +5422,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // (assignment updates below take visit row locks).
       const commsPeek = await trx('scheduled_services')
         .where({ id: req.params.id })
-        .first('customer_id', 'recurring_parent_id');
-      // A visit-count reconcile inserts and cancels series rows, so it has to
-      // serialize against the completion auto-extend and the dispatch series
-      // cancel on the SAME per-parent lock they use. Taken BEFORE the comms
-      // lock: runRecurringAlertAction acquires maintenance→comms, and the
-      // reverse order here would let an alert action and an edit save on one
-      // customer deadlock on each other's held key.
-      if (wantsVisitCountReconcile && commsPeek) {
+        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing');
+      // The plan's ongoing flag BEFORE this save applies its updates — the
+      // ongoing top-up must fire on a real fixed→ongoing transition, never on
+      // the value merely being present in the payload (Codex #3337 r4 P1).
+      // Read from the PARENT when the edited row is a child — the flag the
+      // transition is measured against is the plan's, not this visit's.
+      const ongoingBeforeRow = commsPeek?.recurring_parent_id
+        ? await trx('scheduled_services')
+          .where({ id: commsPeek.recurring_parent_id })
+          .first('recurring_ongoing')
+        : commsPeek;
+      const wasOngoingBeforeSave = ongoingBeforeRow?.recurring_ongoing === true;
+      // Any save that can mutate an EXISTING plan — the visit-count reconcile
+      // or the series-wide recurring_ongoing flip, which can itself top up —
+      // has to serialize against the completion auto-extend and the dispatch
+      // series cancel on the SAME per-parent lock they use. Gating this on the
+      // count alone left the flag write and its top-up racing them (Codex
+      // #3337 r4 P1). Taken BEFORE the comms lock: runRecurringAlertAction
+      // acquires maintenance→comms, and the reverse order here would let an
+      // alert action and an edit save on one customer deadlock on each other's
+      // held key.
+      const wantsExistingPlanMutation = wantsVisitCountReconcile
+        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false);
+      if (wantsExistingPlanMutation && commsPeek) {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
@@ -6133,8 +6149,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // run. The recurring-alert `convert_ongoing` action already defines the
         // contract — flip the flag AND ensure 3 upcoming — so this reuses the
         // same target through the same writer (extend-only; it never trims).
+        // Fires ONLY on a real fixed→ongoing transition, and only while the
+        // lane is armed (Codex #3337 r4 P1). The modal sends recurringOngoing
+        // on every save of a recurring appointment, so keying off the
+        // submitted value alone made a notes-only save top up any ongoing plan
+        // sitting below three visits — and did it with the gate OFF, which
+        // broke the dark-ship guarantee outright.
         if (parent?.is_recurring && parent.recurring_pattern
-          && recurringOngoing === true && !wantsVisitCountReconcile) {
+          && recurringOngoing === true && !wasOngoingBeforeSave
+          && isEnabled('editApptVisitCount') && !wantsVisitCountReconcile) {
           const liveNow = await countUpcomingSeriesVisits(trx, parentId);
           if (liveNow < 3) {
             visitCountResult = await reconcileRecurringSeriesVisitCount(trx, {

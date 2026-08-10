@@ -516,16 +516,43 @@ describe('update-details wiring (source guards)', () => {
       .toBeLessThan(loop.indexOf('cancelSpawnedReminderIfVisitTerminal('));
   });
 
+  test('the ongoing top-up needs a REAL fixed→ongoing transition, and the gate (Codex #3337 r4 P1)', () => {
+    // The modal sends recurringOngoing on every save of a recurring
+    // appointment, so keying off the submitted value alone made a notes-only
+    // save top up any ongoing plan under three visits — with the gate OFF,
+    // which broke the dark ship outright. Regression guard for all three
+    // conditions.
+    const block = src.slice(src.indexOf('Fires ONLY on a real fixed→ongoing transition'));
+    const head = block.slice(0, 900);
+    expect(head).toContain('recurringOngoing === true && !wasOngoingBeforeSave');
+    expect(head).toContain("isEnabled('editApptVisitCount')");
+    expect(src).toContain('const wasOngoingBeforeSave = ongoingBeforeRow?.recurring_ongoing === true;');
+    // Measured against the PARENT's prior flag, not the edited child's.
+    expect(src).toContain("commsPeek?.recurring_parent_id");
+  });
+
+  test('every existing-plan mutation takes the maintenance lock, not just count edits (Codex #3337 r4 P1)', () => {
+    // The series-wide ongoing flip can itself insert visits; gating the lock
+    // on the count left it racing the completion auto-extend and the dispatch
+    // series cancel.
+    expect(src).toContain('const wantsExistingPlanMutation = wantsVisitCountReconcile');
+    expect(src).toContain('if (wantsExistingPlanMutation && commsPeek) {');
+    const lockLine = src.indexOf('acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id');
+    const commsLine = src.indexOf('await lockCustomerComms(trx, commsPeek.customer_id)');
+    expect(lockLine).toBeGreaterThan(-1);
+    expect(commsLine).toBeGreaterThan(lockLine);
+  });
+
   test('flipping a spent plan back to Never leaves it with visits ahead (Codex #3337 r3 P1)', () => {
     // Auto-extend only fires from a COMPLETION, so an exhausted plan flipped
     // to ongoing with nothing booked has no completion coming. Reuses the
     // convert_ongoing contract (flip + ensure 3 upcoming) via the same writer.
     const block = src.slice(src.indexOf('Turning a plan back to "Never" must also leave it'));
-    expect(block.slice(0, 1400)).toContain('recurringOngoing === true && !wantsVisitCountReconcile');
-    expect(block.slice(0, 1400)).toContain('targetCount: 3');
-    expect(block.slice(0, 1400)).toContain('ongoingSeries: true');
+    expect(block.slice(0, 2000)).toContain('!wantsVisitCountReconcile');
+    expect(block.slice(0, 2000)).toContain('targetCount: 3');
+    expect(block.slice(0, 2000)).toContain('ongoingSeries: true');
     // Only tops up when short — never on a plan that already has visits.
-    expect(block.slice(0, 1400)).toContain('if (liveNow < 3)');
+    expect(block.slice(0, 2000)).toContain('if (liveNow < 3)');
   });
 
   test('a resize resolves the stale end-of-plan alert in the same transaction (Codex #3337 r3 P1)', () => {
