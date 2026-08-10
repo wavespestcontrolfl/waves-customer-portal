@@ -3,6 +3,14 @@
 // scheduled estimated_price fallback) and the new-service per-application
 // savings figure shown on the public estimate.
 
+// Controllable gate mock: default-off keeps every pre-existing test on the
+// real test-env behavior (all gates dark); the extension suite flips ONLY
+// waveguardExtendExisting.
+let mockExtendExistingGate = false;
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (gate) => (gate === 'waveguardExtendExisting' ? mockExtendExistingGate : false),
+}));
+
 const {
   computeMembershipContext,
   loadCurrentServiceSpendContext,
@@ -783,5 +791,143 @@ describe('computeMembershipContext', () => {
     });
 
     expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
+  });
+});
+
+// Existing-service tier extension (owner decision 2026-08-10, dark behind
+// GATE_WAVEGUARD_EXTEND_EXISTING): a tier-raising estimate freezes the
+// customer's current qualifying services at the delta rate, and the public
+// projection deliberately carries the prices + visit dates the customer page
+// renders.
+describe('existing-service tier extension snapshot', () => {
+  afterEach(() => { mockExtendExistingGate = false; });
+
+  test('gate off: a tier-raising estimate freezes an EMPTY extension list', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: Bronze→Silver lawn add-on lists existing pest at the delta rate with its upcoming visits', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices).toEqual([expect.objectContaining({
+      key: 'pest_control',
+      label: 'Pest Control',
+      currentPerVisit: 117,
+      extraDiscountPct: 10,
+      perVisitSavings: 11.7,
+      newPerVisit: 105.3,
+      remainingVisits: 3,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
+      prepaid: false,
+    })]);
+    expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
+  });
+
+  test('gate on: an annual-prepay family is marked prepaid (accept credits, never reprices)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({ ...row, annual_prepay_term_id: 'term-1' })),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices[0]).toMatchObject({ key: 'pest_control', prepaid: true });
+  });
+
+  test('gate on: a family this estimate re-quotes is never listed as an extension too', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    // The estimate itself re-quotes pest AND adds lawn: combined Silver, but
+    // the pest family is a priced line of the estimate, not an extension.
+    const estData = {
+      result: {
+        results: { lawn: [{ v: 9, recommended: true }] },
+        recurring: {
+          discount: 0.10,
+          annualBeforeDiscount: 1400,
+          annualAfterDiscount: 1260,
+          services: [
+            { name: 'Pest Control', mo: 47 },
+            { name: 'Lawn Care', mo: 69.75 },
+          ],
+        },
+      },
+    };
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', estData });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: no tier change means no extension rows', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      // Existing pest + lawn already → Silver; adding the same families
+      // re-quotes, no upgrade.
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toBeNull();
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('publicMembershipView deliberately projects the extension prices and dates — and nothing else new', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    const view = publicMembershipView(snapshot);
+    expect(view.existingServices).toEqual([{
+      key: 'pest_control',
+      label: 'Pest Control',
+      currentPerVisit: 117,
+      newPerVisit: 105.3,
+      extraDiscountPct: 10,
+      perVisitSavings: 11.7,
+      remainingVisits: 3,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
+      prepaid: false,
+    }]);
+    // The staff account context stays server-side even with the extension on.
+    const json = JSON.stringify(view);
+    for (const staffMarker of [
+      'currentServices', 'currentSpendPerVisitTotal', 'serviceAddress', 'contracts',
+      'lastPaidAt', 'scheduledPerVisit', 'spendSource', 'nextScheduledDate',
+    ]) {
+      expect(json).not.toContain(staffMarker);
+    }
   });
 });

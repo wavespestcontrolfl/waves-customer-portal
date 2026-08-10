@@ -21,7 +21,7 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
-const { loadExistingQualifyingServiceKeys, isActivePlanCustomer } = require('./waveguard-existing-services');
+const { loadExistingQualifyingServiceKeys, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
@@ -1848,6 +1848,51 @@ async function resolveEstimateWritePayload({
   };
 }
 
+// Save-time member-linkage guard (workstream-1 hardening, 2026-08-10): the
+// combined-tier machinery only engages when the builder LINKS the customer
+// (body.customerId) — the auto-link needs Lookup to run AND the typed
+// address to contain the stored street, and missing either silently prices
+// an active member's add-on estimate as a new lead (no combined tier, no
+// member card, full setup fee), with nothing anywhere saying so. Detect
+// that shape server-side and hand the builder a warning to surface.
+// Read-only, fail-soft, response-only: never blocks the save, never
+// persists, never auto-links (an in-place revise must not silently move a
+// row between accounts — the operator confirms and re-saves).
+async function detectUnlinkedMemberAddress(database, body = {}) {
+  try {
+    if (body.customerId || !body.address) return null;
+    const street = String(body.address).split(',')[0].trim();
+    const houseNumber = (street.match(/^\d{1,6}/) || [])[0];
+    if (!houseNumber || street.length < 6) return null;
+    // House-number prefix narrows cheaply; the street comparator (the same
+    // canonical one the membership snapshot uses) decides the real match.
+    const { sameStreetAddress } = require('./estimator-engine/address-compare');
+    const candidates = await database('customers')
+      .where((q) => q.where('active', true).orWhereNull('active'))
+      .whereNull('deleted_at')
+      .where('address_line1', 'ilike', `${houseNumber} %`)
+      .limit(8)
+      .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip', 'waveguard_tier', 'monthly_rate');
+    for (const candidate of candidates) {
+      if (!candidate.address_line1) continue;
+      const candidateAddress = [candidate.address_line1, candidate.city, candidate.zip].filter(Boolean).join(', ');
+      if (!sameStreetAddress(candidateAddress, body.address)) continue;
+      if (!isMembershipCustomerRow(candidate)) continue;
+      const name = `${candidate.first_name || ''} ${candidate.last_name || ''}`.trim() || 'an active member';
+      return {
+        customerId: candidate.id,
+        customerName: name,
+        waveguardTier: candidate.waveguard_tier || null,
+        message: `This address matches ${name}'s account${candidate.waveguard_tier ? ` (WaveGuard ${candidate.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — member pricing (combined WaveGuard tier) was NOT applied. Link the customer and save again to price at the member rate.`,
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[admin-estimate] unlinked-member address check skipped: ${err.message}`);
+    return null;
+  }
+}
+
 async function createOrReuseAdminEstimate({
   database = db,
   body,
@@ -1867,6 +1912,7 @@ async function createOrReuseAdminEstimate({
     recompute,
   });
   const expiresAt = estimateExpiresAt(now);
+  const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
@@ -1916,6 +1962,7 @@ async function createOrReuseAdminEstimate({
           return {
             estimate: updated,
             reused: true,
+            memberLinkageWarning,
           };
         }
 
@@ -1952,6 +1999,7 @@ async function createOrReuseAdminEstimate({
     return {
       estimate: created,
       reused: false,
+      memberLinkageWarning,
     };
   });
 }
@@ -2084,6 +2132,12 @@ async function reviseAdminEstimate({
   // The builder may reopen an estimate whose contact/customer linkage it did
   // not capture (auto-send or agent-drafted rows) — never let a blank field in
   // the edit payload sever the row's existing linkage or satellite snapshot.
+  // Same unlinked-member guard as creation, against the EFFECTIVE linkage
+  // (a linked row stays linked through a blank edit payload — see below).
+  const memberLinkageWarning = await detectUnlinkedMemberAddress(database, {
+    customerId: body.customerId || estimate.customer_id || null,
+    address: body.address,
+  });
   const writeFields = await resolveEstimateWritePayload({
     database,
     body: {
@@ -2280,7 +2334,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return { estimate: { ...estimate, ...writeFields }, dryRun: true };
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning };
   }
 
   // Atomic revise guard: the editability check above ran on a pre-read, so
@@ -2393,10 +2447,11 @@ async function reviseAdminEstimate({
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }
   clearEstimatePricingCache(estimate.id);
-  return { estimate: updated };
+  return { estimate: updated, memberLinkageWarning };
 }
 
 module.exports = {
+  detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,

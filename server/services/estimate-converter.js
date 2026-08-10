@@ -561,6 +561,165 @@ function hasWaveGuardSetupService(services = []) {
   return shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: services });
 }
 
+// ── Existing-service tier extension (owner decision 2026-08-10) ──────────
+// Applies the FROZEN membershipSnapshot.existingServices plan when an accept
+// raises the membership tier: upcoming qualifying visit rows are repriced to
+// the frozen per-visit figure (or proportionally, when the contracted price
+// moved between save and accept), and annual-prepaid families are credited
+// the difference instead of being repriced (their paid term is never
+// touched). The frozen plan is the SAME data the estimate page displayed
+// (ExistingPlanUpgradeCard), so what was shown is exactly what applies —
+// legacy estimates without a frozen plan (or plans frozen while
+// GATE_WAVEGUARD_EXTEND_EXISTING was off) apply nothing and keep the
+// 2026-08-05 review-bell behavior.
+//
+// Monthly-lane members are NOT auto-adjusted here: the scalar's interplay
+// with this accept's own ledger write is exactly where a silent double-count
+// hides, so the extension surfaces a parked exception naming the manual
+// adjustment instead (rule 14) — per-application members, the dominant lane,
+// bill from the row prices this function updates.
+//
+// Money invariants honored: unpriced rows stay NULL (never $0, never an
+// invented price); a repriced figure only ever goes DOWN; the audit row
+// commits atomically with the writes (same savepoint) — extension-with-audit
+// or clean rollback, never one without the other. Callers wrap this in a
+// nested transaction: a failure rolls back only the extension, never the
+// accept.
+async function applyFrozenExistingServiceExtension({
+  database, customerId, estimateId, estimateData, activatedTier,
+  monthlyLaneMember = false, priorQualifyingKeys = [],
+}) {
+  const summary = {
+    applied: false,
+    repricedRowCount: 0,
+    families: [],
+    familyLines: [],
+    creditAmount: 0,
+    creditLines: [],
+    skippedFamilies: [],
+    reviewFamilies: [],
+    monthlyRateReviewNeeded: false,
+  };
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('waveguardExtendExisting')) return summary;
+  const snapshot = estimateData?.membershipSnapshot;
+  const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
+    .filter((svc) => Number(svc?.currentPerVisit) > 0
+      && Number(svc?.newPerVisit) > 0
+      && Number(svc?.perVisitSavings) > 0
+      && Array.isArray(svc?.keys) && svc.keys.length > 0);
+  if (!plan.length) return summary;
+  // The frozen plan belongs to the tier the snapshot advertised — a stale
+  // snapshot whose tier disagrees with the activated tier must not apply
+  // its numbers.
+  if (String(snapshot?.tierLabel || '').trim().toLowerCase()
+    !== String(activatedTier || '').trim().toLowerCase()) {
+    return summary;
+  }
+  const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
+  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key));
+
+  const { loadExistingRecurringQualifyingRows, qualifyingKeysForRow } = require('./waveguard-existing-services');
+  const rows = await loadExistingRecurringQualifyingRows(database, customerId);
+  const today = etDateString();
+  // DATE-column convention: read the stored calendar day directly.
+  const rowDay = (value) => (value instanceof Date
+    ? value.toISOString().slice(0, 10)
+    : (typeof value === 'string' ? value.split('T')[0] : null));
+  const isCallbackRow = (row) => row.is_callback === true || row.is_callback === 1
+    || row.is_callback === '1' || row.is_callback === 'true';
+  // Extension evidence is ALWAYS the strict predicate (upcoming, not a
+  // callback, not created by THIS accept) regardless of the enroll gate —
+  // a new rule with no legacy behavior to preserve, same posture as the
+  // ownership loader.
+  const liveRows = rows.filter((row) => {
+    const day = rowDay(row.scheduled_date);
+    if (!day || day < today) return false;
+    if (isCallbackRow(row)) return false;
+    if (row.source_estimate_id && String(row.source_estimate_id) === String(estimateId)) return false;
+    return true;
+  });
+
+  let creditTotal = 0;
+  for (const svc of plan) {
+    const familyRows = liveRows.filter((row) => qualifyingKeysForRow(row).some((key) => svc.keys.includes(key)));
+    if (!familyRows.length) {
+      summary.skippedFamilies.push(svc.label || svc.key);
+      continue;
+    }
+    const prepaidRows = familyRows.filter((row) => !!row.annual_prepay_term_id);
+    const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
+    let repriced = 0;
+    for (const row of repriceRows) {
+      const price = Number(row.estimated_price);
+      // Unpriced = NULL stays NULL (billing invariant 8): a blank price is
+      // manual/monthly-lane billing, never a $0 write.
+      if (!(price > 0)) continue;
+      const matchesFrozen = Math.abs(price - Number(svc.currentPerVisit)) <= 0.01;
+      const next = matchesFrozen
+        ? Number(svc.newPerVisit)
+        : Math.round(price * (1 - Number(svc.extraDiscountPct || 0) / 100) * 100) / 100;
+      if (!(next > 0) || next >= price) continue;
+      await database('scheduled_services').where({ id: row.id }).update({ estimated_price: next });
+      repriced += 1;
+    }
+    if (repriced > 0) {
+      summary.repricedRowCount += repriced;
+      svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
+      summary.familyLines.push(
+        `${svc.label || svc.key} $${Number(svc.currentPerVisit).toFixed(2)} → $${Number(svc.newPerVisit).toFixed(2)}/visit (${repriced} upcoming)`,
+      );
+    }
+    if (prepaidRows.length > 0) {
+      const credit = Math.round(prepaidRows.length * Number(svc.perVisitSavings) * 100) / 100;
+      if (credit > 0) {
+        creditTotal = Math.round((creditTotal + credit) * 100) / 100;
+        summary.creditLines.push(
+          `${svc.label || svc.key} $${credit.toFixed(2)} (${prepaidRows.length} prepaid visit${prepaidRows.length === 1 ? '' : 's'} × $${Number(svc.perVisitSavings).toFixed(2)})`,
+        );
+        svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
+      }
+    }
+  }
+
+  if (creditTotal > 0) {
+    const { postCreditMovement } = require('./customer-credit');
+    await postCreditMovement({
+      customerId,
+      delta: creditTotal,
+      source: 'adjustment',
+      note: `WaveGuard ${activatedTier} extension — prepaid-term difference (estimate #${estimateId})`,
+      createdBy: 'system:waveguard_tier_extension',
+    }, database.isTransaction ? database : null);
+    summary.creditAmount = creditTotal;
+  }
+
+  summary.applied = summary.repricedRowCount > 0 || summary.creditAmount > 0;
+  summary.monthlyRateReviewNeeded = summary.applied && monthlyLaneMember === true;
+  if (summary.applied) {
+    // Audit rides the same savepoint as the writes — extension-with-audit
+    // or clean rollback, never one without the other.
+    await database('activity_log').insert({
+      customer_id: customerId,
+      action: 'waveguard_tier_extension_applied',
+      description: `WaveGuard ${activatedTier} extension: ${summary.repricedRowCount} upcoming visit(s) repriced${summary.creditAmount > 0 ? `, $${summary.creditAmount.toFixed(2)} prepaid-difference credit` : ''} (estimate #${estimateId})`,
+      metadata: JSON.stringify({
+        estimateId,
+        tier: activatedTier,
+        families: summary.families,
+        repricedRowCount: summary.repricedRowCount,
+        familyLines: summary.familyLines,
+        creditAmount: summary.creditAmount,
+        creditLines: summary.creditLines,
+        skippedFamilies: summary.skippedFamilies,
+        reviewFamilies: summary.reviewFamilies,
+        monthlyRateReviewNeeded: summary.monthlyRateReviewNeeded,
+      }),
+    });
+  }
+  return summary;
+}
+
 // An ADD-ON accept (existing recurring customer buying a NEW service family)
 // must not clobber monthly_rate with just the add-on's monthly: for a monthly
 // member the billing cron charges monthly_rate directly, so the overwrite
@@ -3932,15 +4091,66 @@ const EstimateConverter = {
       && tier && tier !== 'none'
       && isMembershipTierUpgrade(customer.waveguard_tier, tier)) {
       const discountPct = Math.round((discount || 0) * 100);
+      // Existing-service extension (owner 2026-08-10): apply the frozen
+      // snapshot plan the estimate displayed. Savepoint-confined — a failed
+      // extension rolls back only itself (writes + audit together) and this
+      // accept falls back to the 2026-08-05 review copy below; the accepted
+      // plan is never lost to its discount extension.
+      let extension = null;
+      try {
+        extension = await database.transaction((sp) => applyFrozenExistingServiceExtension({
+          database: sp,
+          customerId,
+          estimateId,
+          estimateData,
+          activatedTier: tier,
+          monthlyLaneMember: preservesExistingMembership === true,
+          priorQualifyingKeys,
+        }));
+      } catch (extErr) {
+        logger.warn(`[estimate-converter] existing-service tier extension failed (falling back to review notice): ${extErr.message}`);
+        extension = null;
+      }
+      const extensionApplied = extension?.applied === true;
+      const appliedClauses = extensionApplied
+        ? [
+          extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
+          extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
+          extension.monthlyRateReviewNeeded
+            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`
+            : '',
+          [...extension.reviewFamilies, ...extension.skippedFamilies].length
+            ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
+            : '',
+        ].filter(Boolean)
+        : [];
       const tierReviewPayload = {
         type: 'estimate_converted',
-        title: `WaveGuard ${tier} activated: review existing plan rates`,
-        body: `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-visit prices — review whether to extend the ${discountPct}% tier discount to them.`,
+        title: extensionApplied
+          ? `WaveGuard ${tier} activated: existing services extended`
+          : `WaveGuard ${tier} activated: review existing plan rates`,
+        body: extensionApplied
+          ? `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. ${appliedClauses.join(' ')}`
+          : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-visit prices — review whether to extend the ${discountPct}% tier discount to them.`,
         options: {
           icon: '⭐',
           link: `/admin/customers?customerId=${customerId}`,
           bell: true,
-          metadata: { estimateId, customerId, tier, priorQualifyingKeys, combinedServiceCount },
+          metadata: {
+            estimateId,
+            customerId,
+            tier,
+            priorQualifyingKeys,
+            combinedServiceCount,
+            ...(extensionApplied
+              ? {
+                extensionApplied: true,
+                extensionFamilies: extension.families,
+                extensionRepricedRowCount: extension.repricedRowCount,
+                extensionCreditAmount: extension.creditAmount,
+              }
+              : {}),
+          },
         },
       };
       if (opts.deferCommercialScheduleNotification === true) {
@@ -4147,3 +4357,4 @@ module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
+module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;

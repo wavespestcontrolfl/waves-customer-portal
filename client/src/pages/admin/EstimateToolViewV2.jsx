@@ -2657,6 +2657,11 @@ export default function EstimateToolViewV2({
   // Set when the server-authoritative price (Decision #2) differs from the
   // client preview at save time, so the operator isn't left quoting a stale number.
   const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
+  // Server-detected unlinked-member save (2026-08-10): the typed address
+  // matches an active member but no customer was linked, so the combined
+  // WaveGuard tier was NOT applied — surfaced beside the saved totals so the
+  // operator links and re-saves before sending.
+  const [memberLinkageWarning, setMemberLinkageWarning] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -4586,6 +4591,7 @@ export default function EstimateToolViewV2({
       // won't honor.
       const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
+      setMemberLinkageWarning(d.memberLinkageWarning || null);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
       // recomputeNotice rides along so saveAndSend can gate the send on it —
@@ -8078,6 +8084,12 @@ export default function EstimateToolViewV2({
               </Button>
             )}
 
+            {memberLinkageWarning && (
+              <div className="text-12 text-ink bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-3 mt-2">
+                <span className="font-medium">Member pricing not applied.</span>{" "}
+                {memberLinkageWarning.message}
+              </div>
+            )}
             {priceRecomputeNotice && (
               <div className="text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 mt-2">
                 Final price recomputed on save (server-authoritative):

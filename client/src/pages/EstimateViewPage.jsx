@@ -3329,6 +3329,94 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
   );
 }
 
+// Calendar-day string (YYYY-MM-DD) rendered directly — no Date parsing,
+// which would shift the stored day across the UTC/ET boundary (repo
+// DATE-column convention).
+const VISIT_MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtVisitDay(day) {
+  const [y, m, d] = String(day || '').split('-').map(Number);
+  if (!y || !m || !d || !VISIT_MONTH_SHORT[m - 1]) return null;
+  return `${VISIT_MONTH_SHORT[m - 1]} ${d}, ${y}`;
+}
+
+// Existing-plan tier extension card (owner decision 2026-08-10): a
+// tier-raising estimate for a current member lists the services they
+// already have — the exact upcoming visits — struck through at today's
+// contracted per-visit price with the combined tier's price beside it.
+// Data is the FROZEN membership snapshot's existingServices (populated
+// only when GATE_WAVEGUARD_EXTEND_EXISTING is on and this estimate raises
+// the tier); accept applies the same frozen rows, so this card can never
+// advertise a discount billing doesn't deliver. Renders nothing for
+// leads, non-upgrades, or snapshots frozen while the gate was off.
+export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = false }) {
+  const rows = (membership?.isExistingCustomer === true && Array.isArray(membership.existingServices)
+    ? membership.existingServices
+    : []).filter((svc) => Number(svc?.currentPerVisit) > 0 && Number(svc?.newPerVisit) > 0);
+  if (!rows.length || !waveGuardTier) return null;
+  const tierDisplay = glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier;
+  return (
+    <div style={estimateCard({ marginTop: 16 })}>
+      {/* Inline header row (title + tier chip) — flex-wrap instead of the
+          ServiceSection corner-pin, so no clearance dance on phones. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'space-between' }}>
+        <h2 style={{ fontSize: 20, fontWeight: 500, lineHeight: 1.2, color: W.blueDeeper, margin: 0 }}>
+          Your current services get the {tierDisplay} rate too
+        </h2>
+        {/* marginLeft:auto keeps the chip right-aligned even when the long
+            title forces it onto its own wrapped row. */}
+        <span style={{
+          display: 'inline-block', padding: '4px 12px', marginLeft: 'auto',
+          ...waveGuardChipStyle(waveGuardTier),
+          borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+          whiteSpace: 'nowrap',
+        }}>
+          WaveGuard {tierDisplay}
+        </span>
+      </div>
+      {rows.map((svc) => {
+        const visitDays = (Array.isArray(svc.upcomingVisitDates) ? svc.upcomingVisitDates : [])
+          .map(fmtVisitDay).filter(Boolean);
+        return (
+          <div key={svc.key || svc.label} style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy }}>{svc.label}</div>
+            {visitDays.length ? (
+              <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2 }}>
+                {visitDays.length === 1 ? 'Upcoming visit: ' : 'Upcoming visits: '}
+                {visitDays.join(' · ')}
+              </div>
+            ) : null}
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
+              <span style={{ fontSize: 16, color: ESTIMATE_MUTED, textDecoration: 'line-through', lineHeight: 1 }}>
+                {fmtMoney(svc.currentPerVisit)}
+              </span>
+              <span style={{ fontSize: 20, fontWeight: 800, color: W.blueDeeper, lineHeight: 1 }}>
+                {fmtMoney(svc.newPerVisit)}
+              </span>
+              <span style={{ fontSize: 14, color: ESTIMATE_MUTED }}>/ visit</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginTop: 4, fontSize: 14, lineHeight: 1.35 }}>
+              <span style={{ color: W.textBody, fontWeight: 600 }}>WaveGuard {tierDisplay} Discount</span>
+              <span style={{ color: W.textBody, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                −{fmtMoney(svc.perVisitSavings)}
+              </span>
+            </div>
+            {svc.prepaid === true ? (
+              <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
+                This service is prepaid — the difference is credited to your account instead.
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      {!readOnly ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 14 }}>
+          Applied automatically when you approve this plan — your visit schedule doesn&apos;t change.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -5276,6 +5364,15 @@ function EstimateViewPageInner() {
             );
           })}
           </div>
+
+          {/* Existing services at the combined tier (owner 2026-08-10) —
+              after the quoted boxes, before the plan-level summaries: the
+              extension rides the same approve action as the plan itself. */}
+          <ExistingPlanUpgradeCard
+            membership={estimate.membership}
+            waveGuardTier={waveGuardTier}
+            readOnly={readOnly}
+          />
 
           {/* No combined "Plan total" on customer estimates (owner rule
               2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and

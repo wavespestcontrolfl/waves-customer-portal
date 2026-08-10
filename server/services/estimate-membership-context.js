@@ -30,6 +30,7 @@
 // ============================================================
 
 const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
 const { sameStreetAddress } = require('./estimator-engine/address-compare');
 const {
   parseRawAddress,
@@ -55,6 +56,16 @@ const SERVICE_LABEL = {
 };
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+// scheduled_date is a pg DATE column arriving as a midnight Date — read the
+// stored calendar day directly (repo DATE-column convention, mirrors
+// waveguard-existing-services.qualifyingRowDateKey), never via ET conversion.
+function visitDateKey(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.split('T')[0];
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return null;
+}
 
 // Precedence guards MIRRORED from waveguard-existing-services.toQualifyingKeys
 // (which follows detectServiceLine / the recurring-appointment-seeder): a
@@ -508,6 +519,14 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       contracts,
       activeScheduledVisits: serviceRows.length,
       nextScheduledDate: scheduledDates[0] || null,
+      // Normalized visit calendar days, deduped and sorted — the
+      // tier-upgrade existing-service display names the exact appointments
+      // the extension covers.
+      scheduledVisitDates: [...new Set(serviceRows.map((row) => visitDateKey(row.scheduled_date)).filter(Boolean))].sort(),
+      // Any row funded by an annual-prepay term: the accept-time extension
+      // must not reprice the paid term — it credits the difference instead
+      // (owner decision 2026-08-10).
+      prepaid: serviceRows.some((row) => !!row.annual_prepay_term_id),
     };
   });
 
@@ -618,14 +637,57 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     const delta = combinedTier.discount - oldTier.discount;
     const deltaPct = Math.round(delta * 100);
 
-    // Existing service prices remain exactly as contracted. Their current
-    // spend is retained for staff context, but the new combined tier applies
-    // only to services priced in this estimate. Do NOT pass existingRows here:
-    // those are the QUALIFYING rows only, and reusing them would drop non-tier
-    // recurring work (rodent bait, palm injection) from the frozen snapshot
-    // and underreport currentSpendPerVisitTotal.
+    // Do NOT pass existingRows here: those are the QUALIFYING rows only, and
+    // reusing them would drop non-tier recurring work (rodent bait, palm
+    // injection) from the frozen snapshot and underreport
+    // currentSpendPerVisitTotal.
     const currentSpend = await loadCurrentServiceSpendContext(database, customerId);
+    // Existing-service tier extension (owner decision 2026-08-10, reversing
+    // the 2026-08-05 review-bell-only ruling): a tier-RAISING estimate lists
+    // the customer's current qualifying services at the combined tier, and
+    // accept applies exactly this FROZEN plan (estimate-converter reads these
+    // rows), so display and billing move together by construction. Dark
+    // behind GATE_WAVEGUARD_EXTEND_EXISTING (money surface): gate off
+    // freezes an empty list — nothing is advertised, accept has nothing to
+    // apply. The math applies the DELTA percentage points (combined − current
+    // tier) to the CONTRACTED per-visit price, exactly what
+    // `extraDiscountPct` advertises — exact for the dominant Bronze-origin
+    // case, and for upgrades from an already-discounted tier it never
+    // over-discounts relative to base-price math.
     const existingServices = [];
+    if (upgraded && isEnabled('waveguardExtendExisting')) {
+      const { etDateString } = require('../utils/datetime-et');
+      const today = etDateString();
+      for (const svc of currentSpend.currentServices) {
+        if (!svc || svc.qualifiesForWaveGuard !== true) continue;
+        const componentKeys = Array.isArray(svc.keys) && svc.keys.length ? svc.keys : [svc.key];
+        // A family this estimate re-quotes is already a priced line of the
+        // estimate itself — never also listed as an existing extension.
+        if (componentKeys.some((k) => newKeys.includes(k))) continue;
+        // Multi-property contracts sum per-contract prices into ONE figure —
+        // advertising that sum as "per visit" would be wrong, so those stay
+        // on the manual review path (the accept notification still names
+        // them for the owner).
+        if (Array.isArray(svc.contracts) && svc.contracts.length > 1) continue;
+        const currentPerVisit = Number(svc.currentPerVisit);
+        if (!(currentPerVisit > 0)) continue; // no honest price to discount
+        const perVisitSavings = round2(currentPerVisit * delta);
+        if (!(perVisitSavings > 0)) continue;
+        const upcomingVisitDates = (svc.scheduledVisitDates || []).filter((d) => d >= today);
+        existingServices.push({
+          key: svc.key,
+          keys: componentKeys,
+          label: svc.label,
+          currentPerVisit: round2(currentPerVisit),
+          extraDiscountPct: deltaPct,
+          perVisitSavings,
+          newPerVisit: round2(currentPerVisit - perVisitSavings),
+          remainingVisits: upcomingVisitDates.length || svc.activeScheduledVisits || null,
+          upcomingVisitDates,
+          prepaid: svc.prepaid === true,
+        });
+      }
+    }
 
     // ── New-service member discount ────────────────────────────
     // Use the rate actually applied to the recurring total (margin-guard caps
@@ -670,7 +732,11 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // pick a cross-sell the customer doesn't already have (existingServices
       // above is only populated on a tier upgrade).
       existingServiceKeys: existingKeys,
-      discountAppliesTo: 'new_services_only',
+      // Dynamic (2026-08-10): with a populated extension the legacy SSR
+      // membership block switches to its "including the ones you already
+      // have" copy branch and renders the existing-service rows — both
+      // branches predate this feature and are already tested.
+      discountAppliesTo: existingServices.length ? 'new_and_existing_services' : 'new_services_only',
       currentServices: currentSpend.currentServices,
       currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,
@@ -715,13 +781,23 @@ function publicMembershipView(snapshot) {
           : [],
       }
       : null,
+    // The customer's own current price, discounted price, and visit dates
+    // are projected DELIBERATELY (owner decision 2026-08-10): the estimate
+    // page renders "your Pest Control: $X → $Y/visit" with the appointments
+    // it covers. Addresses, payment history, and per-contract breakdowns
+    // stay staff-only as before.
     existingServices: (Array.isArray(snapshot.existingServices) ? snapshot.existingServices : [])
       .map((service) => ({
         key: service?.key ?? null,
         label: service?.label ?? null,
+        currentPerVisit: service?.currentPerVisit ?? null,
+        newPerVisit: service?.newPerVisit ?? null,
         extraDiscountPct: service?.extraDiscountPct ?? null,
         perVisitSavings: service?.perVisitSavings ?? null,
         remainingVisits: service?.remainingVisits ?? null,
+        upcomingVisitDates: Array.isArray(service?.upcomingVisitDates)
+          ? service.upcomingVisitDates.filter(Boolean)
+          : [],
         prepaid: service?.prepaid ?? null,
       })),
     newServices: (Array.isArray(snapshot.newServices) ? snapshot.newServices : [])
