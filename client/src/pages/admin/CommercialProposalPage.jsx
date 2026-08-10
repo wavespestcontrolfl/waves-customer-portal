@@ -732,13 +732,14 @@ export default function CommercialProposalPage() {
         // synchronously, so formRef is committed before this continuation
         // runs.)
         const genAtSave = editGenRef.current;
-        // A program row with a name but no valid price/frequency would be
-        // FILTERED from the payload and silently deleted by the reload —
+        // A program row with ANY content but no valid price/frequency would
+        // be FILTERED from the payload and silently deleted by the reload —
         // surface the server's minimum-price rule instead (codex 1A-ii r3).
+        // The ONE content predicate (programRowHasContent) decides, so a
+        // note-only or covers-only row can never slip past a narrower
+        // second definition (codex 1A-ii r16).
         const incompleteProgram = formRef.current.programsState.find(
-          (row) => (String(row.label || '').trim() || Number(row.pricePerApplication) > 0
-            || String(row.inclusionsText || '').trim() || String(row.exclusionsText || '').trim())
-            && !programRowIsPriced(row),
+          (row) => programRowHasContent(row) && !programRowIsPriced(row),
         );
         if (incompleteProgram) {
           setError(`Program “${incompleteProgram.label?.trim() || '(unnamed)'}” needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.`);

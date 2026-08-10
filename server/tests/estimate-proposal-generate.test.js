@@ -828,6 +828,20 @@ describe('deriveProposalDraft', () => {
     expect(green.warnings).toEqual([]);
   });
 
+  test('r16: an empty legacy inputs {} beside engineInputs must not hide the scope facts (union, not short-circuit)', async () => {
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        inputs: {},
+        engineInputs: { buildingSqFt: '12000', stories: 3, lotSqFt: '30000' },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
+      },
+    });
+    expect(draft.propertyScope.items).toEqual([
+      { label: 'Building', value: '12,000 sq ft · 3 stories' },
+      { label: 'Lot', value: '30,000 sq ft' },
+    ]);
+  });
+
   test('r14: mapped specialty `det` scope survives into corrective-work includes', async () => {
     // Mapped rows persist customer-facing scope under the `det` alias —
     // public extraction resolves detail || det, and generation must match

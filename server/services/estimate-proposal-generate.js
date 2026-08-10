@@ -275,22 +275,38 @@ function fmtSqft(value) {
 // into customer-facing contractual scope could publish hallucinated data
 // (codex 1A-ii r2f). Units/building rows stay operator-typed.
 function derivePropertyScope(estimateData) {
-  // Estimator-tool drafts store `inputs`; agent drafts store `engineInputs`.
-  const inputs = estimateData.inputs || estimateData.engineInputs || {};
+  // Estimator-tool drafts store `inputs`; agent drafts store `engineInputs`
+  // — and the shapes COEXIST: persistence can carry populated engineInputs
+  // beside a truthy EMPTY legacy `inputs {}`, so a first-container
+  // short-circuit hides the facts the engine priced from (codex 1A-ii r16;
+  // same union rule as estimate-public's
+  // inferScopeCategoriesFromEngineInputs). Every present source is scanned;
+  // first positive value per fact wins.
+  const inputSources = [estimateData.inputs, estimateData.engineInputs]
+    .filter((source) => source && typeof source === 'object');
+  const inputValue = (...keys) => {
+    for (const source of inputSources) {
+      for (const key of keys) {
+        const v = num(source[key]);
+        if (v > 0) return v;
+      }
+    }
+    return null;
+  };
   const items = [];
 
   // Agent-generated commercial estimates persist the priced area under the
   // buildingSqFt alias (validateAgentEngineInput accepts both — codex
   // 1A-ii r13).
-  const building = fmtSqft(inputs.homeSqFt ?? inputs.buildingSqFt);
-  const stories = num(inputs.stories);
+  const building = fmtSqft(inputValue('homeSqFt', 'buildingSqFt'));
+  const stories = inputValue('stories');
   if (building) {
     items.push({
       label: 'Building',
       value: stories && stories > 1 ? `${building} · ${stories} stories` : building,
     });
   }
-  const lot = fmtSqft(inputs.lotSqFt);
+  const lot = fmtSqft(inputValue('lotSqFt'));
   if (lot) items.push({ label: 'Lot', value: lot });
 
   return items.length ? { items } : null;
