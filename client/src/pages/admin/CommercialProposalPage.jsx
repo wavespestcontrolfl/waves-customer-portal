@@ -248,6 +248,11 @@ export default function CommercialProposalPage() {
   // responsibilities; hand-authored lines are never in the map, so pruning
   // can never touch them.
   const generatedRespByFamilyRef = React.useRef(null);
+  // Family → generated inclusions/exclusions/taxability registry, served on
+  // load like responsibilityRegistry — the family-change resync prunes the
+  // old family's generated lines and installs the new family's stack by
+  // exact match (codex 1A-ii r14). Reload-safe for the same reason.
+  const familyRegistryRef = React.useRef(null);
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -293,6 +298,7 @@ export default function CommercialProposalPage() {
     // family's generated lines (codex 1A-ii r13). Exact-line matching
     // keeps hand-authored text untouchable regardless.
     if (data.responsibilityRegistry) generatedRespByFamilyRef.current = data.responsibilityRegistry;
+    if (data.familyRegistry) familyRegistryRef.current = data.familyRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
       label: w.label || '',
       amount: w.amount ?? 0,
@@ -495,6 +501,72 @@ export default function CommercialProposalPage() {
     setResponsibilitiesText((text) => text.split('\n')
       .filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())))
       .join('\n'));
+  };
+
+  // Changing a program's FAMILY must not keep the old family's generated
+  // copy beside the new label — a generated pest program switched to Lawn
+  // would otherwise save a lawn agreement still promising interior pest
+  // treatment and pest-specific exclusions (codex 1A-ii r14). Exact-line
+  // matching against the served family registry, same doctrine as
+  // removeProgram: generated lines swap to the new family's stack;
+  // hand-authored/edited lines are never in the registry, so they survive
+  // untouched. The dynamic cadence bullet is family-independent and stays.
+  const changeProgramFamily = (idx, nextFamily) => {
+    const prev = programsState[idx];
+    if (!prev || prev.service === nextFamily) return;
+    markEdit();
+    const oldReg = familyRegistryRef.current?.[prev.service];
+    const newReg = familyRegistryRef.current?.[nextFamily];
+    // Prune lines generated for the OLD family (keeping ones the new family
+    // also carries); when the row held generated copy, install the new
+    // family's stack so the narrative matches the promise being sold.
+    const swapLines = (text, oldLines = [], newLines = []) => {
+      const oldSet = new Set(oldLines);
+      const newSet = new Set(newLines);
+      const lines = text.split('\n');
+      const hadGenerated = lines.some((line) => oldSet.has(line.trim()));
+      const kept = lines.filter((line) => !(oldSet.has(line.trim()) && !newSet.has(line.trim())));
+      const present = new Set(kept.map((line) => line.trim()));
+      const installed = hadGenerated
+        ? [...kept, ...newLines.filter((line) => !present.has(line))]
+        : kept;
+      return { text: installed.join('\n'), hadGenerated };
+    };
+    setProgramsState((list) => list.map((p, i) => {
+      if (i !== idx) return p;
+      const next = { ...p, service: nextFamily };
+      if (oldReg && newReg) {
+        const inc = swapLines(p.inclusionsText, oldReg.inclusions, newReg.inclusions);
+        const exc = swapLines(p.exclusionsText, oldReg.exclusions, newReg.exclusions);
+        next.inclusionsText = inc.text;
+        next.exclusionsText = exc.text;
+        // Generated taxability is family-derived — resync it to the new
+        // family's default (the visible Tax switch stays operator-editable).
+        if (inc.hadGenerated || exc.hadGenerated) next.taxable = newReg.taxable === true;
+      }
+      return next;
+    }));
+    // Family-derived generated responsibilities follow the same swap: prune
+    // the old family's lines (unless another remaining program still needs
+    // them) and, when any generated lines were present, install the new
+    // family's lines. Hand-authored lines are never in the registry.
+    const byFamily = generatedRespByFamilyRef.current;
+    if (!byFamily) return;
+    const removedLines = byFamily[prev.service] || [];
+    const remainingFamilies = new Set(
+      programsState.map((p, i) => (i === idx ? nextFamily : p.service)),
+    );
+    const keep = new Set(Object.entries(byFamily)
+      .filter(([family]) => remainingFamilies.has(family))
+      .flatMap(([, lines]) => lines));
+    setResponsibilitiesText((text) => {
+      const lines = text.split('\n');
+      const hadGenerated = lines.some((line) => removedLines.includes(line.trim()));
+      if (!hadGenerated) return text;
+      const kept = lines.filter((line) => !(removedLines.includes(line.trim()) && !keep.has(line.trim())));
+      const present = new Set(kept.map((line) => line.trim()));
+      return [...kept, ...(byFamily[nextFamily] || []).filter((line) => !present.has(line))].join('\n');
+    });
   };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
@@ -1037,7 +1109,7 @@ export default function CommercialProposalPage() {
                   <div className="flex flex-wrap gap-2 items-center">
                     <Select
                       size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family"
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, service: e.target.value } : it))); }}
+                      onChange={(e) => changeProgramFamily(idx, e.target.value)}
                     >
                       {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </Select>

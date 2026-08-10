@@ -776,4 +776,45 @@ describe('deriveProposalDraft', () => {
     });
     expect(draft.propertyScope.items[0]).toEqual({ label: 'Building', value: '12,000 sq ft' });
   });
+
+  test('r14: mapped specialty `det` scope survives into corrective-work includes', async () => {
+    // Mapped rows persist customer-facing scope under the `det` alias —
+    // public extraction resolves detail || det, and generation must match
+    // or Generate → Save keeps the price but drops the material scope.
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { specItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500, det: '2 rooms · 3 visits' }] } },
+      },
+    });
+    expect(draft.correctiveWork).toHaveLength(1);
+    expect(draft.correctiveWork[0].includes).toEqual(['2 rooms · 3 visits']);
+  });
+
+  test('r14: a review marker on EITHER raw one-time clone gates the deduped row', async () => {
+    // The cross-container mirror collapse keeps the FIRST clone — when only
+    // the engineResult twin carries requiresMeasurement, the kept ungated
+    // clone must still fail the draft, never publish the provisional price.
+    const gatedTwin = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] },
+        engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500, requiresMeasurement: true }] },
+      },
+    });
+    expect(gatedTwin.correctiveWork).toBeNull();
+    expect(gatedTwin.warnings[0]).toMatch(/requires manual review/i);
+
+    // Same rule when the canonical extractor's own mirror-collapse dropped
+    // the marker-carrying twin (oneTime.specItems kept, root specItems
+    // clone gated) — the uncollapsed clone set still gates the identity.
+    const mappedTwin = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: {
+          oneTime: { specItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] },
+          specItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500, quoteRequired: true }],
+        },
+      },
+    });
+    expect(mappedTwin.correctiveWork).toBeNull();
+    expect(mappedTwin.warnings[0]).toMatch(/requires manual review/i);
+  });
 });

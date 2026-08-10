@@ -229,6 +229,28 @@ function commercialTaxableDefault(serviceKey, explicit, { taxabilityMap = null, 
   return true;
 }
 
+// Per-family registry served to the BUILDER for its family-change resync:
+// switching a generated program's family must not keep the old family's
+// generated inclusions/exclusions/taxability beside the new family label
+// (codex 1A-ii r14). The client prunes/installs by EXACT line match against
+// this registry — the same reload-safe served-registry pattern as
+// FAMILY_RESPONSIBILITIES (r13), so hand-authored lines are never touched.
+// The cadence bullet is dynamic and family-independent, so it is
+// deliberately absent here.
+function buildFamilyRegistry(taxabilityMap = null) {
+  const registry = {};
+  for (const family of Object.keys(PROGRAM_EXCLUSIONS)) {
+    registry[family] = {
+      inclusions: family === 'pest' ? COMMERCIAL_PEST_INCLUSIONS : [VISIT_DOCUMENTATION_LINE],
+      exclusions: PROGRAM_EXCLUSIONS[family] || [],
+      // Family-level default only — a family switch has no source service
+      // key, so this mirrors commercialTaxableDefault's family fallback.
+      taxable: commercialTaxableDefault(family, undefined, { taxabilityMap }),
+    };
+  }
+  return registry;
+}
+
 function parseEstimateData(estimateData) {
   if (!estimateData) return {};
   if (typeof estimateData === 'string') {
@@ -603,6 +625,17 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     for (const item of list) counts.set(oneTimeIdentity(item), (counts.get(oneTimeIdentity(item)) || 0) + 1);
     for (const [key, count] of counts) maxPerSource.set(key, Math.max(maxPerSource.get(key) || 0, count));
   }
+  // Mirror-collapse keeps the FIRST clone — if any dropped twin carried a
+  // review marker the kept clone lacks, gating below would publish the
+  // provisional price (same trap the recurring side closed with
+  // gatedRawKeys in r12). Collect gated identities from EVERY clone via the
+  // UNCOLLAPSED extraction (the collapse above already dropped mirrored
+  // twins, including marker-carrying ones); the emitted representative
+  // inherits them (codex 1A-ii r14).
+  const gatedOneTimeIdentities = new Set([
+    ...estimateOneTimeItemsFromData(estimateData),
+    ...estimateOneTimeItemsFromData({ result: engineResult }),
+  ].filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
   const objSeen = new Set();
   const emittedCounts = new Map();
   const fromOneTime = sourceLists.flat().filter((item) => {
@@ -639,6 +672,12 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     for (const line of container) counts.set(rawIdentity(line), (counts.get(rawIdentity(line)) || 0) + 1);
     for (const [key, count] of counts) rawMax.set(key, Math.max(rawMax.get(key) || 0, count));
   }
+  // Same clone-marker rule for the raw containers: an ungated result.lineItems
+  // row deduped against its engineResult twin that carries
+  // requiresMeasurement/quoteRequired must stay gated (codex 1A-ii r14).
+  const gatedRawIdentities = new Set(rawContainers.flat()
+    .filter((line) => rowIsReviewGated(line))
+    .map(rawIdentity));
   const rawObjSeen = new Set();
   const rawEmitted = new Map();
   const lineItemsRows = rawContainers.flat().filter((line) => {
@@ -659,7 +698,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       && num(line.installation?.price) > 0
       && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
   const fromLineItems = lineItemsRows.filter((line) => {
-    if (rowIsReviewGated(line)) {
+    if (rowIsReviewGated(line) || gatedRawIdentities.has(rawIdentity(line))) {
       gated.push(String(line.displayName || line.name || line.service || 'item'));
       return false;
     }
@@ -685,7 +724,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
   for (const item of fromOneTime) {
-    if (rowIsReviewGated(item)) {
+    if (rowIsReviewGated(item) || gatedOneTimeIdentities.has(oneTimeIdentity(item))) {
       gated.push(String(item.label || item.name || item.service || 'item'));
       continue;
     }
@@ -705,7 +744,12 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       label: String(item.label || item.name || item.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
       taxable: commercialTaxableDefault(item.service || item.name, item.taxable, { taxabilityMap, oneTime: true }),
-      includes: item.detail ? [String(item.detail).slice(0, 200)] : [],
+      // Mapped specialty rows persist customer-facing scope (bed-bug room/
+      // visit counts) under the `det` alias — resolve it exactly like the
+      // public extraction (`item.detail || item.det`) or Generate → Save
+      // keeps the price but silently drops the material scope (codex 1A-ii
+      // r14).
+      includes: (item.detail || item.det) ? [String(item.detail || item.det).slice(0, 200)] : [],
     });
   }
   for (const line of fromLineItems) {
@@ -901,6 +945,8 @@ module.exports = {
   derivePropertyScope,
   deriveResponsibilities,
   programFamilyForService,
+  buildFamilyRegistry,
+  loadTaxabilityMap,
   PROGRAM_EXCLUSIONS,
   FAMILY_RESPONSIBILITIES,
   COMMERCIAL_PEST_INCLUSIONS,

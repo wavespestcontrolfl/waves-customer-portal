@@ -33,6 +33,7 @@ const {
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
@@ -1889,6 +1890,14 @@ router.get('/:id/proposal', async (req, res, next) => {
       // (codex 1A-ii r13). Exact-line matching client-side keeps
       // hand-authored text untouchable.
       responsibilityRegistry: require('../services/estimate-proposal-generate').FAMILY_RESPONSIBILITIES,
+      // Per-family inclusions/exclusions/taxability registry for the
+      // builder's family-change resync — switching a generated program's
+      // family prunes the old family's generated lines and installs the new
+      // family's stack by exact match (codex 1A-ii r14). Same reload-safe
+      // served-registry pattern as responsibilityRegistry.
+      familyRegistry: require('../services/estimate-proposal-generate').buildFamilyRegistry(
+        await require('../services/estimate-proposal-generate').loadTaxabilityMap(db),
+      ),
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
@@ -2187,6 +2196,17 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (Number(totalValue) > DB_TOTAL_MAX) {
         return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
       }
+    }
+    // The acceptance invoice bills every program's first application PLUS all
+    // corrective work (and tax) on ONE invoice — each estimate column can
+    // pass the per-column bound while the combined first invoice overflows
+    // invoices.subtotal/total, also decimal(10,2), at mark-won (codex 1A-ii
+    // r14). Reuse the canonical builder so the bound matches exactly what a
+    // win would bill. Checked regardless of the current billing mode —
+    // bill_by_invoice can flip after authoring.
+    const firstInvoice = buildProposalFirstInvoice(normalized);
+    if (firstInvoice.subtotal > DB_TOTAL_MAX || firstInvoice.total > DB_TOTAL_MAX) {
+      return res.status(400).json({ error: 'The combined acceptance invoice (first applications plus corrective work and tax) exceeds $99,999,999.99 — reduce the amounts before saving.' });
     }
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
