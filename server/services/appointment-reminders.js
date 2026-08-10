@@ -966,6 +966,14 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     sendOutcome.blockedCode = sendOutcome.blockedCode === 'QUIET_HOURS_HOLD'
       ? 'QUIET_HOURS_HOLD'
       : (result.code || null);
+    // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
+    // the sticky blockedCode above cannot say WHICH contact was held once
+    // an earlier contact set it, so the loop reads this call's own code
+    // (reset by the loop before each contact). deferred + nextAllowedAt
+    // ride along so a held contact can be queued on the scheduled rail.
+    sendOutcome.lastCode = result.code || null;
+    sendOutcome.lastDeferred = result.deferred === true;
+    sendOutcome.lastNextAllowedAt = result.nextAllowedAt || null;
   }
   if (result.blocked || result.sent === false) {
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
@@ -1011,15 +1019,84 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       allowedContacts = [{ ...primary, role: 'primary' }];
     }
   }
+  // Callers that need outcome classification pass their own object; a local
+  // one otherwise, so per-call hold evidence is always readable here.
+  const sharedOutcome = (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object')
+    ? sendOptions.sendOutcome
+    : {};
+  const heldContacts = [];
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
       : 'phone_matches_customer';
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sendOptions.sendOutcome || null);
+    // Reset the NON-sticky per-call fields before each contact — a held
+    // predecessor's evidence must not classify a later opted-out/landline
+    // contact (which returns false without touching them) as held.
+    sharedOutcome.lastCode = null;
+    sharedOutcome.lastDeferred = false;
+    sharedOutcome.lastNextAllowedAt = null;
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sharedOutcome);
+    if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
+      && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
+      heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
+    }
     sentAny = sentAny || sent;
   }
+  // Partial fan-out across the 20:00 boundary (codex r20): one accepted
+  // contact makes callers finalize 'sent', so a later held contact would
+  // silently vanish — persist ONLY the held recipients on the scheduled
+  // rail (call-booking secondary precedent). When NOTHING was accepted the
+  // callers' own defer/skip paths re-fire the whole notice, so queueing
+  // here too would double-text — rows are queued only on partial success.
+  if (sentAny && heldContacts.length) {
+    await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
+  }
   return sentAny;
+}
+
+// Persist the held recipients of a PARTIALLY delivered appointment-notice
+// fan-out on the scheduled-SMS rail. The row belongs to the CONTACT's phone
+// (frozen at enqueue — NO refresh_customer_phone; a send-time swap to the
+// account holder would misdeliver); the registry's contact-slot recheck
+// re-runs the same contact resolution the fan-out used at 8:00 AM. A held
+// 24h reminder is SKIPPED, not queued: its 8:00 AM replay lands on the
+// visit's own day (owner ruling 2026-08-07 — the Tsai/Louis incident class),
+// and the delivered contact already carries the reminder.
+async function queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra }) {
+  if (purpose === 'appointment_reminder_24h') {
+    logger.info(`[appt-remind] ${heldContacts.length} held 24h-reminder contact(s) for customer ${customer.id} SKIPPED — an 8AM replay would land on the visit's own day`);
+    return;
+  }
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  for (const held of heldContacts) {
+    try {
+      await db('sms_log').insert({
+        customer_id: customer.id,
+        direction: 'outbound',
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: held.contact.phone,
+        message_body: held.body,
+        status: 'scheduled',
+        scheduled_for: new Date(held.nextAllowedAt),
+        message_type: messageType,
+        metadata: JSON.stringify({
+          entry_point: 'appointment_notice_contact_deferred',
+          ...(metaExtra.scheduled_service_id ? { scheduled_service_id: metaExtra.scheduled_service_id } : {}),
+          appointment_contact_role: held.contact.role || null,
+          original_block_code: 'QUIET_HOURS_HOLD',
+          replay_purpose: purpose,
+          resolve_from_by_customer: true,
+        }),
+      });
+      logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+    } catch (queueErr) {
+      // The fan-out already partially delivered — re-arming the whole
+      // notice would double-text the accepted contact, so a failed
+      // enqueue can only be surfaced loudly.
+      logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}): ${queueErr.message}`);
+    }
+  }
 }
 
 // ── Get customer + tech info ──

@@ -2784,6 +2784,7 @@ module.exports = {
   isWithinApptCancelWindow,
   sendDeferredInvitationEmailLeg,
   resolveExemption,
+  LIVE_VISIT_STATUSES,
   _test: {
     dateLineFor,
     resolveExemption,

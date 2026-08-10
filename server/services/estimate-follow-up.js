@@ -413,6 +413,27 @@ async function sendDualChannel(est, { sms, email }) {
   if (smsHold) {
     try {
       const TWILIO_NUMBERS = require("../config/twilio-numbers");
+      // Recipient identity decides the replay's refresh behavior (card-link
+      // precedent, codex r19/r20): a linked estimate's captured phone can
+      // legitimately differ from the account phone (the persistence contact
+      // guard accepts an email-only match), and the replay must not swap
+      // the bearer estimate link onto the account holder. Only a snapshot
+      // that IS the account phone re-reads the live customer row at send
+      // time; a differing captured recipient stays FROZEN — the same
+      // number the immediate send would have used. Lookup failure freezes
+      // too (immediate-path semantics, not a guessed refresh).
+      const last10 = (v) => String(v || "").replace(/\D/g, "").slice(-10);
+      let snapshotIsAccountPhone = false;
+      if (est.customer_id) {
+        try {
+          const acct = await db("customers")
+            .where({ id: est.customer_id })
+            .first("phone");
+          snapshotIsAccountPhone = !!acct
+            && !!last10(est.customer_phone)
+            && last10(acct.phone) === last10(est.customer_phone);
+        } catch { /* unverifiable identity → frozen snapshot */ }
+      }
       await db("sms_log").insert({
         customer_id: est.customer_id || null,
         direction: "outbound",
@@ -427,13 +448,18 @@ async function sendDualChannel(est, { sms, email }) {
           estimate_id: est.id,
           followup_stage: email?.stage || null,
           original_block_code: smsHold.code,
-          // Customer rows re-read the live phone at send time and resolve
-          // their LOCATION from-number (from_phone above is a NOT-NULL
-          // placeholder); anonymous lead rows persist the transactional
-          // consent basis the immediate send ran under (same as the
-          // voicemail deferral).
+          // Customer rows resolve their LOCATION from-number at send time
+          // (from_phone above is a NOT-NULL placeholder) and re-read the
+          // live phone ONLY when the snapshot was the account phone;
+          // anonymous lead rows persist the transactional consent basis
+          // the immediate send ran under (same as the voicemail deferral).
           ...(est.customer_id
-            ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+            ? {
+                resolve_from_by_customer: true,
+                ...(snapshotIsAccountPhone
+                  ? { refresh_customer_phone: true }
+                  : { explicit_recipient: true }),
+              }
             : { consent_basis: { status: "transactional_allowed", source: "estimate_follow_up" } }),
         }),
       });

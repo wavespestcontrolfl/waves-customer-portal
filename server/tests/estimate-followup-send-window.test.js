@@ -10,10 +10,16 @@ jest.mock('../models/db', () => {
   const inserts = [];
   const mockDb = jest.fn((table) => ({
     insert: jest.fn(async (row) => { inserts.push({ table, row }); }),
+    // r20: the hold path reads the account phone to decide the replay's
+    // refresh behavior; _firstImpl lets each pin choose the row (or throw).
+    where: jest.fn(() => ({
+      first: jest.fn(async () => (typeof mockDb._firstImpl === 'function' ? mockDb._firstImpl(table) : null)),
+    })),
   }));
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
   mockDb._inserts = inserts;
+  mockDb._firstImpl = null;
   return mockDb;
 });
 jest.mock('../config/twilio-numbers', () => ({
@@ -54,6 +60,7 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db._inserts.length = 0;
+    db._firstImpl = null;
   });
 
   test('a held SMS leg requeues on the scheduled rail and the email proceeds now', async () => {
@@ -77,6 +84,44 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
     expect(row.to_phone).toBe(EST.customer_phone);
   });
 
+  test('replay refresh rides ONLY a snapshot that IS the account phone (r20): a differing captured recipient stays frozen', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      code: 'QUIET_HOURS_HOLD',
+      retryable: true,
+      deferred: true,
+      nextAllowedAt: '2026-08-07T12:00:00.000Z',
+    });
+
+    // Snapshot IS the account phone (formatting aside): safe to re-read live.
+    db._firstImpl = () => ({ phone: '941-555-0123' });
+    await sendDualChannel(EST, { sms: 'Follow-up body', email: EMAIL });
+    let meta = JSON.parse(db._inserts[0].row.metadata);
+    expect(meta.refresh_customer_phone).toBe(true);
+    expect(meta.explicit_recipient).toBeUndefined();
+
+    // Captured phone differs (a supported email-match linkage): FROZEN —
+    // the replay must not swap the bearer estimate link onto the account
+    // holder's number.
+    db._inserts.length = 0;
+    db._firstImpl = () => ({ phone: '+19419998888' });
+    await sendDualChannel(EST, { sms: 'Follow-up body', email: EMAIL });
+    meta = JSON.parse(db._inserts[0].row.metadata);
+    expect(meta.refresh_customer_phone).toBeUndefined();
+    expect(meta.explicit_recipient).toBe(true);
+    expect(db._inserts[0].row.to_phone).toBe(EST.customer_phone);
+
+    // Unverifiable identity freezes too — the immediate path's own number,
+    // never a guessed refresh.
+    db._inserts.length = 0;
+    db._firstImpl = () => { throw new Error('db down'); };
+    await sendDualChannel(EST, { sms: 'Follow-up body', email: EMAIL });
+    meta = JSON.parse(db._inserts[0].row.metadata);
+    expect(meta.refresh_customer_phone).toBeUndefined();
+    expect(meta.explicit_recipient).toBe(true);
+  });
+
   test('a failed requeue releases the claim for a full retry', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false,
@@ -86,7 +131,11 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
       deferred: true,
       nextAllowedAt: '2026-08-07T12:00:00.000Z',
     });
+    // First db() call is the r20 account-phone lookup; the second is the
+    // sms_log insert that must fail for this pin.
     db.mockImplementationOnce(() => ({
+      where: jest.fn(() => ({ first: jest.fn(async () => null) })),
+    })).mockImplementationOnce(() => ({
       insert: jest.fn(async () => { throw new Error('insert failed'); }),
     }));
     const attempted = await sendDualChannel(EST, { sms: 'Follow-up body', email: EMAIL });

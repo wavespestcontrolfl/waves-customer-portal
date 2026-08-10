@@ -25,6 +25,10 @@ jest.mock('../services/dispatch-completion-deferred', () => ({
 jest.mock('../services/appointment-card-request', () => ({
   sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
   resolveExemption: jest.fn(async () => ({ exempt: false })),
+  // Mirrors the real module's canonical live-status list — the card
+  // recheck imports it so the replay and the request path can never
+  // disagree on what a live visit is.
+  LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
 }));
 const mockGetAppointmentContacts = jest.fn(() => [{ phone: '+19415557777' }]);
 jest.mock('../services/customer-contact', () => ({
@@ -518,5 +522,70 @@ describe('deferred-replay registry', () => {
     db.mockReturnValueOnce(release);
     await finalizeDeferredReplay('lead_webhook_auto_reply_deferred', { lead_auto_reply_phone_digits: '5551234567' }, { providerMessageId: 'owner-silence' });
     expect(release.del).toHaveBeenCalled();
+  });
+
+  test("card request recheck (r20): a 'rescheduled' pending-rebook placeholder suppresses — the replay must not consume the claim the re-slotted visit needs", async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'rescheduled', card_link_sent_at: null, customer_id: 'cust-1' }));
+    const res = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(res.eligible).toBe(false);
+    expect(res.reason).toBe('visit-rescheduled');
+  });
+
+  test("visit-anchored replays (r20): 'rescheduled' is non-upcoming for the shared gate", async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'rescheduled', scheduled_date: '2099-01-01' }));
+    const prep = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 's1' });
+    expect(prep.eligible).toBe(false);
+    expect(prep.reason).toBe('visit-rescheduled');
+  });
+
+  test('appointment notice contact (r20): held fan-out rows revalidate the contact slot like the call-booking secondary', async () => {
+    const meta = { scheduled_service_id: 'ss-1', customer_id: 'cust-1', to_phone: '+19415557777' };
+
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    const present = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(present.eligible).toBe(true);
+
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain(null));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '+19415550000' }]);
+    const removed = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(removed.eligible).toBe(false);
+    expect(removed.reason).toBe('contact-removed');
+
+    db.mockReturnValueOnce(firstChain({ status: 'rescheduled', scheduled_date: '2099-01-01' }));
+    const moved = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(moved.eligible).toBe(false);
+    expect(moved.reason).toBe('visit-rescheduled');
+  });
+
+  test('v2 invite terminal (r20): only the missing-table error is swallowed — transient failures keep terminal_pending stamped', async () => {
+    const meta = { promoter_id: 'p-1', invite_phone: '+19415551234' };
+
+    // Transient DB failure: the hook must report ok:false so the durable
+    // wrapper leaves terminal_pending for the sweep — a swallowed error
+    // here strands the /invite cooldown on an undelivered invite for 24h.
+    const transient = firstChain(null);
+    transient.del = jest.fn(async () => { const e = new Error('conn reset'); e.code = 'ECONNRESET'; throw e; });
+    db.mockReturnValueOnce(transient);
+    const failed = await onTerminalDeferredReplay('referrals_v2_invite_deferred', meta);
+    expect(failed.ok).toBe(false);
+
+    // Missing table mirrors the route's read fallback: ignorable, ok:true.
+    const missing = firstChain(null);
+    missing.del = jest.fn(async () => { const e = new Error('relation does not exist'); e.code = '42P01'; throw e; });
+    db.mockReturnValueOnce(missing);
+    const tolerated = await onTerminalDeferredReplay('referrals_v2_invite_deferred', meta);
+    expect(tolerated.ok).toBe(true);
+
+    // Clean release still succeeds.
+    const clean = firstChain(null);
+    clean.del = jest.fn(async () => 1);
+    db.mockReturnValueOnce(clean);
+    const ok = await onTerminalDeferredReplay('referrals_v2_invite_deferred', meta);
+    expect(ok.ok).toBe(true);
   });
 });

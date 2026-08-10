@@ -445,7 +445,15 @@ const REGISTRY = {
           .first('status', 'card_link_sent_at', 'customer_id');
         if (!svc) return { eligible: false, reason: 'visit-missing' };
         const status = String(svc.status || '').toLowerCase();
-        if (['cancelled', 'completed', 'skipped'].includes(status)) {
+        // The canonical request path's OWN live-status test: anything
+        // outside LIVE_VISIT_STATUSES (notably 'rescheduled', the
+        // pending-rebook placeholder that keeps the obsolete date/window)
+        // must not replay — a send against it would carry the stale date
+        // AND consume the one-text claim the re-slotted visit needs.
+        // Suppression runs onTerminal, which releases the stamp-guarded
+        // claim + owned pending row for a fresh later trigger.
+        const { LIVE_VISIT_STATUSES } = require('../appointment-card-request');
+        if (!LIVE_VISIT_STATUSES.includes(status)) {
           return { eligible: false, reason: `visit-${status}` };
         }
         if (meta.card_claim_stamp) {
@@ -619,22 +627,22 @@ const REGISTRY = {
     async recheck(meta) {
       const visit = await visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation');
       if (visit.eligible === false) return visit;
-      try {
-        if (!meta.customer_id || !meta.to_phone) return visit;
-        const customer = await db('customers').where({ id: meta.customer_id }).first();
-        if (!customer) return { eligible: false, reason: 'customer-missing' };
-        const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
-        const { getAppointmentContacts } = require('../customer-contact');
-        const { filterRecipientsByOptin } = require('../recipient-optin');
-        const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-        const stillAuthorized = (await filterRecipientsByOptin(
-          getAppointmentContacts(customer, prefsRow), meta.customer_id
-        )).some((c) => digits(c.phone) === digits(meta.to_phone));
-        if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
-        return { eligible: true };
-      } catch (err) {
-        return failClosed('call-contact-confirmation', meta.scheduled_service_id, err);
-      }
+      return contactSlotStillAuthorized(meta, 'call-contact-confirmation');
+    },
+  },
+
+  // A reminder/confirmation/notice fan-out that PARTIALLY delivered: an
+  // earlier contact was provider-accepted before the 20:00 cutoff, a later
+  // contact crossed it, and the caller finalized the notice as sent — so
+  // ONLY the held recipient rides the rail (safeSendAppointment queues it).
+  // Same frozen-recipient + slot-revalidation contract as the call-booking
+  // secondary above; 24h reminders never reach this entry (skipped at
+  // enqueue per the owner's same-day ruling).
+  appointment_notice_contact_deferred: {
+    async recheck(meta) {
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact');
+      if (visit.eligible === false) return visit;
+      return contactSlotStillAuthorized(meta, 'notice-contact');
     },
   },
 
@@ -702,10 +710,19 @@ const REGISTRY = {
       // (last_share_at is left alone: other shares may own it, and it is
       // cosmetic history rather than a send gate.)
       if (!meta.promoter_id || !meta.invite_phone) return;
-      await db('referral_invites')
-        .where({ promoter_id: meta.promoter_id, phone: meta.invite_phone })
-        .del()
-        .catch(() => { /* table may not exist yet — mirrors the route */ });
+      try {
+        await db('referral_invites')
+          .where({ promoter_id: meta.promoter_id, phone: meta.invite_phone })
+          .del();
+      } catch (err) {
+        // Only the missing-table state is ignorable (mirrors the route's
+        // read fallback). A transient DB failure must THROW: the durable
+        // wrapper keeps terminal_pending stamped and the sweep retries the
+        // release — swallowing it would clear the hook as "done" while the
+        // /invite cooldown keeps treating the undelivered invite as sent
+        // for 24 hours.
+        if (err.code !== '42P01') throw err;
+      }
       logger.info(`[deferred-replay] v2 invite for promoter ${meta.promoter_id} terminally blocked — cooldown reservation released`);
     },
   },
@@ -741,7 +758,10 @@ async function visitStillUpcoming(scheduledServiceId, label) {
       .first('status', 'scheduled_date');
     if (!svc) return { eligible: false, reason: 'visit-missing' };
     const status = String(svc.status || '').toLowerCase();
-    if (['cancelled', 'completed', 'skipped'].includes(status)) {
+    // 'rescheduled' is the pending-rebook placeholder — the row keeps the
+    // OBSOLETE date/window until re-slotted, so frozen confirmation/prep
+    // copy for it is wrong the same way a cancelled visit's is.
+    if (['cancelled', 'completed', 'skipped', 'rescheduled'].includes(status)) {
       return { eligible: false, reason: `visit-${status}` };
     }
     const ymd = svc.scheduled_date instanceof Date
@@ -752,6 +772,32 @@ async function visitStillUpcoming(scheduledServiceId, label) {
     return { eligible: true };
   } catch (err) {
     return failClosed(label, scheduledServiceId, err);
+  }
+}
+
+// Shared: a queued fan-out row belongs to a CONTACT's phone frozen at
+// enqueue — the morning replay re-runs the same contact resolution the
+// fan-out used: the queued phone must still occupy an authorized, opted-in
+// contact slot. A contact removed or replaced overnight would otherwise
+// receive a personalized notice + appointment link for a household they no
+// longer represent. The executor merges the row's to_phone/customer_id
+// into the recheck meta, so pre-fix queued rows revalidate too.
+async function contactSlotStillAuthorized(meta, label) {
+  try {
+    if (!meta.customer_id || !meta.to_phone) return { eligible: true };
+    const customer = await db('customers').where({ id: meta.customer_id }).first();
+    if (!customer) return { eligible: false, reason: 'customer-missing' };
+    const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
+    const { getAppointmentContacts } = require('../customer-contact');
+    const { filterRecipientsByOptin } = require('../recipient-optin');
+    const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    const stillAuthorized = (await filterRecipientsByOptin(
+      getAppointmentContacts(customer, prefsRow), meta.customer_id
+    )).some((c) => digits(c.phone) === digits(meta.to_phone));
+    if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
+    return { eligible: true };
+  } catch (err) {
+    return failClosed(label, meta.scheduled_service_id, err);
   }
 }
 
