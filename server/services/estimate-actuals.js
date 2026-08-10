@@ -64,6 +64,154 @@ function deltaPct(estimated, actual) {
   return Math.round(((act - est) / est) * 10000) / 100;
 }
 
+function parseJsonbValue(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizedEnum(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return text || null;
+}
+
+// Zero is a recorded observation for counts ("no palms on this property"),
+// not a missing value — positiveNumber would erase exactly the evidence an
+// overestimated count needs. Blank/garbage still reads as no-signal null.
+function nonnegativeCount(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// Measurement fields tolerate digit-grouping commas/spaces ("2,400" from
+// dictation) — entry validation enforces numeric shape, this mirrors it.
+function lenientMeasurement(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(String(value).replace(/[,\s]/g, ''));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// deltaPct requires a positive actual, which erases the zero-actual case —
+// but 2,000 estimated sqft of beds against an observed 0 is -100%, the
+// strongest overestimation signal there is. Estimate side stays positive
+// (no signal without a real baseline, and no div-by-zero).
+function deltaPctNonnegativeActual(estimated, actual) {
+  const est = positiveNumber(estimated);
+  if (!est || actual === null || actual === undefined) return null;
+  const act = Number(actual);
+  if (!Number.isFinite(act) || act < 0) return null;
+  return Math.round(((act - est) / est) * 10000) / 100;
+}
+
+// Priced Tree & Shrub inputs. The full engine quote survives ONLY on
+// agent/IB drafts (estimate_data.engineResult.lineItems — the raw
+// generateEstimate output). Admin saves run the result through
+// mapV1ToLegacyShape, which reduces T&S to results.tsMeta {eb, et,
+// bedAreaIsEstimated} + the selected tier row in results.ts — access and
+// onSiteMin don't survive that mapping, so those read null there and the
+// replay profile (engineRequest.profile) is the only access source.
+function extractTreeShrubEstimate(estimateData) {
+  if (!estimateData || typeof estimateData !== 'object') return null;
+
+  const lineItems = estimateData.engineResult?.lineItems;
+  if (Array.isArray(lineItems)) {
+    const quote = lineItems.find((item) => item?.service === 'tree_shrub');
+    if (quote) {
+      const bedAreaSource = normalizedEnum(quote.bedAreaSource);
+      const extracted = {
+        bedSqFt: positiveNumber(quote.bedAreaUsed ?? quote.bedArea),
+        bedAreaSource,
+        // Same semantics as v1-legacy-mapper's bedAreaIsEstimated (:523):
+        // true only for the engine-inferred sources. An operator-entered
+        // 'estimated' is FALSE there — deriving it as true here would put
+        // identical inputs in different cohorts by creation path.
+        bedAreaEstimated: bedAreaSource
+          ? (bedAreaSource === 'lot_based' || bedAreaSource === 'fallback')
+          : null,
+        treeCount: nonnegativeCount(quote.treeCount),
+        access: normalizedEnum(quote.access),
+        tier: normalizedEnum(quote.tier),
+        onSiteMin: positiveNumber(quote.onSiteMin),
+      };
+      // Quote-wizard and lead-automation drafts whitelist the lineItem down
+      // to price/cadence fields — a T&S line with none of the cost drivers
+      // is no signal, not a block of nulls.
+      if (Object.values(extracted).some((value) => value !== null)) return extracted;
+    }
+  }
+
+  const tsMeta = estimateData.result?.results?.tsMeta;
+  if (tsMeta && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
+    const profile = (estimateData.engineRequest && typeof estimateData.engineRequest === 'object'
+      ? estimateData.engineRequest.profile : null) || {};
+    const tierRows = estimateData.result?.results?.ts;
+    const selected = Array.isArray(tierRows) ? tierRows.find((row) => row?.selected) : null;
+    return {
+      bedSqFt: positiveNumber(tsMeta.eb),
+      // The legacy mapping collapses the four-value source enum to ONE
+      // boolean (true = lot_based|fallback, false = explicit|estimated) —
+      // reconstructing an enum from it would invent cohorts. The enum stays
+      // null here; only the coarse boolean is real signal on this path.
+      bedAreaSource: null,
+      bedAreaEstimated: typeof tsMeta.bedAreaIsEstimated === 'boolean'
+        ? tsMeta.bedAreaIsEstimated : null,
+      treeCount: nonnegativeCount(tsMeta.et),
+      // Every writer that produces this mapped shape prices T&S through
+      // translateV2CallToV1Input's services.treeShrub = { tier } — the
+      // engine then receives access: 'easy' explicitly (estimate-engine
+      // :839). 'easy' IS the priced access here, so null would defeat the
+      // priced-vs-observed access calibration (pre-push P1 r4). The
+      // profile reads stay first for any future writer that persists a
+      // real access on the replay profile.
+      access: normalizedEnum(profile.access || profile.features?.access) || 'easy',
+      tier: normalizedEnum(selected?.tier),
+      onSiteMin: null,
+    };
+  }
+
+  return null;
+}
+
+// Observed Tree & Shrub cost drivers from the typed completion. The raw
+// values object (internal calibration fields included) is frozen at
+// service_data.typedReportSnapshot.values; on combined visits the T&S
+// section may instead be a companion snapshot. Primary wins field-by-field.
+function extractTreeShrubActuals(serviceData) {
+  const data = parseJsonbValue(serviceData);
+  if (!data) return null;
+
+  const snapshots = [];
+  if (data.typedReportSnapshot?.type === 'tree_shrub') {
+    snapshots.push(data.typedReportSnapshot.values || {});
+  }
+  for (const companion of Array.isArray(data.companionReportSnapshots) ? data.companionReportSnapshots : []) {
+    if (companion?.type === 'tree_shrub') snapshots.push(companion.values || {});
+  }
+  if (!snapshots.length) return null;
+
+  const pick = (key) => {
+    for (const values of snapshots) {
+      const value = values?.[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+    return null;
+  };
+
+  const actuals = {
+    bedSqFt: lenientMeasurement(pick('bed_sqft_serviced')),
+    palmCount: nonnegativeCount(pick('palm_count_total')) ?? nonnegativeCount(pick('palms_serviced')),
+    treeCount: nonnegativeCount(pick('tree_count_total')),
+    shrubDensity: normalizedEnum(pick('shrub_density')),
+    access: normalizedEnum(pick('access_difficulty')),
+  };
+  return Object.values(actuals).some((value) => value !== null) ? actuals : null;
+}
+
 // Durable backfill marker (structured_notes.backfill, frozen by the
 // completion transaction — the same read job-costing and
 // pricing-reality-check key their untrusted-span policies off).
@@ -121,6 +269,22 @@ function buildActualsRow({ serviceRecord, scheduledService, estimate, completion
     totalCarrierGal: positiveNumber(completion?.total_carrier_gal),
   };
 
+  // Tree & Shrub calibration block (reprice lane 2026-08-08): the engine's
+  // cost drivers, priced vs observed. Attached whenever either side yields
+  // data — not gated on service_line, which is free text and unreliable for
+  // T&S rows. Deltas live inside the block (the scalar columns stay
+  // lawn/pest-shaped); bedSqFtDeltaPct follows the same over-estimate-
+  // positive convention as the columns.
+  const treeShrubEstimate = extractTreeShrubEstimate(estimate.estimate_data);
+  const treeShrubActual = extractTreeShrubActuals(serviceRecord.service_data);
+  if (treeShrubEstimate) estimated.treeShrub = treeShrubEstimate;
+  if (treeShrubActual) {
+    actual.treeShrub = treeShrubActual;
+    if (treeShrubEstimate) {
+      actual.treeShrub.bedSqFtDeltaPct = deltaPctNonnegativeActual(treeShrubEstimate.bedSqFt, treeShrubActual.bedSqFt);
+    }
+  }
+
   return {
     estimate_id: estimate.id,
     customer_id: serviceRecord.customer_id || null,
@@ -148,7 +312,7 @@ async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {
     .where('sr.service_date', '>=', db.raw(`(now() at time zone 'America/New_York')::date - ?::int`, [rescanDays]))
     .select(
       'sr.id as service_record_id', 'sr.customer_id', 'sr.service_line', 'sr.service_date',
-      'sr.started_at', 'sr.ended_at', 'sr.structured_notes',
+      'sr.started_at', 'sr.ended_at', 'sr.structured_notes', 'sr.service_data',
       'ss.id as scheduled_service_id', 'ss.estimated_duration_minutes',
       'ss.actual_duration_minutes', 'ss.arrived_at', 'ss.completed_at',
       'e.id as estimate_id', 'e.estimate_data',
@@ -179,6 +343,7 @@ async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {
           started_at: row.started_at,
           ended_at: row.ended_at,
           structured_notes: row.structured_notes,
+          service_data: row.service_data,
         },
         scheduledService: {
           id: row.scheduled_service_id,
@@ -259,6 +424,9 @@ module.exports = {
     buildActualsRow,
     deltaPct,
     extractEstimateProfile,
+    extractTreeShrubEstimate,
+    extractTreeShrubActuals,
+    deltaPctNonnegativeActual,
     isReconcileDisabled,
   },
 };

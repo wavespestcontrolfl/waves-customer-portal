@@ -884,7 +884,13 @@ async function assertComplianceClear({ title, body, meta = [], city, keyword, ta
     .map((v) => String(v).replace(/\{\{\s*cityPhone\s*\}\}/g, '').trim())
     .filter(Boolean)
     .join('\n\n');
-  const publishableText = metaText ? `${body}\n\n${metaText}` : body;
+  // The marker tells the semantic gate these are field VALUES — comment
+  // delimiters here are literal rendered characters, so the prompt's
+  // body-markup comment exemption is withdrawn past this line (Codex PR
+  // #3302 r1: an alt text of "<!-- pesticide is EPA-approved -->" is
+  // customer-visible copy, and the deterministic guard blanks comment-shaped
+  // spans, so an unscoped exemption left no layer covering it).
+  const publishableText = metaText ? `${body}\n\n${complianceGate.META_SECTION_MARKER}\n\n${metaText}` : body;
   const compliance = await complianceGate.evaluate({ title, body: publishableText, city, keyword, tag });
   if (!compliance.pass) {
     const blocking = compliance.findings.filter((f) => f.severity === 'P0');

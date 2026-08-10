@@ -7984,7 +7984,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       delete estData.pricingContext.tierDiscounts;
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    // Replay of an ALREADY-PERSISTED estimate (this row was loaded from the
+    // DB, not posted by a browser), so its quote-time T&S knob snapshot is
+    // trustworthy and must be reused — a membership lapse must not also
+    // re-price the T&S line off knobs flipped after the quote was sent.
+    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed
@@ -12314,8 +12318,12 @@ function savedFloorReplayOverrides(estData) {
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
+    .treeShrubKnobSignalForReplay(estData);
+  if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
   return overrides;
 }
+
 
 // Saved pest post-discount floor state: pricingMetadata stamps first, then
 // legacy row evidence — armed-era rows carry the floor metadata itself
@@ -20903,3 +20911,7 @@ module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscou
 // Test hook (owner GO 2026-08-04): accept-side first-visit slice of a
 // multi-service PERCENT plan credit.
 module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
+// Test hook (T&S reprice lane 2026-08-08): the saved-knob replay signal that
+// keeps an already-sent Tree & Shrub quote at its sent price after an admin
+// flips the v4.7 pricing_config knobs.
+module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;

@@ -18,6 +18,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(),
   cacheLineType: jest.fn(async () => {}),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC', authToken: 'tok' } }));
 
@@ -50,6 +51,13 @@ describe('isLandline shares the phone_line_types cache', () => {
 
     expect(res).toBe(true);
     expect(mockFetch).not.toHaveBeenCalled(); // no second lookup
+  });
+
+  test('shared-cache hit (fixedVoip) → true, no Lookup — home-phone VoIP routes to email like a landline', async () => {
+    wireCustomer({ id: 'c1', phone: '+19415550101', line_type: null });
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
+    await expect(isLandline('c1', '+19415550101')).resolves.toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   test('shared-cache hit (mobile) on a SERVICE-contact number → false, no Lookup', async () => {

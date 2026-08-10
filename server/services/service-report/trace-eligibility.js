@@ -155,6 +155,21 @@ const SERVICE_KEY_RULES = {
   // WaveGuard's actual stops book as the mosquito programs above (codex
   // P2 r4).
   waveguard_membership: { eligible: false, reason: 'billing_rider' },
+  // Estimate-gap batch (20260808080000). The three mechanical lawn
+  // add-ons apply no treatment — a spray/coverage trace would imply
+  // application work that never happened (compliance: never suggest
+  // treatment where none occurred). Bora-Care treats individual wood
+  // members/attic surfaces, not a perimeter or lawn. The guarantee is a
+  // payment-only billing rider.
+  dethatching: { eligible: false, reason: 'mechanical_lawn_lane' },
+  plugging: { eligible: false, reason: 'mechanical_lawn_lane' },
+  top_dressing: { eligible: false, reason: 'mechanical_lawn_lane' },
+  bora_care: { eligible: false, reason: 'localized_treatment_lane' },
+  rodent_guarantee: { eligible: false, reason: 'billing_rider' },
+  // Reactivation batch (20260809000000): German roach work is interior
+  // gel/IGR treatment — no exterior perimeter or lawn trace.
+  german_roach: { eligible: false, reason: 'interior_only_lane' },
+  german_roach_initial: { eligible: false, reason: 'interior_only_lane' },
   // lawn programs — coverage outline/highlight, not a spray-mist replay
   lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },

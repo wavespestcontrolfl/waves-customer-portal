@@ -23,6 +23,7 @@ const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./cust
 const PayerService = require('./payer');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
+const { isEnabled } = require('../config/feature-gates');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -222,7 +223,38 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const thankYouHtml = thankYouNote
     ? `<div class="dm-page-text" style="margin-top:16px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${thankYouEscaped}</div>`
     : '';
-  const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}`;
+  // Previous balance (owner ruling 2026-08-08, dark behind
+  // GATE_BALANCE_VISIBILITY; self-pay invoices only — a payer AP inbox must
+  // never see the homeowner's unrelated balance). One display-only sentence:
+  // the old invoices stay intact with their own pay links (all reachable from
+  // this invoice's pay page), and the CTA amount stays this invoice's own —
+  // nothing is folded into this bill. Rides the invoice_message template slot
+  // on the SendGrid path so the live invoice.sent template needs no edit;
+  // lookup failure sends the email exactly as today.
+  // Suppressed for ANY recipient override (pre-push r3 P0): an operator
+  // one-off send routes THIS invoice to an arbitrary address (bookkeeper,
+  // realtor) — that recipient is authorized for this invoice only, never for
+  // the account's balance across unrelated invoices. Only the customer's own
+  // saved billing recipient may see the note. (effectiveOverride also covers
+  // the payer-AP reroute, belt-and-braces with the payer_id check.)
+  let previousBalanceNote = '';
+  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
+    try {
+      const { openBalanceSummary } = require('./open-balance');
+      const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
+      if (prev.total > 0) {
+        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
+      }
+    } catch (prevErr) {
+      logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);
+    }
+  }
+  const previousBalanceEscaped = previousBalanceNote
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const previousBalanceHtml = previousBalanceNote
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};">${previousBalanceEscaped}</div>`
+    : '';
+  const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}${previousBalanceHtml}`;
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
@@ -248,6 +280,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     intro,
     summaryNote || null,
     thankYouNote || null,
+    previousBalanceNote || null,
     '',
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
@@ -275,7 +308,10 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           service_label: invoice.service_type || '',
           service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
           invoice_summary: summaryNote,
-          invoice_message: thankYouNote,
+          // The previous-balance sentence rides the existing invoice_message
+          // slot so the live template renders it with no template edit; the
+          // operator note (when present) stays first.
+          invoice_message: [thankYouNote, previousBalanceNote].filter(Boolean).join('\n\n'),
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',

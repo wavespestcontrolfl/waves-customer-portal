@@ -23,6 +23,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'hit', lineType: 'mobile' })),
   cacheLineType: jest.fn(),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: jest.fn((customer) => (customer?.phone

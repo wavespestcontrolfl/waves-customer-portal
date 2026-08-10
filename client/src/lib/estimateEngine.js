@@ -2265,6 +2265,7 @@ export function calculateEstimate(inputs) {
   if (svcTs && !isCommercial && lotSqFt > 0) {
     hasRec = true;
     let eb = bedArea;
+    let inferredRawBedArea = 0;
     if (eb <= 0) {
       let bp = shrubDensity === 'HEAVY' ? 0.25 : shrubDensity === 'MODERATE' ? 0.18 : 0.10;
       // Server parity (audit 2026-07-18 P2): the pricing engine adds the
@@ -2274,8 +2275,29 @@ export function calculateEstimate(inputs) {
       // server-side, so admin-built quotes overpriced big heavy-shrub lots
       // by up to 4,000 sf of bed material vs. what the engine would charge).
       if (landscapeComplexity === 'COMPLEX' || landscapeComplexity === 'MODERATE') bp += 0.05;
-      eb = Math.min(8000, Math.round(lotSqFt * bp));
+      const rawBedArea = Math.round(lotSqFt * bp);
+      eb = Math.min(8000, rawBedArea);
       fieldVerify.push('bed area');
+      inferredRawBedArea = rawBedArea;
+    }
+    // Server parity for the REVIEW SIGNAL too (not just the number): this
+    // client fallback runs when the V1 estimator prices without Property
+    // Lookup, and V1 saves its result with no replayable engineRequest — so
+    // if the cap is silent here, an oversized lot OR an oversized typed area
+    // produces a quote sendable with an empty Pricing Review Notes panel.
+    // Runs for BOTH branches: an explicit 8,000+ area is priced in full and
+    // still owes the at-or-above marker. Mirrors service-pricing.js.
+    if (eb >= 8000 || inferredRawBedArea >= 8000) {
+      addManualReviewReason('bed_area_at_or_above_8000');
+      if (inferredRawBedArea > 8000) {
+        addManualReviewReason('bed_area_cap_reached');
+        addRoutingWarning(`Tree & Shrub bed area was clamped to the 8,000 sq ft estimator cap from an estimated ${inferredRawBedArea.toLocaleString()} sq ft — this quote prices the capped area, so it is UNDER-priced until reviewed.`);
+      } else if (inferredRawBedArea === 8000) {
+        addManualReviewReason('bed_area_cap_reached');
+        addRoutingWarning('Tree & Shrub bed area reached the 8,000 sq ft estimator cap — nothing was clamped off, but confirm the measurement.');
+      } else {
+        addRoutingWarning(`Tree & Shrub bed area of ${Math.round(eb).toLocaleString()} sq ft is at or above the 8,000 sq ft estimator cap. It was priced IN FULL — confirm the measurement.`);
+      }
     }
     // Tree count mirrors server v4.6 semantics: an explicit count (including
     // 0) is authoritative; only a MISSING count falls back to a treeDensity
