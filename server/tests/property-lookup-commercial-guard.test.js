@@ -409,6 +409,24 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
   });
 
+  test('satellite-AI multifamily signal on a county single-family record → no master-parcel guidance (codex P1)', () => {
+    // The AI signal may legitimately flip the CATEGORY, but the guidance copy
+    // asserts county master-parcel provenance — it must only fire when the
+    // trusted RECORD itself carries the multifamily/HOA evidence.
+    const ai = { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' };
+    const flags = buildFieldVerifyFlags(
+      countyMultifamilyBuilding({ propertyType: 'Single Family', unitCount: 1, squareFootage: 1400 }), ai, null
+    );
+    expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+  });
+
+  test('guidance instructs the full commercial exit (Commercial → No + clear subtype), not just a type override (codex P1)', () => {
+    const flag = buildFieldVerifyFlags(countyMultifamilyBuilding(), null, null)
+      .find((f) => f.field === 'commercialSubtype');
+    expect(flag.reason).toMatch(/set Commercial to No/i);
+    expect(flag.reason).toMatch(/clear the Commercial Subtype/i);
+  });
+
   test('guidance rides the enriched profile without changing the commercial verdict', () => {
     const profile = buildEnrichedProfile(countyMultifamilyBuilding(), {}, 27.5, -82.45);
     expect(profile.category).toBe('COMMERCIAL');

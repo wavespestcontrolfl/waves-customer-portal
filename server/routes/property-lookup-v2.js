@@ -2936,15 +2936,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // Guidance only — the classification, the commercial manual-quote gate,
   // and every pricing path are untouched; the operator decides
   // resident-vs-association. Distinct field key so the win/loss byFlagField
-  // slice doesn't double-count propertyType.
-  if (rc && detectCategory(rc, ai) === 'COMMERCIAL') {
-    const masterParcelSubtype = resolveCommercialSubtype(rc, ai);
+  // slice doesn't double-count propertyType. The subtype is derived from the
+  // RECORD alone (no ai) so a satellite/AI commercial signal on a
+  // non-multifamily record can't produce copy asserting county master-parcel
+  // provenance it doesn't have — commercialSignalRecord inside these helpers
+  // already strips untrusted web-sourced type strings (the Gateway Ave
+  // guard), so "record alone" means trusted-record evidence.
+  if (rc && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
+    const masterParcelSubtype = resolveCommercialSubtype(rc, {});
     if (masterParcelSubtype === 'multifamily_common_area_residential'
         || masterParcelSubtype === 'hoa_common_area_residential') {
       const unitCount = Number(rc.unitCount) || 0;
       flags.push({
         field: 'commercialSubtype',
-        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way. If the customer is a resident of ONE unit, collect the unit number and price it as a residential condo/townhome unit (override Property Type). Commercial applies only when the client is the association or property manager.`,
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way. If the customer is a resident of ONE unit, collect the unit number, set Commercial to No and clear the Commercial Subtype, and price it as a residential condo/townhome unit. Commercial applies only when the client is the association or property manager.`,
         priority: 'HIGH',
       });
     }
