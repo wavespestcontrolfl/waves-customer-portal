@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, recordCarriesUnit } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -7408,28 +7408,39 @@ const CallRecordingProcessor = {
       }
     }
 
-    // SAME-CALL unit-ask reconciliation. This pass decided (in either lane)
-    // that this call no longer needs a unit collected — the re-extraction
-    // captured it, AV came back subpremise-complete, or the merged record
-    // already carried it. Evidence re-derived from THIS EXACT call IS
-    // attributable to the ask this call filed, which is precisely what the
-    // rejected cross-call resolver could never establish (a later call's unit
-    // may belong to a different door). So the stale card from an earlier pass
-    // is closed here, and only for this call_log_id.
+    // SAME-CALL unit-ask reconciliation. Evidence re-derived from THIS EXACT
+    // call IS attributable to the ask this call filed — precisely what the
+    // rejected cross-call resolver could never establish, since a later
+    // call's unit may belong to a different door. So a stale card from an
+    // earlier pass of this same call_log_id can be closed here.
     //
-    // Shares the per-call lock + review_status re-sync contract every other
-    // triage writer uses (utils/triage-locks.js). Best-effort: a failure
-    // leaves the card open, which is the safe direction.
-    if (!unitAskFiledThisPass && !bridgeNeedsConfirmation.includes('missing_unit_number')) {
+    // It requires AFFIRMATIVE evidence, never the mere absence of the flag
+    // (codex r18 P1): this pass not re-filing proves nothing — V2 or AV may
+    // be disabled or unreachable, the extraction may have failed, or the
+    // verdict may be a PREMISE-level accept that says nothing about units.
+    // Only two things actually answer the ask: the merged canonical record
+    // now states a unit, or AV validated this call's address down to the
+    // exact door (SUB_PREMISE) — the same bar suppressAddressFlagsForAV
+    // holds a stale flag to.
+    //
+    // `open` only: an in_progress card is human-claimed and is never
+    // auto-transitioned. Shares the per-call lock + review_status re-sync
+    // contract every other triage writer uses (utils/triage-locks.js).
+    // Best-effort: a failure leaves the card open, the safe direction.
+    const unitSuppliedByThisCall = recordCarriesUnit(extracted)
+      || ((effectiveAddressValidation?.status === 'validated_accept' || effectiveAddressValidation?.status === 'corrected')
+        && effectiveAddressValidation?.granularity === 'SUB_PREMISE');
+    if (unitSuppliedByThisCall
+        && !unitAskFiledThisPass
+        && !bridgeNeedsConfirmation.includes('missing_unit_number')) {
       try {
         await db.transaction(async (trx) => {
           await lockTriageCall(trx, call.id);
           const closed = await trx('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
-            .whereIn('status', ['open', 'in_progress'])
+            .where({ call_log_id: call.id, reason_code: 'missing_unit_number', status: 'open' })
             .update({
               status: 'resolved',
-              resolution_note: 'Auto-resolved: reprocessing this call no longer finds a missing unit (the unit was captured, validated, or already on the record).',
+              resolution_note: 'Auto-resolved: reprocessing this call supplied the unit — it is now on the record, or Address Validation confirmed the exact unit.',
               resolved_at: new Date(),
               updated_at: new Date(),
             });
