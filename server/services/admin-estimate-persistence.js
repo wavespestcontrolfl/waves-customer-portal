@@ -114,8 +114,17 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
     for (const leadLockId of leadLockIds) {
       await trx('leads').where({ id: leadLockId }).forUpdate().first('id');
     }
+    // created_at is REQUIRED by callReprocessInFlight (codex P1, GH round
+    // on 796026122): its extraction_failed arm mirrors the processor's
+    // eligibility as attempts-under-cap AND inside the 7-day retry window,
+    // and a MISSING timestamp reads as "within the window". Omitting the
+    // column therefore made an aged-out row — which production considers
+    // settled and will never retry — look forever in-flight, so this
+    // deferral restored the pending marker on every sweep and left the
+    // estimate and its public token permanently blocked.
     const callRow = await trx('call_log').where({ id: verdictCallId }).forUpdate()
-      .first('processing_generation', 'processing_status', 'processing_token', 'extraction_attempts', 'metadata');
+      .first('processing_generation', 'processing_status', 'processing_token',
+        'extraction_attempts', 'created_at', 'metadata');
     const liveGen = callRow?.processing_generation != null ? Number(callRow.processing_generation) : null;
     if (callRow && liveGen != null && liveGen > Number(pending.generation)) {
       if (callReprocessInFlight(callRow)) {
@@ -124,7 +133,18 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
           .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
         return { terminal: false, status: String(row.status || '').toLowerCase(), deferred: true };
       }
-      forcedSuperseded = !(await callRejectedForDrafting(trx, verdictCallId));
+      // Ask whether the NEWER generation re-rejected the call — not
+      // whether generation N's own leftover marker is still lying there
+      // (codex P1, GH round on 796026122). N+1 can settle clean through a
+      // path that never clears N's estimator_draft_block (reconcile-only:
+      // gate off, or no longer quote-flavored), and counting that stale
+      // marker as a live rejection kept forcedSuperseded false — so claim
+      // release or the wedged sweep archived and unlinked the now-valid
+      // draft. Markers at/after liveGen are N+1's own verdict and still
+      // count; generation-less markers stay honored (fail closed).
+      forcedSuperseded = !(await callRejectedForDrafting(trx, verdictCallId, {
+        supersededBelowGeneration: liveGen,
+      }));
     }
   }
   if (forcedSuperseded && !data.lead_id) {
@@ -337,7 +357,20 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
 // is unchanged. Creators call this inside their serialized insert with the
 // call row LOCKED, so a rejection either committed first (seen here) or
 // waits and its own invalidation pass catches what landed.
-async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ignoreQueuedMarkers = false } = {}) {
+// `supersededBelowGeneration`: ignore a DERIVED marker whose recorded
+// writer generation is OLDER than this (codex P1, GH round on 796026122).
+// The queued/draft-block markers are verdicts of a specific pass, and
+// generation N's marker can still be sitting on the row when N+1 settles
+// CLEAN through a path that never clears it (the reconcile-only lane: gate
+// off, or the call no longer quote-flavored). A caller asking "did the
+// NEWER generation re-reject this?" must not read N's leftovers as N+1's
+// answer. A marker written AT or AFTER the live generation is N+1's own
+// verdict and still counts; a marker with NO generation (pre-column, or
+// generation-less maintenance) cannot be proven stale, so it is honored —
+// fail closed, matching every other guard on this path.
+async function callRejectedForDrafting(dbc, callLogId, {
+  lockCallRow = false, ignoreQueuedMarkers = false, supersededBelowGeneration = null,
+} = {}) {
   if (!callLogId) return null;
   const q = dbc('call_log').where({ id: callLogId });
   if (lockCallRow) q.forUpdate();
@@ -359,10 +392,20 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ig
     // proof of the underlying verdict (codex P1, PR #3304 GH r9) — that
     // made its own re-qualification cleanup unreachable.
     if (!ignoreQueuedMarkers) {
-      if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
+      const markerCurrent = (marker) => {
+        if (supersededBelowGeneration == null) return true;
+        const g = marker?.generation;
+        if (g == null) return true;
+        return Number(g) >= Number(supersededBelowGeneration);
+      };
+      if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) {
+        return String(md.estimator_draft_block.reason);
+      }
       // A QUEUED quarantine that has not landed yet is equally
       // disqualifying — its estimate-side marker is what failed to write.
-      if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+      if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
+        return String(md.estimator_quarantine_pending.reason);
+      }
     }
   } catch { /* unparseable metadata: not a rejection signal */ }
   return null;

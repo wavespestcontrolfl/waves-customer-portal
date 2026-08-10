@@ -679,6 +679,104 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
   });
 
+  test('a STALE draft-block from the superseded generation does NOT block supersession (codex P1)', () => {
+    // N's marker can still sit on the row when N+1 settles clean through a
+    // path that never clears it — it must not read as N+1's verdict.
+    const writes = [];
+    const { row, data } = rowAndData();
+    const staleMarker = SETTLED(6, {
+      estimator_draft_block: { reason: 'email_identity_conflict', generation: 5 },
+    });
+    return completePendingInvalidation(trxFor(staleMarker, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    }).then((out) => {
+      expect(out.obsolete).toBe(true);
+      expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    });
+  });
+
+  test('a draft-block written AT the live generation IS the newer verdict and still applies', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const freshMarker = SETTLED(6, {
+      estimator_draft_block: { reason: 'email_identity_conflict', generation: 6 },
+    });
+    const out = await completePendingInvalidation(trxFor(freshMarker, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
+  });
+
+  test('a GENERATION-LESS marker cannot be proven stale, so it is honored (fail closed)', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const legacyMarker = SETTLED(6, {
+      estimator_draft_block: { reason: 'email_identity_conflict' },
+    });
+    const out = await completePendingInvalidation(trxFor(legacyMarker, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.obsolete).toBeUndefined();
+    expect(writtenEstimate(writes).estimatorEngine.linkage_invalidated_at).toBeTruthy();
+  });
+
+  test('an AGED-OUT extraction_failed row is settled, not deferred forever (codex P1)', async () => {
+    // callReprocessInFlight needs created_at: without the column a missing
+    // timestamp reads as inside the 7-day window, so the marker was
+    // restored on every sweep and the estimate stayed blocked for good.
+    const writes = [];
+    const { row, data } = rowAndData();
+    const agedOut = {
+      ...SETTLED(6),
+      processing_status: 'extraction_failed',
+      extraction_attempts: 0,
+      created_at: new Date(Date.now() - (30 * 24 * 60 * 60 * 1000)).toISOString(),
+    };
+    const out = await completePendingInvalidation(trxFor(agedOut, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.deferred).toBeUndefined();
+    expect(out.obsolete).toBe(true);
+  });
+
+  test('a RECENT extraction_failed row with attempts left still defers', async () => {
+    const writes = [];
+    const { row, data } = rowAndData();
+    const retrying = {
+      ...SETTLED(6),
+      processing_status: 'extraction_failed',
+      extraction_attempts: 0,
+      created_at: new Date().toISOString(),
+    };
+    const out = await completePendingInvalidation(trxFor(retrying, writes), 'est-1', {
+      row, data, pending: FORCED_PENDING(5),
+    });
+    expect(out.deferred).toBe(true);
+  });
+
+  test('the locked verdict read selects created_at (source pin)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/admin-estimate-persistence.js'), 'utf8');
+    const fnAt = source.indexOf('async function completePendingInvalidation');
+    const selAt = source.indexOf("'extraction_attempts', 'created_at', 'metadata'", fnAt);
+    expect(selAt).toBeGreaterThan(fnAt);
+  });
+
+  test('the reconcile generation lookup has NO catch — failures reach the outer catch (source pin)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const entryAt = source.indexOf('async function reconcileDraftLinksForCall');
+    const lookupAt = source.indexOf('const observedRow = await db(\'call_log\')', entryAt);
+    expect(lookupAt).toBeGreaterThan(entryAt);
+    const genAt = source.indexOf('const observedGeneration = observedRow', lookupAt);
+    expect(genAt).toBeGreaterThan(lookupAt);
+    // No swallowing catch between the lookup and the derived value.
+    expect(source.slice(lookupAt, genAt)).not.toMatch(/catch/);
+  });
+
   test('takePendingInvalidation carries the generation and strips its key', () => {
     const data = {
       estimatorEngine: {

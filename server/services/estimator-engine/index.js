@@ -1943,10 +1943,18 @@ async function reconcileDraftLinksForCall(callLogId) {
     // identity quarantine below must be fenced to it, or a stale
     // reconcile-only pass whose call was since reclaimed and re-qualified
     // would archive the newer pass's valid replacement drafts.
-    const observedGeneration = await db('call_log').where({ id: callLogId })
-      .first('processing_generation')
-      .then((r) => (r?.processing_generation != null ? Number(r.processing_generation) : null))
-      .catch(() => null);
+    // NO catch here (codex P1, GH round on 796026122): swallowing a
+    // transient SELECT failure into `null` dropped the fence entirely, and
+    // an UNFENCED replay is exactly the race this lookup exists to close —
+    // a force-reprocess could claim and re-qualify the call after the
+    // stale context was read, and this pass would stamp the obsolete
+    // conflict over the newer pass's valid drafts. The failure reaches the
+    // outer catch instead, whose 'error' keeps the durable reconcile
+    // marker for a properly fenced retry. A MISSING row still yields null
+    // (the legacy, generation-less shape), which is absence, not failure.
+    const observedRow = await db('call_log').where({ id: callLogId }).first('processing_generation');
+    const observedGeneration = observedRow?.processing_generation != null
+      ? Number(observedRow.processing_generation) : null;
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
