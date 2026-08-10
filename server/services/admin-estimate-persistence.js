@@ -1820,6 +1820,11 @@ async function resolveEstimateWritePayload({
             ? { streetScope: perPropertyStreetScope }
             : { excludeExistingRows: true })
           : {}),
+        // This lane resolves property scope (the branches above mirror the
+        // priors pricing), so it may freeze an existing-service extension
+        // plan. Agent lanes (IB estimate tools, estimator engine) pass no
+        // scope and deliberately stay plan-less (codex #3338 r7).
+        freezeExtensionPlan: true,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;

@@ -29,11 +29,21 @@ function fakeDb({
   invoiceQueryThrows = false,
   addonRows = [],
   addonQueryThrows = false,
+  mintedInvoiceLinks = [],
+  mintedProbeThrows = false,
 } = {}) {
   const db = (table) => {
+    // Per-call state: the extension's minted-invoice probe is the only
+    // invoices query keyed by scheduled_service_id — the last-paid lookup
+    // keys by customer/service_type and must keep returning paidInvoices.
+    let probesServiceIds = false;
     const builder = {
       where: () => builder,
-      whereIn: () => builder,
+      whereIn: (col) => {
+        if (col === 'scheduled_service_id') probesServiceIds = true;
+        return builder;
+      },
+      whereNot: () => builder,
       whereNotIn: () => builder,
       whereNotNull: () => builder,
       andWhere: () => builder,
@@ -56,6 +66,10 @@ function fakeDb({
       select: async () => {
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
+          if (probesServiceIds) {
+            if (mintedProbeThrows) throw new Error('relation does not exist');
+            return mintedInvoiceLinks.map((id) => ({ scheduled_service_id: id }));
+          }
           if (invoiceQueryThrows) throw new Error('relation does not exist');
           return paidInvoices;
         }
@@ -421,6 +435,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -454,6 +469,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: {
         lineItems: [{
           service: 'tree_shrub',
@@ -485,6 +501,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: { lineItems: [{ service: 'lawn_care', annualAfterDiscount: 840, monthlyAfterDiscount: 70, recurring: true, frequency: 6 }] },
     });
 
@@ -517,6 +534,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -537,6 +555,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -552,6 +571,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -564,6 +584,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -575,6 +596,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -590,6 +612,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -612,6 +635,7 @@ describe('computeMembershipContext', () => {
     // uniform smear advertised 12% on BOTH lines.
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: {
         result: {
           results: { lawn: [{ v: 12, recommended: true }], ts: [{ v: 6, selected: true }] },
@@ -659,6 +683,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -683,6 +708,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -707,6 +733,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -729,6 +756,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -793,6 +821,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -815,6 +844,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
@@ -830,6 +860,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     // Basis is the ROW scheduled price (120), NOT the last-paid invoice
@@ -863,6 +894,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     // Basis is the PAID allocation (100), never the list row price (120):
@@ -893,7 +925,7 @@ describe('existing-service tier extension snapshot', () => {
       ],
       paidInvoices: [],
     });
-    const mixedCtx = await computeMembershipContext(mixed, { customerId: 'cust-1', estData: lawnEstimateData() });
+    const mixedCtx = await computeMembershipContext(mixed, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(mixedCtx.existingServices).toEqual([]);
     const uneven = fakeDb({
       scheduledRows: [
@@ -906,7 +938,7 @@ describe('existing-service tier extension snapshot', () => {
       ],
       paidInvoices: [],
     });
-    const unevenCtx = await computeMembershipContext(uneven, { customerId: 'cust-1', estData: lawnEstimateData() });
+    const unevenCtx = await computeMembershipContext(uneven, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(unevenCtx.existingServices).toEqual([]);
   });
 
@@ -917,7 +949,7 @@ describe('existing-service tier extension snapshot', () => {
       paidInvoices: [],
       addonRows: [{ scheduled_service_id: 's2' }],
     });
-    const ctx = await computeMembershipContext(withAddon, { customerId: 'cust-1', estData: lawnEstimateData() });
+    const ctx = await computeMembershipContext(withAddon, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     // s2 nets primary + add-ons into one estimated_price — discounting it
     // would discount the non-qualifying add-ons too (codex #3338 r24). The
     // clean siblings still freeze.
@@ -931,10 +963,54 @@ describe('existing-service tier extension snapshot', () => {
       paidInvoices: [],
       addonQueryThrows: true,
     });
-    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', estData: lawnEstimateData() });
+    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     // FAIL CLOSED: cannot verify add-ons → the family stays on the
     // review-bell path rather than advertising a visit the apply may park.
     expect(parked.existingServices).toEqual([]);
+  });
+
+  test('gate on: a visit with a pre-minted invoice is excluded from the frozen plan (accept would park it)', async () => {
+    mockExtendExistingGate = true;
+    // Charge Now / pre-completion mints exist at save time and are
+    // knowable — the card must not promise a visit the apply parks
+    // (codex #3338 r7).
+    const withMint = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      mintedInvoiceLinks: ['s1'],
+    });
+    const ctx = await computeMembershipContext(withMint, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(ctx.existingServices[0]).toMatchObject({
+      rowIds: ['s2', 's3'],
+      upcomingVisitDates: ['2099-04-05', '2099-07-05'],
+      remainingVisits: 2,
+    });
+    const probeDown = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      mintedProbeThrows: true,
+    });
+    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(parked.existingServices).toEqual([]);
+  });
+
+  test('no property-scope opt-in (agent lanes): gate on still freezes NO extension plan', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    // IB estimate tools and the estimator engine pass no property scope —
+    // a secondary-property agent estimate must never freeze (or later
+    // reprice) another property's visits (codex #3338 r7). Tier/upgrade
+    // context stays intact; only the frozen plan is withheld.
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
   });
 
   test('gate on: a family this estimate re-quotes is never listed as an extension too', async () => {
@@ -959,7 +1035,7 @@ describe('existing-service tier extension snapshot', () => {
         },
       },
     };
-    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', estData });
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', freezeExtensionPlan: true, estData });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx.discountAppliesTo).toBe('new_services_only');
   });
@@ -986,7 +1062,7 @@ describe('existing-service tier extension snapshot', () => {
         },
       },
     };
-    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', estData });
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', freezeExtensionPlan: true, estData });
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx.discountAppliesTo).toBe('new_services_only');
@@ -1004,6 +1080,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
@@ -1021,6 +1098,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     // The accept-time reprice excludes callbacks, so the displayed list
@@ -1036,6 +1114,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     expect(snapshot.existingServices).toHaveLength(1);
@@ -1108,6 +1187,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
       excludeExistingRows: true,
     });
@@ -1125,6 +1205,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
       // Unstamped rows resolve via the customer's primary street; an empty
       // primary street can never match the quoted street, so every account
@@ -1150,6 +1231,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     expect(ctx.existingServices[0]).toMatchObject({
@@ -1174,6 +1256,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     expect(ctx.upgrade).toBeNull();
@@ -1188,6 +1271,7 @@ describe('existing-service tier extension snapshot', () => {
     });
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
     const view = publicMembershipView(snapshot);

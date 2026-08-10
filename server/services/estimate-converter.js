@@ -669,9 +669,53 @@ async function applyFrozenExistingServiceExtension({
     return true;
   });
 
+  // At-most-once per family (codex #3338 r7 dedup): a SECOND tier-raising
+  // estimate saved before the first was accepted freezes the same
+  // Bronze-origin plan, and accepting both must not reprice or credit the
+  // same applications twice. Row reprices self-park on the second pass (the
+  // frozen-price check no longer matches the already-lowered price) but the
+  // prepaid credit has no natural guard — prepaid_amount is untouched by
+  // design. The applied-extension audit row commits atomically with the
+  // writes, so it is the reliable at-most-once marker: any prior applied
+  // extension covering a family parks that family for owner review instead
+  // of re-applying. FAIL CLOSED: if the audit probe cannot run, every
+  // family parks.
+  let previouslyExtended = new Map();
+  try {
+    const priorAudits = await database('activity_log')
+      .where({ customer_id: customerId, action: 'waveguard_tier_extension_applied' })
+      .select('metadata');
+    for (const auditRow of priorAudits) {
+      let meta;
+      try {
+        meta = typeof auditRow.metadata === 'string' ? JSON.parse(auditRow.metadata) : auditRow.metadata;
+      } catch { meta = null; }
+      if (!meta || String(meta.estimateId) === String(estimateId)) continue;
+      for (const key of (Array.isArray(meta.families) ? meta.families : [])) {
+        if (!previouslyExtended.has(key)) previouslyExtended.set(key, meta.estimateId);
+      }
+    }
+  } catch (probeErr) {
+    logger.warn(`[estimate-converter] prior-extension audit probe failed — parking the plan: ${probeErr.message}`);
+    previouslyExtended = null;
+  }
+
   let creditTotal = 0;
   const creditTermIds = new Set();
   for (const svc of plan) {
+    if (previouslyExtended === null) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify prior extensions — apply manually)`);
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
+    const priorExtensionEstimate = svc.keys.map((key) => previouslyExtended.get(key)).find(Boolean);
+    if (priorExtensionEstimate) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (already extended via estimate #${priorExtensionEstimate} — verify before applying again)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
     // ID-pinned apply (codex #3338 r10): only the appointments frozen at
     // save time — a same-family visit created between save and accept was
     // never shown on the card and must not be repriced or credited. Ids
@@ -687,6 +731,21 @@ async function applyFrozenExistingServiceExtension({
     if (!familyRows.length) {
       summary.skippedFamilies.push(svc.label || svc.key);
       continue;
+    }
+    // A frozen appointment missing from the live set (cancelled, moved into
+    // the past, reclassified) was advertised on the card but will not be
+    // honored — the family is PARTIAL and must not project as fully covered
+    // (codex #3338 r7, sibling of r26: an all-missing family skips above and
+    // never enters `families`, but a partially-missing one would otherwise
+    // ride its applied sibling into appliedFamilies). Matched siblings
+    // still apply.
+    const matchedFrozenIds = new Set(familyRows.map((row) => String(row.id)));
+    const missingFrozenRows = frozenRowIds.filter((id) => !matchedFrozenIds.has(id)).length;
+    if (missingFrozenRows > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${missingFrozenRows} frozen visit${missingFrozenRows === 1 ? '' : 's'} no longer eligible — verify manually)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
     }
     // Composite visits and pre-minted invoices park (codex #3338 r24+r25):
     // a row with scheduled_service_addons nets the primary + add-ons into
@@ -728,6 +787,7 @@ async function applyFrozenExistingServiceExtension({
     const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
     let repriced = 0;
     let driftRows = 0;
+    const repricedApplied = [];
     for (const row of repriceRows) {
       const price = Number(row.estimated_price);
       // Unpriced = NULL stays NULL (billing invariant 8) — but a FROZEN row
@@ -766,6 +826,47 @@ async function applyFrozenExistingServiceExtension({
         continue;
       }
       repriced += 1;
+      repricedApplied.push(row);
+    }
+    // Mint race (codex #3338 r7): Charge Now reads the visit without a row
+    // lock, so an invoice built from the OLD price can commit between the
+    // probe above and the row updates. Re-probe after the writes and REVERT
+    // any repriced row whose invoice appeared mid-apply — the recap must
+    // not read a visit as repriced while its collectible invoice carries
+    // the old amount. The residual window (a mint committing after this
+    // re-probe) closes only when the mint path itself serializes on the
+    // row — named pre-enable fast-follow. FAIL CLOSED: a failed re-probe
+    // reverts every row this family repriced.
+    if (repricedApplied.length > 0) {
+      let lateMintedIds = null;
+      try {
+        const lateRows = await database('invoices')
+          .whereIn('scheduled_service_id', repricedApplied.map((row) => row.id))
+          .whereNot('status', 'void').select('scheduled_service_id');
+        lateMintedIds = new Set(lateRows.map((row) => String(row.scheduled_service_id)));
+      } catch (probeErr) {
+        logger.warn(`[estimate-converter] post-apply invoice re-probe failed — reverting ${svc.label || svc.key}: ${probeErr.message}`);
+      }
+      const revertRows = lateMintedIds === null
+        ? repricedApplied
+        : repricedApplied.filter((row) => lateMintedIds.has(String(row.id)));
+      if (revertRows.length > 0) {
+        for (const row of revertRows) {
+          const reverted = await database('scheduled_services')
+            .where({ id: row.id, estimated_price: Number(svc.newPerVisit) })
+            .update({ estimated_price: row.estimated_price });
+          if (!reverted) {
+            // Our own in-transaction write is gone — nothing sane can
+            // continue; the caller's catch parks the whole extension.
+            throw new Error(`extension revert failed for scheduled service ${row.id}`);
+          }
+          repriced -= 1;
+        }
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${revertRows.length} visit${revertRows.length === 1 ? '' : 's'} invoiced during apply — reverted, adjust manually)`,
+        );
+        summary.dirtyFamilies.push(svc.key);
+      }
     }
     if (driftRows > 0) {
       summary.reviewFamilies.push(
@@ -802,8 +903,38 @@ async function applyFrozenExistingServiceExtension({
       let creditedRows = 0;
       let allocationGaps = 0;
       let allocationDrift = 0;
+      // The allocations are RE-READ under FOR UPDATE inside this
+      // transaction (codex #3338 r7): annual-prepay cancellation, refund,
+      // and window edits mutate prepaid_amount, and a credit computed from
+      // the earlier unlocked read could pay applications that are no longer
+      // prepaid. The row lock makes those writers wait until this accept
+      // commits; a row whose term or allocation no longer matches the
+      // frozen basis parks. FAIL CLOSED: if the locked read cannot run, the
+      // family parks uncredited.
+      let lockedById;
+      try {
+        const lockedRows = await database('scheduled_services')
+          .whereIn('id', prepaidRows.map((row) => row.id))
+          .forUpdate()
+          .select('id', 'prepaid_amount', 'annual_prepay_term_id');
+        lockedById = new Map(lockedRows.map((row) => [String(row.id), row]));
+      } catch (lockErr) {
+        logger.warn(`[estimate-converter] prepaid allocation lock failed — parking ${svc.label || svc.key}: ${lockErr.message}`);
+        summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify paid allocations — credit manually)`);
+        summary.dirtyFamilies.push(svc.key);
+        lockedById = null;
+      }
+      if (lockedById === null) continue;
       for (const row of prepaidRows) {
-        const allocation = Number(row.prepaid_amount);
+        const locked = lockedById.get(String(row.id));
+        if (!locked || !locked.annual_prepay_term_id) {
+          // Row vanished or its prepay term was cleared since the read —
+          // no longer a prepaid application; the frozen figure no longer
+          // describes it.
+          allocationDrift += 1;
+          continue;
+        }
+        const allocation = Number(locked.prepaid_amount);
         if (!(frozenSavings > 0) || !(allocation > 0)) {
           allocationGaps += 1;
           continue;
@@ -819,7 +950,7 @@ async function applyFrozenExistingServiceExtension({
         // so the ledger note must name the term(s) this credit rode on —
         // the manual refund review subtracts it from there. Automated
         // integration with the refund reversal is a named fast-follow.
-        if (row.annual_prepay_term_id) creditTermIds.add(String(row.annual_prepay_term_id));
+        creditTermIds.add(String(locked.annual_prepay_term_id));
       }
       if (allocationGaps > 0) {
         summary.reviewFamilies.push(

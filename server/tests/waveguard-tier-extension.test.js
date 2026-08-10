@@ -37,27 +37,58 @@ const { applyFrozenExistingServiceExtension } = require('../services/estimate-co
 
 function fakeTrx({
   concurrentPrices = {}, addonLinks = [], invoiceLinks = [], probeThrows = false,
+  invoiceLinksLateMint = [], concurrentPrepaid = {}, lockThrows = false,
+  priorExtensionAudits = [], auditProbeThrows = false,
 } = {}) {
   const updates = [];
   const auditRows = [];
+  // Prices this transaction already wrote — the frozen-price and revert
+  // predicates must see our own writes, the way pg does inside one txn.
+  const writtenPrices = {};
+  let invoiceProbeCalls = 0;
   const database = (table) => {
     if (table === 'scheduled_services') {
       return {
         where: (criteria) => ({
           update: async (patch) => {
             // Honor the frozen-price predicate the way pg would: the live
-            // price is the mocked row's — or a concurrent override, for the
-            // read-to-write race tests (codex #3338 r14).
-            const live = Object.prototype.hasOwnProperty.call(concurrentPrices, String(criteria.id))
-              ? concurrentPrices[String(criteria.id)]
-              : mockRowsState.rows.find((r) => String(r.id) === String(criteria.id))?.estimated_price;
+            // price is our own prior write, else the mocked row's — or a
+            // concurrent override, for the read-to-write race tests (codex
+            // #3338 r14).
+            const id = String(criteria.id);
+            const live = Object.prototype.hasOwnProperty.call(writtenPrices, id)
+              ? writtenPrices[id]
+              : (Object.prototype.hasOwnProperty.call(concurrentPrices, id)
+                ? concurrentPrices[id]
+                : mockRowsState.rows.find((r) => String(r.id) === id)?.estimated_price);
             if (criteria.estimated_price !== undefined
               && Number(live) !== Number(criteria.estimated_price)) {
               return 0;
             }
+            writtenPrices[id] = patch.estimated_price;
             updates.push({ id: criteria.id, ...patch });
             return 1;
           },
+        }),
+        // Locked allocation re-read (codex #3338 r7): concurrentPrepaid
+        // overrides simulate an annual-prepay writer racing the accept —
+        // a partial object patches the row, null means it vanished.
+        whereIn: (col, ids) => ({
+          forUpdate: () => ({
+            select: async () => {
+              if (lockThrows) throw new Error('lock timeout');
+              return ids.map((id) => {
+                const key = String(id);
+                const base = mockRowsState.rows.find((r) => String(r.id) === key);
+                if (!base) return null;
+                if (Object.prototype.hasOwnProperty.call(concurrentPrepaid, key)) {
+                  const override = concurrentPrepaid[key];
+                  return override === null ? null : { ...base, ...override };
+                }
+                return base;
+              }).filter(Boolean);
+            },
+          }),
         }),
       };
     }
@@ -74,18 +105,36 @@ function fakeTrx({
     }
     if (table === 'invoices') {
       return {
-        whereIn: () => ({
+        whereIn: (col, ids) => ({
           whereNot: () => ({
             select: async () => {
               if (probeThrows) throw new Error('relation does not exist');
-              return invoiceLinks.map((id) => ({ scheduled_service_id: id }));
+              // The mint-race tests add invoiceLinksLateMint from the
+              // second probe on — the pre-probe misses them, the
+              // post-write re-probe sees them (codex #3338 r7).
+              invoiceProbeCalls += 1;
+              const links = invoiceProbeCalls === 1
+                ? invoiceLinks
+                : [...invoiceLinks, ...invoiceLinksLateMint];
+              const queried = ids.map(String);
+              return links.filter((id) => queried.includes(String(id)))
+                .map((id) => ({ scheduled_service_id: id }));
             },
           }),
         }),
       };
     }
     if (table === 'activity_log') {
-      return { insert: async (row) => { auditRows.push(row); return [1]; } };
+      return {
+        insert: async (row) => { auditRows.push(row); return [1]; },
+        // Prior-extension at-most-once probe (codex #3338 r7 dedup).
+        where: () => ({
+          select: async () => {
+            if (auditProbeThrows) throw new Error('relation does not exist');
+            return priorExtensionAudits;
+          },
+        }),
+      };
     }
     throw new Error(`unexpected table ${table}`);
   };
@@ -465,5 +514,150 @@ describe('applyFrozenExistingServiceExtension', () => {
       'tree_shrub',
       'Pest Control (monthly-billed — adjust the monthly rate manually)',
     ]);
+  });
+
+  test('a family already extended by a prior accept parks — never a second credit for the same applications', async () => {
+    // Two tier-raising estimates saved while Bronze; the first accept
+    // credited the prepaid pest term. The second accept must park, not
+    // re-credit the same applications (codex #3338 r7 dedup).
+    const { database, updates } = fakeTrx({
+      priorExtensionAudits: [{ metadata: JSON.stringify({ estimateId: 'e0', families: ['pest_control'] }) }],
+    });
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(false);
+    expect(summary.creditAmount).toBe(0);
+    expect(updates).toEqual([]);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (already extended via estimate #e0 — verify before applying again)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+    // An audit row from THIS estimate is not a prior extension — the
+    // exclusion keeps re-entrant shapes from self-parking.
+    const { database: ownDb, updates: ownUpdates } = fakeTrx({
+      priorExtensionAudits: [{ metadata: JSON.stringify({ estimateId: 'e1', families: ['pest_control'] }) }],
+    });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const ownSummary = await applyFrozenExistingServiceExtension({
+      database: ownDb, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(ownSummary.applied).toBe(true);
+    expect(ownUpdates).toEqual([{ id: 'row-1', estimated_price: 49.5 }]);
+  });
+
+  test('audit probe failure parks every family — at-most-once cannot be verified', async () => {
+    const { database, updates } = fakeTrx({ auditProbeThrows: true });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(false);
+    expect(updates).toEqual([]);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (could not verify prior extensions — apply manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('a frozen visit missing from the live set dirties the family; the matched sibling still applies', async () => {
+    const { database, updates } = fakeTrx();
+    // row-2 was cancelled after the estimate was saved — the card
+    // advertised it, the apply cannot honor it (codex #3338 r7, r26
+    // sibling): partial family, must not project as fully covered.
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([{ id: 'row-1', estimated_price: 49.5 }]);
+    expect(summary.applied).toBe(true);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 frozen visit no longer eligible — verify manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('an invoice minted during the apply reverts that visit and parks it (mint race)', async () => {
+    const { database, updates } = fakeTrx({ invoiceLinksLateMint: ['row-1'] });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1' }),
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    // Both reprice; the post-write re-probe catches row-1's mid-apply
+    // invoice and reverts exactly that row (codex #3338 r7 mint race).
+    expect(updates).toEqual([
+      { id: 'row-1', estimated_price: 49.5 },
+      { id: 'row-2', estimated_price: 49.5 },
+      { id: 'row-1', estimated_price: 55 },
+    ]);
+    expect(summary.repricedRowCount).toBe(1);
+    expect(summary.applied).toBe(true);
+    expect(summary.familyLines).toEqual(['Pest Control $55.00 → $49.50/application (1 upcoming)']);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit invoiced during apply — reverted, adjust manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('a prepaid allocation changed between read and credit parks (locked re-read)', async () => {
+    const { database } = fakeTrx({ concurrentPrepaid: { 'pre-1': { prepaid_amount: 30 } } });
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(summary.creditAmount).toBe(4.9);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 prepaid visit whose paid allocation changed since the estimate — credit manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+    // A term cleared (refund) or row deleted concurrently — same park,
+    // nothing credited.
+    mockPostCreditMovement.mockClear();
+    const { database: clearedDb } = fakeTrx({
+      concurrentPrepaid: { 'pre-1': { annual_prepay_term_id: null }, 'pre-2': null },
+    });
+    const cleared = await applyFrozenExistingServiceExtension({
+      database: clearedDb, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(cleared.applied).toBe(false);
+    expect(cleared.creditAmount).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(cleared.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  test('locked allocation read failure parks the family uncredited', async () => {
+    const { database } = fakeTrx({ lockThrows: true });
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData({ rowIds: ['pre-1'] }), activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(false);
+    expect(summary.creditAmount).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (could not verify paid allocations — credit manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
   });
 });

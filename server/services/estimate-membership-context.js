@@ -618,6 +618,15 @@ function appliedRateForService(estData, key, blendedRate, tierRate) {
 
 async function computeMembershipContext(database, {
   customerId, estData, streetScope = null, excludeExistingRows = false,
+  // Existing-service extension plans freeze ONLY for callers that resolved
+  // property scope (codex #3338 r7 agent-scope): admin-estimate-persistence
+  // prices priors and threads the per-property street scope, so it opts in;
+  // the IB / estimator-engine agent lanes pass no scope, and a
+  // secondary-property agent estimate must not freeze (or later reprice)
+  // another property's visits. FAIL CLOSED: a future call site that forgets
+  // this flag gets tier/upgrade/new-service context but no frozen plan —
+  // the review-bell fallback, never a wrong-property write.
+  freezeExtensionPlan = false,
 } = {}) {
   try {
     if (!customerId) return null;
@@ -712,7 +721,8 @@ async function computeMembershipContext(database, {
       const { customerPreservesMonthlyMembership } = require('./billing-cadence');
       return customerPreservesMonthlyMembership(customer);
     })();
-    if (upgraded && oldTier.discount === 0 && !monthlyLaneMember && isEnabled('waveguardExtendExisting')) {
+    if (upgraded && oldTier.discount === 0 && !monthlyLaneMember
+      && freezeExtensionPlan === true && isEnabled('waveguardExtendExisting')) {
       const { etDateString } = require('../utils/datetime-et');
       const today = etDateString();
       // The plan is built from the CATALOG-AUTHORITATIVE enriched qualifying
@@ -744,20 +754,34 @@ async function computeMembershipContext(database, {
         if (!eligibleRows.length) continue;
         const distinctAddresses = new Set(eligibleRows.map((row) => row.effective_service_address).filter(Boolean));
         if (distinctAddresses.size > 1) continue;
-        // Composite visits park at SNAPSHOT time too (codex #3338 r24):
-        // a row with scheduled_service_addons nets primary + add-ons into
-        // one estimated_price — discounting that figure would discount the
-        // non-qualifying add-ons. Accept re-probes as the belt; excluding
-        // here keeps the card from listing an appointment the apply will
-        // park. FAIL CLOSED: probe failure parks the whole family.
+        // Composite visits AND pre-minted invoices park at SNAPSHOT time
+        // too (codex #3338 r24 + r7 sibling): a row with
+        // scheduled_service_addons nets primary + add-ons into one
+        // estimated_price — discounting that figure would discount the
+        // non-qualifying add-ons — and a visit whose invoice is already
+        // minted (Charge Now / pre-completion mint) keeps billing the old
+        // amount after a row-only reprice, so the accept parks it. Accept
+        // re-probes both as the belt; excluding here keeps the card from
+        // listing an appointment the apply will park. FAIL CLOSED: probe
+        // failure parks the whole family.
         let compositeIds;
         try {
-          const addonRows = await database('scheduled_service_addons')
-            .whereIn('scheduled_service_id', eligibleRows.map((row) => row.id))
-            .select('scheduled_service_id');
-          compositeIds = new Set(addonRows.map((row) => String(row.scheduled_service_id)));
+          const rowIds = eligibleRows.map((row) => row.id);
+          const [addonRows, mintedRows] = await Promise.all([
+            database('scheduled_service_addons')
+              .whereIn('scheduled_service_id', rowIds)
+              .select('scheduled_service_id'),
+            database('invoices')
+              .whereIn('scheduled_service_id', rowIds)
+              .whereNot('status', 'void')
+              .select('scheduled_service_id'),
+          ]);
+          compositeIds = new Set([
+            ...addonRows.map((row) => String(row.scheduled_service_id)),
+            ...mintedRows.map((row) => String(row.scheduled_service_id)),
+          ]);
         } catch (probeErr) {
-          logger.warn(`[membership-context] extension addon probe failed — family ${familyKey} left to the review path: ${probeErr.message}`);
+          logger.warn(`[membership-context] extension addon/invoice probe failed — family ${familyKey} left to the review path: ${probeErr.message}`);
           continue;
         }
         const simpleRows = eligibleRows.filter((row) => !compositeIds.has(String(row.id)));
