@@ -641,12 +641,18 @@ describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock
 });
 
 describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + pre-push P0 r19)', () => {
-  test('retireCallAttributionRow moves the row to the newest settled successor — history intact, no delete', async () => {
+  test('retireCallAttributionRow moves the row to the newest settled successor — history intact, dimensions refreshed', async () => {
     // With multiple calls reusing one lead, the row owner's rejection
     // deleted the lead's booked/completed history even though a later
     // valid call still supported it. The row now survives IN PLACE with
-    // every accumulated funnel field; only its evidence pointer moves.
-    firstByTable.call_log = { id: 'call-successor' };
+    // every accumulated funnel field; the evidence pointer moves and the
+    // attribution DIMENSIONS refresh from the successor's channel
+    // (pre-push P1 r19) — a cross-channel successor clears campaign_id
+    // so the bridge/backfill can re-supply it.
+    firstByTable.call_log = { id: 'call-successor', to_phone: '+19415551234', created_at: '2026-08-09T12:00:00Z' };
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+    firstByTable.ad_service_attribution = { lead_source: 'google_ads', campaign_id: 'camp-1' };
+    firstByTable.leads = { service_interest: 'Lawn Care' };
 
     const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
 
@@ -654,7 +660,51 @@ describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + p
     const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
       && u.row.source_call_id === 'call-successor');
     expect(reassigned).toBeTruthy();
+    expect(reassigned.row).toMatchObject({
+      lead_source: 'waves_website', // the successor's dialed number's channel
+      is_paid: false,
+      lead_source_detail: 'Sarasota city page',
+      campaign_id: null, // never the rejected call's stale campaign
+      service_line: 'lawn', // the lead's LIVE service interest
+    });
     expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a bridge-CONFIRMED successor refreshes to google_ads with its OWN campaign — never number-inferred organic (pre-push P1 r20)', async () => {
+    // The bridge's shared main-line number's lead_sources row is NOT
+    // google_ads — number-only inference would flip a confirmed-paid call
+    // to organic.
+    firstByTable.call_log = {
+      id: 'call-successor',
+      to_phone: '+19415550000', // the shared main line — must NOT drive the decision
+      created_at: '2026-08-09T12:00:00Z',
+      google_ads_call_resource_name: 'customers/1/callView/2',
+      metadata: { google_ads_call_bridge: { campaignId: '22594274874', campaignName: 'Brand Campaign' } },
+    };
+    firstByTable.ad_campaigns = { id: 'camp-local' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
+    expect(reassigned.row).toMatchObject({
+      lead_source: 'google_ads',
+      is_paid: true,
+      campaign_id: 'camp-local', // the successor's bridge-stamped campaign
+      lead_source_detail: 'Brand Campaign',
+    });
+  });
+
+  test('retireAllCallAttributionRows deletes NULL-lead rows directly — no String(null) UUID query (pre-push P1 r19)', async () => {
+    listQueueByTable.ad_service_attribution = [[{ lead_id: null }]];
+
+    const n = await CallAttribution.retireAllCallAttributionRows(mockDb, 'call-rejected');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
   });
 
   test('no settled successor → the row is deleted (the call supports no lead, nothing survives it)', async () => {

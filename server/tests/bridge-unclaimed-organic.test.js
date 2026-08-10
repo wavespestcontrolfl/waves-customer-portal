@@ -237,6 +237,20 @@ describe('scheduler wiring', () => {
     expect(lockedRead).toMatch(/COALESCE\(status,''\) NOT IN \('duplicate','disqualified','spam'\)/);
   });
 
+  test('successor discovery covers stamp, sid AND ownership-gated phone reuse (pre-push P0 r20)', () => {
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const fn = ca.split('async function findSettledSuccessorCall')[1].split('async function retireCallAttributionRow')[0];
+    // Phone arm: shared-number guard (another live lead on the number
+    // disables it), both call legs, dissent-yield, and the
+    // both-set-and-differ ownership gate.
+    expect(fn).toMatch(/RIGHT\(regexp_replace\(COALESCE\(phone, ''\)/); // shared-lead guard on leads.phone
+    expect(fn).toMatch(/from_phone/);
+    expect(fn).toMatch(/to_phone/);
+    expect(fn.match(/whereNot\(settledDissentingStamp\)/g).length).toBe(2); // sid + phone arms
+    expect(fn).toMatch(/whereNull\('customer_id'\)\.orWhere\('customer_id', lead\.customer_id\)/);
+    expect(fn).toMatch(/\.forUpdate\(\)/); // locked selection (P1 r19)
+  });
+
   test('selection excludes deleted and customer-less leads (codex P1+P2, PR #3303 r14)', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];

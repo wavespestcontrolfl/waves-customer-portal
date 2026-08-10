@@ -752,9 +752,17 @@ async function attributeUnclaimedBridgeLeads({
 // UNIQUE on source_call_id forbids a second. Errors PROPAGATE: this runs
 // inside the caller's fenced transaction, and swallowing a statement
 // error would let the caller commit-continue on an aborted transaction.
+const SUCCESSOR_COLS = ['id', 'to_phone', 'created_at', 'google_ads_call_resource_name', 'metadata'];
+
+// EVERY durable linkage mode (pre-push P0 r20): the stamp arm covers
+// phone-less reuse, but the processor equally supports stamp-less
+// phone/sid-linked reuse — a valid sid-linked successor whose attribution
+// was refused as 'other_call' must also be able to inherit, or the retire
+// deletes booked/completed history it should preserve. Stamp arm first
+// (the explicit link), then the lead's own sid, which YIELDS to a settled
+// dissenting stamp per repo precedence.
 async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
-  const successor = await dbc('call_log')
-    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+  const eligibility = (qb) => qb
     .whereNot('id', rejectedCallId)
     .whereNull('processing_token')
     .whereRaw("COALESCE(processing_status, '') IN ('processed', '')")
@@ -764,8 +772,73 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
         .whereRaw('ap.source_call_id = call_log.id');
     })
     .orderBy('created_at', 'desc')
+    // LOCKED selection (pre-push P1 r19): without FOR UPDATE a concurrent
+    // force-reprocess could reject and finalize the successor between
+    // this read and the reassignment — attaching the lead's
+    // booked/completed history to an already-rejected call permanently.
+    // Postgres re-evaluates the predicates against the locked row's
+    // current version, so a mid-flight or freshly-rejected successor
+    // drops out here; a later rejector serializes behind our lock (its
+    // own fenced clear takes this row FOR UPDATE) and retires/reassigns
+    // the row we move onto it. Sibling-call lock inversions are
+    // theoretically possible and PG-resolved into the retry lanes, like
+    // every other rare inversion in this file.
+    .forUpdate()
+    .first(...SUCCESSOR_COLS);
+  // Sid and phone arms both YIELD to a settled dissenting stamp (repo
+  // precedence — a repointed call is not this lead's successor).
+  const settledDissentingStamp = function settledDissentingStamp() {
+    this.whereRaw("metadata->>'lead_id' IS NOT NULL")
+      .whereRaw("metadata->>'lead_id' != ?", [String(leadId)])
+      .whereNull('processing_token')
+      .whereRaw("COALESCE(processing_status, '') = 'processed'");
+  };
+  const stamped = await eligibility(
+    dbc('call_log').whereRaw("metadata->>'lead_id' = ?", [String(leadId)]),
+  );
+  if (stamped) return stamped;
+  const lead = await dbc('leads').where({ id: leadId }).first('twilio_call_sid', 'phone', 'customer_id');
+  if (!lead) return null;
+  if (lead.twilio_call_sid) {
+    const sidLinked = await eligibility(
+      dbc('call_log')
+        .where('twilio_call_sid', lead.twilio_call_sid)
+        .whereNot(settledDissentingStamp),
+    );
+    if (sidLinked) return sidLinked;
+  }
+  // PHONE-linked reuse (pre-push P0 r20): findReusableCallLead lets a later
+  // call reuse a lead by PHONE — different sid, and no stamp when a phone
+  // is present — so a valid successor was invisible here and the retire
+  // deleted history it should preserve. Ownership-gated the same way the
+  // admin card and the sid join are: a SHARED number (another live lead
+  // owns it) disables the arm entirely — phone alone cannot prove the call
+  // is this lead's — and a call claimed by a DIFFERENT customer than the
+  // lead's owner is excluded (both-set-and-differ, mirroring
+  // sidJoinOwnerConflict; either side unowned is not a conflict).
+  const ten = String(lead.phone || '').replace(/\D/g, '').slice(-10);
+  if (ten.length !== 10) return null;
+  const sharedNumber = await dbc('leads')
+    .whereNull('deleted_at')
+    .whereNot('id', leadId)
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
     .first('id');
-  return successor?.id || null;
+  if (sharedNumber) return null;
+  return eligibility(
+    dbc('call_log')
+      .where(function phoneLegs() {
+        this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+          .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+      })
+      .whereNot(settledDissentingStamp)
+      .modify((qb) => {
+        if (lead.customer_id) {
+          qb.where(function ownershipGate() {
+            this.whereNull('customer_id').orWhere('customer_id', lead.customer_id);
+          });
+        }
+      }),
+  ) || null;
 }
 
 async function retireCallAttributionRow(dbc, callLogId, leadId) {
@@ -776,11 +849,80 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
   // invariant the transfer primitive exists for. The row survives in
   // place with its history; only its evidence pointer moves. Delete only
   // when no eligible successor exists.
-  const successorId = await findSettledSuccessorCall(dbc, leadId, callLogId);
-  if (successorId) {
+  const successor = await findSettledSuccessorCall(dbc, leadId, callLogId);
+  if (successor) {
+    // The attribution DIMENSIONS refresh from the successor's own DURABLE
+    // evidence (pre-push P1 r19/r20): the metrics are the lead's, but
+    // lead_source / is_paid / detail / dates / service described the
+    // definitively REJECTED call — a successor from another channel would
+    // leave paid/organic ROI wrong forever. Evidence precedence:
+    //   1. A bridge-CONFIRMED successor (google_ads_call_resource_name)
+    //      is a paid Google call regardless of the dialed number — the
+    //      shared main-line's lead_sources row is NOT google_ads, so a
+    //      number-only inference would flip a confirmed-paid call to
+    //      organic. Campaign resolves from the bridge stamp; NEVER the
+    //      rejected call's stale campaign.
+    //   2. A dialed number that resolves to a source and is NOT the
+    //      bridge target refreshes from that channel; campaign_id always
+    //      clears (the successor's campaign is not positively known —
+    //      the bridge/backfill re-supplies it).
+    //   3. Anything else (unclaimed bridge-target number, unresolvable
+    //      number) keeps the existing dimensions — provenance still
+    //      moves, and the bridge's own rescan owns that number's story.
+    // Service refreshes from the lead's LIVE service_interest through the
+    // shared inferers whenever dimensions refresh.
+    const patch = { source_call_id: successor.id, updated_at: new Date() };
+    let refreshed = false;
+    if (successor.google_ads_call_resource_name) {
+      const bridgeMd = (() => {
+        try {
+          const md = typeof successor.metadata === 'string' ? JSON.parse(successor.metadata) : (successor.metadata || {});
+          return md?.google_ads_call_bridge || {};
+        } catch { return {}; }
+      })();
+      patch.lead_source = 'google_ads';
+      patch.is_paid = true;
+      patch.campaign_id = await resolveCampaignId(bridgeMd.campaignId);
+      patch.lead_source_detail = bridgeMd.campaignName || 'inbound call';
+      refreshed = true;
+    } else {
+      const ten = String(successor.to_phone || '').replace(/\D/g, '').slice(-10);
+      const src = ten
+        ? await dbc('lead_sources')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(twilio_phone_number, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+          .where('is_active', true)
+          .first('source_type', 'name', 'twilio_phone_number')
+        : null;
+      const channel = src ? attributionForSourceType(src.source_type) : null;
+      const bridgeTarget = (() => {
+        // Lazy require — google-call-bridge lazily requires this module.
+        try {
+          return !!(src?.twilio_phone_number
+            && require('./google-call-bridge').isBridgeTargetNumber(src.twilio_phone_number));
+        } catch { return true; } // unresolvable safety: treat as bridge-owned, keep dimensions
+      })();
+      if (channel && !bridgeTarget) {
+        patch.lead_source = channel.leadSource;
+        patch.is_paid = channel.isPaid;
+        patch.lead_source_detail = src.name || 'inbound call';
+        patch.campaign_id = null;
+        refreshed = true;
+      }
+    }
+    if (refreshed) {
+      patch.lead_date = etDateString(successor.created_at ? new Date(successor.created_at) : new Date());
+      const lead = await dbc('leads').where({ id: leadId }).first('service_interest');
+      const { primaryServiceInterest } = require('../../utils/lead-service-interest');
+      const interest = lead?.service_interest ? primaryServiceInterest(lead.service_interest) : null;
+      if (interest) {
+        patch.service_line = inferServiceLine(interest);
+        patch.specific_service = inferSpecificService(interest);
+        patch.service_bucket = inferServiceBucket(interest);
+      }
+    }
     const moved = await dbc('ad_service_attribution')
       .where({ lead_id: leadId, source_call_id: callLogId })
-      .update({ source_call_id: successorId, updated_at: new Date() });
+      .update(patch);
     if (moved) return moved;
     // 0-row update: the row moved/vanished under us — fall through to the
     // (equally conditioned) delete, which will no-op the same way.
@@ -806,7 +948,17 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
     .where({ source_call_id: callLogId })
     .select('lead_id');
   let affected = 0;
-  for (const leadId of new Set(rows.map((r) => String(r.lead_id)))) {
+  // NULL lead_id rows (ON DELETE SET NULL) delete directly (pre-push P1
+  // r19): String(null) would query the UUID column with "null" and roll
+  // back the whole rejection finalization — and with no lead there is no
+  // successor to inherit anything.
+  if (rows.some((r) => r.lead_id == null)) {
+    affected += await dbc('ad_service_attribution')
+      .where({ source_call_id: callLogId })
+      .whereNull('lead_id')
+      .del();
+  }
+  for (const leadId of new Set(rows.filter((r) => r.lead_id != null).map((r) => String(r.lead_id)))) {
     affected += await retireCallAttributionRow(dbc, callLogId, leadId);
   }
   return affected;
