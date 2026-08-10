@@ -15,9 +15,15 @@ jest.mock('../services/sms-shadow-drafter', () => ({
 jest.mock('../services/sms-shadow-judge', () => ({
   judgeOne: jest.fn(),
 }));
+// Only the terminal stuck-tail rule's control probe reaches llm/call from
+// this module — mock it so no probe ever leaves the test process.
+jest.mock('../services/llm/call', () => ({
+  dispatch: jest.fn(),
+}));
 
 const drafter = require('../services/sms-shadow-drafter');
 const judge = require('../services/sms-shadow-judge');
+const llmCall = require('../services/llm/call');
 const sealedEval = require('../services/sms-sealed-eval');
 
 function makeRunnerDb({ runs = [], items = [], results = [], voiceProfiles = [], insertErrorCode = null } = {}) {
@@ -47,6 +53,7 @@ function makeRunnerDb({ runs = [], items = [], results = [], voiceProfiles = [],
       if (name === 'where' && typeof args[0] === 'string' && args.length === 2) b._kvWheres.push([args[0], args[1]]);
       if (name === 'whereNot') b._whereNots.push(args);
       if (name === 'count') b._count = true;
+      if (name === 'limit') b._limit = args[0];
       if (name === 'first') b._first = true;
       if (name === 'insert') b._insert = args[0];
       if (name === 'update') b._update = args[0];
@@ -98,7 +105,8 @@ function makeRunnerDb({ runs = [], items = [], results = [], voiceProfiles = [],
           }
           out = [];
         } else {
-          out = state.results.filter(matches);
+          const rows = state.results.filter(matches);
+          out = b._first ? rows[0] : rows;
         }
       } else if (tableKey === 'sms_sealed_eval_items') {
         const active = state.items.filter((i) => i.active !== false);
@@ -106,9 +114,15 @@ function makeRunnerDb({ runs = [], items = [], results = [], voiceProfiles = [],
           const pending = active.filter(
             (i) => !state.results.some((r) => r.item_id === i.id && r.run_id === state.lastLoadedRunId)
           );
-          out = b._count ? [{ count: String(pending.length) }] : pending;
+          // Counts see the FULL pending set; row fetches honor .limit —
+          // the runner pages by 25 while the terminal-rule cap check counts
+          // the whole tail, and that distinction is load-bearing.
+          out = b._count
+            ? [{ count: String(pending.length) }]
+            : (b._limit ? pending.slice(0, b._limit) : pending);
         } else {
-          out = b._count ? [{ count: String(active.length) }] : active;
+          const rows = active.filter(matches);
+          out = b._count ? [{ count: String(rows.length) }] : (b._first ? rows[0] : rows);
         }
       } else if (tableKey === 'voice_profiles') {
         const all = state.voiceProfiles.filter(matches);
@@ -158,6 +172,8 @@ beforeEach(() => {
   drafter.generateGroundedDraft.mockReset();
   judge.judgeOne.mockReset();
   drafter.resolveEffectiveVoiceProfile.mockClear(); // keep the default null impl, drop call history
+  // Control probe answers by default — outage-shaped probes are per-test.
+  llmCall.dispatch.mockReset().mockResolvedValue({ ok: true, text: 'OK' });
 });
 
 describe('createExamRun — guards and stamps', () => {
@@ -460,5 +476,311 @@ describe('runSealedExam — replay loop', () => {
     const dbi = makeRunnerDb({ runs, items: [item('i1')] });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', baselineRunId: 'r-good', dbi });
     expect(run.baseline_run_id).toBe('r-good');
+  });
+});
+
+describe('runSealedExam — terminal no-progress rule', () => {
+  const noProgressError = 'no progress in a full batch — aborting run';
+
+  test('a resume of a no-progress-failed run excludes the still-stuck tail as ungradable and COMPLETES', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i1'), item('i2')],
+      results: [{ run_id: 'r1', item_id: 'i1', verdict: 'equivalent', draft_response: 'Happy to check on that for you!', scores: JSON.stringify({ safety: 9, voice: 7, actions: 8, overall: 8 }) }],
+    });
+    // The stuck item keeps failing deterministically on this sitting too —
+    // while the judge control probe (re-judging i1) still parses.
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+
+    const sentinel = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i2');
+    expect(sentinel).toMatchObject({ verdict: 'ungradable' });
+    expect(sentinel.notes).toMatch(/terminal no-progress rule/);
+
+    // The sentinel holds the completion slot but is NOT judged: it shows in
+    // verdict_counts yet stays out of items_judged (the graduation gate's
+    // unsafeRate denominator).
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(complete).toBeTruthy();
+    expect(complete.patch.items_judged).toBe(1);
+    expect(JSON.parse(complete.patch.verdict_counts)).toMatchObject({ equivalent: 1, ungradable: 1 });
+  });
+
+  test('a resume of a run that failed for any OTHER reason does not arm the rule — it aborts again instead of excluding', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: 'run r1 is pinned to voice profile v3, which no longer exists', started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i2')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+
+    const out = await sealedExamExpectFailed(dbi);
+    expect(out.error).toMatch(/no progress/);
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+  });
+
+  test('a consecutive-failures abort ALSO arms the rule — a tail of exactly MAX_CONSECUTIVE_FAILURES items completes on the second sitting instead of looping forever', async () => {
+    // 5 stuck items behind one graded item: the first sitting can only die
+    // on the consecutive bail (it fires mid-batch, before the no-progress
+    // check can run), so the terminal rule must arm on that abort shape too.
+    // The graded item doubles as the judge control probe's material.
+    const stuck = ['s1', 's2', 's3', 's4', 's5'];
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: '5 consecutive item failures — anthropic leg unavailable?', started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i-graded'), ...stuck.map((id) => item(id))],
+      results: [{ run_id: 'r1', item_id: 'i-graded', verdict: 'equivalent', draft_response: 'Happy to check on that for you!', scores: null }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    for (const id of stuck) {
+      expect(dbi.state.results.find((r) => r.item_id === id)).toMatchObject({ verdict: 'ungradable' });
+    }
+  });
+
+  test('an ALL-stuck cohort has no judge-control material — it stays failed for manual diagnosis instead of completing on zero graded items', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i-stuck')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+
+    const out = await sealedExamExpectFailed(dbi);
+    expect(out.error).toMatch(/no progress/);
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+  });
+
+  test('a judge that no longer parses on previously-graded material blocks exclusion — a regressed judge is pipeline breakage, not item pathology', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i-graded'), item('i-stuck')],
+      results: [{ run_id: 'r1', item_id: 'i-graded', verdict: 'equivalent', draft_response: 'Happy to check on that for you!', scores: null }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+    judge.judgeOne.mockResolvedValue(null); // control re-judge is unparseable
+
+    const out = await sealedExamExpectFailed(dbi);
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+  });
+
+  test('a stuck prefix ahead of healthy items converges in two sittings — the deferred bail grades the healthy remainder, then the true tail is excluded', async () => {
+    // 5 stuck items sealed FIRST (they lead every batch), 3 healthy behind
+    // them. Without the deferred bail, the fifth consecutive failure aborts
+    // mid-batch every night and the healthy items are never even attempted.
+    const stuck = ['s1', 's2', 's3', 's4', 's5'];
+    const healthy = ['h1', 'h2', 'h3'];
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: '5 consecutive item failures — anthropic leg unavailable?', started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [...stuck.map((id) => item(id)), ...healthy.map((id) => item(id))],
+    });
+    drafter.generateGroundedDraft.mockImplementation(async ({ factsBlock }) => (
+      stuck.some((id) => factsBlock.includes(id))
+        ? { parsed: null, passes: 1, converged: false, model: null }
+        : goodDraft()
+    ));
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    // Sitting 1 (armed): grades the healthy remainder, then aborts on the
+    // true tail — real progress happened, so nothing is excluded yet.
+    const first = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(first.status).toBe('failed');
+    expect(first.processed).toBe(healthy.length);
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+
+    // Sitting 2 (armed again): pending is exactly the stuck tail — excluded,
+    // run completes.
+    const second = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(second.status).toBe('complete');
+    for (const id of stuck) {
+      expect(dbi.state.results.find((r) => r.item_id === id)).toMatchObject({ verdict: 'ungradable' });
+    }
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(complete.patch.items_judged).toBe(healthy.length);
+  });
+
+  test('a dead provider on the armed sitting keeps the abort — two zero-progress nights are NOT proof of item pathology without a live-provider probe', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i-stuck')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+    llmCall.dispatch.mockResolvedValue({ ok: false, reason: 'anthropic_529' });
+
+    const out = await sealedExamExpectFailed(dbi);
+    expect(out.error).toMatch(/no progress/);
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+    // The probe went to the run's own draft leg.
+    expect(llmCall.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'anthropic' }),
+      expect.objectContaining({ jsonMode: false }),
+    );
+  });
+
+  test('an ok-but-empty (or truncated) probe response is NOT provider health — that is the empty-output failure mode itself', async () => {
+    for (const probeResult of [
+      { ok: true, text: '   ' },
+      { ok: true, text: 'OK', response: { stop_reason: 'max_tokens' } },
+    ]) {
+      const dbi = makeRunnerDb({
+        runs: [{
+          id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+          baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+        }],
+        items: [item('i-stuck')],
+      });
+      drafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+      llmCall.dispatch.mockResolvedValue(probeResult);
+
+      const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+      expect(out.status).toBe('failed');
+      expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+    }
+  });
+
+  test('the cap is checked against the FULL pending tail — a cap at/above the page size cannot gut an outage cohort page by page', async () => {
+    const prevEnv = process.env.SEALED_EVAL_STUCK_EXCLUDE_MAX;
+    process.env.SEALED_EVAL_STUCK_EXCLUDE_MAX = '30';
+    try {
+      let se;
+      let isolatedDrafter;
+      // isolateModules (NOT resetModules): the module tree re-instantiates
+      // inside the sandbox so envNum re-reads the override, while the outer
+      // registry — and every top-level module reference the other tests
+      // hold — stays intact.
+      jest.isolateModules(() => {
+        se = require('../services/sms-sealed-eval');
+        isolatedDrafter = require('../services/sms-shadow-drafter');
+      });
+      isolatedDrafter.generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 1, converged: false, model: null });
+
+      // 31 pending stuck items: the first PAGE is 25 (≤ the misconfigured
+      // cap of 30) but the full tail is 31 (> cap) — exclusion must refuse.
+      const dbi = makeRunnerDb({
+        runs: [{
+          id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+          baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+        }],
+        items: Array.from({ length: 31 }, (_, i) => item(`s${i}`)),
+      });
+
+      const out = await se.runSealedExam({ runId: 'r1', dbi });
+      expect(out.status).toBe('failed');
+      expect(out.error).toMatch(/no progress/);
+      expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+    } finally {
+      if (prevEnv === undefined) delete process.env.SEALED_EVAL_STUCK_EXCLUDE_MAX;
+      else process.env.SEALED_EVAL_STUCK_EXCLUDE_MAX = prevEnv;
+    }
+  });
+
+  test('exclusion requires ZERO progress on the resume — a fresh tail failing after real progress aborts instead of being excluded on its first sitting', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: noProgressError, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i-fine'), item('i-stuck')],
+    });
+    // i-fine now drafts (the prior blocker cleared); i-stuck keeps failing.
+    drafter.generateGroundedDraft.mockImplementation(async ({ factsBlock }) => (
+      factsBlock.includes('i-fine')
+        ? goodDraft()
+        : { parsed: null, passes: 1, converged: false, model: null }
+    ));
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedExamExpectFailed(dbi);
+    expect(out.error).toMatch(/no progress/);
+    // The item that failed once on THIS sitting is left pending, not branded.
+    expect(dbi.state.results.some((r) => r.verdict === 'ungradable')).toBe(false);
+  });
+
+  test('ungradable sentinels are invisible to significance on BOTH sides of the pairing', () => {
+    const scores = JSON.stringify({ safety: 9, voice: 7, actions: 8, overall: 8 });
+    const out = sealedEval.computeSignificance({
+      candidateResults: [
+        { item_id: 'i1', verdict: 'equivalent', scores },
+        { item_id: 'i2', verdict: 'ungradable', scores: null }, // baseline had it unsafe — must NOT count as newly safe
+      ],
+      baselineResults: [
+        { item_id: 'i1', verdict: 'equivalent', scores },
+        { item_id: 'i2', verdict: 'draft_unsafe', scores },
+        { item_id: 'i3', verdict: 'ungradable', scores: null },
+      ],
+    });
+    expect(out.pairedItems).toBe(1);
+    expect(out.newlySafe).toBe(0);
+    expect(out.newlyUnsafe).toBe(0);
+  });
+
+  async function sealedExamExpectFailed(dbi) {
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    return out;
+  }
+});
+
+describe('evaluateExamGate — graded-coverage fail-closed', () => {
+  // Both live legs healthy unless a test overrides one — isolates the leg
+  // under test to a single expected blocker.
+  const healthyRun = {
+    unsafeRate: 0, itemsJudged: 41, itemsTotal: 41, significance: null,
+  };
+  const summaryWith = (anthropicRun) => async () => ({
+    currentVersion: 'house_voice_v9_test',
+    items: { active: 41 },
+    legs: { anthropic: anthropicRun, openai: { ...healthyRun } },
+  });
+
+  test('a completed run that graded ZERO items blocks — completion alone is not exam evidence', async () => {
+    // All-ungradable completion: unsafeRate is null, so without the coverage
+    // check the unsafe-rate cap silently never applies and the leg passes.
+    const blockers = await sealedEval.evaluateExamGate({
+      summaryFn: summaryWith({ unsafeRate: null, itemsJudged: 0, itemsTotal: 4, significance: null }),
+    });
+    expect(blockers).toEqual([expect.stringMatching(/anthropic.*only 0 of 4 items graded/)]);
+  });
+
+  test('a completed run graded under half its cohort blocks', async () => {
+    const blockers = await sealedEval.evaluateExamGate({
+      summaryFn: summaryWith({ unsafeRate: 0, itemsJudged: 20, itemsTotal: 41, significance: null }),
+    });
+    expect(blockers).toEqual([expect.stringMatching(/anthropic.*only 20 of 41 items graded/)]);
+  });
+
+  test('normal sentinel-tail coverage passes — the unsafe-rate cap still applies after it', async () => {
+    const clean = await sealedEval.evaluateExamGate({
+      summaryFn: summaryWith({ unsafeRate: 0, itemsJudged: 39, itemsTotal: 41, significance: null }),
+    });
+    expect(clean).toEqual([]);
+    const unsafe = await sealedEval.evaluateExamGate({
+      summaryFn: summaryWith({ unsafeRate: 0.5, itemsJudged: 39, itemsTotal: 41, significance: null }),
+    });
+    expect(unsafe).toEqual([expect.stringMatching(/anthropic.*unsafe rate/)]);
   });
 });

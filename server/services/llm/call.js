@@ -363,7 +363,17 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
       }
     }
     if (rejection) {
-      failures.push({ provider: route.provider, model: route.model, reason: String(rejection) });
+      // A response truncated at max_tokens is indistinguishable from
+      // malformed output by the time a validator rejects it ("unparseable"),
+      // which mislabels a budget problem as a model-quality problem in the
+      // dispatch digest. Anthropic responses carry stop_reason; tag it so the
+      // recorded failure reason says which one actually happened.
+      const truncated = result?.response?.stop_reason === 'max_tokens';
+      failures.push({
+        provider: route.provider,
+        model: route.model,
+        reason: truncated ? `${rejection} (response truncated at max_tokens=${payload.maxTokens ?? '?'})` : String(rejection),
+      });
       continue;
     }
 

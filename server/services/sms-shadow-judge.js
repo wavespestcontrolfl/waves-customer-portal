@@ -249,9 +249,21 @@ async function judgeOne(draft, humanReply) {
     }],
   });
 
-  const parsed = parseJudgeResponse(resp.content?.[0]?.text || '');
+  const rawText = resp.content?.[0]?.text || '';
+  const parsed = parseJudgeResponse(rawText);
   if (!parsed) {
-    logger.warn(`[shadow-judge] unparseable judge response for draft ${String(draft.id).slice(0, 8)}; skipping (retried next run)`);
+    // Judge calls bypass the dispatcher, so this warn is the ONLY evidence a
+    // failed verdict leaves. Say WHICH failure it was: a refusal or
+    // max_tokens truncation shows in stop_reason, an empty text block means
+    // the content shape was off, and json_shape distinguishes a truncated
+    // object from prose. STRUCTURAL metadata only — the response can echo
+    // customer message content, which must never reach logs. (2026-08: two
+    // sealed sittings churn-failed for days on "unparseable" alone —
+    // undiagnosable without this.)
+    const blocks = (resp.content || []).map((b) => b?.type || 'untyped').join(',') || 'none';
+    const trimmed = rawText.trim();
+    const jsonShape = `${trimmed.startsWith('{') ? 'starts-brace' : trimmed.includes('{') ? 'embedded-brace' : 'no-brace'}${trimmed.endsWith('}') ? '' : ',unterminated'}`;
+    logger.warn(`[shadow-judge] unparseable judge response for draft ${String(draft.id).slice(0, 8)} (stop_reason=${resp.stop_reason || 'unknown'} model=${resp.model || 'unknown'} blocks=${blocks} text_len=${rawText.length} json_shape=${jsonShape}); skipping (retried next run)`);
     return null;
   }
 
