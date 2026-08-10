@@ -6249,14 +6249,6 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
-    // Can the V2-based AV verdict answer a standing unit-number ask? True only
-    // where the address behind it is canonical or corroborated: enforce mode
-    // (V2 drives routing) or a shadow-bridge ADOPTION (the bridge's V1/V2
-    // same-location rule passed). A shadow-mode V2 verdict whose street V1
-    // disagrees with is deliberately NOT trusted — the bridge refuses to
-    // adopt it, and it must not clear cards or lead warnings either
-    // (pre-push audit P1 r4).
-    let v2AddressTrustedForUnitAsk = false;
     // In-run email-review signal: set the moment either bridge branch decides
     // the extracted email needs read-back, BEFORE any card insert — so a
     // failed triage insert cannot release the first-touch email hold below.
@@ -6479,9 +6471,6 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
           const addressValidation = effectiveAddressValidation;
-          // Enforce mode: V2 is the canonical extraction — its AV verdict
-          // needs no V1 corroboration to answer a unit ask.
-          v2AddressTrustedForUnitAsk = true;
           // Fail-open booking (GATE_CALL_FAIL_OPEN_BOOKING): a confirmed booking
           // isn't held over recoverable contact-field flags — the ANI satisfies
           // caller_phone_missing, an existing customer's on-file address clears
@@ -6813,10 +6802,6 @@ const CallRecordingProcessor = {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
         }
         if (normalizedAddress) {
-          // The bridge's V1/V2 same-location rule passed and the validated
-          // address is being adopted — corroborated enough to answer a
-          // standing unit ask.
-          v2AddressTrustedForUnitAsk = true;
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
           if (normalizedAddress.address_line1) extracted.address_line1 = normalizedAddress.address_line1;
