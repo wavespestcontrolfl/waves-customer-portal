@@ -166,6 +166,14 @@ async function saveMarksForPhoto({
 }) {
   if (!scheduledServiceId || !s3Key) return [];
   return knex.transaction(async (trx) => {
+    // Serialize concurrent whole-set replacements for this visit (codex P2).
+    // The transaction alone does NOT do it: under READ COMMITTED two savers
+    // can each delete a set neither can see (the initial empty set is the
+    // easy case), then both insert mark_number 1 — the unique index turns the
+    // loser into a 500 instead of the documented last-save-wins. A tech and
+    // the office, or one tech on two devices, is enough. Locking the parent
+    // row is the portable form: no raw SQL and no reliance on hashtext.
+    await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
     await trx('service_photo_marks')
       .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
       .del();

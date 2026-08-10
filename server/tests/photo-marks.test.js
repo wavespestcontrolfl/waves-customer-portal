@@ -579,3 +579,60 @@ describe('a foam trace re-keys its cached PDF (caller audit)', () => {
     expect(both).toBe(marks);
   });
 });
+
+describe('concurrent whole-set saves are serialized (codex P2 r11)', () => {
+  // Verified against real Postgres 16 before this guard was written: two
+  // savers racing the same photo each delete a set neither can see, then both
+  // insert mark_number 1 — the loser dies on
+  // service_photo_marks_..._mark_number_uni and the route returns 500 instead
+  // of the documented last-save-wins. The row lock made it 0 failures / 1
+  // surviving row. Jest has no database, so this asserts the ORDER that fix
+  // depends on: the lock must be taken BEFORE the delete, or it serializes
+  // nothing.
+  const { saveMarksForPhoto } = require('../services/service-report/photo-marks');
+
+  const fakeKnex = (calls) => {
+    const trx = (table) => {
+      const chain = {
+        where: () => chain,
+        forUpdate: () => { calls.push(`forUpdate:${table}`); return chain; },
+        first: async () => { calls.push(`first:${table}`); return { id: 'ss-1' }; },
+        del: async () => { calls.push(`del:${table}`); return 1; },
+        insert: async () => { calls.push(`insert:${table}`); return []; },
+      };
+      return chain;
+    };
+    return { transaction: (cb) => cb(trx) };
+  };
+
+  test('locks the parent row before deleting the old set', async () => {
+    const calls = [];
+    await saveMarksForPhoto({
+      scheduledServiceId: 'ss-1',
+      s3Key: 'photos/wall.jpg',
+      marks: [{ mark_number: 1, x: 0.5, y: 0.5, kind: 'foam_injection' }],
+      knex: fakeKnex(calls),
+    });
+    expect(calls).toEqual([
+      'forUpdate:scheduled_services',
+      'first:scheduled_services',
+      'del:service_photo_marks',
+      'insert:service_photo_marks',
+    ]);
+  });
+
+  test('clearing marks takes the lock too', async () => {
+    // "Skip" after marks were saved is still a whole-set replacement, and it
+    // races the same way.
+    const calls = [];
+    await saveMarksForPhoto({
+      scheduledServiceId: 'ss-1', s3Key: 'photos/wall.jpg', marks: [], knex: fakeKnex(calls),
+    });
+    expect(calls.slice(0, 3)).toEqual([
+      'forUpdate:scheduled_services',
+      'first:scheduled_services',
+      'del:service_photo_marks',
+    ]);
+    expect(calls).not.toContain('insert:service_photo_marks');
+  });
+});

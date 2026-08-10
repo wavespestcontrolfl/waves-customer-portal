@@ -2700,9 +2700,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // suppressing on "a photo lane exists" silently dropped a trace the tech
   // had successfully recorded. The two artifacts coexist: the marked photo
   // shows the drill points, the trace shows the trenched perimeter.
-  let satelliteLineEligible = traceEligibility.eligible && traceEligibility.variant !== 'photo';
+  // The VERDICT, not a boolean (codex P1 r11): the artifact's variant and
+  // caption are read off the satellite line, so reducing it to "some line
+  // qualifies" left the serializer below with nothing to describe the trace
+  // and it fell back to the primary — which on a mixed visit is the FOAM
+  // verdict. That published variant:'photo' on a satellite bitmap, a value
+  // the client has no branch for, so an outline lane's legacy perimeter
+  // capture wore full spray copy instead of the neutral mismatch wording.
+  let satelliteVerdict = (traceEligibility.eligible && traceEligibility.variant !== 'photo')
+    ? traceEligibility
+    : null;
   if ((photoMarksGateOn() || traceEligibilityGateOn())
-    && (!photoLaneVerdict || !satelliteLineEligible)) {
+    && (!photoLaneVerdict || !satelliteVerdict)) {
     try {
       const frozenPhotoLines = parseJsonObject(service.service_data)?.completedAddonLines;
       const lineVerdicts = Array.isArray(frozenPhotoLines)
@@ -2712,12 +2721,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         photoLaneVerdict = (lineVerdicts || [])
           .find((v) => v?.eligible && v.variant === 'photo') || null;
       }
-      if (!satelliteLineEligible) {
-        satelliteLineEligible = (lineVerdicts || [])
-          .some((v) => v?.eligible && v.variant !== 'photo');
+      if (!satelliteVerdict) {
+        satelliteVerdict = (lineVerdicts || [])
+          .find((v) => v?.eligible && v.variant !== 'photo') || null;
       }
     } catch { /* fail-soft: no photo lane found, the satellite verdict stands */ }
   }
+  const satelliteLineEligible = Boolean(satelliteVerdict);
   // Suppress the satellite trace only when the visit has NO satellite-capable
   // line — i.e. the foam IS the treatment, not one line among several.
   const photoLaneSuppressed = photoMarksGateOn()
@@ -3347,13 +3357,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             // r18): a lawn-family capture renders as outline even when the
             // winning verdict came from a spray add-on line — the saved
             // lawn geometry cannot honestly wear spray copy/animation.
-            variant: (traceEligibilityGateOn() && traceEligibility.eligible)
+            // Read off the SATELLITE line (codex P1 r11), never the primary:
+            // on a foam-primary visit whose add-on earned the trace, the
+            // primary verdict is 'photo' — not a value this field can carry,
+            // and the client falls through it to the spray heading and blue
+            // band. The satellite verdict is the one that describes this
+            // bitmap's lane.
+            variant: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'outline' : traceEligibility.variant)
+                ? 'outline' : satelliteVerdict.variant)
               : null,
-            captionKey: (traceEligibilityGateOn() && traceEligibility.eligible)
+            captionKey: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'lawnCoverage' : traceEligibility.captionKey)
+                ? 'lawnCoverage' : satelliteVerdict.captionKey)
               : null,
           };
         }
@@ -3599,7 +3615,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       // Reuse the payload's combined verdict — ONE verdict per report
       // (codex P2 r24); the resolver only re-checks the zone row.
       ...(traceEligibilityGateOn()
-        ? { precomputedTraceVerdict: { suppressed: traceSuppressed, eligibility: traceEligibility } }
+        // The SATELLITE verdict, matching what resolveTraceRenderVerdict
+        // itself returns (`renderCapabilities.satellite || eligibility`) —
+        // the re-entry scope hangs off the traced exterior artifact, so
+        // handing it a foam primary would scope the advisory off the wrong
+        // lane on exactly the mixed visits this branch exists for.
+        ? {
+          precomputedTraceVerdict: {
+            suppressed: traceSuppressed,
+            eligibility: satelliteVerdict || traceEligibility,
+          },
+        }
         : {}),
     });
   const advisory = normalizeAdvisoryForTreatmentScope({
