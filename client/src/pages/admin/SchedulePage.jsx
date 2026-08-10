@@ -1308,6 +1308,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     serviceIsRecurringTemplate ? "loading" : "idle",
   );
   const recurringCountTouched = useRef(false);
+  const recurringOngoingTouched = useRef(false);
   useEffect(() => {
     // Template only: the panel is hidden on a child visit, so there is no
     // length to seed and no reason to spend the request.
@@ -1326,6 +1327,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // in flight.
         if (!recurringCountTouched.current && data.upcomingCount > 0) {
           setRecurringCount(data.upcomingCount);
+        }
+        // Adopt the summary's ongoing value too (Codex #3337 r7 P1). The
+        // `service` prop comes from a calendar load that may predate another
+        // operator's change; leaving the control on that stale value while
+        // sending this fresh one as the baseline is worse than not checking at
+        // all — the two agree with the database and the server reads the stale
+        // flag as a deliberate transition. Control and baseline must come from
+        // the same snapshot.
+        if (!recurringOngoingTouched.current && typeof data.ongoing === "boolean") {
+          setRecurringOngoing(data.ongoing);
         }
       })
       .catch(() => { if (!cancelled) setSeriesSummaryState("error"); });
@@ -3499,6 +3510,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           // fixed and sent no length, freezing it at whatever
                           // the live count happened to be.
                           if (!never) recurringCountTouched.current = true;
+                          recurringOngoingTouched.current = true;
                           setRecurringOngoing(never);
                         }}
                         className="font-medium"

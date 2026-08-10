@@ -415,6 +415,19 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect((src.match(/const wasOngoingBeforeSave =/g) || []).length).toBe(1);
   });
 
+  test('the generic details write does not carry recurring_ongoing for an existing plan (Codex #3337 r7 P1)', () => {
+    // The guarded series-wide block owns that flag, because it is the only
+    // write checked against the operator's baseline under the lock. Leaving it
+    // in `updates` let a stale flag land on the parent even when the guard
+    // correctly skipped the series write — parent ongoing, children fixed, and
+    // a later completion auto-extends visits another operator just removed.
+    expect(src).toContain('const existingPlanOwnsOngoing = spawnRecurringChildren === false;');
+    expect(src).toContain('if (cols.recurring_ongoing && !existingPlanOwnsOngoing) updates.recurring_ongoing = !!recurringOngoing;');
+    // ...and the guarded write still covers the parent row itself.
+    const guarded = src.slice(src.indexOf('recurring_ongoing lives on every row of the series'));
+    expect(guarded.slice(0, 900)).toContain("this.where('id', parentId).orWhere('recurring_parent_id', parentId)");
+  });
+
   test('the resize audit records the achieved length, not the request (Codex #3337 r6 P2)', () => {
     const audit = src.slice(src.indexOf("action: 'recurring_plan_count_set'") - 700, src.indexOf("action: 'recurring_plan_count_set'") + 900);
     expect(audit).toContain('plan now has ${visitCountResult.achieved}');

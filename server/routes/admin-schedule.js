@@ -5092,7 +5092,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (recurringPattern) updates.recurring_pattern = recurringPattern;
       try {
         const cols = await db('scheduled_services').columnInfo();
-        if (cols.recurring_ongoing) updates.recurring_ongoing = !!recurringOngoing;
+        // recurring_ongoing is written HERE only on the make-this-recurring
+        // path. For a plan that already exists the guarded series-wide block
+        // owns it, because that write has to be checked against the operator's
+        // baseline under the maintenance lock (Codex #3337 r7 P1). Leaving it
+        // in the generic update meant a stale flag still landed on the parent
+        // even when the baseline guard correctly skipped the series write —
+        // parent ongoing, children fixed, and a later completion auto-extends
+        // visits the other operator had just removed.
+        const existingPlanOwnsOngoing = spawnRecurringChildren === false;
+        if (cols.recurring_ongoing && !existingPlanOwnsOngoing) updates.recurring_ongoing = !!recurringOngoing;
         if (cols.recurring_nth) updates.recurring_nth = (editMonthAnchorOpts.nth != null && editMonthAnchorOpts.nth !== '' && !isNaN(parseInt(editMonthAnchorOpts.nth))) ? parseInt(editMonthAnchorOpts.nth) : null;
         if (cols.recurring_weekday) updates.recurring_weekday = (editMonthAnchorOpts.weekday != null && editMonthAnchorOpts.weekday !== '' && !isNaN(parseInt(editMonthAnchorOpts.weekday))) ? parseInt(editMonthAnchorOpts.weekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
