@@ -1626,10 +1626,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !serviceIsRecurringTemplate || seriesSummary?.canSetCount === true;
   const countFieldLoading =
     serviceIsRecurringTemplate && seriesSummaryState === "loading";
+  // A length is submitted only when the number means something: either the
+  // operator typed it, or it was seeded from a plan that actually has visits
+  // ahead. An EXHAUSTED fixed plan reports upcomingCount 0, which leaves the
+  // field on its placeholder — submitting that would spawn a placeholder's
+  // worth of visits because someone edited the notes (Codex #3337 P1).
   const canSetPlanLength =
     serviceIsRecurringTemplate &&
     seriesSummary?.canSetCount === true &&
-    (seriesSummaryState === "loaded" || recurringCountTouched.current);
+    (recurringCountTouched.current ||
+      (seriesSummaryState === "loaded" && seriesSummary?.upcomingCount > 0));
   const countHint = (() => {
     if (!serviceIsRecurringTemplate) return null;
     if (seriesSummaryState === "loading") return "Reading the current plan…";
@@ -1637,6 +1643,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return "Couldn’t read the current plan — type a number to set it.";
     }
     if (seriesSummary?.upcomingCount == null) return null;
+    // Exhausted plan: nothing is submitted until the operator types a number,
+    // so say that rather than describing a diff against zero.
+    if (seriesSummary.upcomingCount === 0 && !recurringCountTouched.current) {
+      return "This plan has no visits left — type a number to schedule more.";
+    }
     const delta = recurringCount - seriesSummary.upcomingCount;
     if (delta === 0) {
       return `${seriesSummary.upcomingCount} visit${seriesSummary.upcomingCount === 1 ? "" : "s"} scheduled — unchanged.`;

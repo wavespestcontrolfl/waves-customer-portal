@@ -96,7 +96,9 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
   fn.isTransaction = true;
   fn.raw = () => Promise.resolve();
   fn.fn = { now: () => new Date() };
-  fn.schema = { hasTable: () => Promise.resolve(hasCardHoldTable) };
+  fn.schema = {
+    hasTable: (t) => Promise.resolve(t === 'estimate_card_holds' ? hasCardHoldTable : true),
+  };
   fn.transaction = (cb) => Promise.resolve().then(() => cb(fn));
   return fn;
 }
@@ -108,6 +110,9 @@ function scenario({
   parentOverrides = {},
   coveredVisitIds = [],
   cardHoldVisitIds = [],
+  prepaidVisitIds = [],
+  paidInvoiceVisitIds = [],
+  zeroPrepaidAll = false,
   hasCardHoldTable = true,
 }) {
   const parent = {
@@ -136,6 +141,7 @@ function scenario({
     scheduled_date: daysOut(1 + i * 14),
     recurring_parent_id: 10,
     annual_prepay_term_id: coveredVisitIds.includes(100 + i) ? 'term-1' : null,
+    prepaid_amount: prepaidVisitIds.includes(100 + i) ? '185.00' : (zeroPrepaidAll ? '0.00' : null),
   }));
   const inserted = [];
   const handler = ({ table, calls, op, data }) => {
@@ -161,6 +167,12 @@ function scenario({
     if (table === 'estimate_card_holds') {
       if (op === 'await') {
         return cardHoldVisitIds.map((id) => ({ scheduled_service_id: id }));
+      }
+      return [];
+    }
+    if (table === 'invoices') {
+      if (op === 'await') {
+        return paidInvoiceVisitIds.map((id) => ({ scheduled_service_id: id }));
       }
       return [];
     }
@@ -210,14 +222,38 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
 
   test('the series parent and the visit being edited are never cancelled', async () => {
     const { conn, parent, live } = scenario({ upcoming: 4 });
-    // Target 1 would otherwise take out everything after the first visit;
-    // protect the third, and make the parent itself one of the live rows.
     live[0].id = 10; // parent is also an upcoming visit
-    const result = await reconcile(conn, parent, 1, { protectedVisitId: live[2].id });
+    const result = await reconcile(conn, parent, 2, { protectedVisitId: live[2].id });
 
     expect(result.cancelledIds).not.toContain(10);
     expect(result.cancelledIds).not.toContain(live[2].id);
+  });
+
+  test('a protected visit past the cut still lands on exactly the target (Codex #3337 P1)', async () => {
+    // Regression: the surplus used to be sliced BEFORE protected rows were
+    // filtered out, so protecting a row past the cut cancelled fewer visits
+    // than asked and left the plan longer than the number the response and
+    // the audit line both reported — an extra billable visit on the calendar.
+    const { conn, parent, live } = scenario({ upcoming: 4 });
+    const result = await reconcile(conn, parent, 2, { protectedVisitId: live[2].id });
+
+    // 4 live → target 2 means exactly 2 cancellations, whichever rows are
+    // eligible. The protected third visit survives; the second goes instead.
+    expect(result.cancelledIds).toHaveLength(2);
     expect(result.cancelledIds).toEqual([live[1].id, live[3].id]);
+    const remaining = live.length - result.cancelledIds.length;
+    expect(remaining).toBe(result.target);
+  });
+
+  test('refuses when the target is unreachable without cancelling a protected visit', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3 });
+    live[0].id = 10; // the parent occupies the first slot
+    // Target 1 needs 2 cancellations but only 1 row is eligible (the parent
+    // and the edited visit are both protected).
+    await expect(
+      reconcile(conn, parent, 1, { protectedVisitId: live[1].id }),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('lowest this plan can go') });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 
   test('refuses the whole save when a surplus visit is covered by an annual prepay term', async () => {
@@ -238,6 +274,33 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
       message: expect.stringContaining('late-cancel fee'),
     });
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('refuses when a surplus visit was prepaid by hand — cash, phone card or Zelle (Codex #3337 P1)', async () => {
+    // POST /:id/prepaid stamps prepaid_amount, and can stamp a whole series at
+    // once, so future siblings carry it. Trimming one silently is money taken
+    // for a visit that never happens.
+    const { conn, parent } = scenario({ upcoming: 4, prepaidVisitIds: [103] });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('already prepaid'),
+    });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('refuses when a surplus visit already has a paid invoice attached', async () => {
+    const { conn, parent } = scenario({ upcoming: 4, paidInvoiceVisitIds: [103] });
+    await expect(reconcile(conn, parent, 2)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('invoice that has been paid'),
+    });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a zero/null prepaid stamp is not coverage — an ordinary plan still trims', async () => {
+    const { conn, parent, live } = scenario({ upcoming: 3, prepaidVisitIds: [], zeroPrepaidAll: true });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toEqual([live[2].id]);
   });
 
   test('a pre-migration env without the card-hold table still trims (prepay guard stands alone)', async () => {
@@ -351,6 +414,21 @@ describe('GATE_EDIT_APPT_VISIT_COUNT — the lane ships dark', () => {
 
   test('the summary endpoint publishes the gate so the modal can hide the controls', () => {
     expect(src).toContain("canSetCount: isEnabled('editApptVisitCount')");
+  });
+
+  test('the add-on mirror runs in a savepoint, not a bare catch (Codex #3337 P2)', () => {
+    // In Postgres a failed statement poisons the transaction; catching it
+    // without a savepoint leaves the txn aborted, so the commit would roll
+    // back the visits the mirror is only supposed to decorate.
+    const start = src.indexOf('SAVEPOINT, not a bare try/catch (Codex #3337 P2)');
+    const end = src.indexOf('[schedule/visit-count] add-on mirror failed', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    expect(block).toContain('trx.transaction(async (sp) => {');
+    expect(block).toContain("sp('scheduled_service_addons').insert(addonData)");
+    // The inserts must run on the savepoint, never the outer transaction.
+    expect(block).not.toContain("trx('scheduled_service_addons').insert(addonData)");
   });
 
   test('the refusal is checked before the reconcile can write anything', () => {

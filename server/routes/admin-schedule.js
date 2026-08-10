@@ -7201,6 +7201,10 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
   const cols = await conn('scheduled_services').columnInfo();
   const selected = ['id', 'status', 'scheduled_date', 'recurring_parent_id'];
   if (cols.annual_prepay_term_id) selected.push('annual_prepay_term_id');
+  // Money already collected by hand (cash / phone card / Zelle), stamped by
+  // POST /:id/prepaid — which can stamp a whole recurring family at once, so
+  // future siblings carry it too.
+  if (cols.prepaid_amount) selected.push('prepaid_amount');
   return conn('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
@@ -7224,8 +7228,15 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // without the table is the one tolerated case — hasTable is checked first.
 async function findBillingCoveredVisits(conn, visits) {
   const covered = new Map();
+  const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   for (const v of visits) {
-    if (v.annual_prepay_term_id) covered.set(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id) mark(v.id, 'covered by an annual prepay term');
+    // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
+    // stamped across the series by POST /:id/prepaid. Cancelling one of these
+    // silently is money taken for a visit that never happens (Codex #3337 P1).
+    if (v.prepaid_amount != null && Number(v.prepaid_amount) > 0) {
+      mark(v.id, 'already prepaid');
+    }
   }
   const ids = visits.map((v) => v.id);
   if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
@@ -7233,9 +7244,16 @@ async function findBillingCoveredVisits(conn, visits) {
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', ['released', 'cancelled', 'charged', 'failed'])
       .select('scheduled_service_id');
-    for (const h of holds) {
-      if (!covered.has(h.scheduled_service_id)) covered.set(h.scheduled_service_id, 'holding a card for a late-cancel fee');
-    }
+    for (const h of holds) mark(h.scheduled_service_id, 'holding a card for a late-cancel fee');
+  }
+  // A settled invoice already attached to a future visit — the deposit and
+  // pay-ahead shapes that don't stamp either field above.
+  if (ids.length > 0 && await conn.schema.hasTable('invoices')) {
+    const invoiced = await conn('invoices')
+      .whereIn('scheduled_service_id', ids)
+      .whereIn('status', ['paid', 'partially_paid'])
+      .select('scheduled_service_id');
+    for (const inv of invoiced) mark(inv.scheduled_service_id, 'attached to an invoice that has been paid');
   }
   return covered;
 }
@@ -7270,14 +7288,30 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   if (live.length === target) return result;
 
   if (live.length > target) {
-    // Keep the earliest `target` visits; the rest come off the calendar.
-    // The series parent and the visit being edited are never candidates —
-    // the parent carries the cadence config the remaining rows inherit, and
+    // Cancel exactly `need` visits, taken from the far end of the ELIGIBLE
+    // rows — so the visits nearest today survive.
+    //
+    // The series parent and the visit being edited are never eligible: the
+    // parent carries the cadence config the remaining rows inherit, and
     // cancelling the row the operator has open would make Save silently
-    // delete the appointment they were editing.
-    const surplus = live
-      .slice(target)
-      .filter((v) => v.id !== parentId && String(v.id) !== String(protectedVisitId || ''));
+    // delete the appointment they were editing. Filtering must therefore
+    // happen BEFORE the cut, not after it (Codex #3337 P1): slicing to the
+    // nominal surplus first and dropping protected rows from that slice
+    // cancels fewer than `need` and leaves a plan longer than the number the
+    // response and the audit line both claim — an extra billable visit on
+    // the calendar. Taking the last `need` eligible rows lands on exactly
+    // `target` remaining even when a protected row sits past the cut.
+    const need = live.length - target;
+    const eligible = live.filter((v) => (
+      v.id !== parentId && String(v.id) !== String(protectedVisitId || '')
+    ));
+    if (eligible.length < need) {
+      // Reaching the target would mean cancelling the anchor or the visit
+      // being edited. Refuse rather than silently landing above the number.
+      const lowest = live.length - eligible.length;
+      throw httpError(409, `Can't shorten this plan to ${target} visit${target === 1 ? '' : 's'}: getting there would mean cancelling the visit you have open or the plan's anchor visit. The lowest this plan can go from here is ${lowest} — pick that, or cancel those visits on their own.`);
+    }
+    const surplus = eligible.slice(eligible.length - need);
     if (surplus.length === 0) return result;
     const covered = await findBillingCoveredVisits(trx, surplus);
     if (covered.size > 0) {
@@ -7382,8 +7416,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (!row?.id) continue;
     // Mirror the parent's add-on lines onto the new visit — a multi-service
     // recurring appointment would otherwise top up with the primary only.
+    //
+    // SAVEPOINT, not a bare try/catch (Codex #3337 P2): in Postgres a failed
+    // statement poisons the whole transaction, so catching the error here
+    // would not make it usable again — the next statement or the commit would
+    // roll back the visits this mirror is only supposed to decorate. The
+    // nested knex transaction confines the failure, matching the add-on
+    // preload above.
     try {
-      const addonCols = await trx('scheduled_service_addons').columnInfo();
+      await trx.transaction(async (sp) => {
+      const addonCols = await sp('scheduled_service_addons').columnInfo();
       for (const addon of dueAddons) {
         const addonData = {
           scheduled_service_id: row.id,
@@ -7400,8 +7442,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
         if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
         if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
         copyAddonDiscountFields(addonData, addon, addonCols);
-        await trx('scheduled_service_addons').insert(addonData);
+        await sp('scheduled_service_addons').insert(addonData);
       }
+      });
     } catch (e) { logger.warn(`[schedule/visit-count] add-on mirror failed for ${row.id} (non-blocking): ${e.message}`); }
     result.added.push({
       id: row.id,
