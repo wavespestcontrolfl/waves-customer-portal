@@ -2949,7 +2949,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       const unitCount = Number(rc.unitCount) || 0;
       flags.push({
         field: 'commercialSubtype',
-        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way. If the customer is a resident of ONE unit, collect the unit number, set Commercial to No and clear the Commercial Subtype, and price it as a residential condo/townhome unit. Commercial applies only when the client is the association or property manager.`,
+        reason: `Commercial verdict describes the ${unitCount > 1 ? `${unitCount}-unit ` : ''}building/association master parcel — county rolls file condo and townhome communities this way. If the customer is a resident of ONE unit, collect the unit number, then set Property Type to the actual unit type (condo/townhome), set Commercial to No, and clear the Commercial Subtype — a Commercial property type alone keeps the estimate on commercial pricing. Commercial applies only when the client is the association or property manager.`,
         priority: 'HIGH',
       });
     }

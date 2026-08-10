@@ -420,11 +420,23 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(flags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
   });
 
-  test('guidance instructs the full commercial exit (Commercial → No + clear subtype), not just a type override (codex P1)', () => {
+  test('guidance instructs the full commercial exit, not just a type override (codex P1)', () => {
     const flag = buildFieldVerifyFlags(countyMultifamilyBuilding(), null, null)
       .find((f) => f.field === 'commercialSubtype');
+    expect(flag.reason).toMatch(/set Property Type to the actual unit type/i);
     expect(flag.reason).toMatch(/set Commercial to No/i);
     expect(flag.reason).toMatch(/clear the Commercial Subtype/i);
+  });
+
+  test('the instructed exit actually leaves commercial pricing per the real classifier (codex P1)', () => {
+    // Property Type left at Commercial defeats the Commercial=No override —
+    // exactly the trap the copy warns about.
+    expect(isCommercialProfile({ propertyType: 'Commercial', isCommercial: 'no', commercialSubtype: null })).toBe(true);
+    // The instructed exit: concrete residential unit type + Commercial=No.
+    // Even a stale category/subtype no longer holds it commercial.
+    expect(isCommercialProfile({
+      propertyType: 'condo_upper', isCommercial: 'no', commercialSubtype: null, category: 'COMMERCIAL',
+    })).toBe(false);
   });
 
   test('guidance rides the enriched profile without changing the commercial verdict', () => {
