@@ -6875,11 +6875,13 @@ const CallRecordingProcessor = {
               // candidate list and the exact question to ask, instead of a
               // bare "could not be verified".
               const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
-              // Shadow mode: the LEGACY V1 record is the source of truth for
-              // the address, so the unit ask is about the building V1 heard.
-              // Stamp it onto the card (overriding buildTriageItem's V2
-              // stamp) — the card, not the rolling extraction, is the
-              // building ledger the resolver matches on.
+              // Name the building the ask is about ON the card. "Ask which
+              // unit" is useless without saying which address, and
+              // call_log.ai_extraction* is a rolling latest-pass snapshot a
+              // reprocess overwrites — so the address is captured here, at
+              // filing time. Shadow mode: the legacy V1 record is the source
+              // of truth for the address, and the bridge only files this ask
+              // when AV's building corroborates it.
               if (flag === 'missing_unit_number') {
                 await db('triage_items')
                   .insert(buildTriageItem({

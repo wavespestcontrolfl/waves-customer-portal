@@ -118,12 +118,22 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     }
   );
 
-  // Synthetic fixture address — never a real caller's (AGENTS.md: no
-  // customer PII on the repo surface).
-  test('ambiguous PREMISE missing its subpremise → missing_unit_number rides with address_unverified', () => {
+  // Synthetic fixture addresses throughout — never a real caller's
+  // (AGENTS.md: no customer PII on the repo surface).
+  //
+  // Shadow mode: the AV verdict describes what V2 sent, the record holds what
+  // V1 heard. The unit ask files only when AV's resolved building corroborates
+  // the legacy street — a task naming a building the record doesn't hold is
+  // human-only work pointed at the wrong address.
+  const UNIT_AV = (street = '100 Example Condo Ct') => ({
+    status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'],
+    normalized: { street_line_1: street, city: 'Bradenton', postal_code: '34212' },
+  });
+
+  test('ambiguous PREMISE missing its subpremise, corroborated by the legacy street → ask rides with address_unverified', () => {
     const out = deriveCallReviewBridge({
-      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
-      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      addressValidation: UNIT_AV(),
+      extracted: { address_line1: '100 Example Condo Court', city: 'Bradenton', lead_quality: 'warm' },
     });
     expect(out.needsConfirmation).toContain('address_unverified');
     expect(out.needsConfirmation).toContain('missing_unit_number');
@@ -131,23 +141,44 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
 
   test('ambiguous without a missing subpremise → no unit-number ask', () => {
     const out = deriveCallReviewBridge({
-      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [] },
+      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: [], normalized: { street_line_1: '100 Example Condo Ct' } },
       extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
     });
     expect(out.needsConfirmation).toContain('address_unverified');
     expect(out.needsConfirmation).not.toContain('missing_unit_number');
   });
 
-  test('V2-only evidence: V1 heard no street, but the V2 deterministic pass flagged the missing unit → ask still files', () => {
+  test('V1/V2 building disagreement → NO unit ask (the verdict is about a different address than the record holds)', () => {
     const out = deriveCallReviewBridge({
-      addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
-      extracted: { city: 'Bradenton', lead_quality: 'warm' }, // no address_line1 → address branch never runs
+      addressValidation: UNIT_AV('4200 Other Sample Blvd'),
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('V1 heard no street → NO unit ask even when the V2 pass flagged it (nothing on the record to attach it to)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
+      extracted: { city: 'Bradenton', lead_quality: 'warm' },
       v2TriageFlags: ['address_unverified', 'missing_unit_number'],
     });
-    expect(out.needsConfirmation).toContain('missing_unit_number');
-    // Both-heard case stays deduped: the branch push and the V2 flag are one ask.
-    const both = deriveCallReviewBridge({
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('an AV result with no normalized street cannot corroborate → no unit ask', () => {
+    const out = deriveCallReviewBridge({
       addressValidation: { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'] },
+      extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
+      v2TriageFlags: ['missing_unit_number'],
+    });
+    expect(out.needsConfirmation).not.toContain('missing_unit_number');
+  });
+
+  test('the corroborated ask is filed once, whether the branch or the V2 flag supplies it', () => {
+    const both = deriveCallReviewBridge({
+      addressValidation: UNIT_AV(),
       extracted: { address_line1: '100 Example Condo Ct', city: 'Bradenton', lead_quality: 'warm' },
       v2TriageFlags: ['missing_unit_number'],
     });
@@ -259,19 +290,9 @@ describe('deriveCallReviewBridge — garbled-street recovery (addressRecovery)',
     expect(out.needsConfirmation).not.toContain('address_unverified');
   });
 
-  // Defence in depth: the call processor refuses street recovery when the
-  // verdict is PREMISE + missing subpremise (a resolved building, not a
-  // garbled street), so this pairing should not reach production — but if a
-  // recovery result ever arrives beside missing-unit evidence, the ask rides.
-  test('unit-number ask survives a successful street recovery (recovery fixes the street, not the unit)', () => {
-    const out = deriveCallReviewBridge({
-      addressValidation: { ...unverifiable, granularity: 'PREMISE', missingComponents: ['subpremise'] },
-      extracted: jimenez,
-      addressRecovery: { attempted: true, recovered: { address_line1: '5039 Seafoam Trail', city: 'Lakewood Ranch', state: 'FL', zip: '34211-1407' }, candidates: ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], method: 'phonetic' },
-    });
-    expect(out.needsConfirmation).toContain('address_recovered');
-    expect(out.needsConfirmation).toContain('missing_unit_number');
-  });
+  // No recovery-plus-missing-unit case is asserted here: recovery.js refuses
+  // that verdict outright (a resolved building is not a garbled street), so
+  // the pairing cannot arise — see address-recovery.test.js for the refusal.
 
   test('recovery attempted but nothing confirmed → address_unverified unchanged', () => {
     const out = deriveCallReviewBridge({

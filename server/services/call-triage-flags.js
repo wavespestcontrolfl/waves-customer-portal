@@ -405,6 +405,29 @@ const ADDRESS_FLAGS_SUPERSEDED_BY_AV = new Set([
 // address given without the unit number. County rolls model these communities
 // as building-level master parcels, so without the unit nothing downstream
 // (parcel match, dispatch, interior treatment) can target the right home.
+/**
+ * SHADOW-MODE guard for the unit ask (codex r12 P1). The AV verdict describes
+ * the address V2 sent; in shadow mode the LEGACY V1 record is what the lead
+ * and the review card actually hold. "Ask which unit" is only useful — and
+ * only true — when those are the same building, so the ask is filed just when
+ * AV's resolved building corroborates the legacy street (suffix-insensitive,
+ * unit designators irrelevant here since the whole point is that there is no
+ * unit). Fails closed: a V1/V2 disagreement, a legacy record with no street,
+ * or an AV result with no normalized street files nothing — the generic
+ * address_unverified hold already covers the call, and a unit task pointing at
+ * a building the record does not hold is worse than none (it is human-only
+ * work, never auto-resolved).
+ *
+ * The enforce lane does NOT use this: there V2 IS the record, so
+ * computeDeterministicTriageFlags takes isMissingUnitNumber directly.
+ */
+function unitAskCorroborated(av, extracted = {}) {
+  if (!isMissingUnitNumber(av)) return false;
+  const avKey = streetCompareKey(av?.normalized?.street_line_1);
+  const legacyKey = streetCompareKey(extracted.address_line1);
+  return !!avKey && !!legacyKey && avKey === legacyKey;
+}
+
 function isMissingUnitNumber(av) {
   return !!(av && av.granularity === 'PREMISE'
     && Array.isArray(av.missingComponents)
@@ -1300,20 +1323,21 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     }
     // Building resolved but the unit designator is the missing piece — the
     // ask survives recovery too (recovery fixes a garbled street, not a
-    // missing unit) and persists across calls until the office collects it.
-    if (isMissingUnitNumber(av)) needsConfirmation.push('missing_unit_number');
+    // missing unit) and persists until the office collects it. Corroboration
+    // rule below.
+    if (unitAskCorroborated(av, extracted)) needsConfirmation.push('missing_unit_number');
   } else if (hadStreet && status === 'out_of_service_area') {
     needsConfirmation.push('out_of_service_area');
   }
 
   const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
   if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
-  // V2-only address evidence: when legacy V1 missed the street entirely,
-  // hadStreet is false and the address branch above never ran — but V2 heard
-  // the building address, and its deterministic pass (fed the same AV
-  // verdict) already flagged the missing unit. Consume it so the ask still
-  // files; dedupe with the branch's own push for the both-heard case.
-  if (flags.includes('missing_unit_number') && !needsConfirmation.includes('missing_unit_number')) {
+  // The V2 deterministic pass (fed the same AV verdict) may also flag the
+  // missing unit — consume it under the SAME corroboration rule, deduped
+  // against the branch's own push.
+  if (flags.includes('missing_unit_number')
+      && unitAskCorroborated(av, extracted)
+      && !needsConfirmation.includes('missing_unit_number')) {
     needsConfirmation.push('missing_unit_number');
   }
 
@@ -1467,6 +1491,7 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
+  unitAskCorroborated,
   deriveCallReviewBridge,
   deriveEmailReview,
   mergeNeedsConfirmation,
