@@ -6397,6 +6397,12 @@ const CallRecordingProcessor = {
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
         extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // "Building resolved, unit missing" is not a garbled street — the
+        // recovery module refuses it outright (codex r10 P1), so the
+        // ambiguous hold stands and missing_unit_number names the ask
+        // instead of an accepted wrong-parcel verdict auto-routing a
+        // unit-less condo booking.
+        avMissingUnitOnly: isMissingUnitNumber(v2AddressValidation),
       }).catch(() => null);
     }
     // The winning recovery candidate passed Address Validation itself, so the
@@ -6404,14 +6410,8 @@ const CallRecordingProcessor = {
     // of the original unresolvable one. The persisted ai_address_validation
     // shadow row keeps the ORIGINAL verdict; the shadow bridge also receives
     // the original + the recovery result and applies its own adoption rule.
-    // Recovery fixes a garbled STREET; it cannot supply the unit the original
-    // verdict said was missing — carry the subpremise evidence onto the
-    // effective verdict so the enforce-mode flags (and the AV suppression)
-    // still see the owed unit ask behind the recovered accept.
     const effectiveAddressValidation = (addressRecovery?.recovered && addressRecovery.avResult)
-      ? (isMissingUnitNumber(v2AddressValidation)
-        ? { ...addressRecovery.avResult, missingComponents: [...new Set([...(addressRecovery.avResult.missingComponents || []), 'subpremise'])] }
-        : addressRecovery.avResult)
+      ? addressRecovery.avResult
       : v2AddressValidation;
     // Which extraction pass recovered (codex final-round P2). The offline
     // audits reconstruct the routing verdict from the address_recovered card

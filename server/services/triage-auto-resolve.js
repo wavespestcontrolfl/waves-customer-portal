@@ -564,6 +564,38 @@ async function resolveOpenUnitNumberCards({
     }
     const callIds = [...new Set(answered.map((i) => i.call_log_id).filter(Boolean))].sort();
     for (const callId of callIds) await lockTriageCall(trx, callId);
+    // Re-verify the selection against a FRESH read before writing (codex r10
+    // P1): the customer lock serializes resolvers, but card INSERTS take no
+    // such lock, so a sibling same-building ask can land between the select
+    // above and this write — and the rule is that two same-building asks
+    // resolve none. Under READ COMMITTED this second statement sees anything
+    // committed since, so the phantom window shrinks to inserts committing
+    // after this read; such a card stays OPEN regardless (we only ever
+    // update the ids we selected) and its own call re-unions the lead
+    // reason, so no owed work is lost either way.
+    const recheck = await trx('triage_items as t')
+      .join('call_log as cl', 'cl.id', 't.call_log_id')
+      .where('t.reason_code', 'missing_unit_number')
+      .whereIn('t.status', ['open', 'in_progress'])
+      .where('cl.customer_id', customerId)
+      .select(
+        't.id', 't.call_log_id', 't.created_at',
+        'cl.ai_extraction_enriched as call_extraction',
+        'cl.ai_extraction as call_extraction_v1',
+      );
+    const stillAnswered = selectUnitCardsToResolve(recheck, acceptedAddress, { acceptingCallId, acceptingCallAt });
+    const answeredIds = new Set(answered.map((i) => i.id));
+    if (stillAnswered.length !== answered.length || !stillAnswered.every((i) => answeredIds.has(i.id))) {
+      const remainingRaced = await trx('triage_items as t')
+        .join('call_log as cl', 'cl.id', 't.call_log_id')
+        .where('t.reason_code', 'missing_unit_number')
+        .whereIn('t.status', ['open', 'in_progress'])
+        .where('cl.customer_id', customerId)
+        .count('* as n')
+        .first();
+      logger.info(`[unit-card-resolve] selection changed under the lock for customer ${customerId} — resolving nothing`);
+      return { resolved: 0, remainingOpen: parseInt(remainingRaced?.n || 0, 10) };
+    }
     const updated = await trx('triage_items')
       .whereIn('id', answered.map((i) => i.id))
       .whereIn('status', ['open', 'in_progress'])

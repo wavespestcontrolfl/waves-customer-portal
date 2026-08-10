@@ -172,26 +172,14 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     // call).
 
     // AV resolved the BUILDING but Google reports the unit designator
-    // missing (condo/townhome address given without a unit). The generic
-    // hold above stays authoritative when the status is unresolved; this
-    // names the specific ask. Advisory by construction — deliberately NOT
-    // in BLOCKING_TRIAGE_FLAGS. Checked OUTSIDE the status chain: a
-    // garbled-street recovery swaps in its own validated_accept verdict,
-    // and the processor carries the original missing-subpremise evidence
-    // onto that effective result — the ask must survive the recovered
-    // (accepted) status, not just the unresolved ones.
-    //
-    // Advisory even in that recovery shape — this is NOT a new unit-less
-    // auto-route: a recovery is returned only when its candidate ITSELF
-    // confirmed validated_accept/corrected through AV
-    // (address-validation/recovery.js confirmPrediction), so the booking
-    // address is Google-complete; the carried evidence describes the
-    // ORIGINAL (likely wrong-parcel) hit and rides the owed
-    // address_recovered read-back card every recovered booking already
-    // files (advisory-by-design, never aged out — triage-auto-resolve).
-    // Recovery auto-routing past the original ambiguity is that feature's
-    // pre-existing contract; this flag only names the extra read-back
-    // question.
+    // missing (condo/townhome address given without a unit). Advisory by
+    // construction — deliberately NOT in BLOCKING_TRIAGE_FLAGS — because it
+    // never stands alone: this shape always carries the unresolved status
+    // above, whose address_unverified hold is what keeps the call in
+    // review. (The call processor also refuses street recovery on this
+    // shape, so the hold can never be swapped for an accepted wrong-parcel
+    // verdict.) This flag only NAMES the specific ask behind that hold:
+    // "which unit?" instead of "could not be verified".
     if (avStatus !== 'out_of_service_area' && isMissingUnitNumber(av)) {
       flags.push('missing_unit_number');
     }
@@ -428,10 +416,8 @@ function suppressAddressFlagsForAV(flags, addressValidation) {
   if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
   // The unit ask only clears on AFFIRMATIVE unit validation: an accept at
   // SUB_PREMISE granularity means Google confirmed the exact door. A
-  // PREMISE-level accept proves only the building (pre-push audit P1) — and a
-  // recovery-produced accept still CARRYING the original missing-subpremise
-  // evidence (the processor merges it onto the effective result) is exactly
-  // such a building-only verdict, so the ask survives the suppression there.
+  // PREMISE-level accept proves the building only — it says nothing about
+  // which unit, so a stale unit ask survives it (pre-push audit P1).
   return (flags || []).filter((f) => !ADDRESS_FLAGS_SUPERSEDED_BY_AV.has(f)
     || (f === 'missing_unit_number' && addressValidation?.granularity !== 'SUB_PREMISE'));
 }

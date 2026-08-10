@@ -259,6 +259,10 @@ describe('deriveCallReviewBridge — garbled-street recovery (addressRecovery)',
     expect(out.needsConfirmation).not.toContain('address_unverified');
   });
 
+  // Defence in depth: the call processor refuses street recovery when the
+  // verdict is PREMISE + missing subpremise (a resolved building, not a
+  // garbled street), so this pairing should not reach production — but if a
+  // recovery result ever arrives beside missing-unit evidence, the ask rides.
   test('unit-number ask survives a successful street recovery (recovery fixes the street, not the unit)', () => {
     const out = deriveCallReviewBridge({
       addressValidation: { ...unverifiable, granularity: 'PREMISE', missingComponents: ['subpremise'] },
