@@ -962,6 +962,84 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('an annual-prepay contract quotes the PAID allocation, never the list price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // estimated_price stays the undiscounted list figure; prepaid_amount is
+    // what the customer actually paid. A panel captioned "currently pays"
+    // must show the latter.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 114,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('a non-uniformly prepaid contract keeps the scheduled price rather than one row\'s allocation', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a combined single row never lets the whole-plan total become one component\'s price', async () => {
+    const database = fakeDb({
+      // ONE row, but two recurring families — accountServiceKey groups it
+      // under pest_control alone, so a key-count-only gate would pass and
+      // report the pest+termite plan total as Pest Control's per-app price.
+      customer: memberWith({ monthly_rate: 150 }),
+      scheduledRows: [
+        { id: 'c1', service_type: 'Quarterly Pest + Termite Bait Station', scheduled_date: '2099-01-05' },
+      ],
+      catalogRows: [{ id: 'c1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const combined = spend.currentServices[0];
+    expect(combined.keys.length).toBeGreaterThan(1);
+    expect(combined.currentPerVisit).toBeNull();
+    expect(combined.spendSource).toBe('unavailable');
+  });
+
+  test('per-property contracts each carry their own billed figure', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [{ id: 'a1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // The aggregate is the account's family spend, NOT one visit's charge —
+    // the per-contract figures are what a single property is quoted against,
+    // so both must be present for the panel to itemize instead of showing
+    // "$200.00 per application".
+    const service = spend.currentServices[0];
+    expect(service.currentPerVisit).toBe(200);
+    expect(service.contracts).toHaveLength(2);
+    expect(service.contracts.map((contract) => contract.perVisit)).toEqual([100, 100]);
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.

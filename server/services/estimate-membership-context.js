@@ -527,9 +527,29 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     }
     const contracts = contractGroups.map(({ address, rows: contractRows }) => {
       const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
+      const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
+      // Annual-prepay coverage: prepaid_amount is the DISCOUNTED amount the
+      // customer ACTUALLY PAID for the visit, while estimated_price stays the
+      // undiscounted list price. A panel captioned "currently pays per
+      // application" must not quote the list figure ($120 shown for a visit
+      // prepaid at $114). Same basis rule the extension logic in this file
+      // already applies: honest only when the contract is UNIFORMLY prepaid
+      // at one allocation — a mixed or uneven contract keeps the scheduled
+      // price rather than picking one row's allocation to stand for all.
+      const firstAllocation = Number(
+        contractRows.find((row) => Number(row.prepaid_amount) > 0)?.prepaid_amount,
+      );
+      const uniformlyPrepaid = contractRows.length > 0
+        && contractRows.every((row) => !!row.annual_prepay_term_id)
+        && firstAllocation > 0
+        && contractRows.every((row) => sameCents(row.prepaid_amount, firstAllocation));
       return {
         serviceAddress: address,
-        scheduledPerVisit: scheduled ? round2(scheduled.estimated_price) : null,
+        scheduledPerVisit,
+        // The figure this contract actually bills at — the paid allocation
+        // when prepaid, else the scheduled price.
+        perVisit: uniformlyPrepaid ? round2(firstAllocation) : scheduledPerVisit,
+        prepaid: uniformlyPrepaid,
         activeScheduledVisits: contractRows.length,
       };
     });
@@ -540,6 +560,14 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const usableLastPaid = contracts.length === 1 ? lastPaid : null;
     const scheduledPerVisit = contracts.some((contract) => contract.scheduledPerVisit != null)
       ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.scheduledPerVisit) || 0), 0))
+      : null;
+    // The billed basis across this key's contracts, prepaid allocations
+    // included. NOTE this is a SUM over per-property contracts — it is the
+    // account's recurring spend for the family, NOT one visit's charge, so a
+    // multi-contract key must never be rendered as a single per-application
+    // price (each contract carries its own figure above).
+    const effectivePerVisit = contracts.some((contract) => contract.perVisit != null)
+      ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.perVisit) || 0), 0))
       : null;
     // Visit cadence for this family — the first row that resolves one. Used
     // for the "· Quarterly (4/yr)" label and to divide the monthly rate
@@ -557,7 +585,16 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     // converter's own stamp gate requires. Last resort, below both real
     // evidence sources: legacy and multi-unit plans previously read
     // "unavailable" here, which told the office nothing at all.
-    const singleUnitAccount = byKey.size === 1 && contracts.length === 1;
+    //
+    // COMPONENT count, not just key count (codex #3353 r1): accountServiceKey
+    // groups a COMBINED row ("Quarterly Pest + Termite Bait Station") under
+    // its FIRST component alone, so byKey.size is 1 while the account really
+    // carries two recurring families. Without this the whole plan total gets
+    // attributed to Pest Control's per-application line — the exact
+    // overstatement this gate exists to prevent, just arriving through a
+    // combined row instead of two rows.
+    const componentCount = (componentKeysByKey.get(key) || new Set([key])).size;
+    const singleUnitAccount = byKey.size === 1 && contracts.length === 1 && componentCount === 1;
     const stampedPerApplication = (singleUnitAccount
       && customer?.billing_mode === 'per_application'
       && Number(customer.per_application_fee) > 0)
@@ -573,7 +610,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       ? round2((Number(customer.monthly_rate) * 12) / visitsPerYear)
       : null;
     const currentPerVisit = usableLastPaid?.amount
-      ?? scheduledPerVisit
+      ?? effectivePerVisit
       ?? stampedPerApplication
       ?? monthlyDerivedPerApplication;
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
@@ -612,8 +649,8 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       visitsPerYear,
       spendSource: usableLastPaid
         ? 'last_paid_invoice'
-        : (scheduledPerVisit != null
-          ? 'scheduled_estimate'
+        : (effectivePerVisit != null
+          ? (contracts.some((contract) => contract.prepaid) ? 'prepaid_allocation' : 'scheduled_estimate')
           : (stampedPerApplication != null
             ? 'per_application_fee'
             : (monthlyDerivedPerApplication != null ? 'monthly_rate_derived' : 'unavailable'))),

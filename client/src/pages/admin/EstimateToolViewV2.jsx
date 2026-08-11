@@ -145,9 +145,21 @@ function matchHasActivePlan(match) {
 const SPEND_SOURCE_LABEL = {
   last_paid_invoice: "last paid invoice",
   scheduled_estimate: "scheduled price",
+  prepaid_allocation: "prepaid allocation",
   per_application_fee: "billing stamp",
   monthly_rate_derived: "derived from monthly rate",
 };
+
+// A service active at more than one property is several contracts, each with
+// its own per-application price. currentPerVisit sums them — that is the
+// account's spend for the family, NOT one visit's charge — so rendering the
+// sum beside "per application" would quote two $100 contracts as $200.00 and
+// send staff into an upgrade conversation on a basis that doesn't exist.
+// Those keys itemize instead.
+function spendContractRows(service) {
+  const contracts = Array.isArray(service?.contracts) ? service.contracts : [];
+  return contracts.length > 1 ? contracts : [];
+}
 
 function resolvePreSlabJobContextForForm(form) {
   if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
@@ -5808,45 +5820,75 @@ export default function EstimateToolViewV2({
                         </span>
                       ) : null}
                     </div>
-                    {customerSpend.currentServices.map((service) => (
-                      <div
-                        key={service.key}
-                        className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0"
-                      >
-                        <div>
-                          <div className="text-14 text-zinc-900">
-                            {service.label}
+                    {customerSpend.currentServices.map((service) => {
+                      const perProperty = spendContractRows(service);
+                      return (
+                        <div
+                          key={service.key}
+                          className="px-3 py-2 border-b border-zinc-100 last:border-b-0"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <div className="text-14 text-zinc-900">
+                                {service.label}
+                              </div>
+                              <div className="text-14 text-zinc-500">
+                                {[
+                                  service.cadenceLabel,
+                                  service.visitsPerYear
+                                    ? `${service.visitsPerYear}/yr`
+                                    : null,
+                                  SPEND_SOURCE_LABEL[service.spendSource] || null,
+                                  service.qualifiesForWaveGuard === false
+                                    ? "not a tier service"
+                                    : null,
+                                  perProperty.length
+                                    ? `${perProperty.length} properties`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </div>
+                            </div>
+                            {/* ml-auto keeps the amount right-aligned on
+                                phones, where flex-wrap drops it onto its own
+                                line and justify-between would otherwise
+                                left-align it. */}
+                            {perProperty.length ? null : (
+                              <div className="text-right ml-auto">
+                                <div className="text-16 text-zinc-900 tabular-nums">
+                                  {service.currentPerVisit == null
+                                    ? "Not available"
+                                    : `$${Number(service.currentPerVisit).toFixed(2)}`}
+                                </div>
+                                <div className="text-14 text-zinc-500">
+                                  per application
+                                </div>
+                              </div>
+                            )}
                           </div>
-                          <div className="text-14 text-zinc-500">
-                            {[
-                              service.cadenceLabel,
-                              service.visitsPerYear
-                                ? `${service.visitsPerYear}/yr`
-                                : null,
-                              SPEND_SOURCE_LABEL[service.spendSource] || null,
-                              service.qualifiesForWaveGuard === false
-                                ? "not a tier service"
-                                : null,
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </div>
+                          {perProperty.map((contract, i) => (
+                            <div
+                              key={contract.serviceAddress || i}
+                              className="flex flex-wrap items-baseline justify-between gap-2 mt-1.5 pl-3 border-l-hairline border-zinc-200"
+                            >
+                              <div className="text-14 text-zinc-500">
+                                {contract.serviceAddress || "Property not recorded"}
+                              </div>
+                              <div className="ml-auto text-14 text-zinc-900 tabular-nums">
+                                {contract.perVisit == null
+                                  ? "Not available"
+                                  : `$${Number(contract.perVisit).toFixed(2)}`}
+                                <span className="text-zinc-500">
+                                  {" "}
+                                  / application
+                                </span>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                        {/* ml-auto keeps the amount right-aligned on phones,
-                            where flex-wrap drops it onto its own line and
-                            justify-between would otherwise left-align it. */}
-                        <div className="text-right ml-auto">
-                          <div className="text-16 text-zinc-900 tabular-nums">
-                            {service.currentPerVisit == null
-                              ? "Not available"
-                              : `$${Number(service.currentPerVisit).toFixed(2)}`}
-                          </div>
-                          <div className="text-14 text-zinc-500">
-                            per application
-                          </div>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               {satelliteData &&
