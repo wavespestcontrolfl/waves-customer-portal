@@ -340,7 +340,8 @@ function serviceCatalogMatch(line, serviceIndex) {
       const {
         converterFollowUpSeedingPattern, seedingFamilyKey,
         visitsPerYearForRecurringService, visitCountFieldsConflict,
-        explicitCadenceFieldForService, explicitlyOneTimeCadence,
+        visitCountFieldsInvalid, explicitCadenceFieldForService,
+        explicitlyOneTimeCadence,
       } = require('../services/estimate-converter');
       const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
       if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
@@ -373,6 +374,10 @@ function serviceCatalogMatch(line, serviceIndex) {
         // one-time spelling beside a >1 visit count still fails closed
         // via the count check.
         const recurringEvidence = visitCountFieldsConflict(line || {})
+          // Populated-but-invalid counts (0, negative, text) are malformed
+          // recurring data, not definitively one-time (codex r18 pre-push
+          // P1) — same reader the converter's gates use.
+          || visitCountFieldsInvalid(line || {})
           || (visits != null && visits > 1)
           || (!!explicitCadenceFieldForService(line || {}) && !explicitlyOneTimeCadence(line || {}));
         if (recurringEvidence) {

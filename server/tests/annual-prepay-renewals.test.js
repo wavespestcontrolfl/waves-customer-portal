@@ -595,6 +595,10 @@ describe('annual prepay renewal helpers', () => {
     }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 0,
       reason: 'palm_catalog_missing',
+      // The deferral runs before any slide persists — it must expose the
+      // AUTHORITATIVE term end, never an unpersisted extension (codex r18
+      // pre-push P0).
+      effectiveTermEnd: '2027-06-15',
     });
   });
 

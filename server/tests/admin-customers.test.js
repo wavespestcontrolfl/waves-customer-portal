@@ -585,6 +585,9 @@ describe('admin customers route helpers', () => {
     // billed as a recurring plan.
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2, visits: 4 }, serviceIndex)).toBeFalsy();
+    // Populated-but-invalid counts are malformed recurring data, not
+    // definitively one-time (codex r18 pre-push P1).
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 0 }, serviceIndex)).toBeFalsy();
     // EXPLICITLY one-time palm rows keep the one-time match (codex r17
     // P2): 'one_time' trips the unrecognized-cadence sentinel but is not
     // recurring evidence.

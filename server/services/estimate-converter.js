@@ -5501,6 +5501,7 @@ module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
+module.exports.visitCountFieldsInvalid = visitCountFieldsInvalid;
 module.exports.explicitCadenceFieldForService = explicitCadenceFieldForService;
 module.exports.explicitlyOneTimeCadence = explicitlyOneTimeCadence;
 module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;

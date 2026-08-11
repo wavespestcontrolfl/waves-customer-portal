@@ -704,7 +704,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
             targetDates,
             existingCount: existingRows.length,
             createdRows: [],
-            effectiveTermEnd,
+            // The ORIGINAL term end (codex r18 pre-push P0): this deferral
+            // runs before the late-payment slide persists, and the caller
+            // trusts any returned effectiveTermEnd for attach/prepay/renewal
+            // work — exposing the unpersisted slide would suppress billing
+            // through a window annual_prepay_terms does not record.
+            effectiveTermEnd: termEnd,
             reason: 'palm_catalog_missing',
           };
         }
@@ -721,7 +726,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           targetDates,
           existingCount: existingRows.length,
           createdRows: [],
-          effectiveTermEnd,
+          // Original term end — same rule as the deferral above.
+          effectiveTermEnd: termEnd,
           reason: 'palm_catalog_missing',
         };
       }
