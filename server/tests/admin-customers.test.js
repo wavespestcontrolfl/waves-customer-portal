@@ -602,6 +602,12 @@ describe('admin customers route helpers', () => {
     // valid semiannual line both keep the operator's choice.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual' }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // An UNKNOWN explicit key is inert and must not bypass palm
+    // validation (codex r18 pre-push P0): a legacy { serviceKey: 'palm' }
+    // 2-visit line routes to the recurring row, and a contradictory one
+    // stays unmatched.
+    expect(serviceCatalogMatch({ serviceKey: 'palm', service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    expect(serviceCatalogMatch({ serviceKey: 'palm', service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
     // INVALID-but-recurring palm data fails closed to NO match (codex r16
     // pre-push P0): contradictory cadence and conflicting counts are not
     // definitively one-time — the one-time profile would invoice work

@@ -402,7 +402,17 @@ function serviceCatalogMatch(line, serviceIndex) {
       return null;
     }
   }
-  if (!explicitKey && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
+  // An explicit key that resolves NO catalog row is inert — the fallback
+  // matching below governs the outcome, so palm validation must apply as
+  // if no explicit key existed (codex r18 pre-push P0: a legacy
+  // { serviceKey: 'palm' } spelling otherwise bypassed validation and the
+  // candidate loop matched the one-time row for a 2-visit line). Explicit
+  // keys that DO resolve are the operator's recognized choice: the two
+  // palm identities are validated above, and any other resolved key wins
+  // in the candidate loop as before.
+  const explicitKeyResolves = explicitKey
+    && !!(serviceIndex.byKey.get(explicitKey) || serviceIndex.byName.get(explicitKey));
+  if ((!explicitKey || !explicitKeyResolves) && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
       const {
         converterFollowUpSeedingPattern, seedingFamilyKey,
