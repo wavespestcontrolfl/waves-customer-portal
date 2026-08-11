@@ -3976,11 +3976,22 @@ const EstimateConverter = {
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
           // or snapshot), codex r20 P1.
           const unitKey = recurringServiceKey({ name: unit.service.name });
-          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey
-            || (unit.catalogServiceKey && (
+          // For PALM units the label clause is unsafe (codex r21 pre-push
+          // P0): recurringServiceKey collapses one-time injection,
+          // nutritional, and semiannual labels into one key, so a reserved
+          // one-time/nutritional palm visit would suppress the sold
+          // recurring series (billed but unscheduled). Palm promotions
+          // match by CATALOG IDENTITY only; every other family keeps
+          // label-or-identity.
+          const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';
+          const alreadyReserved = reservedRows.some((row) => {
+            const identityMatch = !!unit.catalogServiceKey && (
               reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey
               || String(row.service_key_snapshot || '') === unit.catalogServiceKey
-            )));
+            );
+            if (unitIsPalmInjection) return identityMatch;
+            return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
+          });
           if (alreadyReserved) continue;
           try {
             // Copy the customer's picked slot onto the added row (Codex r2):

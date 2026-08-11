@@ -664,6 +664,11 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
     expect(converterSrc).toContain('reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey');
     expect(converterSrc).toContain("String(row.service_key_snapshot || '') === unit.catalogServiceKey");
+    // PALM units match by identity ONLY (codex r21 pre-push P0): the label
+    // key collapses one-time/nutritional/semiannual, and a reserved
+    // one-time palm visit must never suppress the sold recurring series.
+    expect(converterSrc).toContain("const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';");
+    expect(converterSrc).toContain('if (unitIsPalmInjection) return identityMatch;');
     // And the promoted row's window_end reflects its OWN duration, not the
     // reserved visit's block.
     expect(converterSrc).toContain('function windowEndFromStart(');
