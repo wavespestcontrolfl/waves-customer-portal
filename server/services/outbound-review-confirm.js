@@ -63,7 +63,12 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // confirmation message.
   try {
     const AppointmentReminders = require('./appointment-reminders');
-    await AppointmentReminders.registerAppointment(
+    // registerAppointment is fail-soft: it catches internally and returns
+    // NULL on failure (every success path — including the already-
+    // registered dedupe — returns the record). The catch below alone would
+    // never see a swallowed transient error, silently stamping a row whose
+    // reminders never armed (Codex #3361 r6 P1).
+    const reminderRecord = await AppointmentReminders.registerAppointment(
       svc.id,
       svc.customer_id,
       `${dateOnly(svc.scheduled_date)}T${svc.window_start || '09:00'}`,
@@ -71,7 +76,12 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       'admin_manual',
       { sendConfirmation: false },
     );
-    logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
+    if (!reminderRecord) {
+      coreLegsOk = false;
+      logger.error(`[${routeTag}] outbound-review reminder arm returned null (swallowed failure) for ${svc.id}`);
+    } else {
+      logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
+    }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
   // 1a. Inspection-credit booking evidence — written HERE, not at the AI
@@ -171,14 +181,23 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     if (leadId && svcIsCallback && !keepOpenForQuote) {
       logger.info(`[${routeTag}] Skipping won-conversion for confirmed re-service callback ${svc.id} ($0 callback, not a sale; no quote owed)`);
     } else if (leadId) {
-      await CallProc.convertCallLeadOnPhoneBooking(db, {
+      // convertCallLeadOnPhoneBooking is fail-soft too: NULL = transient
+      // failure (retry-worthy), FALSE = a deliberate no-op (quote kept
+      // open, lead already won/unowned, lost race) that must NOT block
+      // the activation stamp (Codex #3361 r6 P1).
+      const converted = await CallProc.convertCallLeadOnPhoneBooking(db, {
         leadId,
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         callSid: null,
         keepOpenForQuote,
       });
-      logger.info(`[${routeTag}] Converted lead ${leadId} (keepOpenForQuote=${keepOpenForQuote}) for confirmed outbound-review booking ${svc.id}`);
+      if (converted === null) {
+        coreLegsOk = false;
+        logger.error(`[${routeTag}] outbound-review lead conversion returned null (swallowed failure) for ${svc.id}`);
+      } else {
+        logger.info(`[${routeTag}] Lead ${leadId} conversion ran (converted=${converted}, keepOpenForQuote=${keepOpenForQuote}) for confirmed outbound-review booking ${svc.id}`);
+      }
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
 

@@ -3167,7 +3167,12 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
     });
   } catch (err) {
     logger.error(`[call-proc] Lead conversion on phone booking failed for ${callSid}: ${err.message}`);
-    return false;
+    // null = TRANSIENT FAILURE, distinct from the deliberate `false` no-ops
+    // above (quote kept open, lead already won/unowned, lost race) — the
+    // legacy-activation hook keys retryability on exactly this distinction
+    // (Codex #3361 r6 P1). Same falsiness for every truthiness-checking
+    // caller.
+    return null;
   }
 }
 
@@ -11744,6 +11749,12 @@ const CallRecordingProcessor = {
                       const rearmed = await db('appointment_reminders')
                         .where({ scheduled_service_id: svc.id, cancelled: false })
                         .where('appointment_time', '>', new Date())
+                        // Live-status check at WRITE time, not the earlier
+                        // svc snapshot: a tech can complete the visit between
+                        // the reuse read and this update, and the stranded-
+                        // confirmation pass sends without a status guard of
+                        // its own (Codex #3361 r6 P1).
+                        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending','confirmed','rescheduled'))")
                         .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
                       if (rearmed > 0) {
                         logger.info(`[call-proc] replay of ${svc.id}: no confirmation evidence — re-armed for the stranded-confirmation sweep`);
