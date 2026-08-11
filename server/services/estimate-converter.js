@@ -2479,10 +2479,21 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
   }
-  return RecurringAppointmentSeeder.inferRecurringPattern({
+  const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
     fallbackFrequency,
   }) || null;
+  // Palm validation mirror (pre-push P1): the seeding gate refuses any
+  // non-semiannual palm cadence, contradictory visit counts, and
+  // commercial lines — the prepay term must not record a cadence the
+  // converter refused (e.g. monthly + 2 visits), or the payment-time
+  // coverage refresh would seed monthly-spaced visits over a program the
+  // office schedules. Fail closed to no coverage cadence instead.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (inferred !== 'semiannual' || !(visits == null || visits === 2) || isCommercialRecurringLine(svc)) return null;
+  }
+  return inferred;
 }
 
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
@@ -3724,18 +3735,19 @@ const EstimateConverter = {
           // (runSeedingStep) so concurrent creators serialize.
           if (reservedSeedingPattern) {
             const outcome = await runSeedingStep(async (trx) => {
-              // Reserved lawn/palm parents carry no service_id — the
-              // reservation resolver stamps only engine-keyed ONE-TIME rows
-              // ("recurring rows have no engineKey"), and the promoted-unit
-              // loop skips a family that IS the reserved row
-              // (alreadyReserved). Relink the parent to its cadence catalog
-              // row BEFORE seeding so the parent and every copied follow-up
-              // carry the durable identity — for palm this is what routes
-              // completion to the recurring typed profile instead of the
-              // one-time short-name match (codex #3349 r2 P1). Fail-open:
-              // an absent row (env not yet migrated) keeps today's
-              // name-only behavior.
-              if (!reservedStart.service_id) {
+              // Reserved lawn/palm parents carry no service_id (the
+              // reservation resolver stamps only engine-keyed ONE-TIME
+              // rows) — or a STALE one: an ADOPTED existing appointment
+              // can already carry the one-time palm_injection id, which
+              // estimate-public intentionally preserves on adoption, and
+              // every seeded child copies the parent's id (pre-push P0).
+              // Relink to the cadence-specific catalog row BEFORE seeding
+              // whenever the parent's id differs from it — for palm this
+              // is what routes completion to the recurring typed profile
+              // instead of the one-time posture (codex #3349 r2 P1).
+              // Fail-open: an absent row (env not yet migrated) keeps
+              // today's behavior, id included.
+              {
                 const reservedFam = RecurringAppointmentSeeder.serviceKeyFor({ service_type: reservedStart.service_type });
                 const reservedCatalogKey = reservedFam === 'palm_injection'
                   ? (reservedSeedingPattern === 'semiannual' ? 'palm_injection_semiannual' : null)
@@ -3747,12 +3759,12 @@ const EstimateConverter = {
                     const catalogRow = await trx('services')
                       .where({ service_key: reservedCatalogKey })
                       .first('id');
-                    if (catalogRow) {
+                    if (catalogRow && reservedStart.service_id !== catalogRow.id) {
                       await trx('scheduled_services').where({ id: reservedStart.id }).update({ service_id: catalogRow.id });
                       reservedStart.service_id = catalogRow.id;
                     }
                   } catch (relinkErr) {
-                    logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (name-only identity kept): ${relinkErr.message}`);
+                    logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
                   }
                 }
               }

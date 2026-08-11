@@ -223,6 +223,19 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(converterFollowUpSeedingPattern(fourVisits, { service_type: 'Palm Injection' }, 'quarterly')).toBe(null);
   });
 
+  test('annual-prepay coverage mirrors the palm validation — contradictory or commercial palm records NO cadence (pre-push P1)', () => {
+    const { annualPrepayCoverageCadence } = EstimateConverter;
+    // The seeding gate refused monthly + 2 visits; the prepay term must
+    // not record the refused cadence (payment-time coverage would seed
+    // monthly-spaced visits over an office-scheduled program).
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, null)).toBe(null);
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 4 }, null)).toBe(null);
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Commercial Palm Injection', visitsPerYear: 2 }, null)).toBe(null);
+    // Valid palm shapes still record semiannual.
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, 'quarterly')).toBe('semiannual');
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 2 }, null)).toBe('semiannual');
+  });
+
   test('an explicit cadence FIELD beats the forced rule — contradictory data declines, explicit semiannual still seeds (codex r4 P1)', () => {
     // monthly + 2 visits is contradictory: normal validation must decline
     // it to office scheduling, never override to semiannual.
