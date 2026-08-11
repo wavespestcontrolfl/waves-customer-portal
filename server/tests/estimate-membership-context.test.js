@@ -38,6 +38,11 @@ function fakeDb({
   // (service_key/service_name for classification, frequency/visits_per_year
   // for cadence); each loader reads only what it selected.
   catalogRows = null,
+  // annual_prepay_terms rows backing prepaid scheduled rows. The TERM is the
+  // authoritative source of a prepaid per-application figure
+  // (prepay_amount / coverage_visit_count), so a prepaid fixture without a
+  // matching term here withholds — which is the intended behavior.
+  prepaidTerms = [],
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -87,6 +92,7 @@ function fakeDb({
             requested.filter((key) => key in row).map((key) => [key, row[key]]),
           ));
         }
+        if (table === 'annual_prepay_terms') return prepaidTerms;
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {
@@ -983,12 +989,13 @@ describe('current-spend cadence and stamped billing basis', () => {
         { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
-    // estimated_price stays the undiscounted list figure; prepaid_amount is
-    // what the customer actually paid. A panel captioned "currently pays"
+    // estimated_price stays the undiscounted list figure; the TERM says what
+    // was actually paid per application. A panel captioned "currently pays"
     // must show the latter.
     expect(spend.currentServices[0]).toEqual(expect.objectContaining({
       currentPerVisit: 114,
@@ -1081,6 +1088,7 @@ describe('current-spend cadence and stamped billing basis', () => {
       // row is what survives in lastPaidByKey.
       paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1211,6 +1219,7 @@ describe('current-spend cadence and stamped billing basis', () => {
         { id: 'a1', frequency: 'quarterly', visits_per_year: 4 },
         { id: 'b1', frequency: 'quarterly', visits_per_year: 4 },
       ],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1270,6 +1279,7 @@ describe('current-spend cadence and stamped billing basis', () => {
       ],
       paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1296,6 +1306,7 @@ describe('current-spend cadence and stamped billing basis', () => {
         { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.76 },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 455.01, coverage_visit_count: 4 }],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1324,6 +1335,67 @@ describe('current-spend cadence and stamped billing basis', () => {
     expect(spend.currentServices[0]).toEqual(expect.objectContaining({
       currentPerVisit: null,
       spendSource: 'unavailable',
+    }));
+  });
+
+  test('a partly-completed prepaid term still quotes the whole term\'s per-application figure', async () => {
+    const database = fakeDb({
+      // A 4-visit $455.03 term allocates 113.75/113.75/113.75/113.78. Two
+      // visits have COMPLETED, so they're filtered out of the active rows and
+      // only the remainder-loaded tail survives. Deriving the figure from
+      // those rows gave $113.78 (or withheld on the spread); the term itself
+      // says $455.03 / 4 = $113.7575 → $113.76.
+      scheduledRows: [
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.78 },
+      ],
+      catalogRows: [{ id: 'p3', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 455.03, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 113.76,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('a prepaid contract whose term cannot be loaded withholds rather than quoting list price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't-missing', prepaid_amount: 114 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('seasonal Feb–Oct resolves through the shared cadence helper', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 90 }),
+      scheduledRows: [{ id: 'm1', service_type: 'mosquito', scheduled_date: '2099-03-05' }],
+      // The coverage vocabulary drops seasonal_feb_oct; the shared helper
+      // knows it is 9 visits.
+      catalogRows: [{
+        id: 'm1', recurring_pattern: 'seasonal_feb_oct',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Seasonal (Feb–Oct)',
+      visitsPerYear: 9,
+      currentPerVisit: 120,
     }));
   });
 

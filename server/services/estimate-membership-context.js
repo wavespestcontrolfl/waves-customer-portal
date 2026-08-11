@@ -411,8 +411,14 @@ async function loadCadenceByRowId(database, customerId) {
     const {
       normalizeCoverageCadence,
       cadenceFromIntervalDays,
-      coverageCadenceVisitsPerYear,
     } = require('./annual-prepay-renewals')._private;
+    // Visits per year comes from the SHARED helper (codex #3353 r9):
+    // prepay-cadence exists for exactly this mapping, and it knows cadences a
+    // coverage-vocabulary round-trip drops — seasonal_feb_oct resolves to 9
+    // there and to nothing through normalizeCoverageCadence. Maintaining a
+    // second mapping is the parallel-mechanism mistake AGENTS.md names, which
+    // I made while citing that very rule.
+    const { visitsPerYearForCadence } = require('./prepay-cadence');
     return new Map(rows.map((row) => {
       // Same three-step resolution admin-invoices' coverage suggestion uses,
       // in the same order (codex #3353 r4): the scheduler's
@@ -420,16 +426,18 @@ async function loadCadenceByRowId(database, customerId) {
       // normalizeCoverageCadence; and everything it can't name — notably
       // 'custom' carrying recurring_interval_days = 42 — resolves from the
       // interval days.
+      // The shared helper resolves the live pattern DIRECTLY when it knows it
+      // (monthly_nth_weekday, seasonal_feb_oct, every_6_weeks…); the coverage
+      // normalizer and interval-days mapping are the fallbacks for patterns it
+      // doesn't name. Whichever produces the cadence, the visit count always
+      // comes from the one shared mapping.
       const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
-      const liveCadence = rawPattern === 'monthly_nth_weekday'
-        ? 'monthly'
-        : (normalizeCoverageCadence(row.recurring_pattern)
-          || cadenceFromIntervalDays(row.recurring_interval_days));
-      if (liveCadence) {
-        return [row.id, {
-          frequency: liveCadence,
-          visitsPerYear: coverageCadenceVisitsPerYear(liveCadence),
-        }];
+      const liveCadence = (visitsPerYearForCadence(rawPattern) ? rawPattern : null)
+        || normalizeCoverageCadence(row.recurring_pattern)
+        || cadenceFromIntervalDays(row.recurring_interval_days);
+      const liveVisitsPerYear = visitsPerYearForCadence(liveCadence);
+      if (liveCadence && liveVisitsPerYear) {
+        return [row.id, { frequency: liveCadence, visitsPerYear: liveVisitsPerYear }];
       }
       // A series that DECLARES a live recurrence we cannot name yields NO
       // cadence — never the catalog default (codex #3353 r6). weekly and
@@ -459,20 +467,47 @@ async function loadCadenceByRowId(database, customerId) {
   }
 }
 
+// The annual-prepay terms backing a customer's active rows, by id. The TERM
+// is the authoritative source of a prepaid per-application figure —
+// prepay_amount / coverage_visit_count is exactly what splitCoverageAmount
+// divides — so reading it removes any need to infer the figure from the
+// allocations still on the schedule (codex #3353 r9: completed visits are
+// filtered out of the active rows, so those allocations are a partial view
+// whose count and spread say nothing reliable about the term).
+// Degrades to an EMPTY Map on error; a prepaid contract with no term then
+// withholds rather than guessing.
+async function loadPrepaidTermsById(database, rows) {
+  const termIds = [...new Set(rows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+  if (!termIds.length) return new Map();
+  try {
+    const terms = await database('annual_prepay_terms')
+      .whereIn('id', termIds)
+      .select('id', 'prepay_amount', 'coverage_visit_count');
+    return new Map(terms.map((term) => [String(term.id), term]));
+  } catch {
+    return new Map();
+  }
+}
+
 // Customer-facing cadence wording. "Every other month" beats the catalog's
 // "bimonthly", which reads as twice-a-month to half the people who see it.
 // 'bi_monthly' is billing-cadence's normalized key; 'bimonthly' is the
 // catalog's spelling of the same cadence — both land on the same wording.
 const CADENCE_LABEL = {
   monthly: 'Monthly',
+  monthly_nth_weekday: 'Monthly',
   bi_monthly: 'Every other month',
   bimonthly: 'Every other month',
   every_6_weeks: 'Every 6 weeks',
   quarterly: 'Quarterly',
   triannual: 'Every 4 months',
+  every_4_months: 'Every 4 months',
   semiannual: 'Twice a year',
+  biannual: 'Twice a year',
   annual: 'Annual',
+  yearly: 'Annual',
   seasonal: 'Seasonal',
+  seasonal_feb_oct: 'Seasonal (Feb–Oct)',
 };
 
 function cadenceLabelFor(frequency) {
@@ -516,6 +551,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const cadenceByRowId = await loadCadenceByRowId(database, customerId);
+  const prepaidTermsById = await loadPrepaidTermsById(database, rows);
   // Best-effort: the customer row backs the stamped per-application /
   // monthly-rate basis of last resort below. A failed load simply leaves
   // those fallbacks unavailable, exactly as before they existed.
@@ -611,44 +647,31 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // already applies: honest only when the contract is UNIFORMLY prepaid
       // at one allocation — a mixed or uneven contract keeps the scheduled
       // price rather than picking one row's allocation to stand for all.
-      // splitCoverageAmount puts the ENTIRE cent remainder on the final visit
-      // ($455.01 over 4 = 113.75/113.75/113.75/113.76), so an uneven
-      // allocation is the NORMAL persisted shape of a prepaid term, not
-      // corrupt data (codex #3353 r7). Demanding exact equality here rejected
-      // that shape and fell through to the undiscounted list price — showing
-      // $120 for a term the customer demonstrably paid ~$113.75 on.
+      // A prepaid contract's per-application figure comes from the TERM, not
+      // from the allocations left on the schedule (codex #3353 r9).
+      // prepay_amount / coverage_visit_count is exactly the number
+      // splitCoverageAmount divides, so it is right regardless of how the
+      // cent remainder landed or how many visits have already completed —
+      // and completed visits ARE filtered out of these rows, which is what
+      // made every previous attempt to infer it from them wrong (r7's
+      // exact-cents check, r8's spread bound).
       //
-      // The AVERAGE of a splitCoverageAmount series is exactly total ÷ visits,
-      // which is precisely "what they paid per application". Bounded to a
-      // spread of at most one cent per visit (the largest remainder that
-      // function can produce) so genuinely different allocations — two terms
-      // collapsed into one contract group — still withhold instead of
-      // averaging into a figure nobody paid.
-      const prepaidAmounts = contractRows
-        .map((row) => Number(row.prepaid_amount))
-        .filter((amount) => Number.isFinite(amount) && amount > 0);
+      // ONE term only: two terms collapsed into one address contract have no
+      // single honest per-application figure. No term, no usable amount, or
+      // no visit count withholds too — a paid term disproves the scheduled
+      // price, so there is nothing safe to fall back to.
+      const prepaidTermIds = [...new Set(contractRows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
       const fullyPrepaid = contractRows.length > 0
-        && contractRows.every((row) => !!row.annual_prepay_term_id)
-        && prepaidAmounts.length === contractRows.length;
-      const allocationSpreadCents = fullyPrepaid
-        ? Math.round((Math.max(...prepaidAmounts) - Math.min(...prepaidAmounts)) * 100)
-        : 0;
-      // ONE term, and a spread no wider than that term could produce (codex
-      // #3353 r8, both corrections to r7's bound):
-      //  - splitCoverageAmount's remainder is at most count-1 cents, not
-      //    count — a two-visit series can differ by exactly one cent, so the
-      //    old `<= contractRows.length` admitted $100.00/$100.02;
-      //  - and the spread test alone can't tell one term's remainder from two
-      //    DIFFERENT terms that happen to land close together, which is the
-      //    case the bound existed to exclude. Term identity is the direct
-      //    check; the spread is the belt.
-      const prepaidTermIds = new Set(contractRows.map((row) => String(row.annual_prepay_term_id || '')));
-      const uniformlyPrepaid = fullyPrepaid
-        && prepaidTermIds.size === 1
-        && allocationSpreadCents <= Math.max(0, contractRows.length - 1);
-      const prepaidPerVisit = uniformlyPrepaid
-        ? round2(prepaidAmounts.reduce((sum, amount) => sum + amount, 0) / prepaidAmounts.length)
+        && contractRows.every((row) => !!row.annual_prepay_term_id);
+      const prepaidTerm = (fullyPrepaid && prepaidTermIds.length === 1)
+        ? prepaidTermsById.get(String(prepaidTermIds[0]))
         : null;
+      const termAmount = Number(prepaidTerm?.prepay_amount);
+      const termVisits = Number(prepaidTerm?.coverage_visit_count);
+      const prepaidPerVisit = (termAmount > 0 && Number.isInteger(termVisits) && termVisits > 0)
+        ? round2(termAmount / termVisits)
+        : null;
+      const uniformlyPrepaid = prepaidPerVisit != null;
       // Cadence belongs to the CONTRACT, not the family (codex #3353 r4):
       // monthly pest at one property and quarterly at another are different
       // schedules, and picking the first resolvable row for both would be an

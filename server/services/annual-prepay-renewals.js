@@ -284,17 +284,9 @@ function cadenceFromIntervalDays(days) {
   return null;
 }
 
-// Visits per year for a coverage cadence — the inverse of the visit-count
-// branch in inferCoverageCadence, so the two can never disagree about what a
-// cadence means. every_6_weeks is 9 (the repo's established figure: a 42-day
-// cycle over a service year, not 365/42).
-function coverageCadenceVisitsPerYear(value) {
-  const cadence = normalizeCoverageCadence(value);
-  if (!cadence) return null;
-  if (cadence === 'every_6_weeks') return 9;
-  const months = coverageCadenceMonths(cadence);
-  return months ? 12 / months : null;
-}
+// NOTE: cadence → visits-per-year lives in prepay-cadence.js
+// (visitsPerYearForCadence). A copy briefly existed here and was removed —
+// it silently disagreed with the shared one on seasonal_feb_oct.
 
 function coverageCadenceSchedule(value) {
   const cadence = normalizeCoverageCadence(value);
@@ -3708,7 +3700,6 @@ module.exports = {
     addMinutesHHMM,
     normalizeCoverageCadence,
     cadenceFromIntervalDays,
-    coverageCadenceVisitsPerYear,
     coverageCadenceMonths,
     coverageCadenceDays,
     inferCoverageCadence,
