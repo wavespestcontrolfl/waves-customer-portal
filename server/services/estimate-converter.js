@@ -2091,6 +2091,17 @@ const LAWN_CADENCE_CATALOG_KEYS = {
   monthly: 'lawn_care_monthly',
 };
 
+// The lawn/palm links added 2026-08-11 are IDENTITY-ONLY (codex #3349 P1):
+// the catalog lookups below also copy default_duration_minutes onto the
+// visit, and the lawn rows carry 45 while the estimate-slot system books
+// lawn at 60 — copying would make auto-scheduled accepts shorter than
+// reserved ones (path-dependent capacity, overlapping dispatch). These keys
+// link the id and change nothing else; duration keeps today's derivation.
+const IDENTITY_ONLY_CATALOG_KEYS = new Set([
+  ...Object.values(LAWN_CADENCE_CATALOG_KEYS),
+  'palm_injection_semiannual',
+]);
+
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
   if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
@@ -3498,7 +3509,9 @@ const EstimateConverter = {
                 .first('id', 'default_duration_minutes');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
-                if (catalogRow.default_duration_minutes) standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
+                  standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                }
               }
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
@@ -3794,7 +3807,7 @@ const EstimateConverter = {
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
-              if (catalogRow.default_duration_minutes) {
+              if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
             } else {

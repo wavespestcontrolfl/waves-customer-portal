@@ -165,6 +165,20 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Lawn Care', service: 'lawn_care' })).toBe(null);
   });
 
+  test('lawn/palm identity links never copy the catalog default duration (codex P1: 45-min lawn rows vs the slot system\'s 60)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const converterSrc = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    // The identity-only set exists and carries every new link key…
+    expect(converterSrc).toContain('const IDENTITY_ONLY_CATALOG_KEYS = new Set([');
+    expect(converterSrc).toContain("...Object.values(LAWN_CADENCE_CATALOG_KEYS),");
+    expect(converterSrc).toContain("'palm_injection_semiannual',\n]);");
+    // …and BOTH catalog-lookup duration copies honor it.
+    expect((converterSrc.match(/default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS\.has\(unit\.catalogServiceKey\)/g) || []).length).toBe(2);
+    // No unconditional duration copy remains at either lookup.
+    expect(converterSrc).not.toMatch(/if \(catalogRow\.default_duration_minutes\) \{?\s*\n?\s*(svc\.estimatedDurationMinutes|standaloneRow\.estimated_duration_minutes)/);
+  });
+
   test('END-TO-END: a scheduled visit with NO service_id resolves the typed palm profile by name', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
