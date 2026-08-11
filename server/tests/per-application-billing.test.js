@@ -307,6 +307,20 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(isPalmInjectionFamily({ name: 'Semiannual Palm Injection Service' })).toBe(true);
   });
 
+  test('two-visit nutritional/bare palm lines never seed or link the INJECTION program (codex r21 pre-push P0)', () => {
+    // The seeder's family collapse also captures the legacy nutritional
+    // program — a 2-visit nutritional line must keep office scheduling,
+    // never the injection series, identity, or forced rule.
+    const nutritional = { service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(nutritional, { service_type: 'Palm Tree Nutritional Treatment' }, 'quarterly')).toBe(null);
+    expect(supportsConverterFollowUpSeeding(nutritional, {}, 'semiannual')).toBe(false);
+    expect(EstimateConverter.remainingUnitCatalogKey(nutritional)).toBe(null);
+    const bare = { name: 'Palm Treatment', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(bare, { service_type: 'Palm Treatment' }, 'quarterly')).toBe(null);
+    expect(supportsConverterFollowUpSeeding(bare, {}, 'semiannual')).toBe(false);
+    expect(EstimateConverter.remainingUnitCatalogKey(bare)).toBe(null);
+  });
+
   test('a POPULATED invalid visit count declines — never read as a legacy count-less line (codex r18 P1)', () => {
     // { visitsPerYear: 0 } (or non-numeric text) is malformed data, not an
     // absent count: the count-less compatibility case must not seed from it.

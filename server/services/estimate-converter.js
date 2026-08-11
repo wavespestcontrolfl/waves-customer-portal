@@ -2299,6 +2299,9 @@ function remainingUnitCatalogKey(svc = {}) {
   // one-time lane's name-resolved row — linking it here would give a 1x
   // treatment the recurring billing/portal posture.
   if (seedingFamilyKey(svc) === 'palm_injection') {
+    // INJECTION-scoped (codex r21 pre-push P0): a legacy nutritional line
+    // must never link the injection identity.
+    if (!isPalmInjectionFamily(svc)) return null;
     const svcName = svc.name || svc.serviceName || svc.service_name || 'Palm Injection';
     return converterFollowUpSeedingPattern(svc, { service_type: svcName }, undefined) === 'semiannual'
       ? 'palm_injection_semiannual'
@@ -2570,6 +2573,10 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // stray and declines to office scheduling. Palm stays excluded from
   // WaveGuard tier counting (see determineTier) — that is a separate rule.
   if (key === 'palm_injection') {
+    // INJECTION identity required (codex r21 pre-push P0): the seeder's
+    // family collapse also captures the legacy nutritional program — its
+    // rows keep office scheduling, never the injection series.
+    if (!isPalmInjectionFamily(svc, parentRow)) return false;
     // Same commercial rejection as lawn above (codex r6 P1) — a
     // commercial-property palm program stays office-scheduled.
     if (isCommercialRecurringLine(svc, parentRow)) return false;
@@ -2797,7 +2804,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // frequency — semiannual included — takes the normal inference +
   // validation path, so contradictory data (monthly + 2 visits) declines
   // to office scheduling instead of being overridden.
-  if (seedingFamilyKey(svc, parentRow) === 'palm_injection'
+  if (isPalmInjectionFamily(svc, parentRow)
     && visitsPerYearForRecurringService(svc) === 2
     && !visitCountFieldsConflict(svc)
     && !visitCountFieldsInvalid(svc)
@@ -2855,7 +2862,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // while the actual series seeds semiannual — the payment-time coverage
   // refresh would then seed mismatched visits over the real series. Same
   // cadence-field restriction as the seeding rule (codex r4 P1).
-  if (seedingFamilyKey(svc) === 'palm_injection'
+  if (isPalmInjectionFamily(svc)
     && visitsPerYearForRecurringService(svc) === 2
     && !visitCountFieldsConflict(svc)
     && !visitCountFieldsInvalid(svc)
@@ -2884,7 +2891,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // converter refused (e.g. monthly + 2 visits), or the payment-time
   // coverage refresh would seed monthly-spaced visits over a program the
   // office schedules. Fail closed to no coverage cadence instead.
-  if (seedingFamilyKey(svc) === 'palm_injection') {
+  if (isPalmInjectionFamily(svc)) {
     const visits = visitsPerYearForRecurringService(svc);
     const cadenceField = explicitCadenceFieldForService(svc);
     if (inferred !== 'semiannual'
@@ -3787,7 +3794,7 @@ const EstimateConverter = {
                 if (pattern) {
                   await addUnit(
                     svcName,
-                    fam === 'palm_injection' ? 'palm_injection_semiannual' : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
+                    (fam === 'palm_injection' && isPalmInjectionFamily(svc)) ? 'palm_injection_semiannual' : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
                   );
                 }
               }
@@ -3941,9 +3948,9 @@ const EstimateConverter = {
               // would fall back to "Frequency: recurring" on every child
               // while the series actually seeds semiannual.
               service: { ...line, name: lineName, frequency: line.frequency || pattern },
-              catalogServiceKey: fam === 'palm_injection'
+              catalogServiceKey: (fam === 'palm_injection' && isPalmInjectionFamily(line))
                 ? 'palm_injection_semiannual'
-                : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
+                : (fam === 'palm_injection' ? null : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null)),
               noteKind: fam === 'palm_injection' ? 'palm injection program' : 'lawn program',
             };
           });
@@ -4250,7 +4257,7 @@ const EstimateConverter = {
                 // both directions.
                 const reservedFam = seedingFamilyKey(seedSvc || {}, reservedStart);
                 const reservedCatalogKey = reservedFam === 'palm_injection'
-                  ? (reservedSeedingPattern === 'semiannual' ? 'palm_injection_semiannual' : null)
+                  ? ((reservedSeedingPattern === 'semiannual' && isPalmInjectionFamily(seedSvc || {}, reservedStart)) ? 'palm_injection_semiannual' : null)
                   : reservedFam === 'lawn_care'
                     ? (LAWN_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
                     : null;
@@ -4516,7 +4523,7 @@ const EstimateConverter = {
             // reads as 1, but an ambiguous row is not DEFINITIVELY
             // one-time — it stands down to the guard like any other
             // recurring-reading unit.
-            const oneApplicationPalm = seedingFamilyKey(svc) === 'palm_injection'
+            const oneApplicationPalm = isPalmInjectionFamily(svc)
               && !visitCountFieldsConflict(svc)
               && visitsPerYearForRecurringService(svc) === 1;
             if (seedingPattern || (pattern && !oneApplicationPalm)) {
