@@ -463,6 +463,11 @@ class AutonomousRunner {
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
     run.agent_ms = Date.now() - t3;
+    // Persist the session pointer on EVERY outcome, not just success — the
+    // 2026-08-08→10 streaming_failed runs stored no agent_session_id, so the
+    // hung sessions could not be correlated against the Managed Agents log.
+    run.agent_id = dispatchResult.agent_id || null;
+    run.agent_session_id = dispatchResult.session_id || null;
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -488,8 +493,6 @@ class AutonomousRunner {
     if (draft && Array.isArray(dispatchResult.checked_existing_routes) && dispatchResult.checked_existing_routes.length) {
       draft.checked_existing_routes = dispatchResult.checked_existing_routes;
     }
-    run.agent_id = dispatchResult.agent_id || null;
-    run.agent_session_id = dispatchResult.session_id || null;
     run.draft_payload = draft || null;
     if (!draft) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
@@ -3798,8 +3801,13 @@ function agentSessionTimeoutMs(actionType, brief = {}) {
     || actionType === 'refresh_existing_page'
     || brief?.page_type === 'supporting-blog'
     || brief?.page_type === 'refresh';
+  // 20 min for the writer lanes: operator-pinned intercept briefs (binding
+  // outline + mandated source verification) push the final drafting turn
+  // past 10 minutes — 2026-08-08→10, nine straight new_supporting_blog runs
+  // aborted at exactly 600s while the session emitted the finished draft
+  // ~90s after the abort.
   const fallback = longRunningAgent
-    ? 10 * 60 * 1000
+    ? 20 * 60 * 1000
     : 5 * 60 * 1000;
   return envInt('AUTONOMOUS_CONTENT_AGENT_SESSION_TIMEOUT_MS', fallback);
 }
