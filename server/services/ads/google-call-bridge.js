@@ -1691,20 +1691,22 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     // scan window. The snapshot names the CANDIDATE leads the processor
     // could have reused for this call, and it is TEMPORALLY BOUNDED
     // (pre-push audit P1 r4): a REUSED lead necessarily existed before
-    // the call's last processing pass. The bound is anchored to
-    // PROCESSING-SPECIFIC evidence (codex P1s, r3+r4 GH rounds): the
-    // automatic retry lane ends at created_at + the shared extraction
-    // retry window, and every pass that can link a lead — the
-    // age-unlimited admin force-reprocess included — goes through a claim
-    // write that stamps processing_started_at, which finalization
-    // deliberately preserves. The anchor gets the processor's own
-    // 10-minute stale-pass allowance on top (codex P1, r5 GH round):
-    // findReusableCallLead runs late in the pass and can reuse a lead
-    // committed after the claim — a pass older than that allowance is the
-    // processor's own definition of dead. Generic updated_at was rejected
-    // here (disposition edits and triage sync move it, widening the
-    // horizon with non-processing writes); the daily re-record of a
-    // still-open ambiguity refreshes the snapshot after a late pass. The exact pick ("newest eligible exact-phone match at
+    // the call's last processing pass ENDED. The bound is that pass's
+    // actual evidence (codex P1s, r3+r4+r5 GH rounds + audit r10): every
+    // pass that can link a lead — the age-unlimited admin force-reprocess
+    // included — claims first, stamping processing_started_at (which
+    // finalization deliberately preserves), and findReusableCallLead runs
+    // late in the pass, so the anchor is that stamp plus the processor's
+    // own 10-minute stale-pass allowance (a pass older than that is the
+    // processor's own definition of dead). The created_at + retry-window
+    // fallback applies ONLY to pre-column rows with no stamp — keeping it
+    // in a GREATEST let the seven-day term dominate every
+    // normally-processed call and re-widened the very window the stamp
+    // makes precise. A pass tomorrow that links a lead created tonight
+    // bumps the stamp, and the daily re-record of a still-open ambiguity
+    // (or the reopen's re-record) refreshes the snapshot behind it.
+    // Generic updated_at was rejected (disposition edits and triage sync
+    // move it, widening the horizon with non-processing writes). The exact pick ("newest eligible exact-phone match at
     // processing time") is not reconstructible post-hoc — claim states
     // move under it — so the hold keeps every candidate (over-holding a
     // coexisting same-number lead is recoverable; a wrong organic label
@@ -1721,7 +1723,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
            ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
           AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
             = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
-          AND l.created_at < GREATEST(cl.created_at + make_interval(secs => ?), COALESCE(cl.processing_started_at + interval '10 minutes', cl.created_at))
+          AND l.created_at < COALESCE(cl.processing_started_at + interval '10 minutes', cl.created_at + make_interval(secs => ?))
         WHERE cl.id IN (${ids.map(() => '?').join(', ')})
        ON CONFLICT DO NOTHING`,
       [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...ids],

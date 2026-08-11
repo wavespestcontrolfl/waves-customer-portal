@@ -128,14 +128,15 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(snap[0]).toMatch(/cl\.from_phone/);
     expect(snap[0]).toMatch(/RIGHT\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(snap[0]).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\)\) >= 10/);
-    // TEMPORALLY BOUNDED (audit P1 r4), anchored to PROCESSING-SPECIFIC
-    // evidence (codex P1s GH r3+r4+r5): every pass that can link a lead —
-    // the age-unlimited force-reprocess included — goes through a claim
-    // write stamping processing_started_at, plus the processor's own
-    // 10-minute stale-pass allowance (findReusableCallLead runs LATE in
-    // the pass and can reuse a lead committed after the claim). Generic
-    // updated_at was rejected (disposition edits and triage sync move it).
-    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), COALESCE\(cl\.processing_started_at \+ interval '10 minutes', cl\.created_at\)\)/);
+    // TEMPORALLY BOUNDED (audit P1 r4) by the last pass's ACTUAL evidence
+    // (codex GH r3+r4+r5 + audit r10): processing_started_at (stamped by
+    // every linking pass, preserved through finalization) plus the
+    // processor's 10-minute stale-pass allowance; the created_at +
+    // retry-window arm is a FALLBACK for pre-column rows only — inside a
+    // GREATEST the seven-day term dominated every normally-processed call
+    // and re-widened the window the stamp makes precise.
+    expect(snap[0]).toMatch(/l\.created_at < COALESCE\(cl\.processing_started_at \+ interval '10 minutes', cl\.created_at \+ make_interval\(secs => \?\)\)/);
+    expect(snap[0]).not.toMatch(/GREATEST/);
     expect(snap[1]).toEqual([7 * 24 * 60 * 60, 'call-1', 'call-2']);
   });
 
