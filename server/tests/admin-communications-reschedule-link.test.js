@@ -96,13 +96,14 @@ function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
     where: jest.fn(() => inner),
     orWhere: jest.fn(() => inner),
   };
-  const b = { inner, calls: { where: [], whereRaw: [], whereNull: [] } };
+  const b = { inner, calls: { where: [], whereRaw: [], whereNull: [], whereIn: [] } };
   b.where = jest.fn((...a) => {
     if (typeof a[0] === 'function') a[0](inner);
     else b.calls.where.push(a);
     return b;
   });
   b.whereNull = jest.fn((...a) => { b.calls.whereNull.push(a); return b; });
+  b.whereIn = jest.fn((...a) => { b.calls.whereIn.push(a); return b; });
   b.whereRaw = jest.fn((...a) => { b.calls.whereRaw.push(a); return b; });
   b.first = jest.fn(() => Promise.resolve(firstRow));
   b.select = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : []));
@@ -245,7 +246,14 @@ describe('POST /admin/communications/reschedule-link', () => {
       expect(res.status).toBe(404); // no visit — resolution path is what's under test
       expect(customers.calls.where).toContainEqual([{ id: CUSTOMER_UUID }]);
       expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
-      expect(customers.whereRaw).not.toHaveBeenCalled();
+      // Identity resolution never re-derives from the phone on this path —
+      // the single whereRaw is the exact last-10 NAME-agreement set
+      // (firstNameForPhone), not a lookup that could widen the account.
+      expect(customers.whereRaw).toHaveBeenCalledTimes(1);
+      expect(customers.whereRaw).toHaveBeenCalledWith(
+        "right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+        ['9415551234'],
+      );
       expect(customers.inner.where).toHaveBeenCalledWith({ account_id: 'acct-9' });
       expect(customers.inner.orWhere).toHaveBeenCalledWith({ id: 'acct-9' });
       expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID, 'cust-sibling']]);
@@ -394,6 +402,7 @@ describe('POST /admin/communications/reschedule-link', () => {
       expect(await res.json()).toEqual({
         url: GOOD_LINK.url,
         line: GOOD_LINK.line,
+        firstName: null,
         appointment: {
           id: 'svc-1',
           scheduledDate: '2099-08-04',
@@ -403,6 +412,72 @@ describe('POST /admin/communications/reschedule-link', () => {
         },
       });
       expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: CUSTOMER_UUID });
+    });
+  });
+
+  test('the recipient first name rides the response for the greeting prefill (both resolution paths)', async () => {
+    const visit = {
+      id: 'svc-1',
+      customer_id: CUSTOMER_UUID,
+      scheduled_date: '2099-08-04',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+      service_type: 'lawn care',
+      status: 'confirmed',
+    };
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+
+    // Phone path (selects: matches → expansion → name set). The name only
+    // rides when every named row on the NUMBER agrees (trimmed,
+    // case-insensitive); blank siblings don't break agreement.
+    const byPhone = makeCustomersBuilder({
+      selectResults: [
+        [{ id: 'cust-b', account_id: 'acct-1' }, { id: 'cust-a', account_id: 'acct-1' }],
+        [{ id: CUSTOMER_UUID }],
+        [{ first_name: 'PersonA ' }, { first_name: '  ' }, { first_name: 'persona' }],
+      ],
+    });
+    wireDb({ customers: byPhone, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBe('PersonA');
+    });
+
+    // customerId path (selects: expansion → name set): a thread-open
+    // auto-selects whichever row the latest message carried, so a supplied
+    // customerId is NOT proof of an explicit pick (codex P2) — the same
+    // number-wide agreement gate applies. Rows naming DIFFERENT people →
+    // no greeting, the composer keeps the bare clause.
+    const ambiguous = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
+      selectResults: [
+        [{ id: CUSTOMER_UUID }],
+        [{ first_name: 'PersonA' }, { first_name: 'PersonB' }],
+      ],
+    });
+    wireDb({ customers: ambiguous, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBeNull();
+    });
+
+    // customerId path, agreeing number: the name rides — and the agreement
+    // set is scoped to the RESOLVED ACCOUNT's rows (whereIn), so a
+    // stranger's row sharing a reused number can never supply the greeting
+    // (phone-only resolution 409s cross-account; customerId deliberately
+    // proceeds as the operator's disambiguation).
+    const byId = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
+      selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'PersonB' }]],
+    });
+    wireDb({ customers: byId, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBe('PersonB');
+      expect(byId.calls.whereIn).toContainEqual(['id', [CUSTOMER_UUID]]);
     });
   });
 

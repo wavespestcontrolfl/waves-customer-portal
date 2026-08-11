@@ -607,6 +607,31 @@ function ConversationViewV2({
 
 // ── SMS tab ───────────────────────────────────────────────────
 
+// Personalized compose prefill for the link-insert buttons. Only used when
+// the composer is EMPTY — an operator-typed draft gets the bare server
+// clause appended instead, so the greeting never lands mid-message. Returns
+// null when there is no first name to greet with (fall back to the clause).
+// The TEMPLATE copy stays plain ASCII on purpose — an em dash or curly
+// quote silently flips the SMS to UCS-2 and cuts each segment from 160 to
+// 70 chars. Dynamic values (name, service type) pass through untouched: a
+// customer named José still gets greeted correctly, and the operator sees
+// the resulting body (and char count) before sending.
+export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
+    serviceType ? ` ${serviceType}` : ""
+  } visit here: ${url}`;
+}
+
+export function buildReservicePrefill({ firstName, laneLabel, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves Pest Control. Book your free${
+    laneLabel ? ` ${laneLabel}` : ""
+  } re-service here: ${url}`;
+}
+
 function SmsTab() {
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -1258,6 +1283,24 @@ function SmsTab() {
       });
       if (rescheduleContextChanged()) return;
       const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
+      // Noon anchor keeps the Y-M-D string on its own calendar day in every
+      // US zone (same idiom as the server's reschedule confirmation copy).
+      const day = new Date(
+        `${d.appointment.scheduledDate}T12:00:00`,
+      ).toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      });
+      // Empty composer → prefill a full greeting message (recipient first
+      // name + the visit the link points to); anything already typed keeps
+      // the bare clause-append behavior.
+      const prefill = buildReschedulePrefill({
+        firstName: d.firstName,
+        day,
+        serviceType: d.appointment.serviceType,
+        url: d.url,
+      });
       // Replace-don't-stack: every lookup mints a FRESH short code, and the
       // strip-on-recipient-change effect only knows the one tracked URL — a
       // second click stacking a second clause would leave the first link
@@ -1275,21 +1318,14 @@ function SmsTab() {
               .replace(/\n{3,}/g, "\n\n")
               .trim()
           : b;
-        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
       });
       setInsertedResched({
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
-      });
-      // Noon anchor keeps the Y-M-D string on its own calendar day in every
-      // US zone (same idiom as the server's reschedule confirmation copy).
-      const day = new Date(
-        `${d.appointment.scheduledDate}T12:00:00`,
-      ).toLocaleDateString("en-US", {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
       });
       setSendResult({
         ok: true,
@@ -1381,6 +1417,19 @@ function SmsTab() {
       });
       if (reserviceContextChanged()) return;
       const clause = (d.line || "").trim() || `Book your free re-service: ${d.url}`;
+      const laneLabel =
+        Array.isArray(d.lanes) && d.lanes.length
+          ? d.lanes
+              .map((l) => (l === "pest" ? "pest" : l === "lawn" ? "lawn" : l))
+              .join(" + ")
+          : null;
+      // Empty composer → full greeting message; typed draft → clause append
+      // (same contract as the reschedule insert).
+      const prefill = buildReservicePrefill({
+        firstName: d.firstName,
+        laneLabel,
+        url: d.url,
+      });
       // Replace-don't-stack, same as the reschedule insert: drop any line
       // carrying the previously tracked URL before appending the fresh one.
       const prevUrl = insertedReservice?.url || null;
@@ -1393,19 +1442,15 @@ function SmsTab() {
               .replace(/\n{3,}/g, "\n\n")
               .trim()
           : b;
-        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
       });
       setInsertedReservice({
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
       });
-      const laneLabel =
-        Array.isArray(d.lanes) && d.lanes.length
-          ? d.lanes
-              .map((l) => (l === "pest" ? "pest" : l === "lawn" ? "lawn" : l))
-              .join(" + ")
-          : null;
       setSendResult({
         ok: true,
         text: `Re-service link added${laneLabel ? ` — covers the ${laneLabel} plan` : ""}.`,
