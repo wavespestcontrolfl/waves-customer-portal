@@ -2500,13 +2500,24 @@ const STATION_NOUN_SRC = '(?:(?:exterior|interior|in-ground|ground|installed|bai
 // so the guard skips an "of" that is itself governed by "total" (codex r3
 // on #3358).
 const STATION_PARTITIVE_GUARD_SRC = '(?<!(?<!\\btotal\\s)\\bof\\s+)(?<!(?<!\\btotal\\s)\\bof\\s+the\\s+)';
+// The claimed number, guarded against the word-number normalizer's split
+// hundreds (codex r5 on #3358): "One hundred twenty" normalizes to
+// "1 100 20", and matching the numeric tail read 20 as the count and
+// dropped accurate copy. A number adjacent to another number claims
+// nothing.
+const STATION_NUM_SRC = '(?<!\\d\\s)(\\d+)(?!\\s+\\d)';
 const STATION_AUX_GAP_SRC = '(?:\\s+(?:were|was|have|has|had|been|all|now|already|just|also|[a-z]+ly))*';
+// A restrictive qualifier after the noun marks a SUBSET, not the checked
+// total (codex r5 on #3358): "we inspected 2 bait stations WITH damaged
+// lids" describes the two repaired stations, and claiming 2 against a
+// corrected stations_checked of 12 dropped accurate copy.
+const STATION_SUBSET_QUALIFIER_GUARD_SRC = '(?!\\s+(?:with|that|which)\\b)';
 const STATION_CHECKED_ACTIVE_RE = new RegExp(
-  `\\b(?:checked|inspected)\\s+(?:all\\s+|the\\s+)?(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  `\\b(?:checked|inspected)\\s+(?:all\\s+|the\\s+)?${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b${STATION_SUBSET_QUALIFIER_GUARD_SRC}`,
   'gi',
 );
 const STATION_CHECKED_PASSIVE_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\b${STATION_AUX_GAP_SRC}\\s+(?:checked|inspected)\\b`,
+  `\\b${STATION_PARTITIVE_GUARD_SRC}${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b${STATION_AUX_GAP_SRC}\\s+(?:checked|inspected)\\b`,
   'gi',
 );
 // Tempered gap: stops at clause boundaries AND refuses to bridge a
@@ -2520,8 +2531,11 @@ const STATION_NEGATION_FREE_GAP_SRC = '(?:(?!\\b(?:no|not|none|never|zero)\\b)[^
 // claim — the safe direction: a missed claim publishes copy, a false
 // claim discards it.
 const STATION_ACTIVITY_SCOPE_GUARD_SRC = '(?<!\\b(?:no|not|none|never|zero|without|for|monitor|monitors|monitored|monitoring|watch|watching|check|checking|prevent|preventing)\\b[^.!?;,:]{0,24})';
+// "activity CHECKS/inspections … at N stations" is the scope of the work,
+// not an observed subset (codex r5 on #3358) — the noun must not head a
+// checking-scope compound.
 const STATION_ACTIVITY_AT_RE = new RegExp(
-  `\\b${STATION_ACTIVITY_SCOPE_GUARD_SRC}(?:activity|feeding|consumption)\\b${STATION_NEGATION_FREE_GAP_SRC}\\b(?:at|in|across)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  `\\b${STATION_ACTIVITY_SCOPE_GUARD_SRC}(?:activity|feeding|consumption)\\b(?!\\s+(?:checks?|inspections?|monitoring)\\b)${STATION_NEGATION_FREE_GAP_SRC}\\b(?:at|in|across)\\s+${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b`,
   'gi',
 );
 const STATION_ACTIVITY_MOD_SRC = '(?:(?:visible|light|moderate|heavy|active|fresh|recent|new|termite|rodent)\\s+)*';
@@ -2531,7 +2545,7 @@ const STATION_ACTIVITY_MOD_SRC = '(?:(?:visible|light|moderate|heavy|active|fres
 // activity" still claims nothing: 'no' is not a whitelisted modifier.
 const STATION_EVIDENCE_OF_SRC = '(?:(?:signs|evidence|indications|traces)\\s+of\\s+)?';
 const STATION_ACTIVITY_WITH_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\s+${STATION_ACTIVITY_MOD_SRC}${STATION_EVIDENCE_OF_SRC}${STATION_ACTIVITY_MOD_SRC}(?:activity|feeding|consumption|hits?)\\b`,
+  `\\b${STATION_PARTITIVE_GUARD_SRC}${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\s+${STATION_ACTIVITY_MOD_SRC}${STATION_EVIDENCE_OF_SRC}${STATION_ACTIVITY_MOD_SRC}(?:activity|feeding|consumption|hits?)\\b`,
   'gi',
 );
 // A roster TOTAL requires an explicit assertion (codex r4 on #3358 —
@@ -2543,19 +2557,22 @@ const STATION_ACTIVITY_WITH_RE = new RegExp(
 // were checked" belongs to stations_checked (the passive checked matcher
 // claims it through the total-of exemption above), so the total form
 // deliberately excludes it.
+// The existential form must be an UNQUALIFIED roster assertion (codex r5
+// on #3358): "there are 2 bait stations WITH ACTIVITY on the property"
+// restricts the assertion to the active subset and claims no total.
 const STATION_TOTAL_RE = new RegExp(
-  `\\bthere\\s+(?:are|is)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`
-  + `|\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:are\\s+|were\\s+)?(?:installed|in\\s+place)\\b`,
+  `\\bthere\\s+(?:are|is)\\s+${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b${STATION_SUBSET_QUALIFIER_GUARD_SRC}`
+  + `|\\b${STATION_PARTITIVE_GUARD_SRC}${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\s+(?:are\\s+|were\\s+)?(?:installed|in\\s+place)\\b`,
   'gi',
 );
 const STATION_INACCESSIBLE_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\b(?:\\s+(?:were|was|are|is))?\\s+(?:inaccessible|not\\s+accessible|unreachable|could\\s+not\\s+be\\s+(?:accessed|reached|checked))\\b`,
+  `\\b${STATION_PARTITIVE_GUARD_SRC}${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b(?:\\s+(?:were|was|are|is))?\\s+(?:inaccessible|not\\s+accessible|unreachable|could\\s+not\\s+be\\s+(?:accessed|reached|checked))\\b`,
   'gi',
 );
 // Active inaccessible claims (codex r3 on #3358): "we could not access 2
 // bait stations", "we were unable to reach 2 stations".
 const STATION_INACCESSIBLE_ACTIVE_RE = new RegExp(
-  `\\b(?:could\\s+not|couldn['’]t|(?:was|were)\\s+unable\\s+to|unable\\s+to)\\s+(?:access|reach|check|inspect|open|service)\\s+(?:all\\s+|the\\s+)?(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  `\\b(?:could\\s+not|couldn['’]t|(?:was|were)\\s+unable\\s+to|unable\\s+to)\\s+(?:access|reach|check|inspect|open|service)\\s+(?:all\\s+|the\\s+)?${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b`,
   'gi',
 );
 const CAUGHT_CLAIM_RE = new RegExp(

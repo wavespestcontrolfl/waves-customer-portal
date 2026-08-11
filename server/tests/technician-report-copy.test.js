@@ -642,6 +642,31 @@ describe('typed snapshot — technician report body in the generic tail composit
     )).not.toEqual([]);
   });
 
+  // Round-5 #3358 — all four findings were copy-dropping false positives,
+  // the fix-on-sight class under the accepted-scope ruling.
+  test('qualified subsets, split hundreds, and scope compounds never claim (codex #3358 r5)', () => {
+    const { countContradictions } = require('../services/service-report/activity-indicators');
+    const silent = [
+      // "with activity" restricts the existential to the active subset.
+      ['There are 2 bait stations with activity on the property.', { total_stations: '12', stations_with_activity: '2' }],
+      // "with damaged lids" restricts the inspection to a subset.
+      ['We inspected 2 bait stations with damaged lids and checked the remaining stations.', { stations_checked: '12' }],
+      // normalizeWordNumbers splits "one hundred twenty" into "1 100 20" —
+      // a number adjacent to another number claims nothing.
+      ['1 100 20 bait stations were inspected.', { stations_checked: '120' }],
+      // "activity checks" is the work's scope, not an observed subset.
+      ['Termite activity checks were completed at 12 bait stations; no activity was observed.', { stations_checked: '12', stations_with_activity: '0' }],
+    ];
+    for (const [text, values] of silent) {
+      expect(countContradictions(text, values)).toEqual([]);
+    }
+    // The unqualified forms still claim.
+    expect(countContradictions('There are 20 stations on the property.', { total_stations: '18' }))
+      .not.toEqual([]);
+    expect(countContradictions('We checked 12 bait stations.', { stations_checked: '10' }))
+      .not.toEqual([]);
+  });
+
   test('negated and subject-position intent qualifiers stay governed (codex #3358)', () => {
     const base = {
       projectType: 'cockroach',
