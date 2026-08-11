@@ -14,10 +14,13 @@
  * call aged past the scan window.
  *
  * This table closes it exactly: when an ambiguity is recorded, snapshot the
- * leads whose phone matches the call's CALLER leg at that moment. Those
- * exact associations — not the open-ended number match — carry the
- * indefinite hold. A lead minted on the same number after the ambiguity
- * ages out is a genuinely different prospect and is never suppressed.
+ * leads whose phone matches the call's CALLER leg AND that existed by the
+ * call's last possible processing pass (created_at within the extraction
+ * retry window of the call — a reused lead cannot postdate its own reuse).
+ * Those bounded associations — not the open-ended number match — carry the
+ * indefinite hold. A lead minted on the same number after that horizon is
+ * a genuinely different prospect and can never join the hold, no matter
+ * how long the ambiguity keeps re-reporting.
  *
  * Insert-only from the app's perspective (ON CONFLICT DO NOTHING); rows are
  * inert while their parent record is resolved and re-arm automatically on a

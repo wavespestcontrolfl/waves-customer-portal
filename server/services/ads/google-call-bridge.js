@@ -2,6 +2,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { parseETDateTime, etDateString, addETDays, formatETTime } = require('../../utils/datetime-et');
+// The retry horizon bounding the phone-linkage snapshot — shared with the
+// processor's own in-flight test so the two can't drift apart.
+const { CALL_EXTRACTION_RETRY_WINDOW_MS } = require('../../utils/estimate-claim-sql');
 
 const GOOGLE_ADS_BRIDGE_SOURCE_NAME = 'Google Ads - Call Reporting Bridge';
 const GOOGLE_ADS_BRIDGE_LOCATION_ID = 'bradenton';
@@ -1608,20 +1611,27 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
       .insert(rows)
       .onConflict('call_log_id')
       .merge({ last_seen_at: trx.fn.now(), resolved_at: null, resolve_reason: null });
-    // Snapshot the call→lead PHONE linkage at observation time (pre-push
-    // audit P1 r3): the sid and stamp arms are durable links and carry an
-    // indefinite hold safely, but the broad last-10 phone arm takes only
-    // the day's fresh candidates (r2) — so a findReusableCallLead
-    // association with neither sid nor stamp lost its hold the day its
-    // call aged past the scan window. Persisting the exact leads whose
-    // phone matches the CALLER leg right now gives the indefinite hold a
-    // precise identity: a later, distinct lead minted on the same
-    // household number after the ambiguity ages out is never suppressed.
-    // Insert-only and idempotent; rows are inert while the record is
-    // resolved and re-arm automatically on a reopen. Deliberately no
-    // deleted_at filter — a hold on a soft-deleted lead is dormant until
-    // an undelete, then protective (a hold is recoverable, the organic
-    // label is not).
+    // Snapshot the call→lead PHONE linkage (pre-push audit P1 r3): the sid
+    // and stamp arms are durable links and carry an indefinite hold
+    // safely, but the broad last-10 phone arm takes only the day's fresh
+    // candidates (r2) — so a findReusableCallLead association with
+    // neither sid nor stamp lost its hold the day its call aged past the
+    // scan window. The snapshot names the CANDIDATE leads the processor
+    // could have reused for this call, and it is TEMPORALLY BOUNDED
+    // (pre-push audit P1 r4): a REUSED lead necessarily existed by the
+    // call's last possible processing pass — its created_at plus the
+    // extraction retry window (the same 7-day horizon
+    // callReprocessInFlight honors). The exact pick ("newest eligible
+    // exact-phone match at processing time") is not reconstructible
+    // post-hoc — claim states move under it — so the hold keeps every
+    // call-time candidate (over-holding a coexisting same-number lead is
+    // recoverable; a wrong organic label is not) while the immutable
+    // created_at anchor makes repeat/reopen re-records idempotent: a
+    // distinct lead minted on the number AFTER that horizon can never
+    // join the hold, no matter how long the ambiguity re-reports. Leads
+    // the call itself minted carry its sid and ride the sid arm instead.
+    // Deliberately no deleted_at filter — a hold on a soft-deleted lead
+    // is dormant until an undelete, then protective.
     await trx.raw(
       `INSERT INTO bridge_ambiguous_call_leads (call_log_id, lead_id)
        SELECT cl.id, l.id
@@ -1630,9 +1640,10 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
            ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
           AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
             = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
+          AND l.created_at < cl.created_at + make_interval(secs => ?)
         WHERE cl.id IN (${ids.map(() => '?').join(', ')})
        ON CONFLICT DO NOTHING`,
-      ids,
+      [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...ids],
     );
     if (reopened.length) {
       // Lazy require: this module and call-attribution require each other.

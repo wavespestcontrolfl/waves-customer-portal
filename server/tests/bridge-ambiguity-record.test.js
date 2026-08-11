@@ -113,7 +113,12 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(snap[0]).toMatch(/cl\.from_phone/);
     expect(snap[0]).toMatch(/RIGHT\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(snap[0]).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\)\) >= 10/);
-    expect(snap[1]).toEqual(['call-1', 'call-2']);
+    // TEMPORALLY BOUNDED (audit P1 r4): a reused lead existed by the
+    // call's last possible processing pass — created_at anchored to the
+    // immutable call time plus the shared extraction retry window, so
+    // repeat/reopen re-records can never add a later, distinct lead.
+    expect(snap[0]).toMatch(/l\.created_at < cl\.created_at \+ make_interval\(secs => \?\)/);
+    expect(snap[1]).toEqual([7 * 24 * 60 * 60, 'call-1', 'call-2']);
   });
 
   test('a repeat REOPENS a previously resolved record — today\'s scan supersedes an old resolution', async () => {
