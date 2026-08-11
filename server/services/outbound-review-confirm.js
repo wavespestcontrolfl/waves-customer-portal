@@ -92,7 +92,14 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       `${dateOnly(slotDate)}T${slotStart || '09:00'}`,
       svc.service_type,
       'admin_manual',
-      { sendConfirmation: false },
+      {
+        sendConfirmation: false,
+        // A windowless visit (the office cleared its arrival time)
+        // registers the pre-closed placeholder, never an ARMED reminder at
+        // the fabricated 09:00 fallback — the cron would otherwise text a
+        // time nobody chose (Codex #3361 r17 P1).
+        closeReminderWindows: !slotStart,
+      },
     );
     if (!reminderRecord) {
       coreLegsOk = false;
@@ -153,15 +160,31 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // mint $75 for an appointment the customer never confirmed. Idempotent
   // (unique per booking); never blocks the confirmation.
   try {
+    // On a retry, reuse the instant the failed earlier write froze so the
+    // retry cannot shift the offer-boundary ordering (Codex #3361 r16 P1).
+    // The immediate job-status activation passes it in opts; the CRASH
+    // path — process exit before that activation, recovered by the hourly
+    // sweep — must recover it from the durable evidence outbox instead,
+    // or this insert's first-write-wins would beat the outbox replay with
+    // a fresh, later timestamp (Codex #3361 r17 P1). Null = call time,
+    // the ordinary confirm contract.
+    let evidenceMoment = opts.evidenceBookedAt || null;
+    if (!evidenceMoment) {
+      try {
+        const outboxRow = await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'reason' = 'booking_evidence_outbox'")
+          .whereRaw("metadata->>'scheduledServiceId' = ?", [String(svc.id)])
+          .orderBy('created_at', 'asc')
+          .first(db.raw("metadata->>'bookedAt' as booked_at"));
+        if (outboxRow && outboxRow.booked_at) evidenceMoment = new Date(outboxRow.booked_at);
+      } catch { /* no outbox readable — fall through to call time */ }
+    }
     const marked = await require('./inspection-credit').markBookingForInspectionCredit(db, {
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       source: 'phone_call',
-      // On the legacy-completion retry, reuse the instant the failed
-      // in-trx write froze (its outbox carries the same one) so the retry
-      // cannot shift the offer-boundary ordering (Codex #3361 r16 P1);
-      // null = call time, the ordinary confirm contract.
-      bookedAt: opts.evidenceBookedAt || null,
+      bookedAt: evidenceMoment,
     });
     // Fast redemption too, mirroring the admin-schedule/self-book paths
     // (Codex #3178 r26 P2): confirmation is the booking moment, and a

@@ -147,7 +147,7 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
     const confirmStamp = updates.find((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true);
     expect(confirmStamp).toBeTruthy();
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
-      'svc1', 'cust1', '2026-08-11T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false },
+      'svc1', 'cust1', '2026-08-11T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false, closeReminderWindows: false },
     );
   });
 });
@@ -194,7 +194,7 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     expect(activated).toBe(true);
     expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
-      'svc1', 'cust1', '2026-08-12T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false },
+      'svc1', 'cust1', '2026-08-12T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false, closeReminderWindows: false },
     );
   });
 
@@ -294,7 +294,7 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     }));
     // Reminders armed without a confirmation send; card resolved.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
-      'svc1', 'cust1', '2026-07-14T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false },
+      'svc1', 'cust1', '2026-07-14T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false, closeReminderWindows: false },
     );
     expect(db._state.triageResolved).toBe(true);
   });
