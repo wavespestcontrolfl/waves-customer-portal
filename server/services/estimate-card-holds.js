@@ -888,18 +888,6 @@ function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
 }
 
-// Reason codes that mark a reschedule as the tail of a WAVES-initiated move
-// (rain-out / quick-move): a customer replying to that SMS logs
-// initiated_by='customer_sms' but KEEPS the original move reason
-// (reschedule-sms.js passes pending.reason_code through), so the reason —
-// not just the actor — distinguishes "we moved them" from "they moved
-// themselves". Mirrors WEATHER_REASON_CODES in routes/reschedule-public.js
-// (loadWeatherMove), including its `_series` suffix normalization.
-const COMPANY_MOVE_REASON_CODES = new Set([
-  'weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat',
-  'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow',
-]);
-
 // Sticky cancel window (owner ruling 2026-08-10): a customer-initiated
 // reschedule made while the THEN-CURRENT slot was inside the fee window must
 // not launder a later cancel into a free one. Before this check, rebooker's
@@ -944,16 +932,20 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     .select('original_date', 'original_window', 'reason_code', 'initiated_by', 'created_at');
   const { parseETDateTime } = require('../utils/datetime-et');
   for (const row of rows || []) {
-    const reason = String(row.reason_code || '').replace(/_series$/, '');
-    // Customer-initiated = a customer actor (self-serve page, SMS reply) OR
+    // Customer-initiated = a customer ACTOR (self-serve page, SMS reply) OR
     // a staff-assisted move recorded with the customer_request reason — the
     // office phone flow logs initiated_by='admin' but the CUSTOMER asked
-    // for the move, and that path must not stay a fee dodge. Ops-reason
-    // admin moves (route_overload, holiday, ...) never stick.
+    // for the move, and that path must not stay a fee dodge. The actor is
+    // authoritative even when the reason is a weather/quick-move code:
+    // reschedule-sms.js keeps the pending move's reason on the customer's
+    // OWN pick, and reschedule-public.js classifies that pick as the
+    // customer's move, not a Waves one — an SMS pick made inside the window
+    // is exactly as sticky as the same pick on the reschedule page. Waves
+    // actors (tech, admin, weather_auto, auto_dispatch, system) with ops or
+    // weather reasons never stick.
     const customerInitiated = /^customer/.test(String(row.initiated_by || ''))
       || /^customer_request/.test(String(row.reason_code || ''));
     if (!customerInitiated) continue;
-    if (COMPANY_MOVE_REASON_CODES.has(reason)) continue;
     // Same DATE+TIME → ET-instant composition as scheduledServiceApptTime:
     // original_window logs as '<window_start>-<window_end>' raw TIME values.
     const datePart = row.original_date instanceof Date

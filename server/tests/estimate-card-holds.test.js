@@ -710,15 +710,17 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
-  it('a customer pick on a WAVES-initiated move (rain-out reply keeps the weather reason) never sticks', async () => {
-    stubDb(holdRow, { rescheduleLog: [{ ...lateCustomerMove, reason_code: 'weather_rain' }] });
+  it("a customer's OWN SMS pick sticks even though it inherits the rain-out reason — the actor is authoritative", async () => {
+    stubDb([holdRow, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'customer_sms', reason_code: 'weather_rain' }],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
     const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
-    expect(r).toEqual(expect.objectContaining({ released: true }));
-    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
   });
 
-  it("series moves log '<reason>_series' — the company-move exemption survives the suffix", async () => {
-    stubDb(holdRow, { rescheduleLog: [{ ...lateCustomerMove, reason_code: 'weather_rain_series' }] });
+  it('the WAVES rain-out move itself (weather_auto actor) never sticks — company moves reset the clock', async () => {
+    stubDb(holdRow, { rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'weather_auto', reason_code: 'weather_rain' }] });
     const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
     expect(r).toEqual(expect.objectContaining({ released: true }));
     expect(mockChargeOffSession).not.toHaveBeenCalled();
