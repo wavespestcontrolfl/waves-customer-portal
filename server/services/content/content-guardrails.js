@@ -3207,8 +3207,13 @@ const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['�
 //   2. Other scheduling objects exclude only when NO drying context
 //      follows in the sentence: "confirm the timing after the visit based
 //      on drying conditions" is the current treatment visit and passes.
+// A scheduling noun BEFORE "timing" is appointment timing too (Codex
+// #3348 r5): "confirm the appointment timing" — the lookbehind rejects a
+// compound scheduling object on the left the same way the lookaheads
+// police the right. (Server-side only: lookbehind never ships in client
+// chunks.)
 const TIMING_GAP_SRC = "(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?";
-const TIMING_OBJ_SRC = 'timing'
+const TIMING_OBJ_SRC = "(?<!\\b(?:visit|appointment|arrival|estimate|quote|call|application|service)[\\s-])timing"
   + `(?!${TIMING_GAP_SRC}\\b(?:next|upcoming)\\s+(?:visit|appointment|arrival|application|service)\\b)`
   + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;
 const TECH_CONFIRMS_RE = new RegExp(
