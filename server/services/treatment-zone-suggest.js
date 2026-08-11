@@ -67,8 +67,36 @@ Rules for "perimeter":
 - Ordered clockwise around the loop; do NOT repeat the first point at the end.
 - If you cannot confidently locate this property's lawn, return {"perimeter": [], "includes_pool_enclosure": false, "confidence": 0}.`;
 
+// Mosquito visits outline the treated YARD — turf AND the landscape/plant
+// beds where mosquitoes harbor (owner 2026-08-11: the mosquito report gets
+// the lawn-style overlay with the bedding areas included). Distinct from
+// the lawn prompt, whose boundary deliberately STOPS where turf meets the
+// beds.
+const YARD_SUGGEST_PROMPT = `You are analyzing a satellite photo of a single residential property for a mosquito-control service. The property being serviced is at the CENTER of the image — neighboring lots are usually visible at the edges. Identify the OUTER boundary of THIS property's maintained yard as one continuous loop.
+
+The loop should:
+- Cover the whole treated landscape: the grass/turf AND the landscape beds, shrubs, hedges, and plantings around the home — where the maintained yard meets the street, sidewalk, driveway, fences, or the neighboring lot.
+- Cover the front, sides, and back when the yard is contiguous around the home. The house may sit inside the loop; that is fine.
+- Stay on THIS property only — never include a neighbor's yard or the street.
+
+Do NOT trace: the building outline by itself, driveways, pools or pool decks, or property lines beyond the maintained landscape.
+
+Return ONLY this JSON, nothing else — no markdown, no backticks:
+{
+  "perimeter": [[x, y], ...],
+  "includes_pool_enclosure": false,
+  "confidence": <number 0-1>
+}
+
+Rules for "perimeter":
+- 8 to 28 [x, y] points, each normalized 0-1 relative to the image (x = fraction of width from the left, y = fraction of height from the top).
+- Ordered clockwise around the loop; do NOT repeat the first point at the end.
+- If you cannot confidently locate this property's yard, return {"perimeter": [], "includes_pool_enclosure": false, "confidence": 0}.`;
+
 function promptForMode(mode) {
-  return mode === 'lawn' ? LAWN_SUGGEST_PROMPT : SUGGEST_PROMPT;
+  if (mode === 'lawn') return LAWN_SUGGEST_PROMPT;
+  if (mode === 'yard') return YARD_SUGGEST_PROMPT;
+  return SUGGEST_PROMPT;
 }
 
 function parseModelJson(text) {
@@ -243,8 +271,9 @@ async function claudeSuggest(base64Png, prompt) {
 /**
  * @param {Buffer} pngBuffer — the visit's satellite map PNG (1280x960).
  * @param {object} [opts]
- * @param {'perimeter'|'lawn'} [opts.mode] — 'lawn' traces the turf boundary
- *   instead of the building footprint.
+ * @param {'perimeter'|'lawn'|'yard'} [opts.mode] — 'lawn' traces the turf
+ *   boundary instead of the building footprint; 'yard' traces the whole
+ *   maintained landscape (turf + beds) for mosquito visits.
  * @returns suggestion (see normalizeSuggestion) or null.
  */
 async function suggestTreatmentZone(pngBuffer, opts = {}) {
@@ -263,7 +292,8 @@ async function suggestTreatmentZone(pngBuffer, opts = {}) {
     try {
       const suggestion = normalizeSuggestion(await attempt());
       if (suggestion) {
-        if (opts.mode !== 'lawn') {
+        // Lawn and yard boundaries are organic — never orthogonalize those.
+        if (opts.mode !== 'lawn' && opts.mode !== 'yard') {
           suggestion.perimeter = orthogonalizePerimeter(suggestion.perimeter);
         }
         return suggestion;
@@ -281,4 +311,5 @@ module.exports = {
   orthogonalizePerimeter,
   SUGGEST_PROMPT,
   LAWN_SUGGEST_PROMPT,
+  YARD_SUGGEST_PROMPT,
 };

@@ -9,9 +9,11 @@
  *    half-shapes never do;
  *  - banned customer wording (hand edits) drops the copy, including the
  *    summary pipeline's forbidden-language list;
- *  - the typed snapshot uses the copy ONLY in the generic non-gauge default
- *    composition (the one-time pest family from the owner's report) —
- *    zero states and owner-specified story branches keep approved wording;
+ *  - the typed snapshot uses the copy in the generic non-gauge default
+ *    composition, every gauge lane, and the knockdown/one-time-mosquito
+ *    story branches (which keep their mandated disclosure sentences) —
+ *    zero states and the remaining owner-specified story branches (rodent
+ *    exclusion/inspection, flea, tree & shrub) keep approved wording;
  *  - template-only output is byte-identical to before (no bodySource key).
  */
 
@@ -219,9 +221,11 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(snapshot.todaysResult.headline).toBe('Pest Control Re-Service completed today');
     expect(snapshot.todaysResult.body).toBe(`${AI_BODY} ${chipSentence}`);
     expect(snapshot.todaysResult.bodySource).toBe('technician_report');
-    // v4: rodent trapping joined the technician-report lane and gained the
-    // declared setup/re-check composition (#3159).
-    expect(snapshot.summaryTemplateVersion).toBe(4);
+    // v5: every gauge lane plus the knockdown and one-time mosquito story
+    // branches joined the technician-report lane (owner 2026-08-11 — the
+    // cockroach report dropped the generated copy). v4 added rodent
+    // trapping + the declared setup/re-check composition (#3159).
+    expect(snapshot.summaryTemplateVersion).toBe(5);
   });
 
   test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {
@@ -256,6 +260,265 @@ describe('typed snapshot — technician report body in the generic tail composit
       technicianReportBody: AI_BODY,
     });
     expect(snapshot.todaysResult.body.startsWith(AI_BODY)).toBe(true);
+  });
+
+  // Summary template v5 (owner 2026-08-11): the drop was collective — every
+  // gauge lane now accepts the reviewed body, and the knockdown/one-time
+  // mosquito stories swap their intro for it while keeping the mandated
+  // disclosure/follow-up sentences.
+  test('cockroach gauge branch: body is the reviewed report, headline stays gauge-driven', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Moderate' },
+      chips,
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.headline).toBe('Cockroach activity was moderate today.');
+    expect(result.body).toContain(AI_BODY);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('cockroach zero gauge keeps the template body — a draft must not outrank a typed zero', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'None observed' },
+      chips,
+      activity: { score: 0 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('termite treatment gauge branch accepts the reviewed body (pretreatment with a pinned score)', () => {
+    const result = buildTodaysResult({
+      projectType: 'termite_treatment',
+      reportTypeLabel: 'Termite Pretreatment Summary',
+      values: { termite_activity: 'Suspected activity' },
+      chips,
+      activity: { score: 2 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).toContain(AI_BODY);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('palmetto knockdown swaps the intro for the reviewed body and keeps the flush disclosure', () => {
+    const result = buildTodaysResult({
+      projectType: 'palmetto_roach_knockdown',
+      reportTypeLabel: 'Large-Roach Knockdown Summary',
+      values: { activity_level: 'Moderate' },
+      chips,
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.headline).toBe('Large-roach activity was moderate today.');
+    expect(result.body).toContain(AI_BODY);
+    // The mandated palmetto flush disclosure survives the swap.
+    expect(result.body).toContain('flushed from hiding areas');
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('German knockdown keeps the bait-cooperation guidance and follow-up line alongside the reviewed body', () => {
+    const result = buildTodaysResult({
+      projectType: 'german_roach_knockdown',
+      reportTypeLabel: 'German Roach Knockdown Summary',
+      values: {
+        activity_level: 'Heavy',
+        rooms_treated: 'Kitchen and both bathrooms',
+        followup_required: 'Yes',
+        followup_window: '10–14 days',
+      },
+      chips,
+      activity: { score: 4 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).toContain(AI_BODY);
+    // Owner-critical German bait guidance survives the swap.
+    expect(result.body).toContain('keep bait placements undisturbed');
+    expect(result.body).toContain('Follow-up service is recommended in 10–14 days.');
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('knockdown cleared state keeps the template body — a pre-zero draft must not outrank it', () => {
+    const result = buildTodaysResult({
+      projectType: 'palmetto_roach_knockdown',
+      reportTypeLabel: 'Large-Roach Knockdown Summary',
+      values: { activity_level: 'None observed' },
+      chips,
+      activity: { score: 0 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('one-time mosquito swaps the body on an observed level and keeps the level headline', () => {
+    const result = buildTodaysResult({
+      projectType: 'mosquito_event',
+      reportTypeLabel: 'Mosquito Treatment Summary',
+      values: { activity_level: 'Light' },
+      chips,
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.headline).toBe('Mosquito activity was light today.');
+    expect(result.body).toBe(`${AI_BODY} ${chipSentence}`);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('one-time mosquito "None observed" keeps the template body', () => {
+    const result = buildTodaysResult({
+      projectType: 'mosquito_event',
+      reportTypeLabel: 'Mosquito Treatment Summary',
+      values: { activity_level: 'None observed' },
+      chips,
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  // Activity-level claim screen (codex P1 on #3354): a draft written while
+  // the gauge read Heavy must not ride under a re-pinned "low" headline —
+  // the nonzero mirror of the zero-state rule.
+  const HEAVY_DRAFT = 'Cockroach activity was heavy in the kitchen today. '
+    + 'We applied gel bait to the harborage points behind the appliances.';
+
+  test('a draft claiming the opposite level family is refused on the gauge lanes', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: HEAVY_DRAFT,
+    });
+    expect(result.body).not.toContain('heavy');
+    expect(result).not.toHaveProperty('bodySource');
+    // Headline stays gauge-driven either way.
+    expect(result.headline).toBe('Cockroach activity was very low today.');
+  });
+
+  test('a matching-family draft is kept; adjacent-band drift does not refuse', () => {
+    const kept = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Heavy' },
+      chips,
+      activity: { score: 4 },
+      visitSequence: 1,
+      technicianReportBody: HEAVY_DRAFT,
+    });
+    expect(kept.body).toContain(HEAVY_DRAFT);
+    expect(kept.bodySource).toBe('technician_report');
+    // Moderate final (band 2) vs heavy claim (band 3): adjacent, kept.
+    const adjacent = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Moderate' },
+      chips,
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: HEAVY_DRAFT,
+    });
+    expect(adjacent.bodySource).toBe('technician_report');
+  });
+
+  test('an exemption word AFTER the claim does not launder it (codex P1 r2)', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Cockroach activity was heavy today and can continue between visits without treatment. '
+        + 'We applied gel bait behind the appliances.',
+    });
+    expect(result.body).not.toContain('heavy');
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('an intent marker BEFORE the claim still exempts it', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Without continued treatment, activity may become heavy again. '
+        + 'We applied gel bait behind the appliances.',
+    });
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('prior-visit and conditional level references are exempt from the screen', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Activity was heavy at our last visit and has dropped sharply. '
+        + 'We refreshed the bait placements in the kitchen.',
+    });
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('the confirmed reconciliation prompt overrides the level screen', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: HEAVY_DRAFT,
+      reconcileConfirmed: true,
+    });
+    expect(result.body).toContain(HEAVY_DRAFT);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('knockdown and one-time mosquito refuse an opposite-family draft the same way', () => {
+    const knockdown = buildTodaysResult({
+      projectType: 'palmetto_roach_knockdown',
+      reportTypeLabel: 'Large-Roach Knockdown Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Roach activity was severe around the garage today. We treated the exterior.',
+    });
+    expect(knockdown.body).not.toContain('severe');
+    expect(knockdown).not.toHaveProperty('bodySource');
+    // The mandated flush disclosure still composes on the template path.
+    expect(knockdown.body).toContain('flushed from hiding areas');
+
+    const mosquito = buildTodaysResult({
+      projectType: 'mosquito_event',
+      reportTypeLabel: 'Mosquito Treatment Summary',
+      values: { activity_level: 'Light' },
+      chips,
+      visitSequence: 1,
+      technicianReportBody: 'Mosquito activity was heavy near the beds. We applied a barrier treatment.',
+    });
+    expect(mosquito.body).not.toContain('heavy');
+    expect(mosquito).not.toHaveProperty('bodySource');
   });
 
   test('owner-story branches ignore the technician report (rodent exclusion keeps its approved story)', () => {

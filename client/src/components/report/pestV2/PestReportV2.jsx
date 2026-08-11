@@ -194,7 +194,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
               variant (older payloads, gate off) keeps the spray copy. */}
           {(() => {
             const outlineCoverage = tracedMap.variant === 'outline'
-              && (tracedMap.captureMode === 'lawn' || tracedMap.captureMode === 'lawn_highlight');
+              && (tracedMap.captureMode === 'lawn' || tracedMap.captureMode === 'lawn_highlight'
+                || tracedMap.captureMode === 'yard');
             const legacyOutlineMismatch = tracedMap.variant === 'outline' && !outlineCoverage;
             return (
               <>

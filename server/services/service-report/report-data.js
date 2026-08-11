@@ -3331,11 +3331,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
-            // 'lawn' | 'lawn_highlight' | 'perimeter' | 'interior' | null
-            // (legacy rows predate the column) — the client only claims
-            // "highlighted"/"treated lawn area"/interior coverage for rows
-            // actually captured by those workflows (codex P1 #3038; interior
-            // owner 2026-07-29; lawn_highlight codex P1 #3075).
+            // 'lawn' | 'lawn_highlight' | 'yard' | 'perimeter' | 'interior'
+            // | null (legacy rows predate the column) — the client only
+            // claims "highlighted"/"treated lawn area"/yard/interior
+            // coverage for rows actually captured by those workflows (codex
+            // P1 #3038; interior owner 2026-07-29; lawn_highlight codex P1
+            // #3075; yard = mosquito outline, owner 2026-08-11).
             captureMode: tracedRow.capture_mode || null,
             label: tracedRow.capture_mode === 'interior'
               ? 'Interior and perimeter treatment traced on-site by your technician.'
@@ -3364,12 +3365,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             // band. The satellite verdict is the one that describes this
             // bitmap's lane.
             variant: (traceEligibilityGateOn() && satelliteVerdict)
-              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight'
+                || tracedRow.capture_mode === 'yard')
                 ? 'outline' : satelliteVerdict.variant)
               : null,
             captionKey: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'lawnCoverage' : satelliteVerdict.captionKey)
+                ? 'lawnCoverage'
+                : (tracedRow.capture_mode === 'yard' ? 'yardCoverage' : satelliteVerdict.captionKey))
               : null,
           };
         }

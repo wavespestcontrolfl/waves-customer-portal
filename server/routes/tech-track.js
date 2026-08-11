@@ -969,13 +969,17 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     // mode=lawn traces the property's turf boundary instead of the building
     // footprint — a building suggestion saved in lawn mode would publish a
     // house outline labeled "treated lawn area" (pre-push audit P1 2026-07-28).
-    const mode = req.body?.mode === 'lawn' ? 'lawn' : 'perimeter';
+    // mode=yard is the mosquito boundary: turf plus the landscape beds
+    // (owner 2026-08-11).
+    const mode = ['lawn', 'yard'].includes(req.body?.mode) ? req.body.mode : 'perimeter';
     const suggestion = await suggestTreatmentZone(req.file.buffer, { mode });
     if (!suggestion) {
       return res.status(422).json({
         error: mode === 'lawn'
           ? 'Could not detect the lawn outline — trace it manually.'
-          : 'Could not detect the building outline — trace it manually.',
+          : mode === 'yard'
+            ? 'Could not detect the yard outline — trace it manually.'
+            : 'Could not detect the building outline — trace it manually.',
       });
     }
     logger.info(
