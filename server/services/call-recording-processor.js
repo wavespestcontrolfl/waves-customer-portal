@@ -2199,6 +2199,14 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // and taking the newest let retries pick an arbitrary one (audit P1 r21).
   // Resolve the sid lead first; consult the stamp only when no eligible sid
   // lead exists. Both arms pass the SAME eligibility as the contact lookups.
+  // The return carries WHICH arm resolved the row ({ lead, matchedVia }) —
+  // the guarded write must inherit the eligibility of the arm that actually
+  // selected the row (pre-push P1 r2 on the root fix): a stamp-selected row
+  // passed applySameCallLeadEligibility (unclaimed for a customer-less
+  // caller) and the write must repeat exactly that, while a row the PHONE
+  // fallback selected runs the phone path's own ownership rules. Inferring
+  // the arm after the fact (id/phone equality) misclassified both
+  // directions.
   if (callSid) {
     // An ineligible sid row falls through to contact reuse or a fresh mint
     // like any other rejected candidate.
@@ -2206,14 +2214,14 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       database('leads').where('twilio_call_sid', callSid),
       { customerId, unclaimedOnly, workableUnnamedLead },
     ).orderBy('created_at', 'desc').first();
-    if (own) return own;
+    if (own) return { lead: own, matchedVia: 'same_call_sid' };
   }
   if (stampedLeadId) {
     const own = await applySameCallLeadEligibility(
       database('leads').where('id', stampedLeadId),
       { customerId, unclaimedOnly, workableUnnamedLead },
     ).orderBy('created_at', 'desc').first();
-    if (own) return own;
+    if (own) return { lead: own, matchedVia: 'same_call_stamp' };
   }
   // The email key must be a REAL email, validated here and not just at the
   // workable-signal gate: customer-attached calls reach this lookup without
@@ -2222,7 +2230,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // storing the same garbage value (pre-push audit P1, PR #3275).
   const emailLcRaw = String(email || '').trim().toLowerCase();
   const emailLc = EMAIL_RE.test(emailLcRaw) ? emailLcRaw : '';
-  if (!phone && !emailLc) return null;
+  if (!phone && !emailLc) return { lead: null, matchedVia: null };
   let query = database('leads').whereNull('deleted_at');
   // Email matching engages ONLY when there is no phone: a phone match stays
   // the sole identity key for identified callers (an email-also match could
@@ -2247,7 +2255,10 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   // Phone identity is strong — the newest match wins outright.
-  if (phone) return query.orderBy('created_at', 'desc').first();
+  if (phone) {
+    const row = await query.orderBy('created_at', 'desc').first();
+    return { lead: row || null, matchedVia: row ? 'phone' : null };
+  }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
   // (or a transcription collision can fabricate the overlap), and reusing
@@ -2263,7 +2274,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // duplicates past the cap (codex P2 r6/r13).
   const norm = (v) => String(v || '').trim().toLowerCase();
   const firstLc = norm(firstName);
-  if (!firstLc) return null; // positive corroboration impossible — fresh row
+  if (!firstLc) return { lead: null, matchedVia: null }; // positive corroboration impossible — fresh row
   query = query.whereRaw('LOWER(TRIM(first_name)) = ?', [firstLc]);
   const lastLc = norm(lastName);
   if (lastLc) {
@@ -2272,7 +2283,8 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       [lastLc],
     );
   }
-  return query.orderBy('created_at', 'desc').first();
+  const row = await query.orderBy('created_at', 'desc').first();
+  return { lead: row || null, matchedVia: row ? 'email' : null };
 }
 
 // The lead stamp an earlier attempt of this call may have written
@@ -2315,34 +2327,6 @@ function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid
     || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
 }
 
-// Classifies whether the reused row is SAME-CALL identity (this call's own
-// earlier work, by sid or stamp) — which routes the guarded write through
-// applySameCallLeadEligibility's strict predicates — or ordinary contact
-// reuse.
-//
-// The stamp arm must NOT claim a row the caller's CURRENT phone re-selects
-// (pre-push P1 r1 on the root fix): a customer-less phone-bearing call may
-// legitimately reuse a customer-OWNED lead (the phone lookup applies no
-// ownership filter when customerId is null — phone is strong identity), and
-// the root fix stamps that reuse. On retry the stamp-arm lookup rejects the
-// owned row (applySameCallLeadEligibility requires unclaimed for anonymous
-// same-call rows), the phone fallback re-finds it, and inferring same-call
-// from BARE ID EQUALITY then re-applied the anonymous-strict predicates to
-// a phone-identified row — the guarded write 0-rowed and the retry dropped
-// a valid association. When the row's stored phone equals the caller's
-// phone (exact string — the phone branch matched on equality, so a re-found
-// row always compares equal; a format mismatch just falls back to the
-// stricter classification), phone identity dominates: the write runs the
-// phone path's own ownership backstop and the re-stamp arm still refreshes
-// the ledgers. The sid arm is unaffected — a same-sid row is this call's
-// own insert regardless of phone.
-function isSameCallLeadReuse({ existingLead, callTwilioSid, priorStampedLeadId, phone }) {
-  if (!existingLead) return false;
-  if (callTwilioSid && existingLead.twilio_call_sid === callTwilioSid) return true;
-  if (!priorStampedLeadId || String(existingLead.id) !== priorStampedLeadId) return false;
-  if (phone && String(existingLead.phone || '') === String(phone)) return false;
-  return true;
-}
 
 // The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
@@ -8323,7 +8307,7 @@ const CallRecordingProcessor = {
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
         };
-        const existingLead = await findReusableCallLead(db, {
+        const { lead: existingLead, matchedVia: existingLeadVia } = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
           firstName: extracted.first_name || null,
@@ -8336,15 +8320,17 @@ const CallRecordingProcessor = {
         // inserted, by sid — or already REUSED, by stamp) is strong identity,
         // so the weak-identity write revalidation must not apply its
         // email/name predicates to it (a name-less caller's own row would
-        // fail them and re-mint). A stamp-identified row the caller's
-        // CURRENT phone re-selects is classified as plain phone reuse
-        // instead — see isSameCallLeadReuse.
-        const sameCallLeadReuse = isSameCallLeadReuse({
-          existingLead,
-          callTwilioSid: call.twilio_call_sid,
-          priorStampedLeadId,
-          phone,
-        });
+        // fail them and re-mint). Decided by the LOOKUP'S OWN provenance,
+        // never inferred from id/phone equality after the fact (pre-push P1
+        // r1+r2 on the root fix): a stamp-arm-rejected customer-owned row
+        // the phone fallback re-finds is plain phone reuse (its write runs
+        // the phone path's ownership rules, keeping retries idempotent),
+        // while a row the stamp arm itself selected keeps the same-call
+        // strict predicates its lookup enforced — so a claim landing
+        // between lookup and write 0-rows instead of overwriting the
+        // newly-claimed lead.
+        const sameCallLeadReuse = existingLeadVia === 'same_call_sid'
+          || existingLeadVia === 'same_call_stamp';
         // A fresh insert with no prior stamp self-links via its own sid at
         // insert time — REUSE of a different-sid lead puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
@@ -13547,7 +13533,6 @@ CallRecordingProcessor._test = {
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,
-  isSameCallLeadReuse,
   shouldStampCallLeadLinkage,
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
