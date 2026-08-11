@@ -1361,6 +1361,29 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('cancelled prepay coverage bills at the scheduled price again, not the term figure', async () => {
+    const database = fakeDb({
+      // A voided/refunded/disputed prepay: clearPrepaidStampsForTerm nulls the
+      // per-visit stamps so these visits bill normally, but keeps
+      // annual_prepay_term_id for audit. The term row still exists and still
+      // has its original amount — keying on the link alone would keep quoting
+      // $114 for visits that will now bill $120.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
   test('a prepaid contract whose term cannot be loaded withholds rather than quoting list price', async () => {
     const database = fakeDb({
       scheduledRows: [

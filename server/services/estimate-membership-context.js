@@ -661,8 +661,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // no visit count withholds too — a paid term disproves the scheduled
       // price, so there is nothing safe to fall back to.
       const prepaidTermIds = [...new Set(contractRows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+      // LIVE coverage is the per-visit prepaid_amount stamp, not the term link
+      // (codex #3353 r10). When a prepay payment is voided, refunded, or
+      // disputed, clearPrepaidStampsForTerm nulls the stamps on the remaining
+      // visits so they bill normally again but DELIBERATELY keeps
+      // annual_prepay_term_id for audit — its own comment says "billing-skip
+      // keys on prepaid_amount, which is now null". Keying on the audit link
+      // alone (my r9 refactor dropped this check) reports cancelled coverage
+      // as still prepaid, overriding the price those visits will now bill.
+      // Reading the same signal billing reads is the point.
       const fullyPrepaid = contractRows.length > 0
-        && contractRows.every((row) => !!row.annual_prepay_term_id);
+        && contractRows.every((row) => !!row.annual_prepay_term_id && Number(row.prepaid_amount) > 0);
       const prepaidTerm = (fullyPrepaid && prepaidTermIds.length === 1)
         ? prepaidTermsById.get(String(prepaidTermIds[0]))
         : null;
