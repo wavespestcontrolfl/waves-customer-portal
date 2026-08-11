@@ -547,7 +547,11 @@ describe('the series creators consume the guard (source guards)', () => {
     // Standalone-bait creator: guard runs before its parent insert inside
     // the same transaction — a duplicate skips the WHOLE unit, no orphan
     // first visit.
-    const baitGuard = converterSrc.indexOf('serviceType: standaloneRow.service_type');
+    // serviceType flows through guardServiceTypeFor (codex #3349 r10 P1):
+    // an adopted palm-alias label would otherwise family-match an
+    // unrelated Tree & Shrub series through the seeder's tree-first
+    // matcher and skip the palm series as a "duplicate".
+    const baitGuard = converterSrc.indexOf('serviceType: guardServiceTypeFor(standaloneRow.service_type)');
     const baitInsert = converterSrc.indexOf("trx('scheduled_services').insert(standaloneRow)");
     expect(baitGuard).toBeGreaterThan(-1);
     expect(baitInsert).toBeGreaterThan(baitGuard);

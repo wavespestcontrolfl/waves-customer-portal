@@ -235,6 +235,34 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(EstimateConverter.annualPrepayCoverageCadence(agreeing, 'monthly')).toBe('semiannual');
   });
 
+  test('CONFLICTING cadence fields decline — behavior never depends on field precedence (codex r10 P1)', () => {
+    // frequency 'semiannual' left beside a corrected cadence 'monthly'
+    // (and the reverse) both decline: the force stands down and the
+    // gate/prepay contradiction checks refuse the row.
+    const conflictA = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', cadence: 'monthly', visitsPerYear: 2 };
+    const conflictB = { service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', cadence: 'semiannual', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(conflictA, { service_type: 'Palm Injection' }, null)).toBe(null);
+    expect(converterFollowUpSeedingPattern(conflictB, { service_type: 'Palm Injection' }, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(conflictA, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(conflictB, null)).toBe(null);
+    // Duplicate spellings of the SAME cadence are not a conflict.
+    const agreeing = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', cadence: 'semiannual', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
+  });
+
+  test('the duplicate guard receives a palm-canonical serviceType for alias labels (codex r10 P1)', () => {
+    const { guardServiceTypeFor } = EstimateConverter;
+    // An adopted alias label would family-match an unrelated ACTIVE Tree
+    // & Shrub series through the seeder's tree-first matcher — the guard
+    // gets the canonical palm label instead.
+    expect(guardServiceTypeFor('Palm Tree Injections')).toBe('Palm Injection');
+    // Real palm and non-palm labels pass through untouched.
+    expect(guardServiceTypeFor('Palm Injection')).toBe('Palm Injection');
+    expect(guardServiceTypeFor('Bi-Monthly Tree & Shrub Care Service')).toBe('Bi-Monthly Tree & Shrub Care Service');
+    expect(guardServiceTypeFor('Quarterly Pest Control Service')).toBe('Quarterly Pest Control Service');
+    expect(guardServiceTypeFor(null)).toBe(null);
+  });
+
   test('an adopted "Palm Tree Injections" row matches the PALM line, not a Tree & Shrub sibling (codex r9 P1)', () => {
     const { recurringServiceForScheduledRow } = EstimateConverter;
     const tsLine = { name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 };

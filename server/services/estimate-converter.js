@@ -338,14 +338,23 @@ function explicitCadenceFieldForService(svc = {}) {
   // P1: plan_frequency snake_case included) minus its visit-count
   // fallbacks — visit counts are exactly what this reader must NOT infer
   // from.
-  return [
+  const values = [
     svc.frequency, svc.frequencyKey, svc.frequency_key,
     svc.recurringPattern, svc.recurring_pattern,
     svc.cadence, svc.cadenceKey, svc.cadence_key,
     svc.planFrequency, svc.plan_frequency,
   ]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
-    .find(Boolean) || null;
+    .filter(Boolean);
+  const unique = [...new Set(values)];
+  if (unique.length === 0) return null;
+  if (unique.length === 1) return unique[0];
+  // Conflicting cadence fields — e.g. frequency 'semiannual' left beside a
+  // corrected cadence 'monthly' (codex r10 P1). Behavior must not depend on
+  // field precedence: surface a value no real cadence equals, so the
+  // forced-palm branch stands down AND the gate's ≠-semiannual check (and
+  // the prepay mirror) decline the contradictory row to office scheduling.
+  return 'conflicting_cadence_fields';
 }
 
 function explicitServiceCadence(svc = {}) {
@@ -2184,6 +2193,24 @@ function remainingUnitCatalogKey(svc = {}) {
   return null;
 }
 
+// The duplicate-series guard classifies its serviceType through the
+// SEEDER's tree-first matcher (findActiveRecurringSeries) — pass a
+// canonical palm label whenever the converter's palm-first resolver
+// disagrees with the seeder on a palm row, or an adopted 'Palm Tree
+// Injections' parent would family-match an unrelated ACTIVE Tree & Shrub
+// series and the guard would skip the palm series as a "duplicate",
+// resurrecting the billed-but-unscheduled defect this PR exists to close
+// (codex r10 P1). Non-palm labels pass through untouched.
+function guardServiceTypeFor(rawLabel) {
+  if (!rawLabel) return rawLabel;
+  const row = { service_type: rawLabel };
+  if (seedingFamilyKey({}, row) === 'palm_injection'
+    && RecurringAppointmentSeeder.serviceKeyFor(row) !== 'palm_injection') {
+    return 'Palm Injection';
+  }
+  return rawLabel;
+}
+
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
   // Palm-first family matching (codex r9 P1): an adopted reserved row
   // labeled 'Palm Tree Injections' beside a Tree & Shrub line would
@@ -3666,7 +3693,7 @@ const EstimateConverter = {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: standaloneRow.service_id || null,
-                serviceType: standaloneRow.service_type,
+                serviceType: guardServiceTypeFor(standaloneRow.service_type),
                 serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
@@ -3867,7 +3894,7 @@ const EstimateConverter = {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: reservedStart.service_id || null,
-                serviceType: reservedStart.service_type || null,
+                serviceType: guardServiceTypeFor(reservedStart.service_type) || null,
                 excludeParentId: reservedStart.id,
                 serviceAddressScope: seriesAddressScope,
               });
@@ -4060,7 +4087,7 @@ const EstimateConverter = {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: combinedServiceId,
-                serviceType: serviceName,
+                serviceType: guardServiceTypeFor(serviceName),
                 serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
@@ -5095,6 +5122,7 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.guardServiceTypeFor = guardServiceTypeFor;
 module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
