@@ -2251,6 +2251,20 @@ function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0
   return visitsPerYearForRecurringService(nonRider[0]);
 }
 
+// A recurring line (or its parent row) that reads as COMMERCIAL — the
+// seeder's serviceKeyFor collapses any /lawn/ or /palm/ text to the
+// residential family, but commercial recurring programs are intentionally
+// office-scheduled (the accept fires the commercial-schedule bell), so the
+// residential lawn/palm seeding paths must reject them (codex #3349 r6 P1).
+// Text-based, mirroring recurringServiceKey's own commercial detection.
+function isCommercialRecurringLine(svc = {}, parentRow = {}) {
+  return [svc.service, svc.serviceKey, svc.service_key, svc.name, svc.label, svc.displayName, svc.serviceName, svc.service_name, parentRow?.service_type]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes('commercial');
+}
+
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
@@ -2304,6 +2318,13 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // explicit visit count, so LEGACY lawn rows without explicit visits keep
   // office scheduling exactly as before (same shape as tree_shrub above).
   if (key === 'lawn_care') {
+    // Commercial lawn never collapses into the residential allowlist
+    // (codex r6 P1): custom commercial proposals can carry 6/9/12 visit
+    // counts, but their scheduling stays office-managed via the
+    // commercial-schedule bell — rejecting here also keeps the catalog
+    // identity link and the reserved promotion from treating them as
+    // residential (both gate on this pattern resolving).
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'bimonthly') return visits === 6;
     if (pattern === 'every_6_weeks') return visits === 9;
@@ -2318,6 +2339,9 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // stray and declines to office scheduling. Palm stays excluded from
   // WaveGuard tier counting (see determineTier) — that is a separate rule.
   if (key === 'palm_injection') {
+    // Same commercial rejection as lawn above (codex r6 P1) — a
+    // commercial-property palm program stays office-scheduled.
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'semiannual') return visits == null || visits === 2;
     return false;
@@ -2416,7 +2440,8 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // to office scheduling instead of being overridden.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
-    && !explicitCadenceFieldForService(svc)) {
+    && !explicitCadenceFieldForService(svc)
+    && !isCommercialRecurringLine(svc, parentRow)) {
     return 'semiannual';
   }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -2450,7 +2475,8 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // cadence-field restriction as the seeding rule (codex r4 P1).
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
-    && !explicitCadenceFieldForService(svc)) {
+    && !explicitCadenceFieldForService(svc)
+    && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
   }
   return RecurringAppointmentSeeder.inferRecurringPattern({

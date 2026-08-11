@@ -158,6 +158,16 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(supportsConverterFollowUpSeeding({ ...monthlyLine, visitsPerYear: 6 }, {}, 'monthly')).toBe(false);
   });
 
+  test('COMMERCIAL lawn never collapses into the residential allowlist — office-scheduled via the bell (codex r6 P1)', () => {
+    // serviceKeyFor reduces any /lawn/ text to lawn_care, and custom
+    // commercial proposals can carry residential-shaped visit counts.
+    const commercial = { name: 'Commercial Lawn Care Program', service: 'commercial_lawn', frequency: 'bi_monthly', visits: 6, visitsPerYear: 6 };
+    expect(supportsConverterFollowUpSeeding(commercial, {}, 'bimonthly')).toBe(false);
+    expect(converterFollowUpSeedingPattern(commercial, { service_type: 'Commercial Lawn Care Program' }, null)).toBe(null);
+    // The commercial identity on the PARENT row alone also rejects.
+    expect(supportsConverterFollowUpSeeding({ frequency: 'monthly', visitsPerYear: 12 }, { service_type: 'Commercial Lawn Service' }, 'monthly')).toBe(false);
+  });
+
   test('LEGACY lawn rows without explicit visits keep office scheduling', () => {
     // The lawn billing cadence (monthly) must never seed a 12-visit series
     // for a plan whose visit cadence is unknown — no visits, no series.
@@ -191,6 +201,12 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
   test('a stray non-semiannual cadence declines to office scheduling', () => {
     expect(supportsConverterFollowUpSeeding({ ...semiannualLine, frequency: 'monthly' }, {}, 'monthly')).toBe(false);
     expect(supportsConverterFollowUpSeeding(semiannualLine, {}, 'quarterly')).toBe(false);
+  });
+
+  test('COMMERCIAL palm lines never seed or force — office-scheduled (codex r6 P1)', () => {
+    const commercial = { name: 'Commercial Palm Injection', service: 'palm_injection', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(commercial, { service_type: 'Commercial Palm Injection' }, 'quarterly')).toBe(null);
+    expect(supportsConverterFollowUpSeeding({ ...commercial, frequency: 'semiannual' }, {}, 'semiannual')).toBe(false);
   });
 
   test('builder palm line (visitsPerYear 2, NO frequency) beats the plan fallback — forced semiannual (codex #3349 P1)', () => {

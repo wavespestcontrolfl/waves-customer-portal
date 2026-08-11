@@ -269,11 +269,18 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasTable('discounts')) {
       refs += (await knex('discounts').where({ service_key_filter: entry.key }).pluck('service_key_filter')).length;
     }
+    // Ownership check BEFORE any mutation (codex r6 P2, mirroring the
+    // roll-forward's rule): a row an admin renamed/repurposed under a
+    // different key is theirs now — neither deactivate nor delete it.
+    const row = await knex('services').where({ id: entry.id }).first();
+    if (row && row.service_key !== entry.key) {
+      console.warn(`[palm-semiannual] down: row ${entry.id} now carries key "${row.service_key}" (was ${entry.key}) — admin-repurposed, leaving untouched`);
+      continue;
+    }
     // Name-only references count too (exemplar's alias sweep): a visit
     // scheduled under the row's name/short name without a service_id still
     // resolves this row by name, so deleting it would reroute that visit's
     // completion. Aliases mirror what the completion resolver accepts.
-    const row = await knex('services').where({ id: entry.id }).first();
     if (row) {
       const aliases = [...new Set([
         row.name,

@@ -263,6 +263,19 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(stateValue(db).profiles).toEqual([KEY]);
   });
 
+  test('down() leaves a row an admin REPURPOSED before the first rollback — neither deactivated nor deleted (codex r6 P2)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const insertedId = db.services.find((r) => r.service_key === KEY).id;
+    // Admin repurposes the migration-created row under a new key, no refs.
+    db.services.find((r) => r.id === insertedId).service_key = 'admin_custom_palm';
+    await migration.down(fakeKnex(db));
+
+    const adminRow = db.services.find((r) => r.id === insertedId);
+    expect(adminRow).toBeDefined();
+    expect(adminRow.is_active).toBe(true);
+  });
+
   test('roll-forward skips a retained row an admin REPURPOSED under a different key (codex r5 P2)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
