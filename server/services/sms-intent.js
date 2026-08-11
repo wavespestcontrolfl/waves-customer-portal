@@ -70,9 +70,17 @@ function hasSchedulingIntent(body) {
   return false;
 }
 
+// A tapback quotes the ORIGINAL message VERBATIM — newlines included — and
+// every appointment template is multi-line ("…4:00 PM.\n\nReschedule here:
+// <url>"). `.` never matches \n, so the anchored patterns above failed to
+// span the quoted body and the reaction read as ordinary prose: the quoted
+// "Reschedule here:" line then tripped the reschedule detector and belled
+// the owner (2026-08-11: "Liked" on a 72h reminder raised a reschedule flag
+// against a still-armed visit). Collapse whitespace before matching — the
+// same normalization the opt-out detector's tapback stripper already uses.
 function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
-  const text = body.trim();
+  const text = body.trim().replace(/\s+/g, ' ');
   return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text);
 }
 
