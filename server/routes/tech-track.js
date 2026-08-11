@@ -152,8 +152,28 @@ router.post('/:id/en-route', async (req, res, next) => {
     // for a no-op tap.
     if (fromStatus !== 'en_route') {
       try {
-        await db.transaction(async (trx) => {
-          if (autoConfirmReview) {
+        // Phase 1 — auto-confirm in its OWN trx, row-locked. The recheck
+        // inside the trx closes the reassignment window (Codex P1 on this
+        // PR, same race admin-schedule's status route locks against):
+        // the pre-trx ownership check alone would let a stale tap from a
+        // reassigned tech stamp customer_confirmed and approve the review.
+        if (autoConfirmReview) {
+          await db.transaction(async (trx) => {
+            const fresh = await trx('scheduled_services')
+              .where({ id: svc.id })
+              .forUpdate()
+              .first('technician_id', 'status', 'customer_confirmed', 'source_action');
+            if (!fresh || fresh.technician_id !== req.technicianId) {
+              const e = new Error('Not assigned to this service');
+              e.code = 'TECH_OWNERSHIP_LOST';
+              throw e;
+            }
+            if (!isPendingOutboundReviewBooking(fresh)) {
+              // Office confirmed/rejected it between our read and this trx.
+              const e = new Error('Review state changed');
+              e.code = 'REVIEW_STATE_CHANGED';
+              throw e;
+            }
             await trx('scheduled_services')
               .where({ id: svc.id })
               .update({ customer_confirmed: true });
@@ -164,7 +184,26 @@ router.post('/:id/en-route', async (req, res, next) => {
               transitionedBy: req.technicianId,
               trx,
             });
-          }
+          });
+
+          // Phase 2 — confirm side effects (arm deferred reminders, convert
+          // the originating call lead, resolve the outbound_booking_review
+          // card, inspection-credit evidence, card-on-file request) — the
+          // SAME post-commit best-effort hook the admin confirm paths run,
+          // so a field-confirmed booking is never confirmed-but-half-armed.
+          // MUST run while status is still 'confirmed' (Codex P1 on this
+          // PR): requestCardForAppointment re-reads the visit and skips
+          // anything past pending/confirmed, and the previsit sweep has the
+          // same status list — running the hook after the en_route flip
+          // permanently skips the card funnel for this booking. Day-of
+          // reminder arming sends nothing: the 72h leg only fires >24.25h
+          // out and the 24h leg only for tomorrow-ET visits.
+          await runOutboundReviewConfirmHook(db, svc, 'tech-track');
+        }
+
+        // Phase 3 — advance. The atomic guard catches anything that moved
+        // the row between phases; surfaced as 409 refresh-and-retry.
+        await db.transaction(async (trx) => {
           await transitionJobStatus({
             jobId: svc.id,
             fromStatus: autoConfirmReview ? 'confirmed' : fromStatus,
@@ -174,6 +213,16 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         });
       } catch (err) {
+        if (err && err.code === 'TECH_OWNERSHIP_LOST') {
+          // Same contract as the pre-trx check above.
+          return res.status(403).json({ error: 'Not assigned to this service' });
+        }
+        if (err && err.code === 'REVIEW_STATE_CHANGED') {
+          return res.status(409).json({
+            error: 'This booking was just updated by the office. Refresh your route and try again.',
+            code: 'review_state_changed',
+          });
+        }
         // The shared writer's review-booking guard should no longer fire on
         // this path (auto-confirm above) — kept as a safety net for a race
         // with a concurrent office reject.
@@ -189,16 +238,6 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         }
         throw err;
-      }
-
-      // Confirm side effects (arm deferred reminders, convert the
-      // originating call lead, resolve the outbound_booking_review card,
-      // inspection-credit evidence) — the SAME post-commit best-effort hook
-      // the admin confirm paths run, so a field-confirmed booking is never
-      // confirmed-but-half-armed. Day-of arming sends nothing: the 72h leg
-      // only fires >24.25h out and the 24h leg only for tomorrow-ET visits.
-      if (autoConfirmReview) {
-        await runOutboundReviewConfirmHook(db, svc, 'tech-track');
       }
     }
 
@@ -277,15 +316,29 @@ router.post('/:id/on-site', async (req, res, next) => {
     if (fromStatus !== 'on_site') {
       const arrivedAt = new Date();
       try {
-        await db.transaction(async (trx) => {
-          const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
-          if (autoConfirmReview) {
-            lifecycleUpdates.customer_confirmed = true;
-          }
-          if (Object.keys(lifecycleUpdates).length > 0) {
-            await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
-          }
-          if (autoConfirmReview) {
+        // Phase 1 + 2 — same shape and Codex P1 rationale as the en-route
+        // leg above: row-locked in-trx recheck before the confirm flip,
+        // then the shared confirm hook while status is still 'confirmed'
+        // (the card-on-file leg is dead once the row passes confirmed).
+        if (autoConfirmReview) {
+          await db.transaction(async (trx) => {
+            const fresh = await trx('scheduled_services')
+              .where({ id: svc.id })
+              .forUpdate()
+              .first('technician_id', 'status', 'customer_confirmed', 'source_action');
+            if (!fresh || fresh.technician_id !== req.technicianId) {
+              const e = new Error('Not assigned to this service');
+              e.code = 'TECH_OWNERSHIP_LOST';
+              throw e;
+            }
+            if (!isPendingOutboundReviewBooking(fresh)) {
+              const e = new Error('Review state changed');
+              e.code = 'REVIEW_STATE_CHANGED';
+              throw e;
+            }
+            await trx('scheduled_services')
+              .where({ id: svc.id })
+              .update({ customer_confirmed: true });
             await transitionJobStatus({
               jobId: svc.id,
               fromStatus: 'pending',
@@ -293,6 +346,15 @@ router.post('/:id/on-site', async (req, res, next) => {
               transitionedBy: req.technicianId,
               trx,
             });
+          });
+          await runOutboundReviewConfirmHook(db, svc, 'tech-track');
+        }
+
+        // Phase 3 — advance to on_site with the lifecycle stamps.
+        await db.transaction(async (trx) => {
+          const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
+          if (Object.keys(lifecycleUpdates).length > 0) {
+            await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
           }
           await transitionJobStatus({
             jobId: svc.id,
@@ -303,7 +365,16 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         });
       } catch (err) {
-        // Same safety-net translation as the en-route leg above.
+        // Same error translations as the en-route leg above.
+        if (err && err.code === 'TECH_OWNERSHIP_LOST') {
+          return res.status(403).json({ error: 'Not assigned to this service' });
+        }
+        if (err && err.code === 'REVIEW_STATE_CHANGED') {
+          return res.status(409).json({
+            error: 'This booking was just updated by the office. Refresh your route and try again.',
+            code: 'review_state_changed',
+          });
+        }
         if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
           return res.status(409).json({
             error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
@@ -316,11 +387,6 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         }
         throw err;
-      }
-
-      // Same post-commit confirm hook as the en-route leg above.
-      if (autoConfirmReview) {
-        await runOutboundReviewConfirmHook(db, svc, 'tech-track');
       }
     }
 
