@@ -375,6 +375,13 @@ function visitCountFieldsConflict(svc = {}) {
   return new Set(values).size > 1;
 }
 
+// The two invalid-cadence sentinels explicitCadenceFieldForService can
+// surface. They are deliberately truthy (forces stand down, ≠-checks
+// decline) but NEVER a schedulable cadence — any consumer that compares
+// two resolved cadences for EQUALITY must reject them first (codex r14
+// P1: sentinel === sentinel reads as "cadences agree").
+const CADENCE_FIELD_SENTINELS = new Set(['conflicting_cadence_fields', 'unrecognized_cadence_field']);
+
 function explicitServiceCadence(svc = {}) {
   const fromFields = explicitCadenceFieldForService(svc);
   if (fromFields) return fromFields;
@@ -437,6 +444,13 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       ? acceptPattern
       : explicitServiceCadence(primary);
     const companionPattern = explicitServiceCadence(companion) || route.companionDefaultPattern || null;
+    // Sentinels never satisfy route matching (codex r14 P1): with BOTH
+    // sides conflicted/unrecognized, the two sentinels compare EQUAL and
+    // the route would combine — discarding the contradictory source
+    // fields. Declined, the rows stay standalone for the per-line gates.
+    // (A sentinel is truthy on purpose so a conflicted companion never
+    // falls back to the route's program default either.)
+    if (CADENCE_FIELD_SENTINELS.has(primaryPattern) || CADENCE_FIELD_SENTINELS.has(companionPattern)) continue;
     if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
     // are coarse, so explicit visit counts are the cadence truth when known.

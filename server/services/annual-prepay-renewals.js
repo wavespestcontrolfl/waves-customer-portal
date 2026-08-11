@@ -681,6 +681,36 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
   }
 
+  // Payment-seeded PALM visits must carry the recurring catalog identity
+  // (codex #3349 r14 P1): a bare service_type 'Palm Injection' misfiles at
+  // completion — the exact-name lookup misses and the unique short-name
+  // match is the ONE-TIME palm_injection row, so every paid recurring
+  // visit would get one-time billing and the token-only portal posture.
+  // Mirror the converter/admin identity link (seedingFamilyKey handles the
+  // Palmetto substring trap); IDENTITY ONLY — duration stays the 60-minute
+  // slot default above, never the catalog row's. Fail-soft: a missing row
+  // (migration rolled back) seeds without identity exactly as before.
+  let coverageCatalogServiceId = null;
+  let coverageCatalogKey = null;
+  if (coverageCadence === 'semiannual') {
+    try {
+      const { seedingFamilyKey } = require('./estimate-converter');
+      if (seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection') {
+        const catalogRow = await conn('services')
+          .where({ service_key: 'palm_injection_semiannual' })
+          .first('id', 'service_key');
+        if (catalogRow?.id) {
+          coverageCatalogServiceId = catalogRow.id;
+          coverageCatalogKey = catalogRow.service_key;
+        } else {
+          logger.warn(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row not found — seeding palm coverage without catalog identity`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link skipped: ${err.message}`);
+    }
+  }
+
   const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
@@ -690,6 +720,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
+    if (cols.service_id && coverageCatalogServiceId) insertData.service_id = coverageCatalogServiceId;
+    if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;

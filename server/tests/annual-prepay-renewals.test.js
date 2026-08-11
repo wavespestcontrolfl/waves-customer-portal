@@ -417,6 +417,54 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('semiannual PALM coverage stamps the recurring catalog identity on every seeded visit (codex #3349 r14 P1)', async () => {
+    // A bare service_type 'Palm Injection' misfiles at completion: the
+    // exact-name lookup misses and the unique short-name match is the
+    // ONE-TIME palm_injection row — paid recurring visits would get
+    // one-time billing + token-only portal posture.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const parentInsert = query({ returning: [{ id: 'svc-p1', scheduled_date: '2026-06-15' }] });
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), parentInsert, childInsert],
+      services: [query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 2,
+      targetDates: ['2026-06-15', '2026-12-15'],
+    });
+
+    expect(parentInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      service_type: 'Palm Injection',
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+      recurring_pattern: 'semiannual',
+    }));
+    expect(childInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+      recurring_parent_id: 'svc-p1',
+    }));
+  });
+
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
     const columnQuery = query({
       columnInfo: {

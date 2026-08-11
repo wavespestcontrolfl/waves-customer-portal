@@ -114,6 +114,35 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(remaining).toHaveLength(2);
   });
 
+  test('cadence sentinels never satisfy route matching — BOTH sides conflicted stays separate (Codex r14 P1)', () => {
+    // Each side resolves the same truthy conflict sentinel; equality must
+    // not read as "cadences agree" and combine a row whose cadence is
+    // unresolvable on both sides.
+    const conflicted = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', service: 'pest_control', frequency: 'quarterly', cadence: 'monthly' },
+      { name: 'Termite Bait Station System', frequency: 'monthly', cadence: 'quarterly' },
+    ]);
+    expect(conflicted.combos).toEqual([]);
+    expect(conflicted.remaining).toHaveLength(2);
+    // Same for two unrecognized-field sentinels.
+    const unrecognized = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', service: 'pest_control', frequency: 'every_4_months' },
+      { name: 'Termite Bait Station System', frequency: 'every_4_months' },
+    ]);
+    expect(unrecognized.combos).toEqual([]);
+    expect(unrecognized.remaining).toHaveLength(2);
+    // A conflicted companion must not fall back to the route's program
+    // default either (bait default = quarterly).
+    const companionConflicted = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control' },
+        { name: 'Termite Bait Station System', frequency: 'monthly', cadence: 'quarterly' },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(companionConflicted.combos).toEqual([]);
+  });
+
   test('conflicting pest counts on an accepted-frequency combo: combine stands, count never rides (Codex r12 P1)', () => {
     // Pest primaries ride the ACCEPTED plan cadence (stale-debris doctrine),
     // so a contested count set doesn't block the combo — but it must not be
