@@ -1755,12 +1755,17 @@ async function rescheduleAppointment(input) {
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, needsLifecycleRewind } = require('../rebooker');
+  const {
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects, needsLifecycleRewind,
+  } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   // Rewind on stale evidence too, not just live status — see
-  // needsLifecycleRewind in rebooker.js. The status flip and post-commit
-  // side effects below stay keyed on wasLive.
-  const liveReset = wasLive || needsLifecycleRewind(appt) ? LIVE_LIFECYCLE_RESET : {};
+  // needsLifecycleRewind in rebooker.js. The status flip and the history
+  // append stay keyed on wasLive; an evidence-only rewind still gets the
+  // post-commit tracker cleanup below (tech pointer + customer refresh)
+  // without recording a status transition that never happened.
+  const trackRewound = !wasLive && needsLifecycleRewind(appt);
+  const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
 
   // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
   // guard and the wasLive classification above came from the initial read —
@@ -1823,6 +1828,16 @@ async function rescheduleAppointment(input) {
       await applyLiveMoveSideEffects(db, appt);
     } catch (err) {
       logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+    }
+  } else if (trackRewound) {
+    // No status transition happened (status was never live), so no history
+    // row — but the tracker rewind still released a manual En Route tap's
+    // state: free the tech pointer and refresh any open customer tracker
+    // with the row's unchanged status.
+    try {
+      await applyLiveMovePostCommitEffects(appt, { toStatus: appt.status });
+    } catch (err) {
+      logger.error(`[intelligence-bar] track-rewind side effects failed for ${appointment_id}: ${err.message}`);
     }
   }
 

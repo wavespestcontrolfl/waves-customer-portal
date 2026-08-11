@@ -331,6 +331,16 @@ async function markEnRoute(serviceId, opts = {}) {
     : {};
   const updated = await db('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
+    .modify((q) => {
+      // The stale-clear variant erases lifecycle columns, so its CAS must
+      // also match the status + schedule tuple this read observed — a
+      // completion that persisted status (but hasn't run its best-effort
+      // tracker flip yet) or a concurrent move makes it miss instead of
+      // wiping a finished visit's timestamps; the race path below re-reads.
+      if (staleEvidence) {
+        q.where('status', svc.status).where('scheduled_date', svc.scheduled_date);
+      }
+    })
     .update({
       track_state: 'en_route', en_route_at: now, updated_at: now, ...staleFlipClears,
     });

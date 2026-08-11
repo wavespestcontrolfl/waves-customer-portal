@@ -322,6 +322,11 @@ class SmartRebooker {
       });
     }
     const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
+    // Evidence-based rewind test — broader than wasLive (live track_state
+    // or stale stamps under a non-live status). Drives the lifecycle reset
+    // AND the post-commit tracker cleanup below; movability stays
+    // status-based.
+    const lifecycleRewound = needsLifecycleRewind(service);
 
     // A past target date moves the job where no "upcoming" query will ever
     // find it — silently never serviced. Stale SMS replies and freeform
@@ -387,7 +392,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: 'confirmed',
-      ...(needsLifecycleRewind(service) ? LIVE_LIFECYCLE_RESET : {}),
+      ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -528,7 +533,12 @@ class SmartRebooker {
     //      here leaves a stale pointer, not inconsistent job state.
     //   2. A customer watching the public tracker would otherwise stay
     //      on the stale en-route / on-site screen — push the refresh.
-    if (wasLive) {
+    if (wasLive || lifecycleRewound) {
+      // lifecycleRewound without wasLive: a manual En Route tap advanced
+      // track_state (and pinned tech_status) without syncing status — the
+      // rewind above cleared the row, so the tech pointer and any open
+      // customer tracker need the same cleanup. This path lands the row on
+      // 'confirmed' either way, so the refresh status is unchanged.
       if (service.technician_id) {
         try {
           await clearTechCurrentJob({
@@ -1103,8 +1113,9 @@ class SmartRebooker {
     // Live-anchor post-commit cleanup — same pattern as the single-job
     // override in reschedule(): free the tech_status pointer and push
     // the customer-tracker refresh so an open TrackPage doesn't sit on
-    // the stale en-route / on-site screen.
-    if (wasLive) {
+    // the stale en-route / on-site screen. Evidence-only rewinds (live
+    // track_state under a non-live status) need the same cleanup.
+    if (wasLive || needsLifecycleRewind(service)) {
       if (service.technician_id) {
         try {
           await clearTechCurrentJob({
@@ -1181,7 +1192,12 @@ async function applyLiveMoveHistory(conn, svc, { actor = null } = {}) {
 // successful commit — otherwise a rollback leaves the tech cleared and
 // clients holding a phantom refresh for a move that never happened. Matches
 // reschedule()'s own post-commit sequencing above.
-async function applyLiveMovePostCommitEffects(svc) {
+// toStatus: the operational status the customer refresh should carry —
+// 'confirmed' for a genuine live move (the movers land those on
+// 'confirmed'), the row's unchanged status for a tracker-evidence-only
+// rewind (track_state was live but status never synced, so the move did
+// not flip it).
+async function applyLiveMovePostCommitEffects(svc, { toStatus = 'confirmed' } = {}) {
   if (svc.technician_id) {
     try {
       await clearTechCurrentJob({
@@ -1193,7 +1209,7 @@ async function applyLiveMovePostCommitEffects(svc) {
       logger.error(`[rebooker] tech_status clear after live move failed for ${svc.id}: ${err.message}`);
     }
   }
-  emitCustomerJobRefresh(svc, 'confirmed');
+  emitCustomerJobRefresh(svc, toStatus);
 }
 
 // Convenience composition for NON-transactional callers (the IB movers run

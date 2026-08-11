@@ -482,7 +482,9 @@ async function moveStopsToDay(input) {
   }
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, needsLifecycleRewind } = require('../rebooker');
+  const {
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects, needsLifecycleRewind,
+  } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
@@ -495,9 +497,12 @@ async function moveStopsToDay(input) {
     // lifecycle exactly like the rebooker's live override does.
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
     // Rewind on stale evidence too, not just live status — see
-    // needsLifecycleRewind in rebooker.js. The status flip and post-commit
-    // side effects below stay keyed on wasLive.
-    const liveReset = wasLive || needsLifecycleRewind(s) ? LIVE_LIFECYCLE_RESET : {};
+    // needsLifecycleRewind in rebooker.js. The status flip and the history
+    // append stay keyed on wasLive; an evidence-only rewind still gets the
+    // post-commit tracker cleanup below without recording a status
+    // transition that never happened.
+    const trackRewound = !wasLive && needsLifecycleRewind(s);
+    const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
     // Compare-and-swap on the OBSERVED status + schedule fields: everything
     // below (the wasLive classification, the lifecycle rewind, the
     // 'confirmed' restamp) was derived from the initial read — if the stop
@@ -565,6 +570,14 @@ async function moveStopsToDay(input) {
         await applyLiveMoveSideEffects(db, s);
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+      }
+    } else if (trackRewound) {
+      // Tracker rewind without a status transition: cleanup only, no
+      // history row, refresh with the stop's unchanged status.
+      try {
+        await applyLiveMovePostCommitEffects(s, { toStatus: s.status });
+      } catch (err) {
+        logger.error(`[intelligence-bar:schedule] track-rewind side effects failed for ${s.id}: ${err.message}`);
       }
     }
     // Audit row matching the rebooker's reschedule_log conventions.

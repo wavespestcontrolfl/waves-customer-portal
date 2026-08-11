@@ -4393,6 +4393,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
+            // 'confirmed' for a genuine live move; the row's unchanged
+            // status for an evidence-only tracker rewind.
+            let liveMoveRefreshStatus = 'confirmed';
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -4491,6 +4494,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // back on 'confirmed' in the same UPDATE — otherwise it stays live
               // on a future date, matching the rebooker's own path.
               const wasLive = ['en_route', 'on_site'].includes(String(svc.status));
+              let trackRewound = false;
               if (wasLive) {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
@@ -4499,9 +4503,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // advanced by a manual En Route tap that never synced status,
                 // or stamps a partial reset left behind) rewinds the tracker
                 // too — status stays untouched, matching this path's no-flip
-                // contract for non-live rows.
+                // contract for non-live rows. No history row either (no
+                // status transition happened), but the post-commit tracker
+                // cleanup below still runs.
                 const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
-                if (needsLifecycleRewind(svc)) Object.assign(updates, LIVE_LIFECYCLE_RESET);
+                if (needsLifecycleRewind(svc)) {
+                  Object.assign(updates, LIVE_LIFECYCLE_RESET);
+                  trackRewound = true;
+                }
               }
               // Compare-and-swap on the OBSERVED status + schedule fields:
               // the terminal guard and the wasLive classification above came
@@ -4555,6 +4564,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const { applyLiveMoveHistory } = require('../services/rebooker');
                 await applyLiveMoveHistory(trx, svc, { actor: req.technicianId || null });
                 liveMoveRow = svc;
+              } else if (trackRewound) {
+                // Evidence-only rewind: post-commit cleanup with the row's
+                // unchanged status; no history append.
+                liveMoveRow = svc;
+                liveMoveRefreshStatus = String(svc.status);
               }
               // Audit row matching the rebooker's reschedule_log conventions.
               await trx('reschedule_log').insert({
@@ -4590,7 +4604,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             if (liveMoveRow) {
               try {
                 const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
-                await applyLiveMovePostCommitEffects(liveMoveRow);
+                await applyLiveMovePostCommitEffects(liveMoveRow, { toStatus: liveMoveRefreshStatus });
               } catch (err) {
                 logger.error(`[admin-schedule] bulk reschedule live-move side effects failed for ${id}: ${err.message}`);
               }
@@ -5436,10 +5450,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // reschedule text after commit. start stays null for date-only visits
     // (no fabricated 08:00 goes into a customer text).
     let scheduleMoveForNotice = null;
-    // Live (en_route/on_site) row moved to a new date through this edit —
+    // Live (or tracker-rewound) row moved to a new date through this edit —
     // captured inside the trx; drives the rebooker-parity post-commit
     // effects (tech_status release + customer tracker refresh) after commit.
     let liveEditMovePostCommitRow = null;
+    let liveEditMoveRefreshStatus = 'confirmed';
 
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -5556,14 +5571,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))
           && dateOnly(updates.scheduled_date) !== dateOnly(preTupleRow.scheduled_date);
         let liveEditMoveRow = null;
+        let liveEditWasLive = false;
         if (dateActuallyMoves) {
           const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
-          const editWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
-          if (editWasLive) {
+          liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
+          if (liveEditWasLive) {
             Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
             liveEditMoveRow = preTupleRow;
           } else if (needsLifecycleRewind(preTupleRow)) {
+            // Evidence-only rewind: no status flip, no history row — but
+            // the post-commit tracker cleanup (tech pointer + customer
+            // refresh) still applies.
             Object.assign(updates, LIVE_LIFECYCLE_RESET);
+            liveEditMoveRow = preTupleRow;
           }
         }
         // When the appointment's own date or arrival window changes, resync its
@@ -5580,9 +5600,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // flip on the trx; the tech_status release + customer tracker
         // refresh are externally visible and run only after commit.
         if (liveEditMoveRow) {
-          const { applyLiveMoveHistory } = require('../services/rebooker');
-          await applyLiveMoveHistory(trx, liveEditMoveRow, { actor: req.technicianId || null });
+          if (liveEditWasLive) {
+            const { applyLiveMoveHistory } = require('../services/rebooker');
+            await applyLiveMoveHistory(trx, liveEditMoveRow, { actor: req.technicianId || null });
+          }
           liveEditMovePostCommitRow = liveEditMoveRow;
+          liveEditMoveRefreshStatus = liveEditWasLive ? 'confirmed' : String(liveEditMoveRow.status);
         }
         if (updates.scheduled_date !== undefined && reminderBefore) {
           callFollowUpShiftFrom = reminderBefore.scheduled_date;
@@ -5815,18 +5838,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           };
           const skipChild = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
+          // track_state + lifecycle stamps ride along as rewind evidence: a
+          // pending child can still carry a live tracker or stale stamps
+          // from an aborted attempt (manual En Route taps advance
+          // track_state without syncing status), and re-dating it must not
+          // carry those onto the new date.
+          const seriesEvidenceCols = ['track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time'];
           const pendingChildren = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: true })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'scheduled_date', 'window_start');
+            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
           const pendingBoosters = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: false })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'scheduled_date', 'window_start');
+            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
           const pendingRewriteIds = [
             ...pendingChildren.map((row) => row.id),
             ...pendingBoosters.map((row) => row.id),
@@ -5877,6 +5906,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
               if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
               if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
+              if (childDateChanged) {
+                const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                if (needsLifecycleRewind(child)) Object.assign(childUpdates, LIVE_LIFECYCLE_RESET);
+              }
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -5922,6 +5955,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
+                if (boosterDateChanged) {
+                  const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                  if (needsLifecycleRewind(booster)) Object.assign(boosterUpdates, LIVE_LIFECYCLE_RESET);
+                }
                 await trx('scheduled_services').where({ id: booster.id }).update(boosterUpdates);
                 if (boosterDateChanged) {
                   await resetAppointmentReminderForScheduleRewrite(
@@ -6333,7 +6370,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (liveEditMovePostCommitRow) {
       try {
         const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
-        await applyLiveMovePostCommitEffects(liveEditMovePostCommitRow);
+        await applyLiveMovePostCommitEffects(liveEditMovePostCommitRow, { toStatus: liveEditMoveRefreshStatus });
       } catch (err) {
         logger.error(`[schedule/update-details] live-move side effects failed for ${req.params.id}: ${err.message}`);
       }
