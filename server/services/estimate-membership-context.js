@@ -389,19 +389,25 @@ async function loadCadenceByRowId(database, customerId) {
     const rows = await database('scheduled_services as s')
       .leftJoin('services as svc', 's.service_id', 'svc.id')
       .where({ 's.customer_id': customerId })
-      .select('s.id', 's.recurring_pattern', 'svc.frequency', 'svc.visits_per_year');
+      // recurring_interval_days is REQUIRED here, not optional detail: it is
+      // what resolves a 'custom' series (codex #3353 r5 — the projection
+      // missed it, so the r4 interval-days resolution silently never fired
+      // against a real database and every custom series fell back to the
+      // catalog cadence).
+      .select('s.id', 's.recurring_pattern', 's.recurring_interval_days', 'svc.frequency', 'svc.visits_per_year');
     // The LIVE series wins over the catalog default (codex #3353 r3): a
     // series whose scheduled_services.recurring_pattern overrides its
     // catalog frequency really runs at the overridden cadence, and reading
     // the catalog alone would both mislabel it and divide the monthly rate
     // by the wrong visit count (a $100/mo monthly series read as quarterly
-    // becomes "$300 per application"). Resolution goes through
-    // billing-cadence.normalizeFrequencyKey — the repo's existing cadence
-    // mechanism (AGENTS.md: extend it, never build a parallel one) — so
-    // every spelling the schedule writes ('every_other_month', 'bimonthly',
-    // a raw visit count) resolves the same way it does everywhere else.
-    // A pattern it cannot resolve (custom, seasonal, annual) falls back to
-    // the catalog rather than guessing.
+    // becomes "$300 per application"). Resolution reuses the coverage-cadence
+    // helpers in annual-prepay-renewals — the repo's existing mechanism
+    // (AGENTS.md: extend it, never build a parallel one) — which is also what
+    // admin-invoices' coverage suggestion resolves with.
+    //
+    // Required at CALL time: this module sits in a require cycle with the
+    // converter/prepay web, and a module-scope destructure of ._private can
+    // land while that export is still undefined.
     const {
       normalizeCoverageCadence,
       cadenceFromIntervalDays,

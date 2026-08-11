@@ -71,8 +71,22 @@ function fakeDb({
         if (table === 'annual_prepay_terms') return prepaidTerm;
         return null;
       },
-      select: async () => {
-        if (table === 'scheduled_services as s') return catalogRows || [];
+      select: async (...cols) => {
+        // The JOINED query is PROJECTED for real (codex #3353 r5): returning
+        // every fixture property regardless of what the caller selected let a
+        // missing column (recurring_interval_days) pass here while resolving
+        // to undefined against a real database. Honoring the projection means
+        // a column the code reads but never selects now fails the test.
+        if (table === 'scheduled_services as s') {
+          const requested = cols.flat().map((col) => {
+            const text = String(col);
+            const aliased = / as /i.test(text) ? text.split(/ as /i)[1] : text;
+            return aliased.includes('.') ? aliased.split('.').pop() : aliased;
+          });
+          return (catalogRows || []).map((row) => Object.fromEntries(
+            requested.filter((key) => key in row).map((key) => [key, row[key]]),
+          ));
+        }
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {

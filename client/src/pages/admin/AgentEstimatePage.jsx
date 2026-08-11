@@ -299,10 +299,18 @@ export function CustomerAccountPanel({ account, profile }) {
                 <div>
                   <div className="text-[14px] font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
                   <div className="text-[14px] text-zinc-500">
-                    {spendSourceLabel(service.spendSource)}
-                    {service.lastPaidAt ? ` · ${String(service.lastPaidAt).slice(0, 10)}` : ""}
-                    {service.qualifiesForWaveGuard === false ? " · not a tier service" : ""}
-                    {perProperty.length ? ` · ${perProperty.length} properties` : ""}
+                    {/* Cadence belongs on the family row too, not only inside
+                        the multi-property loop: a monthly-derived amount is
+                        meaningless without the divisor that produced it
+                        ("$133.33" vs "Every 6 weeks · 9/yr · $133.33"). */}
+                    {[
+                      service.cadenceLabel,
+                      service.visitsPerYear ? `${service.visitsPerYear}/yr` : null,
+                      spendSourceLabel(service.spendSource),
+                      service.lastPaidAt ? String(service.lastPaidAt).slice(0, 10) : null,
+                      service.qualifiesForWaveGuard === false ? "not a tier service" : null,
+                      perProperty.length ? `${perProperty.length} properties` : null,
+                    ].filter(Boolean).join(" · ")}
                   </div>
                 </div>
                 {perProperty.length ? null : (
