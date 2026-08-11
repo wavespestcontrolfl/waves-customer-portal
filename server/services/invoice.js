@@ -358,8 +358,14 @@ async function buildScheduledServiceInvoiceLines(
     fallbackAmount = 0,
     fallbackDescription = "Service visit",
     extraLineItems = [],
+    // Mint-serialization (WaveGuard #3338 fast-follow): a mint that holds
+    // FOR UPDATE on the visit row must build its lines on the SAME
+    // connection, or the price read here would come from a different
+    // connection's snapshot and the lock would be theater.
+    database = null,
   } = {},
 ) {
+  const conn = database || db;
   if (!scheduledServiceId) {
     return {
       lineItems:
@@ -378,7 +384,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const scheduled = await db("scheduled_services")
+  const scheduled = await conn("scheduled_services")
     .where({ id: scheduledServiceId })
     .first()
     .catch(() => null);
@@ -400,7 +406,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const addons = await db("scheduled_service_addons")
+  const addons = await conn("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy("created_at", "asc")
     .catch(() => []);
@@ -1602,40 +1608,56 @@ const InvoiceService = {
 
     const hasExplicitAmount =
       amount !== undefined && amount !== null && Number(amount) > 0;
-    const scheduledInvoice =
-      (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
+    const replayFromScheduled =
+      (useScheduledReplay || !hasExplicitAmount) && !!sr.scheduled_service_id;
+    // Params are built PER MINT ATTEMPT, on the minting connection
+    // (mint-serialization, WaveGuard #3338 fast-follow): the replay path
+    // derives its price from the scheduled row, so that read happens under
+    // FOR UPDATE inside the same transaction the invoice mints in — a
+    // concurrent reprice (the tier-extension apply holds the same lock)
+    // either commits first and is billed, or waits for this mint. The
+    // explicit-amount path bills the operator's figure and needs no lock.
+    const buildParams = async (conn = null) => {
+      if (replayFromScheduled && conn) {
+        await conn("scheduled_services")
+          .where({ id: sr.scheduled_service_id })
+          .forUpdate()
+          .first("id");
+      }
+      const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
             fallbackAmount: amount,
             fallbackDescription: description || sr.service_type,
+            database: conn,
           })
         : null;
-    let lineItems = scheduledInvoice?.lineItems?.length
-      ? scheduledInvoice.lineItems
-      : [
-          {
-            description: description || sr.service_type,
-            quantity: 1,
-            unit_price: amount,
-            amount,
-            category: sr.service_type,
-          },
-        ];
-    if (Array.isArray(extraLineItems) && extraLineItems.length) {
-      lineItems = [...lineItems, ...extraLineItems];
-    }
-
-    const createParams = {
-      customerId: sr.customer_id,
-      serviceRecordId,
-      scheduledServiceId: sr.scheduled_service_id || undefined,
-      lineItems,
-      discountIds: scheduledInvoice?.discountIds || undefined,
-      taxRate,
-      dueDate,
-      trustedStoredDiscountSources: scheduledInvoice
-        ? ["scheduled_service"]
-        : [],
-      skipAccrual,
+      let lineItems = scheduledInvoice?.lineItems?.length
+        ? scheduledInvoice.lineItems
+        : [
+            {
+              description: description || sr.service_type,
+              quantity: 1,
+              unit_price: amount,
+              amount,
+              category: sr.service_type,
+            },
+          ];
+      if (Array.isArray(extraLineItems) && extraLineItems.length) {
+        lineItems = [...lineItems, ...extraLineItems];
+      }
+      return {
+        customerId: sr.customer_id,
+        serviceRecordId,
+        scheduledServiceId: sr.scheduled_service_id || undefined,
+        lineItems,
+        discountIds: scheduledInvoice?.discountIds || undefined,
+        taxRate,
+        dueDate,
+        trustedStoredDiscountSources: scheduledInvoice
+          ? ["scheduled_service"]
+          : [],
+        skipAccrual,
+      };
     };
 
     // Estimate-deposit roll-forward: when this service traces back to an
@@ -1693,7 +1715,7 @@ const InvoiceService = {
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...createParams,
+              ...(await buildParams(trx)),
               database: trx,
               depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
@@ -1733,7 +1755,12 @@ const InvoiceService = {
       }
     }
 
-    return this.create(createParams);
+    if (replayFromScheduled) {
+      return db.transaction(async (trx) =>
+        this.create({ ...(await buildParams(trx)), database: trx }),
+      );
+    }
+    return this.create(await buildParams(null));
   },
 
   /**

@@ -8863,6 +8863,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
             svc,
+            // A REQUIRED resume mints the FROZEN amount — the money truth
+            // this block documents above — so the helper's stale-price 409
+            // must not block it. First runs bill live values and keep the
+            // guard: a mid-flight reprice 409s and the retry bills fresh.
+            allowPriceMovement: !useReplayLines,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,

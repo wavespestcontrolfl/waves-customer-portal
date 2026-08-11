@@ -22,6 +22,10 @@ jest.mock('../services/invoice', () => ({
 }));
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn(),
+  // Literal duplicates of the real identities (a requireActual would drag
+  // the db pool in); the identity-pinning test below keeps them honest.
+  WAVEGUARD_EXTENSION_CREDIT_BY: 'system:waveguard_tier_extension',
+  WAVEGUARD_EXTENSION_REVERSAL_BY: 'system:waveguard_tier_extension_reversal',
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
@@ -1829,6 +1833,121 @@ describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
   });
 });
 
+describe('reverseWaveguardExtensionCredits (tier-extension refund claw-back)', () => {
+  const { postCreditMovement } = require('../services/customer-credit');
+  const TERM = { id: 'term-1', customer_id: 'customer-1' };
+  const grantRow = {
+    id: 'cl-wg-1',
+    delta: 4.9,
+    invoice_id: 'inv-prepay',
+    note: 'WaveGuard Silver extension — prepaid-term difference (term term-1, estimate est-9)',
+  };
+
+  beforeEach(() => {
+    postCreditMovement.mockReset();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('reverses the extension grant when its prepay term refunds', async () => {
+    const grantsQuery = query({ rows: [grantRow] });
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 20 } })],
+      customer_credit_ledger: [grantsQuery, query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM);
+
+    expect(reversed).toBe(1);
+    // Selection is by class identity + the per-term LIKE the grants mint.
+    expect(grantsQuery.where).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'customer-1',
+      created_by: 'system:waveguard_tier_extension',
+    }));
+    expect(grantsQuery.where).toHaveBeenCalledWith('note', 'like', '%term term-1,%');
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: -4.9,
+      source: 'adjustment',
+      invoiceId: 'inv-prepay',
+      note: expect.stringContaining('(term term-1, estimate est-9)'),
+      createdBy: 'system:waveguard_tier_extension_reversal',
+    }), db);
+  });
+
+  test('an existing reversal row for the grant marker blocks a second claw-back (replayed refund sync)', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 20 } })],
+      customer_credit_ledger: [
+        query({ rows: [grantRow] }),
+        query({ rows: [{ note: 'Annual prepay refunded — reversing the WaveGuard extension credit (term term-1, estimate est-9)' }] }),
+      ],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('an exhausted balance writes the zero-delta dedupe row instead of pulling negative', async () => {
+    const markerInsert = query();
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 0 } })],
+      customer_credit_ledger: [query({ rows: [grantRow] }), query({ rows: [] }), markerInsert],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+    expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'customer-1',
+      delta: 0,
+      balance_after: 0,
+      created_by: 'system:waveguard_tier_extension_reversal',
+      note: expect.stringContaining('(term term-1, estimate est-9)'),
+    }));
+  });
+
+  test('a partially available balance reverses what remains (capped, never negative)', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 2.5 } })],
+      customer_credit_ledger: [query({ rows: [grantRow] }), query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM);
+
+    expect(reversed).toBe(1);
+    expect(postCreditMovement).toHaveBeenCalledWith(
+      expect.objectContaining({ delta: -2.5 }), db,
+    );
+  });
+
+  test('no grants for the term is a clean no-op', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 20 } })],
+      customer_credit_ledger: [query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  // The grant identity is shared through customer-credit.js — pin the real
+  // module's constants against the literals this suite (and the writer's
+  // suite) mock, so a rename can never silently split writer from reversal.
+  test('the shared identity constants match the real customer-credit module', () => {
+    const source = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/customer-credit.js'),
+      'utf8',
+    );
+    expect(source).toContain("const WAVEGUARD_EXTENSION_CREDIT_BY = 'system:waveguard_tier_extension'");
+    expect(source).toContain("const WAVEGUARD_EXTENSION_REVERSAL_BY = 'system:waveguard_tier_extension_reversal'");
+  });
+});
+
 describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
   const InvoiceService = require('../services/invoice');
   const { postCreditMovement } = require('../services/customer-credit');
@@ -2331,10 +2450,12 @@ describe('billing_mode reset on term void/refund', () => {
       query({ columnInfo: { scheduled_date: {} } }), // clearPrepaidStamps probe → no-op
     ],
     customers: [
-      query({ first: { id: 'customer-1', account_credits: 0 } }), // credit-reversal row lock
+      query({ first: { id: 'customer-1', account_credits: 0 } }), // pending-completion reversal row lock
+      query({ first: { id: 'customer-1', account_credits: 0 } }), // WaveGuard extension reversal row lock
       resetQ, // billing_mode reset
     ],
-    customer_credit_ledger: [query({ rows: [] })],
+    // One grants select per reversal class — both empty here.
+    customer_credit_ledger: [query({ rows: [] }), query({ rows: [] })],
   });
 
   beforeEach(() => {
@@ -2459,10 +2580,11 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
         query({ columnInfo: { scheduled_date: {} } }), // clearPrepaidStamps probe → no-op
       ],
       customers: [
-        query({ first: { id: 'customer-1', account_credits: 0 } }), // credit-reversal row lock
+        query({ first: { id: 'customer-1', account_credits: 0 } }), // pending-completion reversal row lock
+        query({ first: { id: 'customer-1', account_credits: 0 } }), // WaveGuard extension reversal row lock
         resetQ,
       ],
-      customer_credit_ledger: [query({ rows: [] })],
+      customer_credit_ledger: [query({ rows: [] }), query({ rows: [] })],
     });
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(
@@ -2495,9 +2617,10 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
       ],
       customers: [
         query({ first: { id: 'customer-1', account_credits: 0 } }),
+        query({ first: { id: 'customer-1', account_credits: 0 } }), // WaveGuard extension reversal row lock
         resetQ,
       ],
-      customer_credit_ledger: [query({ rows: [] })],
+      customer_credit_ledger: [query({ rows: [] }), query({ rows: [] })],
     });
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(

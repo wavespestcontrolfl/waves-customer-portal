@@ -280,7 +280,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
         return q;
       }
       if (table === 'scheduled_services') {
-        const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ source_estimate_id: sourceEstimateId })) };
+        const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => ({ source_estimate_id: sourceEstimateId })) };
         return q;
       }
       if (table === 'customers') {
@@ -433,7 +433,7 @@ describe('createFromService — frozen-money backfill mints bypass scheduled rep
         return q;
       }
       if (table === 'scheduled_services') {
-        const q = { where: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
+        const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
         return q;
       }
       if (table === 'scheduled_service_addons') {

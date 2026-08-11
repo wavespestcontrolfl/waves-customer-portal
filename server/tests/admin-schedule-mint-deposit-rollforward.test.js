@@ -50,14 +50,25 @@ const adminScheduleRouter = require('../routes/admin-schedule');
 
 const { mintScheduledServiceInvoiceWithDeposit } = adminScheduleRouter._test;
 
-function makeTrx({ replayedInvoice = undefined } = {}) {
+function makeTrx({ replayedInvoice = undefined, lockedSvcRow } = {}) {
   const trx = (table) => {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'invoices' ? replayedInvoice : undefined));
+    q.forUpdate = jest.fn(() => q);
+    q.first = jest.fn(async () => {
+      if (table === 'invoices') return replayedInvoice;
+      if (table === 'scheduled_services') {
+        // The mint's row lock re-read; undefined estimated_price on the
+        // caller's svc keeps the stale-price guard out of legacy tests.
+        return lockedSvcRow !== undefined
+          ? lockedSvcRow
+          : { id: 'svc-1', estimated_price: null, primary_line_price: null };
+      }
+      return undefined;
+    });
     return q;
   };
   trx.raw = jest.fn(async () => undefined);
@@ -179,5 +190,84 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       mintScheduledServiceInvoiceWithDeposit({ svc: { ...svc, source_estimate_id: null }, buildCreateParams }),
     ).rejects.toThrow('create exploded');
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  // Mint-path row lock + stale-price refusal (WaveGuard #3338 pre-enable
+  // fast-follow): the mint re-reads the visit row FOR UPDATE inside the
+  // lock transaction and refuses to CREATE from a price snapshot the row
+  // no longer carries. 409s are terminal (no deposit retry, no fallback
+  // mint) — retrying with the same stale params can't fix them.
+  describe('stale-price guard', () => {
+    const pricedSvc = { ...svc, estimated_price: 120, primary_line_price: null };
+
+    it('409s when the locked estimated_price differs from the caller snapshot', async () => {
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 100, primary_line_price: null },
+      }));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc: pricedSvc, buildCreateParams }),
+      ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_PRICE_MOVED' });
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('409s when primary_line_price moved even with estimated_price unchanged', async () => {
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 120, primary_line_price: 95 },
+      }));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({
+          svc: { ...pricedSvc, primary_line_price: 110 },
+          buildCreateParams,
+        }),
+      ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_PRICE_MOVED' });
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('mints normally when the locked prices match to the cent', async () => {
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 120, primary_line_price: null },
+      }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc: pricedSvc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+
+    it('allowPriceMovement (frozen-money resume lanes) bypasses the refusal', async () => {
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 100, primary_line_price: null },
+      }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({
+        svc: pricedSvc, buildCreateParams, allowPriceMovement: true,
+      });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+
+    it('404s terminally when the visit row vanished before the lock', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: null }));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc: pricedSvc, buildCreateParams }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('a caller snapshot without price fields never trips the guard', async () => {
+      programTransactions(makeTrx({
+        lockedSvcRow: { id: 'svc-1', estimated_price: 77, primary_line_price: 12 },
+      }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
   });
 });

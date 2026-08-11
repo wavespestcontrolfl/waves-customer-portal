@@ -29,7 +29,24 @@ const logger = require('./logger');
 // (this helper's callers and Charge-now) so a double-tap can't race a visit
 // into two open invoices; the in-lock re-check returns the first request's
 // invoice to the replay.
-async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, assertEligibleInTrx = null }) {
+// Cents-exact comparison of two nullable money values; undefined on the
+// caller side means "field not selected" and never trips the guard.
+function priceMovedBetween(callerSvc, lockedSvc, col) {
+  if (callerSvc[col] === undefined) return false;
+  const cents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
+  return cents(callerSvc[col]) !== cents(lockedSvc[col]);
+}
+
+// allowPriceMovement: the frozen-money-truth resume lanes (dispatch REQUIRED
+// backfill mints) bill a FROZEN amount by design — by-now-mutable row fields
+// must not block that mint (lost AR). Everyone else fails closed: a 409 with
+// code SCHEDULED_PRICE_MOVED means the visit was repriced (the WaveGuard
+// tier-extension apply holds FOR UPDATE on the rows it rewrites) between the
+// caller's read and this lock — retrying re-reads and bills the current
+// price instead of silently minting the stale one.
+async function mintScheduledServiceInvoiceWithDeposit({
+  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
+}) {
   const InvoiceService = require('../services/invoice');
   const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
   const sourceEstimateId = svc.source_estimate_id || null;
@@ -48,6 +65,23 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, 
         // lands, letting the FORMER tech mint and receive the invoice's
         // bearer payment token.
         if (assertEligibleInTrx) await assertEligibleInTrx(trx);
+        // Mint-path row lock (WaveGuard #3338 pre-enable fast-follow): the
+        // caller's svc row and line items were read WITHOUT a lock, so a
+        // concurrent reprice could land between that read and this mint —
+        // billing the pre-extension price. The advisory lock above only
+        // serializes mint-vs-mint; THIS lock serializes mint-vs-reprice
+        // (the extension apply holds FOR UPDATE on the rows it rewrites
+        // from before its probe until its savepoint commits). Taken before
+        // the replay check so ordering holds for adoption too.
+        const lockedSvc = await trx('scheduled_services')
+          .where({ id: svc.id })
+          .forUpdate()
+          .first('id', 'estimated_price', 'primary_line_price');
+        if (!lockedSvc) {
+          const e = new Error('Scheduled service not found');
+          e.status = 404;
+          throw e;
+        }
         // Replay = the double-tap window returning the FIRST request's fresh
         // invoice. Terminal invoices (refunded/cancelled — every payment
         // route rejects them) are not replay candidates: returning one here
@@ -60,6 +94,19 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, 
           .orderBy('created_at', 'desc')
           .first();
         if (replayed) return { invoice: replayed, reused: true };
+        // Stale-price refusal — CREATE only (an adopted replay invoice is
+        // the extension probe/re-probe's problem, handled there). Both
+        // price columns matter: invoice lines PREFER primary_line_price
+        // when present. err.status makes the failure terminal for the
+        // retry loop below — retrying the same stale params can't fix it.
+        if (!allowPriceMovement
+          && (priceMovedBetween(svc, lockedSvc, 'estimated_price')
+            || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
+          const e = new Error('Scheduled service was repriced while minting — retry to bill the current price');
+          e.status = 409;
+          e.code = 'SCHEDULED_PRICE_MOVED';
+          throw e;
+        }
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;

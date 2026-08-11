@@ -65,6 +65,9 @@ function setupDb({
         where: jest.fn((criteria) => { q.criteria = criteria || {}; return q; }),
         leftJoin: jest.fn(() => q),
         select: jest.fn(() => q),
+        // createFromService's replay path locks the visit row inside its
+        // mint transaction (mint-serialization, WaveGuard #3338 fast-follow).
+        forUpdate: jest.fn(() => q),
         first: jest.fn(async () => scheduledServices.find((row) => (
           !q.criteria.id || String(row.id) === String(q.criteria.id)
         ) && (
@@ -143,6 +146,9 @@ function setupDb({
 
     throw new Error(`Unexpected table query: ${table}`);
   });
+  // The replay path now mints inside a transaction (row lock) — pass the
+  // same table-routed mock through as the trx client.
+  db.transaction = jest.fn(async (callback) => callback(db));
 
   return {
     getInsertedInvoice: () => insertedInvoice,

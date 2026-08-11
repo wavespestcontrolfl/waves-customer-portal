@@ -20,6 +20,16 @@ const VALID_SOURCES = Object.freeze([
   'inspection_credit',
 ]);
 
+// WaveGuard tier-extension prepaid-difference credit class. The writer
+// (estimate-converter's extension apply) and the clawback (the annual-prepay
+// refund flow in annual-prepay-renewals) both key on these identities, so
+// they live here — the one module both already import — and can never drift.
+// Grant notes carry a per-term "(term <id>, estimate <id>)" marker, the same
+// parenthesized shape the pending-completion reversal parses; the reversal
+// dedupes by finding the grant's marker inside prior reversal notes.
+const WAVEGUARD_EXTENSION_CREDIT_BY = 'system:waveguard_tier_extension';
+const WAVEGUARD_EXTENSION_REVERSAL_BY = 'system:waveguard_tier_extension_reversal';
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -569,6 +579,8 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
 module.exports = {
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
+  WAVEGUARD_EXTENSION_CREDIT_BY,
+  WAVEGUARD_EXTENSION_REVERSAL_BY,
   round2,
   getBalance,
   getLedger,

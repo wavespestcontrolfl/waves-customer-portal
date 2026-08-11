@@ -725,7 +725,12 @@ async function applyFrozenExistingServiceExtension({
   }
 
   let creditTotal = 0;
-  const creditTermIds = new Set();
+  // Per-TERM credit accumulation (mint one ledger movement per prepay term,
+  // not one aggregate): the annual-prepay refund clawback reverses by term,
+  // so each grant row must carry exactly one term's marker and exactly that
+  // term's dollars — an aggregate row naming several terms could only be
+  // clawed back all-or-nothing.
+  const creditByTerm = new Map();
   for (const svc of plan) {
     if (priorExtensionCoverage === null) {
       summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify prior extensions — apply manually)`);
@@ -782,6 +787,34 @@ async function applyFrozenExistingServiceExtension({
     // billing the old amount after a row-only reprice. Both are manual
     // territory. FAIL CLOSED: if either probe cannot run, the whole family
     // parks rather than risking a write the probe would have blocked.
+    // Row lock over the family (mint-serialization fast-follow to codex
+    // #3338 r7): every invoice-mint lane now takes FOR UPDATE on the visit
+    // row before billing it, so holding the same lock from BEFORE the
+    // invoice probe until this savepoint commits turns reprice-vs-mint
+    // into a true serialization — a mint entering after our lock waits,
+    // then sees the new price (or 409s on its stale snapshot); a mint that
+    // committed before our lock leaves its invoice for the probe to park.
+    // Lock order (scheduled_services → customers) matches the billing
+    // helpers; ids sorted for a deterministic intra-table order. The locked
+    // values are also the authoritative read for the reprice below —
+    // including primary_line_price, which invoice lines PREFER over
+    // estimated_price when present, so a reprice that ignored it would
+    // leave the invoice billing the old figure with no race at all.
+    // FAIL CLOSED: if the lock cannot be taken, the family parks.
+    let lockedFamilyById;
+    try {
+      const lockedFamilyRows = await database('scheduled_services')
+        .whereIn('id', familyRows.map((row) => row.id))
+        .orderBy('id')
+        .forUpdate()
+        .select('id', 'estimated_price', 'primary_line_price');
+      lockedFamilyById = new Map(lockedFamilyRows.map((row) => [String(row.id), row]));
+    } catch (lockErr) {
+      logger.warn(`[estimate-converter] family row lock failed — parking ${svc.label || svc.key}: ${lockErr.message}`);
+      summary.reviewFamilies.push(`${svc.label || svc.key} (could not lock appointments — apply manually)`);
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
     let compositeOrInvoicedIds;
     try {
       const rowIds = familyRows.map((row) => row.id);
@@ -815,7 +848,14 @@ async function applyFrozenExistingServiceExtension({
     let driftRows = 0;
     const repricedApplied = [];
     for (const row of repriceRows) {
-      const price = Number(row.estimated_price);
+      const locked = lockedFamilyById.get(String(row.id));
+      // Row vanished between the unlocked read and the lock — no longer a
+      // live application; the frozen figure no longer describes it.
+      if (!locked) {
+        driftRows += 1;
+        continue;
+      }
+      const price = Number(locked.estimated_price);
       // Unpriced = NULL stays NULL (billing invariant 8) — but a FROZEN row
       // was priced at the basis when the card displayed it (the snapshot
       // never freezes unpriced rows), so a blank price now means the price
@@ -840,31 +880,49 @@ async function applyFrozenExistingServiceExtension({
       }
       const next = Number(svc.newPerVisit);
       if (!(next > 0) || next >= price) continue;
+      // primary_line_price is the figure invoice lines PREFER over
+      // estimated_price when present (buildScheduledServiceInvoiceLines) —
+      // a reprice that left it behind would lower the contracted price
+      // while the invoice keeps billing the old one, no race required. A
+      // set value that AGREES with the contracted price moves with it; a
+      // set value that disagrees is a price structure this reprice doesn't
+      // understand (add-ons already parked above) — park as drift.
+      const primarySet = locked.primary_line_price !== null && locked.primary_line_price !== undefined;
+      if (primarySet && !extensionSameCents(Number(locked.primary_line_price), price)) {
+        driftRows += 1;
+        continue;
+      }
       // Concurrency guard (codex #3338 r14): the frozen-or-review invariant
       // must hold against a price edit landing between the row read and
-      // this write — the predicate re-asserts the exact price the match
-      // was computed on (raw value, so pg numeric comparison is exact).
-      // Zero rows updated = the price moved underneath us = drift.
+      // this write — the predicate re-asserts the exact LOCKED price the
+      // match was computed on (raw value, so pg numeric comparison is
+      // exact). With the family lock held this cannot miss; it stays as a
+      // belt against a lock refactor. Zero rows updated = drift.
+      const casWhere = { id: row.id, estimated_price: locked.estimated_price };
+      if (primarySet) casWhere.primary_line_price = locked.primary_line_price;
       const changed = await database('scheduled_services')
-        .where({ id: row.id, estimated_price: row.estimated_price })
-        .update({ estimated_price: next });
+        .where(casWhere)
+        .update({ estimated_price: next, ...(primarySet ? { primary_line_price: next } : {}) });
       if (!changed) {
         driftRows += 1;
         continue;
       }
       repriced += 1;
-      repricedApplied.push(row);
+      repricedApplied.push({
+        id: row.id,
+        priorEstimated: locked.estimated_price,
+        priorPrimary: locked.primary_line_price,
+        primarySet,
+      });
       summary.appliedRowIds.push(String(row.id));
     }
-    // Mint race (codex #3338 r7): Charge Now reads the visit without a row
-    // lock, so an invoice built from the OLD price can commit between the
-    // probe above and the row updates. Re-probe after the writes and REVERT
-    // any repriced row whose invoice appeared mid-apply — the recap must
-    // not read a visit as repriced while its collectible invoice carries
-    // the old amount. The residual window (a mint committing after this
-    // re-probe) closes only when the mint path itself serializes on the
-    // row — named pre-enable fast-follow. FAIL CLOSED: a failed re-probe
-    // reverts every row this family repriced.
+    // Mint race re-probe (codex #3338 r7, retained as belt-and-braces): the
+    // family lock above now serializes every row-locking mint lane, so a
+    // mid-apply invoice can only come from a writer that skipped the lock.
+    // Re-probe after the writes and REVERT any repriced row whose invoice
+    // appeared mid-apply — the recap must not read a visit as repriced
+    // while its collectible invoice carries the old amount. FAIL CLOSED: a
+    // failed re-probe reverts every row this family repriced.
     if (repricedApplied.length > 0) {
       let lateMintedIds = null;
       try {
@@ -882,7 +940,10 @@ async function applyFrozenExistingServiceExtension({
         for (const row of revertRows) {
           const reverted = await database('scheduled_services')
             .where({ id: row.id, estimated_price: Number(svc.newPerVisit) })
-            .update({ estimated_price: row.estimated_price });
+            .update({
+              estimated_price: row.priorEstimated,
+              ...(row.primarySet ? { primary_line_price: row.priorPrimary } : {}),
+            });
           if (!reverted) {
             // Our own in-transaction write is gone — nothing sane can
             // continue; the caller's catch parks the whole extension.
@@ -977,12 +1038,13 @@ async function applyFrozenExistingServiceExtension({
         familyCredit = Math.round((familyCredit + frozenSavings) * 100) / 100;
         creditedRows += 1;
         summary.appliedRowIds.push(String(row.id));
-        // Term breadcrumb for the credit note (codex #3338 r27): the
-        // annual-prepay refund flow claws back only its own credit class,
-        // so the ledger note must name the term(s) this credit rode on —
-        // the manual refund review subtracts it from there. Automated
-        // integration with the refund reversal is a named fast-follow.
-        creditTermIds.add(String(locked.annual_prepay_term_id));
+        // Term breadcrumb (codex #3338 r27, upgraded from breadcrumb to
+        // mechanism): each term's slice accumulates separately so the
+        // grant below can mint one ledger row per term, carrying the
+        // "(term <id>, estimate <id>)" marker the annual-prepay refund
+        // clawback reverses by.
+        const termKey = String(locked.annual_prepay_term_id);
+        creditByTerm.set(termKey, Math.round(((creditByTerm.get(termKey) || 0) + frozenSavings) * 100) / 100);
       }
       if (allocationGaps > 0) {
         summary.reviewFamilies.push(
@@ -1007,14 +1069,45 @@ async function applyFrozenExistingServiceExtension({
   }
 
   if (creditTotal > 0) {
-    const { postCreditMovement } = require('./customer-credit');
-    await postCreditMovement({
-      customerId,
-      delta: creditTotal,
-      source: 'adjustment',
-      note: `WaveGuard ${activatedTier} extension — prepaid-term difference (estimate #${estimateId}${creditTermIds.size ? `; terms: ${[...creditTermIds].sort().join(', ')}` : ''})`,
-      createdBy: 'system:waveguard_tier_extension',
-    }, database.isTransaction ? database : null);
+    const { postCreditMovement, WAVEGUARD_EXTENSION_CREDIT_BY } = require('./customer-credit');
+    // One ledger movement PER TERM (refund-clawback fast-follow): the
+    // annual-prepay refund flow reverses this credit class term-by-term —
+    // an aggregate row naming several terms could only be clawed back
+    // all-or-nothing. Each grant carries:
+    //  - the "(term <id>, estimate <id>)" marker the reversal selects by
+    //    (LIKE '%term <id>,%') and dedupes on — unique per grant, since the
+    //    at-most-once audit blocks the same estimate re-crediting a term;
+    //  - invoice_id = the term's PREPAY invoice, the same anchor the
+    //    pending-completion sweep leg uses to detect a refunded term whose
+    //    in-line clawback was lost.
+    // Sanity: the per-term map is built from the same frozenSavings adds as
+    // creditTotal, so the sum matches by construction; assert anyway —
+    // a mismatch means a bookkeeping bug and must park, not underpost.
+    const perTermSum = [...creditByTerm.values()].reduce((sum, amt) => Math.round((sum + amt) * 100) / 100, 0);
+    if (Math.round(perTermSum * 100) !== Math.round(creditTotal * 100)) {
+      throw new Error(`extension credit split mismatch (total ${creditTotal}, per-term ${perTermSum})`);
+    }
+    let prepayInvoiceByTerm = new Map();
+    try {
+      const termRows = await database('annual_prepay_terms')
+        .whereIn('id', [...creditByTerm.keys()])
+        .select('id', 'prepay_invoice_id');
+      prepayInvoiceByTerm = new Map(termRows.map((row) => [String(row.id), row.prepay_invoice_id || null]));
+    } catch (termErr) {
+      // Anchor lookup only — the marker alone still supports the in-line
+      // clawback; the grant just loses its sweep-recovery anchor.
+      logger.warn(`[estimate-converter] prepay-invoice anchor lookup failed for extension credit: ${termErr.message}`);
+    }
+    for (const [termId, termCredit] of [...creditByTerm.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      await postCreditMovement({
+        customerId,
+        delta: termCredit,
+        source: 'adjustment',
+        invoiceId: prepayInvoiceByTerm.get(termId) || null,
+        note: `WaveGuard ${activatedTier} extension — prepaid-term difference (term ${termId}, estimate ${estimateId})`,
+        createdBy: WAVEGUARD_EXTENSION_CREDIT_BY,
+      }, database.isTransaction ? database : null);
+    }
     summary.creditAmount = creditTotal;
   }
 
