@@ -132,28 +132,44 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
   // header comment above.
   await runOutboundReviewConfirmHook(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
 
-  // Post-hook reminder sync (Codex P1 round 4): a reschedule can commit
-  // between the hookRow snapshot and registerAppointment's insert — that
-  // reschedule path saw no reminder row to move, so the just-armed row
-  // would keep the stale clock. Re-read the schedule and, if it moved,
-  // silently sync the reminder row to the current slot (sendNotification:
-  // false — the reschedule path owns any customer notice; expectSchedule
-  // makes the sync atomically miss if yet another move lands, since that
-  // newer move now finds the row and syncs it itself).
+  // Post-hook reminder repair (Codex P1 rounds 4–5): an office action can
+  // commit between the hookRow snapshot and registerAppointment's insert —
+  // that writer saw no reminder row to move/close, so the just-armed row
+  // needs reconciling against the CURRENT visit. One re-read, three cases:
+  //
+  //   • Cancelled during the hook → close the reminder row (the cancel path
+  //     found nothing to close). handleCancellation is internally guarded —
+  //     it no-ops unless the visit is still 'cancelled' at write time — and
+  //     sendNotification:false sends nothing (the cancel route owns any
+  //     customer notice; one skipped for lack of a row can't be conjured
+  //     retroactively — the owner sends comms, never this route).
+  //   • Moved to a slot WITH a real window → silently sync the reminder
+  //     clock (sendNotification:false — the reschedule path owns any
+  //     notice; expectSchedule makes the sync atomically miss if yet
+  //     another move lands, since that newer move now finds the row and
+  //     syncs it itself).
+  //   • Window CLEARED (null) → deliberately do nothing. The armed row
+  //     keeps its now-past appointment_time and can never fire (both cron
+  //     legs require the time to still be ahead), which is exactly the
+  //     windowless placeholder's never-send semantics — fabricating a
+  //     fallback time here would promise the customer a slot nobody
+  //     selected. A later edit that sets a real window finds the row and
+  //     re-arms it through the normal reschedule path.
   try {
     const post = await db('scheduled_services')
       .where({ id: svc.id })
-      .first('scheduled_date', 'window_start');
+      .first('status', 'scheduled_date', 'window_start');
     const dateOnly = (v) => (v instanceof Date ? v.toISOString().split('T')[0] : String(v || '').split('T')[0]);
-    const hookDate = hookRow ? dateOnly(hookRow.scheduled_date) : null;
-    const moved = post && hookRow
-      && (dateOnly(post.scheduled_date) !== hookDate
-        || String(post.window_start || '') !== String(hookRow.window_start || ''));
-    if (moved) {
-      const AppointmentReminders = require('../services/appointment-reminders');
+    const AppointmentReminders = require('../services/appointment-reminders');
+    if (post && String(post.status) === 'cancelled') {
+      await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false });
+      logger.info(`[tech-track] Closed reminder for ${svc.id} — visit cancelled during confirm hook`);
+    } else if (post && hookRow && post.window_start
+      && (dateOnly(post.scheduled_date) !== dateOnly(hookRow.scheduled_date)
+        || String(post.window_start) !== String(hookRow.window_start || ''))) {
       await AppointmentReminders.handleReschedule(
         svc.id,
-        `${dateOnly(post.scheduled_date)}T${post.window_start || '09:00'}`,
+        `${dateOnly(post.scheduled_date)}T${post.window_start}`,
         {
           sendNotification: false,
           expectSchedule: { date: dateOnly(post.scheduled_date), windowStart: post.window_start },
@@ -162,7 +178,7 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       logger.info(`[tech-track] Synced reminder clock for ${svc.id} — schedule moved during confirm hook`);
     }
   } catch (e) {
-    logger.error(`[tech-track] post-hook reminder sync failed for ${svc.id}: ${e.message}`);
+    logger.error(`[tech-track] post-hook reminder repair failed for ${svc.id}: ${e.message}`);
   }
 }
 
