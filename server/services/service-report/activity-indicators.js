@@ -2472,6 +2472,33 @@ const TRAP_PARTITIVE_PASSIVE_RE = new RegExp(
   'gi',
 );
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
+// Bait-station count claims (codex P1 r3 on #3354): the gauge lanes now
+// accept AI drafts on bait-station visits, and a draft naming station
+// totals can go stale against a corrected stations_checked /
+// stations_with_activity the same way trap counts do. Deliberately
+// NARROW, same philosophy as the trap guard — a false positive silently
+// discards the technician's reviewed copy — so only the unambiguous
+// orderings claim a count: a check verb governing "N stations" (either
+// side), "activity/feeding at N stations", and "N stations with/showing
+// activity". Partitives ("3 of the 12 stations") match neither pattern
+// and claim nothing.
+const STATION_NOUN_SRC = '(?:bait\\s+|termite\\s+|rodent\\s+|monitoring\\s+)*stations?';
+const STATION_CHECKED_ACTIVE_RE = new RegExp(
+  `\\b(?:checked|inspected|serviced|monitored)\\s+(?:all\\s+|the\\s+)?(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  'gi',
+);
+const STATION_CHECKED_PASSIVE_RE = new RegExp(
+  `\\b(\\d+)\\s+${STATION_NOUN_SRC}\\b(?:\\s+(?:were|was|have|has|had|been|all|now|already|just|also))*\\s+(?:checked|inspected|serviced|monitored)\\b`,
+  'gi',
+);
+const STATION_ACTIVITY_AT_RE = new RegExp(
+  `\\b(?:activity|feeding|consumption)\\b[^.!?]{0,20}?\\b(?:at|in|across)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  'gi',
+);
+const STATION_ACTIVITY_WITH_RE = new RegExp(
+  `\\b(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\b[^.!?]{0,20}?\\b(?:activity|feeding|consumption|hits?)\\b`,
+  'gi',
+);
 const CAUGHT_CLAIM_RE = new RegExp(
   `\\b(?:caught|captured|removed)\\s+(\\d+)${ANIMAL_MODIFIER_RUN}\\s+(?:rats?|mice|mouse|rodents?|animals?)\\b`,
   'gi',
@@ -2638,6 +2665,19 @@ function countContradictions(text, values = {}) {
     values.captures,
     'capture_count_mismatch',
   );
+  // Bait-station lanes (codex P1 r3 on #3354): same staleness, different
+  // nouns. Unverifiable (blank/missing) values screen nothing, and two
+  // competing totals bail, exactly like the trap rules above.
+  check(
+    claimedCounts(str, [STATION_CHECKED_ACTIVE_RE, STATION_CHECKED_PASSIVE_RE]),
+    values.stations_checked,
+    'station_count_mismatch',
+  );
+  check(
+    claimedCounts(str, [STATION_ACTIVITY_AT_RE, STATION_ACTIVITY_WITH_RE]),
+    values.stations_with_activity,
+    'station_activity_count_mismatch',
+  );
   return found;
 }
 
@@ -2757,6 +2797,32 @@ const LEVEL_CLAIM_INTENT_RE = new RegExp(
   + '|\\b(?:typical(?:ly)?|usual(?:ly)?|may|might|could|can)\\b',
   'i',
 );
+// An intent marker GOVERNS the claim only when nothing but copular,
+// connective, or perception filler stands between them (codex P1 r3 on
+// #3354): in "activity may DECREASE from the heavy activity observed
+// today" the 'may' governs "decrease", not the heavy claim, and must not
+// exempt it — the same governs-vs-shares-a-clause distinction the trap
+// stage guard already draws (futureGovernsVerb). A rival verb in the gap
+// ("decrease", "drop", "spread") means the marker's predicate is that
+// verb, so the claim stands on its own.
+const LEVEL_CLAIM_GOVERN_GAP_RE = new RegExp(
+  '^(?:\\s+(?:activity|infestation|pressure|levels?|the|a|an|still|again|'
+  + 'to|be|been|being|is|are|was|were|become|becomes|becoming|get|gets|'
+  + 'getting|go|goes|going|turn|turns|remain|remains|remaining|stay|stays|'
+  + 'staying|appear|appears|look|looks|seem|seems|run|runs|running|'
+  + 'you|we|they|it|there|see|seeing|notice|noticing|observe|observing|'
+  + 'find|finding|experience|experiencing|'
+  + 'very|quite|somewhat|more|less|rather|fairly|relatively|[a-z]+ly))*\\s*$',
+  'i',
+);
+function intentGovernsLevelClaim(before) {
+  const re = new RegExp(LEVEL_CLAIM_INTENT_RE.source, 'gi');
+  let last = null;
+  let match;
+  while ((match = re.exec(before)) !== null) last = match;
+  if (!last) return false;
+  return LEVEL_CLAIM_GOVERN_GAP_RE.test(before.slice(last.index + last[0].length));
+}
 const LEVEL_CLAIM_PRIOR_VISIT_RE = /\b(?:last|previous|prior|initial|first|earlier)\s+(?:visit|service|stop|check|treatment)\b/i;
 const LEVEL_CLAIM_PRIOR_VISIT_WINDOW = 48;
 function levelBandForScore(score) {
@@ -2779,7 +2845,7 @@ function activityLevelContradictions(text, finalBand) {
         match.index + match[0].length,
         match.index + match[0].length + LEVEL_CLAIM_PRIOR_VISIT_WINDOW,
       );
-      if (LEVEL_CLAIM_INTENT_RE.test(before)) continue;
+      if (intentGovernsLevelClaim(before)) continue;
       if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
       found.push(`level_claim_mismatch:${word}`);
     }

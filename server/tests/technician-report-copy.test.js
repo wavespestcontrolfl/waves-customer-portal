@@ -451,6 +451,59 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(result).not.toHaveProperty('bodySource');
   });
 
+  test('an intent marker governing a DIFFERENT predicate does not exempt the claim (codex P1 r3)', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      // 'may' governs "decrease", not the heavy claim — the stale Heavy
+      // body must not publish beneath the Low headline.
+      technicianReportBody: 'Activity may decrease from the heavy activity observed today. '
+        + 'We applied gel bait behind the appliances.',
+    });
+    expect(result.body).not.toContain('heavy');
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('bait-station drafts reconcile station counts before publishing (codex P1 r3)', () => {
+    const base = {
+      projectType: 'termite_bait_station',
+      reportTypeLabel: 'Termite Bait Station Summary',
+      chips,
+      activity: { score: 2 },
+      visitSequence: 2,
+    };
+    // Stale roster: draft says 12, final typed value says 10 → refused.
+    const staleRoster = buildTodaysResult({
+      ...base,
+      values: { stations_checked: '10', bait_consumption: 'Light' },
+      technicianReportBody: 'We checked 12 bait stations around the home and refreshed the bait. '
+        + 'Light feeding was noted.',
+    });
+    expect(staleRoster.body).not.toContain('12 bait stations');
+    expect(staleRoster).not.toHaveProperty('bodySource');
+    // Matching roster publishes.
+    const matching = buildTodaysResult({
+      ...base,
+      values: { stations_checked: '12', bait_consumption: 'Light' },
+      technicianReportBody: 'We checked 12 bait stations around the home and refreshed the bait. '
+        + 'Light feeding was noted.',
+    });
+    expect(matching.bodySource).toBe('technician_report');
+    // Stale activity subset: draft claims feeding at 3 stations, final says 1.
+    const staleActivity = buildTodaysResult({
+      ...base,
+      values: { stations_checked: '12', stations_with_activity: '1', bait_consumption: 'Light' },
+      technicianReportBody: 'We found feeding at 3 stations along the back fence line. '
+        + 'Bait was refreshed at every station.',
+    });
+    expect(staleActivity.body).not.toContain('feeding at 3 stations');
+    expect(staleActivity).not.toHaveProperty('bodySource');
+  });
+
   test('an intent marker BEFORE the claim still exempts it', () => {
     const result = buildTodaysResult({
       projectType: 'cockroach',
