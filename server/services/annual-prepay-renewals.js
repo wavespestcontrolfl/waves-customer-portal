@@ -606,6 +606,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   }
 
   const createdRows = [];
+  // Rows adopted under the occupancy lock (concurrently-created same-day
+  // visits) — collected so the palm identity backfill below can reach
+  // them; they are never in existingRows.
+  const adoptedConcurrentRows = [];
   // Owner directive (2026-07-03): every service call defaults to 60 minutes.
   const baseDuration = 60;
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
@@ -833,6 +837,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
     if (concurrentAdoptable) {
       logger.warn(`[annual-prepay] term ${term.id} found concurrently-created visit ${concurrentAdoptable.id} on ${scheduledDate} under the occupancy lock — adopting it instead of inserting a duplicate`);
+      adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
     if (!windowStart && firstVisitWindowStart) {
@@ -1026,6 +1031,32 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       } catch (err) {
         logger.warn(`[annual-prepay] seeded-visit reminder registration skipped for ${created.id}: ${err.message}`);
       }
+    }
+  }
+
+  // Identity BACKFILL for adopted/matched palm coverage rows (codex #3349
+  // r15 pre-push P1): buildInsert stamps only NEW rows, but a name-only
+  // 'Palm Injection' visit the seeder matched (existingRows) or adopted
+  // under the occupancy lock still resolves the ONE-TIME catalog row at
+  // completion. Scoped to rows with NULL service_id — a row already
+  // carrying an id (including the one-time palm row) was deliberately
+  // booked that way and is never retargeted here. Fail-soft, like the
+  // stamps above.
+  if (coverageCatalogServiceId && cols.service_id) {
+    try {
+      const backfillIds = [...existingRows, ...adoptedConcurrentRows]
+        .filter((row) => row && row.id && !row.service_id)
+        .map((row) => row.id);
+      if (backfillIds.length) {
+        const patch = { service_id: coverageCatalogServiceId };
+        if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
+        await conn('scheduled_services')
+          .whereIn('id', backfillIds)
+          .whereNull('service_id')
+          .update(patch);
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity backfill skipped: ${err.message}`);
     }
   }
 

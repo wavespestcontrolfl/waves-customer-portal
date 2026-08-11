@@ -465,6 +465,50 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('an ADOPTED name-only palm visit is backfilled with the recurring catalog identity (codex #3349 r15 pre-push P1)', async () => {
+    // buildInsert stamps only NEW rows; a matched pre-existing name-only
+    // visit must be backfilled or it keeps resolving the one-time row.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const adoptedRow = {
+      id: 'v-adopted', scheduled_date: '2026-06-15', service_type: 'Palm Injection',
+      service_id: null, status: 'pending',
+    };
+    const rowsQuery = query({ rows: [adoptedRow] });
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    const backfillUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), childInsert, backfillUpdate],
+      services: [query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-adopt',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-adopted']);
+    expect(backfillUpdate.update).toHaveBeenCalledWith({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+    });
+  });
+
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
     const columnQuery = query({
       columnInfo: {
