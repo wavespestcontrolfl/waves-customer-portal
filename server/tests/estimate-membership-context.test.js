@@ -50,8 +50,20 @@ function fakeDb({
     // keys by customer/service_type and must keep returning paidInvoices.
     let probesServiceIds = false;
     const builder = {
-      ...(catalogRows ? { leftJoin: () => builder } : {}),
+      // coveredTermsAsOf always leftJoins, so the join must exist whenever a
+      // terms fixture is in play. The catalog loader's degrade-on-no-join
+      // behavior is preserved in select() instead of by withholding leftJoin.
+      ...((catalogRows || prepaidTerms.length) ? { leftJoin: () => builder } : {}),
       where: () => builder,
+      // coveredTermsAsOf composes its paid-coverage guard from these; a
+      // missing one throws and the loader degrades to "no live term", which
+      // silently looks like a legitimate withhold.
+      orWhere: () => builder,
+      orWhereNotNull: () => builder,
+      orWhereIn: () => builder,
+      whereNull: () => builder,
+      whereRaw: () => builder,
+      join: () => builder,
       whereIn: (col) => {
         if (col === 'scheduled_service_id') probesServiceIds = true;
         return builder;
@@ -83,6 +95,10 @@ function fakeDb({
         // to undefined against a real database. Honoring the projection means
         // a column the code reads but never selects now fails the test.
         if (table === 'scheduled_services as s') {
+          // Without a catalog fixture the join is treated as unavailable, so
+          // the catalog/cadence loaders degrade exactly as they do against a
+          // database lacking the services table.
+          if (!catalogRows) throw new Error('relation does not exist');
           const requested = cols.flat().map((col) => {
             const text = String(col);
             const aliased = / as /i.test(text) ? text.split(/ as /i)[1] : text;
@@ -92,7 +108,7 @@ function fakeDb({
             requested.filter((key) => key in row).map((key) => [key, row[key]]),
           ));
         }
-        if (table === 'annual_prepay_terms') return prepaidTerms;
+        if (table === 'annual_prepay_terms' || table === 'annual_prepay_terms as t') return prepaidTerms;
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {
@@ -985,8 +1001,8 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('an annual-prepay contract quotes the PAID allocation, never the list price', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
       prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
@@ -1006,7 +1022,7 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('a non-uniformly prepaid contract keeps the scheduled price rather than one row\'s allocation', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
         { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
@@ -1080,8 +1096,8 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('an active prepaid allocation outranks a superseded per-visit invoice', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
       ],
       // Paid BEFORE the customer moved onto the annual-prepay term — the
       // annual-prepay invoice itself carries no service_type, so this older
@@ -1212,7 +1228,7 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('a prepaid property beside a pay-per-visit one reports a mixed basis, not one source for both', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice', service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
         { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
       ],
       catalogRows: [
@@ -1274,8 +1290,8 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('a prepaid allocation does not carry the superseded invoice\'s payment date', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
       ],
       paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
@@ -1300,10 +1316,10 @@ describe('current-spend cadence and stamped billing basis', () => {
       // exact equality would reject a perfectly normal term and quote the
       // $120 list price the paid term disproves.
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
-        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
-        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.76 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.76, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
       prepaidTerms: [{ id: 't1', prepay_amount: 455.01, coverage_visit_count: 4 }],
@@ -1324,8 +1340,8 @@ describe('current-spend cadence and stamped billing basis', () => {
       // would invent a figure nobody paid, and the list price is disproven by
       // the active term, so the honest answer is nothing.
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
     });
@@ -1346,8 +1362,8 @@ describe('current-spend cadence and stamped billing basis', () => {
       // those rows gave $113.78 (or withheld on the spread); the term itself
       // says $455.03 / 4 = $113.7575 → $113.76.
       scheduledRows: [
-        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
-        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.78 },
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.78, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p3', frequency: 'quarterly', visits_per_year: 4 }],
       prepaidTerms: [{ id: 't1', prepay_amount: 455.03, coverage_visit_count: 4 }],
@@ -1384,10 +1400,57 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('an independently prepaid visit is not treated as annual-term coverage', async () => {
+    const database = fakeDb({
+      // applyPrepaidCoverageForTerm PRESERVES an out-of-band cash/Zelle stamp
+      // while attachScheduledServices may still have linked the row to the
+      // term. A positive amount plus a term link is therefore not proof the
+      // annual term paid for it — the METHOD is.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 60, prepaid_method: 'cash' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 60, prepaid_method: 'cash' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // NOT $114 (456/4) — that term did not pay for these visits.
+    expect(spend.currentServices[0].currentPerVisit).not.toBe(114);
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('after a cancelled prepay the scheduled price outranks the older invoice', async () => {
+    const database = fakeDb({
+      // Stamps cleared by clearPrepaidStampsForTerm, audit link retained.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+      ],
+      // Paid per-visit BEFORE the prepay. Two arrangements ago — these visits
+      // will bill their $120 scheduled price now.
+      paidInvoices: [{ service_type: 'pest_control', total: 100, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+      lastPaidAt: null,
+    }));
+  });
+
   test('a prepaid contract whose term cannot be loaded withholds rather than quoting list price', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't-missing', prepaid_amount: 114 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't-missing', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
       prepaidTerms: [],
@@ -1425,8 +1488,8 @@ describe('current-spend cadence and stamped billing basis', () => {
   test('an unaverageable prepaid contract withholds even when an older invoice exists', async () => {
     const database = fakeDb({
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140, prepaid_method: 'annual_prepay_invoice' },
       ],
       // The r7 fix suppressed only the scheduled price, so this superseded
       // per-visit invoice still surfaced. A paid term disproves it too.
@@ -1448,8 +1511,8 @@ describe('current-spend cadence and stamped billing basis', () => {
       // TWO-visit splitCoverageAmount series can differ by at most one cent —
       // and these are two distinct terms, so the $100.01 average is invented.
       scheduledRows: [
-        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 100 },
-        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 100.02 },
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 100.02, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
     });

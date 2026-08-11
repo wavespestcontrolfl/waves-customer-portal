@@ -132,6 +132,12 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // (splitCoverageAmount slice) — the tier-extension credit derives from
   // what was PAID, never the undiscounted estimated_price.
   if (cols.prepaid_amount) selectCols.push('prepaid_amount');
+  // Which mechanism paid for the visit. A cash/Zelle prepayment keeps its own
+  // method even when attachScheduledServices links the row to an annual term,
+  // so the method is what distinguishes annual-prepay coverage from an
+  // unrelated out-of-band payment (annual-prepay-renewals' own
+  // annualPrepayCoversVisit keys on it first).
+  if (cols.prepaid_method) selectCols.push('prepaid_method');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');

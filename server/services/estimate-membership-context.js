@@ -480,9 +480,18 @@ async function loadPrepaidTermsById(database, rows) {
   const termIds = [...new Set(rows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
   if (!termIds.length) return new Map();
   try {
-    const terms = await database('annual_prepay_terms')
-      .whereIn('id', termIds)
-      .select('id', 'prepay_amount', 'coverage_visit_count');
+    // Through coveredTermsAsOf, NOT a raw term read (codex #3353 r10/r11):
+    // that query is the repo's definition of coverage whose money is still
+    // live — it excludes cancelled terms and revokes coverage whose prepay
+    // invoice went void, refunded, or disputed. A raw read returns the
+    // original amount for a term the customer no longer holds. No date window
+    // (null), matching annualPrepayCoversVisit: the stamp allocates specific
+    // prepaid dollars to the visit regardless of where it sits on the
+    // calendar.
+    const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+    const terms = await coveredTermsAsOf(database, null)
+      .whereIn('t.id', termIds)
+      .select('t.id', 't.prepay_amount', 't.coverage_visit_count');
     return new Map(terms.map((term) => [String(term.id), term]));
   } catch {
     return new Map();
@@ -670,8 +679,24 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // alone (my r9 refactor dropped this check) reports cancelled coverage
       // as still prepaid, overriding the price those visits will now bill.
       // Reading the same signal billing reads is the point.
+      // The METHOD is what makes a stamp the annual term's (codex #3353 r11).
+      // applyPrepaidCoverageForTerm deliberately preserves an independent
+      // cash/Zelle stamp while attachScheduledServices may still link that row
+      // to the term, so a positive amount + term link is NOT proof the annual
+      // term paid for it — that repeats r10's audit-link mistake with a
+      // positive but unrelated stamp. These are the same three conditions
+      // annualPrepayCoversVisit checks before consulting the term.
+      const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
       const fullyPrepaid = contractRows.length > 0
-        && contractRows.every((row) => !!row.annual_prepay_term_id && Number(row.prepaid_amount) > 0);
+        && contractRows.every((row) => !!row.annual_prepay_term_id
+          && Number(row.prepaid_amount) > 0
+          && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+      // Rows carrying a term link that did NOT qualify above: coverage was
+      // cancelled (stamps cleared, link kept for audit) or the term's money is
+      // no longer live. Those visits bill their scheduled price now, so any
+      // invoice predating the prepay is superseded.
+      const lapsedPrepaidLink = !fullyPrepaid
+        && contractRows.some((row) => !!row.annual_prepay_term_id);
       const prepaidTerm = (fullyPrepaid && prepaidTermIds.length === 1)
         ? prepaidTermsById.get(String(prepaidTermIds[0]))
         : null;
@@ -714,6 +739,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
           : ((!fullyPrepaid && scheduledPerVisit != null) ? 'scheduled_estimate' : 'unavailable'),
         cadenceLabel: cadenceLabelFor(contractCadence?.frequency),
         visitsPerYear: contractCadence?.visitsPerYear ?? null,
+        lapsedPrepaidLink,
         activeScheduledVisits: contractRows.length,
       };
     });
@@ -791,9 +817,15 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     // below it: the paid term disproves the scheduled price, the customer-level
     // stamps, and any older per-visit invoice alike (codex #3353 r8).
     const prepaidWithoutBasis = contracts.some((contract) => contract.prepaidWithoutBasis);
+    // After a prepay lapses, the SCHEDULED price outranks invoice history
+    // (codex #3353 r11): those visits bill their scheduled price now, and any
+    // per-visit invoice from before the prepay describes an arrangement two
+    // changes ago. My r10 test missed this by supplying no invoice.
+    const lapsedPrepaid = contracts.some((contract) => contract.lapsedPrepaidLink);
     const currentPerVisit = prepaidWithoutBasis
       ? null
       : (activePrepaidBasis
+        ?? (lapsedPrepaid ? effectivePerVisit : null)
         ?? usableLastPaid?.amount
         ?? effectivePerVisit
         ?? stampedPerApplication
@@ -842,6 +874,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         const contractSources = new Set(contracts.map((contract) => contract.spendSource));
         if (contracts.length > 1 && contractSources.size > 1) return 'mixed_basis';
         if (activePrepaidBasis != null) return 'prepaid_allocation';
+        if (lapsedPrepaid && effectivePerVisit != null) return 'scheduled_estimate';
         if (usableLastPaid) return 'last_paid_invoice';
         if (effectivePerVisit != null) return 'scheduled_estimate';
         if (stampedPerApplication != null) return 'per_application_fee';
@@ -852,7 +885,9 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // When an active prepaid allocation outranks a superseded per-visit
       // invoice, carrying that invoice's date renders as "prepaid allocation
       // · 2026-01-10" and dates the current allocation to the old payment.
-      lastPaidAt: activePrepaidBasis != null ? null : (usableLastPaid?.paidAt || null),
+      lastPaidAt: (activePrepaidBasis != null || (lapsedPrepaid && effectivePerVisit != null))
+        ? null
+        : (usableLastPaid?.paidAt || null),
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the
       // rows aren't property-split) so multi-property spend stays itemized.
