@@ -697,6 +697,32 @@ describe('annual prepay renewal helpers', () => {
     expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved', 'v-legacy-parent']);
   });
 
+  test('a FAILED palm identity lookup rejects the refresh — never silently excludes id-carrying rows (codex r21 P0)', async () => {
+    const throwingLookup = query({});
+    throwingLookup.first = jest.fn(async () => { throw new Error('db down'); });
+    const colQ = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {}, is_recurring: {},
+        recurring_pattern: {}, recurring_parent_id: {}, recurring_ongoing: {},
+        technician_id: {}, window_start: {}, window_end: {}, time_window: {},
+        customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [colQ, query({ rows: [] })],
+      services: [throwingLookup],
+    });
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-dbdown',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).rejects.toThrow('db down');
+  });
+
   test('a LEGACY quarterly nutritional palm term seeds normally — never the injection deferral (codex r20 pre-push P0)', async () => {
     const columnQuery = query({
       columnInfo: {

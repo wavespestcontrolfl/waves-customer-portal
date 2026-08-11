@@ -471,10 +471,13 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // excluded and the seeder creates a correctly-identified visit
   // instead (fail closed).
   if (coverageFamilyIsPalm(coverageServiceType)) {
-    let semiannualPalmId = null;
-    try {
-      semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
-    } catch { semiannualPalmId = null; }
+    // A FAILED identity lookup PROPAGATES (codex r21 P0): swallowing it
+    // to null would exclude valid id-carrying palm rows from coverage and
+    // seed duplicate visits beside them — the originals then bill at
+    // completion. A MISSING row (clean undefined) still resolves null:
+    // that is the catalog-missing environment, where the seeding resolve
+    // defers before anything is created.
+    const semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
     const carriesRecurringPalmIdentity = (row) =>
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
