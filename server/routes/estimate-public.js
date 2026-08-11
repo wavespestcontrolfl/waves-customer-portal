@@ -4239,6 +4239,12 @@ function renderMembershipBlockHtml(membership) {
     ? `Welcome back, ${escapeHtml(membership.firstName)}`
     : 'Welcome back';
 
+  // The extension claim names ONLY the listed services (codex #3338 r9):
+  // the frozen plan is bounded to the quoted property, so "every qualifying
+  // service, including the ones you already have" would overpromise for a
+  // multi-property member whose other property carries the same family —
+  // that contract is untouched by the accept. The rows rendered below ARE
+  // the covered set.
   const upgradeHtml = membership.upgrade ? `
     <div class="wg-upgrade">
       Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
@@ -4246,7 +4252,7 @@ function renderMembershipBlockHtml(membership) {
       up to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
       ${membership.discountAppliesTo === 'new_services_only'
         ? `for this estimate. That tier discounts the new services by up to ${Number(membership.tierDiscountPct) || 0}%; your current service prices stay unchanged.`
-        : `&mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
+        : `&mdash; an extra ${membership.upgrade.deltaPct}% off the new services and the current services listed below.`}
     </div>` : '';
 
   const existingHtml = existing.length ? `
@@ -8388,7 +8394,12 @@ async function handleEstimateView(req, res, next) {
       // Same PUBLIC boundary as /data: renderPage only reads whitelisted
       // fields today, but projecting here keeps a future SSR embed from
       // shipping the staff account context to the unauthenticated page.
-    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
+    }, estData, publicMembershipView(membership, {
+      // Accepted/price-locked estimates keep their committed extension
+      // record even with the gate off (codex #3338 r15 sibling) — same
+      // committed definition the snapshot reconciler uses.
+      committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
   } catch (err) { next(err); }
 }
 
@@ -20898,7 +20909,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // Project the frozen snapshot down to the fields the customer page
         // renders — the staff account context (per-property addresses,
         // per-contract prices, payment/visit dates) stays server-side.
-        membership: publicMembershipView(membership),
+        // Accepted/price-locked estimates keep their committed extension
+        // record even with the gate off (codex #3338 r15 sibling) — same
+        // committed definition the snapshot reconciler uses.
+        membership: publicMembershipView(membership, {
+          committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
+        }),
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),

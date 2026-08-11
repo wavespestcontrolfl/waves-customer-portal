@@ -561,6 +561,492 @@ function hasWaveGuardSetupService(services = []) {
   return shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: services });
 }
 
+// ── Existing-service tier extension (owner decision 2026-08-10) ──────────
+// Applies the FROZEN membershipSnapshot.existingServices plan when an accept
+// raises the membership tier: upcoming qualifying visit rows are repriced to
+// the frozen per-visit figure (or proportionally, when the contracted price
+// moved between save and accept), and annual-prepaid families are credited
+// the difference instead of being repriced (their paid term is never
+// touched). The frozen plan is the SAME data the estimate page displayed
+// (ExistingPlanUpgradeCard), so what was shown is exactly what applies —
+// legacy estimates without a frozen plan (or plans frozen while
+// GATE_WAVEGUARD_EXTEND_EXISTING was off) apply nothing and keep the
+// 2026-08-05 review-bell behavior.
+//
+// Monthly-lane members are NOT auto-adjusted here: the scalar's interplay
+// with this accept's own ledger write is exactly where a silent double-count
+// hides, so the extension surfaces a parked exception naming the manual
+// adjustment instead (rule 14) — per-application members, the dominant lane,
+// bill from the row prices this function updates.
+//
+// Money invariants honored: unpriced rows stay NULL (never $0, never an
+// invented price); a repriced figure only ever goes DOWN; the audit row
+// commits atomically with the writes (same savepoint) — extension-with-audit
+// or clean rollback, never one without the other. Callers wrap this in a
+// nested transaction: a failure rolls back only the extension, never the
+// accept.
+//
+// Money equality is INTEGER CENTS (codex #3338 r9): a ±$0.01 tolerance
+// admits values that genuinely differ by a cent (split-remainder prepaid
+// allocations, a one-cent price edit), and the frozen figure would then be
+// a cent off the real basis. numeric(10,2) columns make exact cents
+// well-defined; Math.round absorbs float parse noise.
+const extensionSameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+async function applyFrozenExistingServiceExtension({
+  database, customerId, estimateId, estimateData, activatedTier,
+  monthlyLaneMember = false, priorQualifyingKeys = [],
+}) {
+  const summary = {
+    applied: false,
+    repricedRowCount: 0,
+    families: [],
+    familyLines: [],
+    creditAmount: 0,
+    creditLines: [],
+    skippedFamilies: [],
+    reviewFamilies: [],
+    // Families whose frozen plan was only PARTIALLY honored (drift, parked
+    // rows, allocation gaps) — the committed recap projects only families
+    // absent from this list (codex #3338 r26).
+    dirtyFamilies: [],
+    // Appointment identities this apply actually repriced or credited —
+    // persisted into the audit metadata so a LATER accept's dedup blocks
+    // only these exact applications, never a disjoint same-family plan at
+    // another property (codex #3338 r8).
+    appliedRowIds: [],
+    monthlyRateReviewNeeded: false,
+  };
+  const snapshot = estimateData?.membershipSnapshot;
+  const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
+    .filter((svc) => Number(svc?.currentPerVisit) > 0
+      && Number(svc?.newPerVisit) > 0
+      && Number(svc?.perVisitSavings) > 0
+      && Array.isArray(svc?.keys) && svc.keys.length > 0);
+  if (!plan.length) return summary;
+  // The frozen plan belongs to the tier the snapshot advertised — a stale
+  // snapshot whose tier disagrees with the activated tier must not apply
+  // its numbers.
+  if (String(snapshot?.tierLabel || '').trim().toLowerCase()
+    !== String(activatedTier || '').trim().toLowerCase()) {
+    return summary;
+  }
+  // Kill switch off but a tier-matching frozen plan exists (saved while it
+  // was on): an already-open estimate tab can still promise the extension
+  // — projection-time hiding can't reach a rendered page (codex #3338
+  // r15) — so the accept parks the plan for review instead of going
+  // silent. No plan (every legacy accept) returns above and stays a
+  // silent no-op; no money moves either way with the gate off.
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('waveguardExtendExisting')) {
+    for (const svc of plan) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (extension gate off at accept — not applied)`);
+    }
+    return summary;
+  }
+  const plannedKeys = new Set(plan.flatMap((svc) => svc.keys));
+  summary.reviewFamilies = (priorQualifyingKeys || []).filter((key) => !plannedKeys.has(key));
+
+  // Monthly-lane members bill customers.monthly_rate — row writes and
+  // prepaid credits would not deliver the displayed reduction (codex #3338
+  // r9), so NOTHING is mutated for them: the whole frozen plan parks as a
+  // manual rate adjustment BEFORE any write runs. Snapshots now exclude
+  // monthly-lane members at save time; this guards mode changes between
+  // save and accept and snapshots frozen before that exclusion.
+  if (monthlyLaneMember === true) {
+    summary.monthlyRateReviewNeeded = true;
+    for (const svc of plan) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (monthly-billed — adjust the monthly rate manually)`);
+    }
+    return summary;
+  }
+
+  const { loadExistingRecurringQualifyingRows, qualifyingKeysForRow } = require('./waveguard-existing-services');
+  const rows = await loadExistingRecurringQualifyingRows(database, customerId);
+  const today = etDateString();
+  // DATE-column convention: read the stored calendar day directly.
+  const rowDay = (value) => (value instanceof Date
+    ? value.toISOString().slice(0, 10)
+    : (typeof value === 'string' ? value.split('T')[0] : null));
+  const isCallbackRow = (row) => row.is_callback === true || row.is_callback === 1
+    || row.is_callback === '1' || row.is_callback === 'true';
+  // Extension evidence is ALWAYS the strict predicate (upcoming, not a
+  // callback, not created by THIS accept) regardless of the enroll gate —
+  // a new rule with no legacy behavior to preserve, same posture as the
+  // ownership loader.
+  const liveRows = rows.filter((row) => {
+    const day = rowDay(row.scheduled_date);
+    if (!day || day < today) return false;
+    if (isCallbackRow(row)) return false;
+    if (row.source_estimate_id && String(row.source_estimate_id) === String(estimateId)) return false;
+    return true;
+  });
+
+  // At-most-once per covered appointment (codex #3338 r7 dedup, refined by
+  // r8): a SECOND tier-raising estimate saved before the first was accepted
+  // freezes the same Bronze-origin plan, and accepting both must not
+  // reprice or credit the same applications twice. Row reprices self-park
+  // on the second pass (the frozen-price check no longer matches the
+  // already-lowered price) but the prepaid credit has no natural guard —
+  // prepaid_amount is untouched by design. The applied-extension audit row
+  // commits atomically with the writes, so it is the reliable at-most-once
+  // marker: a plan whose frozen appointments INTERSECT a prior extension's
+  // covered appointments parks for owner review instead of re-applying —
+  // while a disjoint same-family plan (the same family at another property)
+  // still applies. FAIL CLOSED: audits without identities block their whole
+  // family; if the probe cannot run, every family parks.
+  let priorExtensionCoverage = [];
+  try {
+    const priorAudits = await database('activity_log')
+      .where({ customer_id: customerId, action: 'waveguard_tier_extension_applied' })
+      .select('metadata');
+    for (const auditRow of priorAudits) {
+      let meta;
+      try {
+        meta = typeof auditRow.metadata === 'string' ? JSON.parse(auditRow.metadata) : auditRow.metadata;
+      } catch { meta = null; }
+      if (!meta || String(meta.estimateId) === String(estimateId)) continue;
+      priorExtensionCoverage.push({
+        estimateId: meta.estimateId,
+        families: new Set(Array.isArray(meta.families) ? meta.families : []),
+        // Covered appointment identities (codex #3338 r8): a prior
+        // extension blocks only the appointments it actually repriced or
+        // credited — a same-family plan whose frozen rows are DISJOINT
+        // (the same Bronze family at a different property) still applies.
+        // An audit without identities (malformed) blocks its whole family,
+        // fail closed.
+        appliedRowIds: Array.isArray(meta.appliedRowIds)
+          ? new Set(meta.appliedRowIds.map(String))
+          : null,
+      });
+    }
+  } catch (probeErr) {
+    logger.warn(`[estimate-converter] prior-extension audit probe failed — parking the plan: ${probeErr.message}`);
+    priorExtensionCoverage = null;
+  }
+
+  let creditTotal = 0;
+  const creditTermIds = new Set();
+  for (const svc of plan) {
+    if (priorExtensionCoverage === null) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify prior extensions — apply manually)`);
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
+    // ID-pinned apply (codex #3338 r10): only the appointments frozen at
+    // save time — a same-family visit created between save and accept was
+    // never shown on the card and must not be repriced or credited. Ids
+    // survive reschedules (dates don't). A frozen row without identities
+    // parks for review rather than falling back to family-wide matching.
+    const frozenRowIds = Array.isArray(svc.rowIds) ? svc.rowIds.map(String) : [];
+    if (!frozenRowIds.length) {
+      summary.reviewFamilies.push(`${svc.label || svc.key} (no frozen appointment identities — apply manually)`);
+      continue;
+    }
+    const priorHit = priorExtensionCoverage.find((prior) => (prior.appliedRowIds === null
+      ? svc.keys.some((key) => prior.families.has(key))
+      : frozenRowIds.some((id) => prior.appliedRowIds.has(id))));
+    if (priorHit) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (already extended via estimate #${priorHit.estimateId} — verify before applying again)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
+    let familyRows = liveRows.filter((row) => frozenRowIds.includes(String(row.id))
+      && qualifyingKeysForRow(row).some((key) => svc.keys.includes(key)));
+    if (!familyRows.length) {
+      summary.skippedFamilies.push(svc.label || svc.key);
+      continue;
+    }
+    // A frozen appointment missing from the live set (cancelled, moved into
+    // the past, reclassified) was advertised on the card but will not be
+    // honored — the family is PARTIAL and must not project as fully covered
+    // (codex #3338 r7, sibling of r26: an all-missing family skips above and
+    // never enters `families`, but a partially-missing one would otherwise
+    // ride its applied sibling into appliedFamilies). Matched siblings
+    // still apply.
+    const matchedFrozenIds = new Set(familyRows.map((row) => String(row.id)));
+    const missingFrozenRows = frozenRowIds.filter((id) => !matchedFrozenIds.has(id)).length;
+    if (missingFrozenRows > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${missingFrozenRows} frozen visit${missingFrozenRows === 1 ? '' : 's'} no longer eligible — verify manually)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+    }
+    // Composite visits and pre-minted invoices park (codex #3338 r24+r25):
+    // a row with scheduled_service_addons nets the primary + add-ons into
+    // one estimated_price (discounting the whole figure would discount the
+    // non-qualifying add-ons too), and a row whose invoice was already
+    // minted (Charge Now / pre-completion mint — the shared mint path
+    // REUSES an existing invoice rather than rebuilding it) would keep
+    // billing the old amount after a row-only reprice. Both are manual
+    // territory. FAIL CLOSED: if either probe cannot run, the whole family
+    // parks rather than risking a write the probe would have blocked.
+    let compositeOrInvoicedIds;
+    try {
+      const rowIds = familyRows.map((row) => row.id);
+      const [addonRows, invoiceRows] = await Promise.all([
+        database('scheduled_service_addons').whereIn('scheduled_service_id', rowIds).select('scheduled_service_id'),
+        database('invoices').whereIn('scheduled_service_id', rowIds)
+          .whereNot('status', 'void').select('scheduled_service_id'),
+      ]);
+      compositeOrInvoicedIds = new Set([
+        ...addonRows.map((row) => String(row.scheduled_service_id)),
+        ...invoiceRows.map((row) => String(row.scheduled_service_id)),
+      ]);
+    } catch (probeErr) {
+      logger.warn(`[estimate-converter] extension addon/invoice probe failed — parking ${svc.label || svc.key}: ${probeErr.message}`);
+      summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify add-ons/invoices — apply manually)`);
+      summary.dirtyFamilies.push(svc.key);
+      continue;
+    }
+    const parkedComposite = familyRows.filter((row) => compositeOrInvoicedIds.has(String(row.id)));
+    if (parkedComposite.length > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${parkedComposite.length} visit${parkedComposite.length === 1 ? '' : 's'} with add-ons or an already-minted invoice — apply manually)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+      familyRows = familyRows.filter((row) => !compositeOrInvoicedIds.has(String(row.id)));
+      if (!familyRows.length) continue;
+    }
+    const prepaidRows = familyRows.filter((row) => !!row.annual_prepay_term_id);
+    const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
+    let repriced = 0;
+    let driftRows = 0;
+    const repricedApplied = [];
+    for (const row of repriceRows) {
+      const price = Number(row.estimated_price);
+      // Unpriced = NULL stays NULL (billing invariant 8) — but a FROZEN row
+      // was priced at the basis when the card displayed it (the snapshot
+      // never freezes unpriced rows), so a blank price now means the price
+      // moved after save: park as drift (codex #3338 r26 — a silently
+      // skipped appointment must not leave its family reading as fully
+      // repriced). Never a $0 or invented write either way.
+      if (!(price > 0)) {
+        driftRows += 1;
+        continue;
+      }
+      // FROZEN figure or nothing (codex #3338 r5): a row whose contracted
+      // price moved after the estimate was saved gets NO automatic write —
+      // a proportional delta would bill a figure the customer never saw,
+      // and stamping the frozen figure could undo a legitimate post-save
+      // price change. Drifted rows park for the owner (named in the
+      // notification's review clause below). Exact cents (r9): even a
+      // one-cent move is a different price than quoted.
+      const matchesFrozen = extensionSameCents(price, svc.currentPerVisit);
+      if (!matchesFrozen) {
+        driftRows += 1;
+        continue;
+      }
+      const next = Number(svc.newPerVisit);
+      if (!(next > 0) || next >= price) continue;
+      // Concurrency guard (codex #3338 r14): the frozen-or-review invariant
+      // must hold against a price edit landing between the row read and
+      // this write — the predicate re-asserts the exact price the match
+      // was computed on (raw value, so pg numeric comparison is exact).
+      // Zero rows updated = the price moved underneath us = drift.
+      const changed = await database('scheduled_services')
+        .where({ id: row.id, estimated_price: row.estimated_price })
+        .update({ estimated_price: next });
+      if (!changed) {
+        driftRows += 1;
+        continue;
+      }
+      repriced += 1;
+      repricedApplied.push(row);
+      summary.appliedRowIds.push(String(row.id));
+    }
+    // Mint race (codex #3338 r7): Charge Now reads the visit without a row
+    // lock, so an invoice built from the OLD price can commit between the
+    // probe above and the row updates. Re-probe after the writes and REVERT
+    // any repriced row whose invoice appeared mid-apply — the recap must
+    // not read a visit as repriced while its collectible invoice carries
+    // the old amount. The residual window (a mint committing after this
+    // re-probe) closes only when the mint path itself serializes on the
+    // row — named pre-enable fast-follow. FAIL CLOSED: a failed re-probe
+    // reverts every row this family repriced.
+    if (repricedApplied.length > 0) {
+      let lateMintedIds = null;
+      try {
+        const lateRows = await database('invoices')
+          .whereIn('scheduled_service_id', repricedApplied.map((row) => row.id))
+          .whereNot('status', 'void').select('scheduled_service_id');
+        lateMintedIds = new Set(lateRows.map((row) => String(row.scheduled_service_id)));
+      } catch (probeErr) {
+        logger.warn(`[estimate-converter] post-apply invoice re-probe failed — reverting ${svc.label || svc.key}: ${probeErr.message}`);
+      }
+      const revertRows = lateMintedIds === null
+        ? repricedApplied
+        : repricedApplied.filter((row) => lateMintedIds.has(String(row.id)));
+      if (revertRows.length > 0) {
+        for (const row of revertRows) {
+          const reverted = await database('scheduled_services')
+            .where({ id: row.id, estimated_price: Number(svc.newPerVisit) })
+            .update({ estimated_price: row.estimated_price });
+          if (!reverted) {
+            // Our own in-transaction write is gone — nothing sane can
+            // continue; the caller's catch parks the whole extension.
+            throw new Error(`extension revert failed for scheduled service ${row.id}`);
+          }
+          repriced -= 1;
+          summary.appliedRowIds = summary.appliedRowIds.filter((id) => id !== String(row.id));
+        }
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${revertRows.length} visit${revertRows.length === 1 ? '' : 's'} invoiced during apply — reverted, adjust manually)`,
+        );
+        summary.dirtyFamilies.push(svc.key);
+      }
+    }
+    if (driftRows > 0) {
+      summary.reviewFamilies.push(
+        `${svc.label || svc.key} (${driftRows} visit${driftRows === 1 ? '' : 's'} priced differently than quoted — apply manually)`,
+      );
+      summary.dirtyFamilies.push(svc.key);
+    }
+    if (repriced > 0) {
+      summary.repricedRowCount += repriced;
+      svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
+      // "/application" is the one price unit on every rendered discount
+      // (owner 2026-08-10, same ruling as the customer card) — "visits"
+      // stays schedule language only.
+      summary.familyLines.push(
+        `${svc.label || svc.key} $${Number(svc.currentPerVisit).toFixed(2)} → $${Number(svc.newPerVisit).toFixed(2)}/application (${repriced} upcoming)`,
+      );
+    }
+    if (prepaidRows.length > 0) {
+      // The credit derives from the PAID allocation, never the list row
+      // price (codex #3338 r21): a prepaid visit's prepaid_amount is the
+      // DISCOUNTED splitCoverageAmount slice, so pct × estimated_price
+      // would stack the tier delta on top of the prepay incentive and
+      // overcredit every covered application. Within that, FROZEN figure
+      // or nothing (same doctrine as the reprice path): the per-row credit
+      // is the exact perVisitSavings the card displayed — recomputed pct
+      // math can land a half-cent boundary a penny off the displayed
+      // figure — and it applies only while the row's paid allocation still
+      // equals the frozen basis. A re-split term, like a drifted price,
+      // parks; a row without a usable allocation parks. Never a guessed
+      // credit.
+      const frozenBasis = Number(svc.currentPerVisit);
+      const frozenSavings = Number(svc.perVisitSavings);
+      let familyCredit = 0;
+      let creditedRows = 0;
+      let allocationGaps = 0;
+      let allocationDrift = 0;
+      // The allocations are RE-READ under FOR UPDATE inside this
+      // transaction (codex #3338 r7): annual-prepay cancellation, refund,
+      // and window edits mutate prepaid_amount, and a credit computed from
+      // the earlier unlocked read could pay applications that are no longer
+      // prepaid. The row lock makes those writers wait until this accept
+      // commits; a row whose term or allocation no longer matches the
+      // frozen basis parks. FAIL CLOSED: if the locked read cannot run, the
+      // family parks uncredited.
+      let lockedById;
+      try {
+        const lockedRows = await database('scheduled_services')
+          .whereIn('id', prepaidRows.map((row) => row.id))
+          .forUpdate()
+          .select('id', 'prepaid_amount', 'annual_prepay_term_id');
+        lockedById = new Map(lockedRows.map((row) => [String(row.id), row]));
+      } catch (lockErr) {
+        logger.warn(`[estimate-converter] prepaid allocation lock failed — parking ${svc.label || svc.key}: ${lockErr.message}`);
+        summary.reviewFamilies.push(`${svc.label || svc.key} (could not verify paid allocations — credit manually)`);
+        summary.dirtyFamilies.push(svc.key);
+        lockedById = null;
+      }
+      if (lockedById === null) continue;
+      for (const row of prepaidRows) {
+        const locked = lockedById.get(String(row.id));
+        if (!locked || !locked.annual_prepay_term_id) {
+          // Row vanished or its prepay term was cleared since the read —
+          // no longer a prepaid application; the frozen figure no longer
+          // describes it.
+          allocationDrift += 1;
+          continue;
+        }
+        const allocation = Number(locked.prepaid_amount);
+        if (!(frozenSavings > 0) || !(allocation > 0)) {
+          allocationGaps += 1;
+          continue;
+        }
+        // Exact cents (codex #3338 r9): a one-cent-different allocation is
+        // a different paid slice — the frozen savings no longer describes it.
+        if (!extensionSameCents(allocation, frozenBasis)) {
+          allocationDrift += 1;
+          continue;
+        }
+        familyCredit = Math.round((familyCredit + frozenSavings) * 100) / 100;
+        creditedRows += 1;
+        summary.appliedRowIds.push(String(row.id));
+        // Term breadcrumb for the credit note (codex #3338 r27): the
+        // annual-prepay refund flow claws back only its own credit class,
+        // so the ledger note must name the term(s) this credit rode on —
+        // the manual refund review subtracts it from there. Automated
+        // integration with the refund reversal is a named fast-follow.
+        creditTermIds.add(String(locked.annual_prepay_term_id));
+      }
+      if (allocationGaps > 0) {
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${allocationGaps} prepaid visit${allocationGaps === 1 ? '' : 's'} without a usable paid allocation — credit manually)`,
+        );
+        summary.dirtyFamilies.push(svc.key);
+      }
+      if (allocationDrift > 0) {
+        summary.reviewFamilies.push(
+          `${svc.label || svc.key} (${allocationDrift} prepaid visit${allocationDrift === 1 ? '' : 's'} whose paid allocation changed since the estimate — credit manually)`,
+        );
+        summary.dirtyFamilies.push(svc.key);
+      }
+      if (familyCredit > 0) {
+        creditTotal = Math.round((creditTotal + familyCredit) * 100) / 100;
+        summary.creditLines.push(
+          `${svc.label || svc.key} $${familyCredit.toFixed(2)} (${creditedRows} prepaid application${creditedRows === 1 ? '' : 's'} × $${frozenSavings.toFixed(2)}/application off the paid allocation)`,
+        );
+        svc.keys.forEach((key) => { if (!summary.families.includes(key)) summary.families.push(key); });
+      }
+    }
+  }
+
+  if (creditTotal > 0) {
+    const { postCreditMovement } = require('./customer-credit');
+    await postCreditMovement({
+      customerId,
+      delta: creditTotal,
+      source: 'adjustment',
+      note: `WaveGuard ${activatedTier} extension — prepaid-term difference (estimate #${estimateId}${creditTermIds.size ? `; terms: ${[...creditTermIds].sort().join(', ')}` : ''})`,
+      createdBy: 'system:waveguard_tier_extension',
+    }, database.isTransaction ? database : null);
+    summary.creditAmount = creditTotal;
+  }
+
+  summary.applied = summary.repricedRowCount > 0 || summary.creditAmount > 0;
+  summary.monthlyRateReviewNeeded = summary.applied && monthlyLaneMember === true;
+  if (summary.applied) {
+    // Audit rides the same savepoint as the writes — extension-with-audit
+    // or clean rollback, never one without the other.
+    await database('activity_log').insert({
+      customer_id: customerId,
+      action: 'waveguard_tier_extension_applied',
+      description: `WaveGuard ${activatedTier} extension: ${summary.repricedRowCount} upcoming visit(s) repriced${summary.creditAmount > 0 ? `, $${summary.creditAmount.toFixed(2)} prepaid-difference credit` : ''} (estimate #${estimateId})`,
+      metadata: JSON.stringify({
+        estimateId,
+        tier: activatedTier,
+        families: summary.families,
+        // The exact appointments repriced/credited — the dedup key a later
+        // accept's at-most-once check intersects against (codex #3338 r8).
+        appliedRowIds: [...summary.appliedRowIds].sort(),
+        repricedRowCount: summary.repricedRowCount,
+        familyLines: summary.familyLines,
+        creditAmount: summary.creditAmount,
+        creditLines: summary.creditLines,
+        skippedFamilies: summary.skippedFamilies,
+        reviewFamilies: summary.reviewFamilies,
+        monthlyRateReviewNeeded: summary.monthlyRateReviewNeeded,
+      }),
+    });
+  }
+  return summary;
+}
+
 // An ADD-ON accept (existing recurring customer buying a NEW service family)
 // must not clobber monthly_rate with just the add-on's monthly: for a monthly
 // member the billing cron charges monthly_rate directly, so the overwrite
@@ -3921,26 +4407,122 @@ const EstimateConverter = {
     // notification: in-transaction callers dispatch post-commit so a
     // rolled-back accept can't page staff.
     let tierUpgradeNotification = null;
-    // Upgrade = the activated tier outranks the customer's PERSISTED tier
-    // (codex #3228 r2) — not the tier the prior rows alone would derive. A
-    // stale-stamped Gold customer whose rows only support Silver is a
-    // downgrade (no "upgrade" alert), while a Bronze-stamped legacy customer
-    // whose existing rows already supported Silver gets the review alert the
-    // moment an accept actually moves the stored tier up.
+    // Existing-service extension (owner 2026-08-10): apply the frozen
+    // snapshot plan the estimate displayed. Runs on SNAPSHOT/ACTIVATED tier
+    // agreement, NOT on the persisted-tier upgrade check below (codex #3338
+    // r2): a stale-stamped Silver customer whose rows only re-earn Silver
+    // still displayed the extension card, and gating the apply on the
+    // stored tier rising would leave that advertised discount unapplied.
+    // The helper itself no-ops without a tier-matching frozen plan, so
+    // legacy estimates and non-upgrades stay untouched. Savepoint-confined
+    // — a failed extension rolls back only itself (writes + audit
+    // together) and the accept falls back to the 2026-08-05 review copy;
+    // the accepted plan is never lost to its discount extension.
+    let extension = null;
+    if (!suppressRecurringConversion && !commercialOnlyRecurring
+      && priorQualifyingKeys.length > 0
+      && tier && tier !== 'none') {
+      try {
+        extension = await database.transaction((sp) => applyFrozenExistingServiceExtension({
+          database: sp,
+          customerId,
+          estimateId,
+          estimateData,
+          activatedTier: tier,
+          monthlyLaneMember: preservesExistingMembership === true,
+          priorQualifyingKeys,
+        }));
+      } catch (extErr) {
+        logger.warn(`[estimate-converter] existing-service tier extension failed (falling back to review notice): ${extErr.message}`);
+        // A throw here means the gate/plan/tier preconditions all passed
+        // (the plan-less paths return before the first await), so the
+        // customer accepted an ADVERTISED extension — a failed apply must
+        // page staff, never vanish with the rolled-back savepoint (codex
+        // #3338 r16: on a tier-equal customer neither notification operand
+        // would otherwise be true).
+        extension = {
+          applied: false,
+          repricedRowCount: 0,
+          families: [],
+          familyLines: [],
+          creditAmount: 0,
+          creditLines: [],
+          skippedFamilies: [],
+          reviewFamilies: ['existing-service extension failed at accept — apply manually'],
+          dirtyFamilies: [],
+          monthlyRateReviewNeeded: false,
+        };
+      }
+    }
+    const extensionApplied = extension?.applied === true;
+    // A frozen plan that applied NOTHING but parked work (all rows drifted,
+    // monthly-lane snapshot, missing identities) must still page staff
+    // (codex #3338 r10 sibling): the customer accepted a card that
+    // advertised automatic application, so silence is not an option even
+    // when the persisted tier didn't move.
+    const extensionNeedsReview = !!extension && !extensionApplied
+      && (extension.reviewFamilies.length > 0
+        || extension.skippedFamilies.length > 0
+        || extension.monthlyRateReviewNeeded === true);
+    // Upgrade REVIEW alert = the activated tier outranks the customer's
+    // PERSISTED tier (codex #3228 r2) — not the tier the prior rows alone
+    // would derive. A stale-stamped Gold customer whose rows only support
+    // Silver is a downgrade (no "upgrade" alert), while a Bronze-stamped
+    // legacy customer whose existing rows already supported Silver gets the
+    // review alert the moment an accept actually moves the stored tier up.
+    // An APPLIED extension always notifies, upgrade or not — money moved;
+    // so does a frozen plan that parked for review.
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && isMembershipTierUpgrade(customer.waveguard_tier, tier)) {
+      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
       const discountPct = Math.round((discount || 0) * 100);
+      const appliedClauses = extensionApplied
+        ? [
+          extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
+          extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
+          extension.monthlyRateReviewNeeded
+            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`
+            : '',
+          [...extension.reviewFamilies, ...extension.skippedFamilies].length
+            ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
+            : '',
+        ].filter(Boolean)
+        : [];
+      // Review copy names the SPECIFIC parked work when a frozen plan
+      // produced any (codex #3338 r10 sibling) — "review whether to
+      // extend" alone would undersell an accept whose card already
+      // promised the extension.
+      const reviewClauses = !extensionApplied && extension
+        ? [...extension.reviewFamilies, ...extension.skippedFamilies]
+        : [];
       const tierReviewPayload = {
         type: 'estimate_converted',
-        title: `WaveGuard ${tier} activated: review existing plan rates`,
-        body: `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-visit prices — review whether to extend the ${discountPct}% tier discount to them.`,
+        title: extensionApplied
+          ? `WaveGuard ${tier} activated: existing services extended`
+          : `WaveGuard ${tier} activated: review existing plan rates`,
+        body: extensionApplied
+          ? `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. ${appliedClauses.join(' ')}`
+          : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-application prices — review whether to extend the ${discountPct}% tier discount to them.${reviewClauses.length ? ` Needs manual attention: ${reviewClauses.join('; ')}.` : ''}`,
         options: {
           icon: '⭐',
           link: `/admin/customers?customerId=${customerId}`,
           bell: true,
-          metadata: { estimateId, customerId, tier, priorQualifyingKeys, combinedServiceCount },
+          metadata: {
+            estimateId,
+            customerId,
+            tier,
+            priorQualifyingKeys,
+            combinedServiceCount,
+            ...(extensionApplied
+              ? {
+                extensionApplied: true,
+                extensionFamilies: extension.families,
+                extensionRepricedRowCount: extension.repricedRowCount,
+                extensionCreditAmount: extension.creditAmount,
+              }
+              : {}),
+          },
         },
       };
       if (opts.deferCommercialScheduleNotification === true) {
@@ -3957,6 +4539,55 @@ const EstimateConverter = {
         } catch (err) {
           logger.warn(`[estimate-converter] tier-upgrade admin notify setup failed: ${err.message}`);
         }
+      }
+    }
+
+    // Persist the extension OUTCOME onto the frozen snapshot (codex #3338
+    // r19): the accepted read-only recap keeps showing the extension ONLY
+    // when it actually applied — an accept whose plan parked for review
+    // moved no money and must not read as repriced. Stamped HERE, the
+    // single choke point every conversion entrypoint passes through;
+    // read-modify-write inside the caller's transaction, so the accept
+    // path's own estimate_data write (which lands before conversion) is
+    // extended, never clobbered. Outcome is written only when a frozen
+    // plan was actually in play — legacy/plan-less accepts stay untouched.
+    // Never blocks the accept.
+    const extensionHadPlanInPlay = !!extension
+      && (extension.applied === true
+        || extension.reviewFamilies.length > 0
+        || extension.skippedFamilies.length > 0
+        || extension.monthlyRateReviewNeeded === true);
+    if (extensionHadPlanInPlay) {
+      try {
+        const outcomeRow = await database('estimates').where({ id: estimateId }).first('estimate_data');
+        const outcomeIsString = typeof outcomeRow?.estimate_data === 'string';
+        const outcomeData = outcomeIsString
+          ? JSON.parse(outcomeRow.estimate_data)
+          : (outcomeRow?.estimate_data || null);
+        if (outcomeData?.membershipSnapshot) {
+          outcomeData.membershipSnapshot.extensionOutcome = {
+            applied: extension.applied === true,
+            // Families whose frozen plan was honored IN FULL — the
+            // committed recap projects only these (codex #3338 r26: a
+            // partially-applied accept must not display parked families or
+            // appointments as repriced).
+            appliedFamilies: extension.families.filter(
+              (key) => !extension.dirtyFamilies.includes(key),
+            ),
+            repricedRowCount: extension.repricedRowCount,
+            creditAmount: extension.creditAmount,
+            familyLines: extension.familyLines,
+            creditLines: extension.creditLines,
+            reviewFamilies: extension.reviewFamilies,
+            skippedFamilies: extension.skippedFamilies,
+            monthlyRateReviewNeeded: extension.monthlyRateReviewNeeded === true,
+          };
+          await database('estimates').where({ id: estimateId }).update({
+            estimate_data: outcomeIsString ? JSON.stringify(outcomeData) : outcomeData,
+          });
+        }
+      } catch (outcomeErr) {
+        logger.warn(`[estimate-converter] extension outcome stamp skipped: ${outcomeErr.message}`);
       }
     }
 
@@ -4147,3 +4778,4 @@ module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
+module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;

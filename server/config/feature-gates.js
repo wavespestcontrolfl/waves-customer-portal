@@ -1289,6 +1289,25 @@ const gates = {
   // completion. Kill switch: unset or any non-'true' value — completions
   // behave byte-identically to today.
   completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
+
+  // WaveGuard tier extension to existing services (owner decision
+  // 2026-08-10, reversing the 2026-08-05 review-bell-only ruling): a
+  // tier-RAISING estimate for a linked member lists their current
+  // qualifying services at the combined tier's extra percentage points off
+  // the contracted per-visit price, and accepting applies exactly that
+  // frozen plan — upcoming visit rows repriced, monthly-lane slices
+  // adjusted via the plan-rate ledger where attributable, annual-prepaid
+  // terms credited the difference instead of being repriced. The gate is
+  // checked at THREE points that silence together (codex #3338 r1):
+  // snapshot population (no new estimate advertises the extension), the
+  // public projection (a plan frozen while the gate was on stops
+  // DISPLAYING the moment it flips off), and the converter apply
+  // (inspectionCredit's dormant-while-off pattern) — so display and
+  // billing can never disagree across a flip in either direction. Money
+  // surface — fail-closed ==='true' in EVERY environment. Kill switch:
+  // unset or any non-'true' value — estimates and accepts revert to the
+  // 2026-08-05 review-bell behavior.
+  waveguardExtendExisting: process.env.GATE_WAVEGUARD_EXTEND_EXISTING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

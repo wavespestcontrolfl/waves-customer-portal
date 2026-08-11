@@ -489,7 +489,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { estimate, reused } = await createOrReuseAdminEstimate({
+    const { estimate, reused, memberLinkageWarning } = await createOrReuseAdminEstimate({
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
@@ -505,6 +505,15 @@ router.post('/', async (req, res, next) => {
       onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
       pricingAuthority: estimate.pricing_authority || null,
       pricingDrift: estimate.pricing_drift || null,
+      // Unlinked-member guard (2026-08-10): the typed address matches an
+      // active member but no customer was linked, so member pricing was not
+      // applied — the builder surfaces this beside the saved totals.
+      // ADMIN ONLY (codex #3338 r23, same rule as the edit-source customer
+      // block below): the reverse address lookup is unscoped, so returning
+      // the matched customer's identity/tier to a technician token would
+      // let an arbitrary-address save enumerate customers outside the
+      // assignment gate. Technicians save fine; they just get no warning.
+      memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -524,7 +533,7 @@ router.put('/:id', async (req, res, next) => {
     // the builder can confirm a server reprice with the operator BEFORE the
     // edit publishes to the customer's live link.
     const dryRun = req.body?.dryRun === true;
-    const { estimate } = await reviseAdminEstimate({
+    const { estimate, memberLinkageWarning } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
@@ -545,6 +554,9 @@ router.put('/:id', async (req, res, next) => {
       onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
       pricingAuthority: estimate.pricing_authority || null,
       pricingDrift: estimate.pricing_drift || null,
+      // Unlinked-member guard (2026-08-10) — same contract and ADMIN-ONLY
+      // scope as POST / (codex #3338 r23).
+      memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });

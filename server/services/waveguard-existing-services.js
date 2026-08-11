@@ -128,6 +128,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date', 'status'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
+  // The DISCOUNTED per-visit allocation of an annual-prepaid term
+  // (splitCoverageAmount slice) — the tier-extension credit derives from
+  // what was PAID, never the undiscounted estimated_price.
+  if (cols.prepaid_amount) selectCols.push('prepaid_amount');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
@@ -460,6 +464,7 @@ module.exports = {
   TERMINAL_STATUSES,
   toQualifyingKey,
   toQualifyingKeys,
+  filterRowsToStreet,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysForRow,

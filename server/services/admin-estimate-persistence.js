@@ -21,7 +21,7 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
-const { loadExistingQualifyingServiceKeys, isActivePlanCustomer } = require('./waveguard-existing-services');
+const { loadExistingQualifyingServiceKeys, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
@@ -1811,6 +1811,29 @@ async function resolveEstimateWritePayload({
       membershipSnapshot = await computeMembershipContext(database, {
         customerId: body.customerId,
         estData: trustedEstimateData,
+        // The snapshot sees exactly the rows the priors lookup above priced
+        // with (codex #3338 r22): grouped estimates scope to the quoted
+        // street; a grouped estimate whose street could not be parsed
+        // priced with NO priors, so the snapshot sees none either. The
+        // primary-address lane prices priors ACCOUNT-WIDE (long-standing),
+        // so its tier context stays account-wide to match — but its frozen
+        // PLAN is still bounded to the quoted street (codex #3338 r8): a
+        // multi-property customer's other-property series must never be
+        // frozen (or later repriced) by a primary-address estimate.
+        ...(groupedEstimate
+          ? (perPropertyStreetScope
+            ? { streetScope: perPropertyStreetScope }
+            : { excludeExistingRows: true })
+          : (perPropertyStreetScope
+            ? { extensionStreetScope: perPropertyStreetScope }
+            : {})),
+        // This lane resolves property scope, so it may freeze an
+        // existing-service extension plan — but only when the quoted street
+        // actually resolved (no parsed street = no way to bound the plan =
+        // review-bell fallback, fail closed). Agent lanes (IB estimate
+        // tools, estimator engine) pass no scope and deliberately stay
+        // plan-less (codex #3338 r7).
+        freezeExtensionPlan: !!perPropertyStreetScope,
       });
       if (membershipSnapshot) trustedEstimateData.membershipSnapshot = membershipSnapshot;
       else delete trustedEstimateData.membershipSnapshot;
@@ -1848,6 +1871,78 @@ async function resolveEstimateWritePayload({
   };
 }
 
+// Save-time member-linkage guard (workstream-1 hardening, 2026-08-10): the
+// combined-tier machinery only engages when the builder LINKS the customer
+// (body.customerId) — the auto-link needs Lookup to run AND the typed
+// address to contain the stored street, and missing either silently prices
+// an active member's add-on estimate as a new lead (no combined tier, no
+// member card, full setup fee), with nothing anywhere saying so. Detect
+// that shape server-side and hand the builder a warning to surface.
+// Read-only, fail-soft, response-only: never blocks the save, never
+// persists, never auto-links (an in-place revise must not silently move a
+// row between accounts — the operator confirms and re-saves).
+async function detectUnlinkedMemberAddress(database, body = {}) {
+  try {
+    if (body.customerId || !body.address) return null;
+    const street = String(body.address).split(',')[0].trim();
+    const houseNumber = (street.match(/^\d{1,6}/) || [])[0];
+    if (!houseNumber || street.length < 6) return null;
+    // House-number prefix narrows cheaply; the street comparator (the same
+    // canonical one the membership snapshot uses) decides the real match.
+    const { sameStreetAddress } = require('./estimator-engine/address-compare');
+    // Bounded but generous (codex #3338 r17): a common house number can
+    // match many active addresses, and an unordered small limit could drop
+    // the true member before the street comparator runs. 50 per leg with a
+    // deterministic order keeps the scan bounded while making a same-house-
+    // number collision that deep implausible.
+    const candidates = await database('customers')
+      .where((q) => q.where('active', true).orWhereNull('active'))
+      .whereNull('deleted_at')
+      .where('address_line1', 'ilike', `${houseNumber} %`)
+      .orderBy('id')
+      .limit(50)
+      .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip', 'waveguard_tier', 'monthly_rate');
+    // A member's NON-PRIMARY addresses live in customer_properties, not
+    // customers.address_line1 (codex #3338 r12) — a secondary-property
+    // estimate must warn the same way. Best-effort: environments without
+    // the table just skip this leg.
+    try {
+      const propertyCandidates = await database('customer_properties as cp')
+        .join('customers as c', 'cp.customer_id', 'c.id')
+        .where('cp.active', true)
+        .where((q) => q.where('c.active', true).orWhereNull('c.active'))
+        .whereNull('c.deleted_at')
+        .where('cp.address_line1', 'ilike', `${houseNumber} %`)
+        .orderBy('cp.id')
+        .limit(50)
+        .select(
+          'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate',
+          'cp.address_line1', 'cp.city', 'cp.zip',
+        );
+      candidates.push(...propertyCandidates);
+    } catch (propErr) {
+      logger.warn(`[admin-estimate] unlinked-member property-address leg skipped: ${propErr.message}`);
+    }
+    for (const candidate of candidates) {
+      if (!candidate.address_line1) continue;
+      const candidateAddress = [candidate.address_line1, candidate.city, candidate.zip].filter(Boolean).join(', ');
+      if (!sameStreetAddress(candidateAddress, body.address)) continue;
+      if (!isMembershipCustomerRow(candidate)) continue;
+      const name = `${candidate.first_name || ''} ${candidate.last_name || ''}`.trim() || 'an active member';
+      return {
+        customerId: candidate.id,
+        customerName: name,
+        waveguardTier: candidate.waveguard_tier || null,
+        message: `This address matches ${name}'s account${candidate.waveguard_tier ? ` (WaveGuard ${candidate.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — member pricing (combined WaveGuard tier) was NOT applied. Link the customer and save again to price at the member rate.`,
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[admin-estimate] unlinked-member address check skipped: ${err.message}`);
+    return null;
+  }
+}
+
 async function createOrReuseAdminEstimate({
   database = db,
   body,
@@ -1867,6 +1962,7 @@ async function createOrReuseAdminEstimate({
     recompute,
   });
   const expiresAt = estimateExpiresAt(now);
+  const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
@@ -1916,6 +2012,7 @@ async function createOrReuseAdminEstimate({
           return {
             estimate: updated,
             reused: true,
+            memberLinkageWarning,
           };
         }
 
@@ -1952,6 +2049,7 @@ async function createOrReuseAdminEstimate({
     return {
       estimate: created,
       reused: false,
+      memberLinkageWarning,
     };
   });
 }
@@ -2084,6 +2182,12 @@ async function reviseAdminEstimate({
   // The builder may reopen an estimate whose contact/customer linkage it did
   // not capture (auto-send or agent-drafted rows) — never let a blank field in
   // the edit payload sever the row's existing linkage or satellite snapshot.
+  // Same unlinked-member guard as creation, against the EFFECTIVE linkage
+  // (a linked row stays linked through a blank edit payload — see below).
+  const memberLinkageWarning = await detectUnlinkedMemberAddress(database, {
+    customerId: body.customerId || estimate.customer_id || null,
+    address: body.address,
+  });
   const writeFields = await resolveEstimateWritePayload({
     database,
     body: {
@@ -2280,7 +2384,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return { estimate: { ...estimate, ...writeFields }, dryRun: true };
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning };
   }
 
   // Atomic revise guard: the editability check above ran on a pre-read, so
@@ -2393,10 +2497,11 @@ async function reviseAdminEstimate({
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }
   clearEstimatePricingCache(estimate.id);
-  return { estimate: updated };
+  return { estimate: updated, memberLinkageWarning };
 }
 
 module.exports = {
+  detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
