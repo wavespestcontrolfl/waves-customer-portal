@@ -636,6 +636,23 @@ function useLawnHealth(customerId) {
 }
 
 // =========================================================================
+// PROPERTY SCORE HOOK — unified property health (dark behind
+// GATE_PROPERTY_SCORE; gate-off answers available:false and the card
+// renders nothing). Best-effort: a failed load just hides the card.
+// =========================================================================
+function usePropertyScore() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.getPropertyScore()
+      .then(d => { if (!cancelled && d?.available) setData(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return data;
+}
+
+// =========================================================================
 // BEFORE / AFTER PHOTO COMPARISON SLIDER — real S3 photos or gradient fallback
 // =========================================================================
 function BeforeAfterSlider({ beforeAfter }) {
@@ -807,6 +824,100 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         {label && <div style={{ fontSize: 9, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
       </div>
     </div>
+  );
+}
+
+// =========================================================================
+// PROPERTY SCORE CARD — one card, every protection domain. Condition
+// components carry numbers from their own engines; protection components
+// (termite/mosquito) show presence; irrigation shows the snapshot status.
+// "Not monitored" is deliberately quiet copy — factual, not a pitch.
+// =========================================================================
+function PropertyScoreCard({ data, compact }) {
+  if (!data?.available) return null;
+  const components = data.components || [];
+  const overall = data.overall || {};
+  const anyContent = overall.score != null || components.some(c => c && c.status !== 'not_monitored');
+  if (!anyContent) return null;
+
+  const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
+  const muted = PORTAL_SHELL.muted;
+  const labelStyle = {
+    fontSize: 14, fontWeight: 850, color: B.glassNavy,
+    textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: FONTS.heading,
+  };
+  const TONES = {
+    good: { background: '#F0FDF4', border: '#BBF7D0', color: B.glassNavy },
+    watch: { background: '#FFF7ED', border: '#FED7AA', color: '#9A3412' },
+    quiet: { background: GLASS_SUBTLE, border: PORTAL_SHELL.border, color: muted },
+  };
+  const scoreTone = (score) => (score >= 75 ? 'good' : score >= 50 ? 'watch' : 'watch');
+
+  const chipFor = (c) => {
+    if (c.status === 'scored' && c.key === 'pest' && c.pressure != null) {
+      const text = `${Number(c.pressure).toFixed(1)}/${c.maxPressure || 5}${c.pressureLabel ? ` ${c.pressureLabel}` : ''}`;
+      return { text, tone: c.score != null ? scoreTone(c.score) : 'quiet' };
+    }
+    if (c.status === 'scored' && c.score != null) return { text: String(c.score), tone: scoreTone(c.score) };
+    if (c.status === 'active') return { text: 'Active', tone: 'good' };
+    if (c.status === 'pending') return { text: 'Coming soon', tone: 'quiet' };
+    if (c.status === 'status') {
+      if (c.waterStatus === 'balanced') return { text: 'On track', tone: 'good' };
+      return { text: 'Watch', tone: 'watch' };
+    }
+    return { text: 'Not monitored', tone: 'quiet' };
+  };
+
+  const deltaLine = overall.delta == null ? null
+    : overall.delta > 0 ? `Up ${overall.delta} point${overall.delta === 1 ? '' : 's'} since your last visits`
+    : overall.delta < 0 ? `Down ${Math.abs(overall.delta)} point${overall.delta === -1 ? '' : 's'} since your last visits`
+    : 'Holding steady since your last visits';
+
+  return (
+    <section data-glass="card" style={{ ...card, padding: 20 }}>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        {overall.score != null && <ScoreRing score={overall.score} size={72} stroke={6} />}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={labelStyle}>Property Health</div>
+          {deltaLine && (
+            <div style={{ marginTop: 6, fontSize: 14, fontWeight: 700, color: overall.delta >= 0 ? B.green : B.orange }}>
+              {deltaLine}
+            </div>
+          )}
+          {data.rain?.note && (
+            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{data.rain.note}</div>
+          )}
+        </div>
+      </div>
+      <div style={{
+        marginTop: 16, display: 'grid', gap: compact ? 8 : 10,
+        gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+      }}>
+        {components.map((c) => {
+          const chip = chipFor(c);
+          const tone = TONES[chip.tone];
+          return (
+            <div key={c.key} style={{
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10,
+              padding: '10px 12px', borderRadius: 8,
+              background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+            }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{c.label}</div>
+                {c.reason && <div style={{ marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.4 }}>{c.reason}</div>}
+              </div>
+              <div style={{
+                flexShrink: 0, padding: '3px 10px', borderRadius: 999,
+                background: tone.background, border: `1px solid ${tone.border}`, color: tone.color,
+                fontSize: 12, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+              }}>
+                {chip.text}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -1624,6 +1735,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
+  // Unified Property Score (GATE_PROPERTY_SCORE) — null until the gate is on
+  // and the load succeeds, so the card costs nothing while dark.
+  const propertyScore = usePropertyScore();
   const tier = TIER[customer.tier];
   // 0% is not a perk — the At-a-Glance sub shows the plan name instead of
   // advertising "0% discount" (eyeball 07-12). >0% keeps the discount line.
@@ -1969,6 +2083,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           ))}
         </div>
       </section>
+
+      <PropertyScoreCard data={propertyScore} compact={compact} />
 
       {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
