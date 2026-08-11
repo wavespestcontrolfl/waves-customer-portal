@@ -2747,7 +2747,6 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     const extGrants = await conn('customer_credit_ledger')
       .where({ created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
       .where('delta', '>', 0)
-      .whereNotNull('invoice_id')
       .select('customer_id', 'note', 'invoice_id');
     const seenTerms = new Set();
     for (const grant of extGrants) {
@@ -2757,10 +2756,26 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       const termId = termMatch ? termMatch[1] : null;
       if (!termId || seenTerms.has(termId)) continue;
       seenTerms.add(termId);
+      // UNANCHORED grants recover too (pre-push P0, codex r5 round): the
+      // accept path posts the grant with invoice_id null when its
+      // best-effort prepay-invoice lookup failed — filtering on the ledger
+      // anchor would leave exactly those grants without any sweep
+      // recovery. Resolve the anchor from the term's CURRENT prepay
+      // invoice instead; a term with no linked prepay invoice (legacy
+      // born-active) has no refundable anchor to detect and keeps its
+      // historical covered semantics.
+      let anchorInvoiceId = grant.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
       // Cheap unlocked pre-check keeps the common case (anchor still
       // collectible) out of the locked path entirely.
       const anchorInvoice = await conn('invoices')
-        .where({ id: grant.invoice_id })
+        .where({ id: anchorInvoiceId })
         .first('id', 'status');
       if (!anchorInvoice) continue;
       const anchorStatus = String(anchorInvoice.status || '').toLowerCase();
@@ -2799,7 +2814,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
           .first('id');
         if (!lockedCustomer) return 0;
         const lockedAnchor = await t('invoices')
-          .where({ id: grant.invoice_id })
+          .where({ id: anchorInvoiceId })
           .forUpdate()
           .first('id', 'status');
         if (!lockedAnchor) return 0;
@@ -2836,7 +2851,6 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     const datedLoopTermIds = new Set(terms.map((term) => String(term.id)));
     const reversalRows = await conn('customer_credit_ledger')
       .where({ created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
-      .whereNotNull('invoice_id')
       .select('customer_id', 'note', 'invoice_id');
     const seenRestoreTerms = new Set();
     for (const reversal of reversalRows) {
@@ -2847,10 +2861,22 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       // The dated loop already ran the restore for covered-today terms —
       // this pass owns only the terms outside today's window.
       if (datedLoopTermIds.has(String(termId))) continue;
+      // Unanchored reversals resolve their anchor from the term's current
+      // prepay invoice — same recovery contract as the clawback pass above
+      // (pre-push P0, codex r5 round): a reversal inherits its grant's
+      // null invoice_id when the accept-time anchor lookup failed.
+      let anchorInvoiceId = reversal.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
       // Cheap unlocked pre-check keeps the common case (anchor still
       // refunded — nothing to restore) out of the locked path entirely.
       const anchorInvoice = await conn('invoices')
-        .where({ id: reversal.invoice_id })
+        .where({ id: anchorInvoiceId })
         .first('id', 'status', 'paid_at');
       if (!anchorInvoice) continue;
       const anchorPaid = String(anchorInvoice.status || '').toLowerCase() === 'paid'
@@ -2868,7 +2894,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
           .first('id');
         if (!lockedCustomer) return 0;
         const lockedAnchor = await t('invoices')
-          .where({ id: reversal.invoice_id })
+          .where({ id: anchorInvoiceId })
           .forUpdate()
           .first('id');
         if (!lockedAnchor) return 0;
