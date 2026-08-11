@@ -614,14 +614,45 @@ describe('annual prepay renewal helpers', () => {
     expect(palmCheck).toBeGreaterThan(-1);
     expect(slidePersist).toBeGreaterThan(-1);
     expect(palmCheck).toBeLessThan(slidePersist);
-    // And refreshTermSnapshot HARD-STOPS on a palm deferral (codex r18
-    // pre-push P1): attach/prepay-stamp must not run while adopted visits
-    // still carry the one-time identity.
-    const deferGuard = src.indexOf('const palmDeferred = ensured?.reason');
-    const attachCall = src.indexOf('await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);');
-    expect(deferGuard).toBeGreaterThan(-1);
-    expect(attachCall).toBeGreaterThan(deferGuard);
-    expect(src).toContain('if (!palmDeferred) {');
+    // And refreshTermSnapshot runs attach + prepaid stamping even on a
+    // palm deferral (codex r18 pre-push P0, superseding the earlier
+    // hard-stop): the prepaid stamp is the anti-double-bill mechanism —
+    // an already-booked palm visit left unstamped would invoice at
+    // completion after the prepay was collected. Identity stays
+    // quarantined via the durable coverage exception.
+    expect(src).not.toContain('palmDeferred');
+    expect(src).toContain('Attach + prepaid stamping run even on a palm-identity DEFERRAL');
+  });
+
+  test('a palm term with a NON-semiannual coverage cadence defers with an exception — nothing seeds (codex r18 pre-push P1)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
+      notifications: [query({ first: undefined })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-badcadence',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+      coverage_cadence: 'monthly',
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      reason: 'palm_coverage_cadence_invalid',
+      effectiveTermEnd: '2027-06-15',
+    });
   });
 
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {

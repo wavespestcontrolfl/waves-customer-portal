@@ -670,70 +670,94 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   let coverageCatalogServiceId = null;
   let coverageCatalogKey = null;
   let staleOneTimePalmId = null;
-  if (coverageCadence === 'semiannual') {
+  // Palm detection runs INDEPENDENTLY of the coverage cadence (codex r18
+  // pre-push P1): nesting it under `=== 'semiannual'` let an admin-created
+  // palm term with an explicit monthly/quarterly cadence bypass the
+  // identity guard entirely and seed name-only visits at the wrong
+  // cadence. Detection uncertainty counts as palm when the type names
+  // palm (word-boundary — 'Palmetto…' never trips it).
+  let coverageIsPalm = false;
+  try {
+    const { seedingFamilyKey } = require('./estimate-converter');
+    coverageIsPalm = seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection';
+  } catch (familyErr) {
+    logger.warn(`[annual-prepay] term ${term.id}: palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
+    coverageIsPalm = /\bpalm\b/i.test(String(coverageServiceType));
+  }
+  if (coverageIsPalm) {
+    // Palm coverage is semiannual-only (owner ruling 2026-08-11): any
+    // other recorded cadence is invalid term data — seeding it would
+    // create the wrong series AND misfile completions to the one-time
+    // profile. Defer with a durable exception; nothing is created.
+    if (coverageCadence !== 'semiannual') {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage records cadence '${coverageCadence}' — palm is semiannual-only, deferring (fail closed)`);
+      await fileCoverageException(term, 'palm_coverage_cadence_invalid',
+        `This palm term records a '${coverageCadence}' coverage cadence, but the palm program is semiannual-only — correct the term's coverage cadence, then re-save to seed its visits.`);
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        effectiveTermEnd: termEnd,
+        reason: 'palm_coverage_cadence_invalid',
+      };
+    }
     try {
-      const { seedingFamilyKey } = require('./estimate-converter');
-      if (seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection') {
-        const catalogRow = await conn('services')
-          .where({ service_key: 'palm_injection_semiannual' })
-          .first('id', 'service_key');
-        if (catalogRow?.id) {
-          coverageCatalogServiceId = catalogRow.id;
-          coverageCatalogKey = catalogRow.service_key;
-          // The one-time palm row's id (codex r16 P1): an adopted legacy
-          // visit booked before the recurring row existed can carry it
-          // (estimate-public preserves ids on adoption), and completion
-          // trusts the id first. In this definitively semiannual coverage
-          // context that KNOWN id is stale — the backfill below retargets
-          // it, mirroring the converter's reserved-parent relink.
-          const oneTimeRow = await conn('services')
-            .where({ service_key: 'palm_injection' })
-            .first('id');
-          staleOneTimePalmId = oneTimeRow?.id || null;
-        } else {
-          // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
-          // visits would knowingly hand them the one-time completion/
-          // billing posture. Defer — ensureCoverageRowsForTerm is
-          // idempotent and re-runs on every term refresh, and the deduped
-          // coverage exception keeps it office-visible until then.
-          logger.error(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row missing — deferring palm coverage seeding (fail closed)`);
-          await fileCoverageException(term, 'palm_catalog_missing',
-            'The recurring palm catalog row (palm_injection_semiannual) is missing, so this term\'s prepaid palm visits were NOT created. Restore the catalog row (migration 20260811000010); the next term refresh seeds them automatically.');
-          return {
-            createdCount: 0,
-            targetDates,
-            existingCount: existingRows.length,
-            createdRows: [],
-            // The ORIGINAL term end (codex r18 pre-push P0): this deferral
-            // runs before the late-payment slide persists, and the caller
-            // trusts any returned effectiveTermEnd for attach/prepay/renewal
-            // work — exposing the unpersisted slide would suppress billing
-            // through a window annual_prepay_terms does not record.
-            effectiveTermEnd: termEnd,
-            reason: 'palm_catalog_missing',
-          };
-        }
-      }
-    } catch (err) {
-      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link skipped: ${err.message}`);
-      // Unknown identity state = fail closed for palm too (word-boundary
-      // test so 'Palmetto…' coverage never trips this).
-      if (/\bpalm\b/i.test(String(coverageServiceType))) {
+      const catalogRow = await conn('services')
+        .where({ service_key: 'palm_injection_semiannual' })
+        .first('id', 'service_key');
+      if (catalogRow?.id) {
+        coverageCatalogServiceId = catalogRow.id;
+        coverageCatalogKey = catalogRow.service_key;
+        // The one-time palm row's id (codex r16 P1): an adopted legacy
+        // visit booked before the recurring row existed can carry it
+        // (estimate-public preserves ids on adoption), and completion
+        // trusts the id first. In this definitively semiannual coverage
+        // context that KNOWN id is stale — the backfill below retargets
+        // it, mirroring the converter's reserved-parent relink.
+        const oneTimeRow = await conn('services')
+          .where({ service_key: 'palm_injection' })
+          .first('id');
+        staleOneTimePalmId = oneTimeRow?.id || null;
+      } else {
+        // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
+        // visits would knowingly hand them the one-time completion/
+        // billing posture. Defer — ensureCoverageRowsForTerm is
+        // idempotent and re-runs on every term refresh, and the deduped
+        // coverage exception keeps it office-visible until then. Runs
+        // BEFORE the term-end slide persists (codex r17 pre-push P1) so
+        // repeated deferrals never extend the coverage window.
+        logger.error(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row missing — deferring palm coverage seeding (fail closed)`);
         await fileCoverageException(term, 'palm_catalog_missing',
-          'The recurring palm catalog identity could not be verified while seeding this term\'s prepaid visits — seeding deferred; the next term refresh retries automatically.');
+          'The recurring palm catalog row (palm_injection_semiannual) is missing, so this term\'s prepaid palm visits were NOT created. Restore the catalog row (migration 20260811000010); the next term refresh seeds them automatically.');
         return {
           createdCount: 0,
           targetDates,
           existingCount: existingRows.length,
           createdRows: [],
-          // Original term end — same rule as the deferral above.
+          // The ORIGINAL term end: this deferral runs before the
+          // late-payment slide persists, and the caller trusts any
+          // returned effectiveTermEnd for downstream window math.
           effectiveTermEnd: termEnd,
           reason: 'palm_catalog_missing',
         };
       }
+    } catch (err) {
+      // Unknown identity state = fail closed for palm too.
+      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link failed (${err.message}) — deferring`);
+      await fileCoverageException(term, 'palm_catalog_missing',
+        'The recurring palm catalog identity could not be verified while seeding this term\'s prepaid visits — seeding deferred; the next term refresh retries automatically.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — same rule as the deferral above.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_catalog_missing',
+      };
     }
   }
-
 
   // Shared palm identity backfill (codex r15/r16/r17/r18 rounds): rows
   // the seeder matched or adopted still resolve the ONE-TIME catalog row
@@ -1978,27 +2002,22 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
-    // A palm-identity deferral is a HARD STOP for this refresh (codex r18
-    // pre-push P1): attaching and prepay-stamping adopted visits while
-    // their identity is still the one-time palm row would hand them the
-    // one-time billing posture the deferral exists to prevent. Both hard
-    // reasons defer BEFORE any visit is created, so no correctly-seeded
-    // row is left unstamped by stopping here (codex r18 pre-push P0).
-    // 'palm_concurrent_backfill_failed' deliberately does NOT stop: the
-    // newly inserted visits carry the correct identity and must be
-    // stamped; the one unresolved adopted row is quarantined via its
-    // durable coverage exception instead.
-    const palmDeferred = ensured?.reason === 'palm_catalog_missing'
-      || ensured?.reason === 'palm_identity_backfill_failed';
-    if (!palmDeferred) {
-      await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
-      await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
-      // Callers sync customers.waveguard_renewal_date from the PRE-slide end
-      // (or their own normalizedEnd), so renewal workflows would fire while
-      // coverage is still running — re-sync from the slid end here.
-      if (windowEnd !== termEnd) {
-        await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
-      }
+    // Attach + prepaid stamping run even on a palm-identity DEFERRAL
+    // (codex r18 pre-push P0, superseding the earlier hard-stop): the
+    // prepaid stamp is the anti-double-bill mechanism — an already-booked
+    // palm visit left unstamped would invoice at completion after the
+    // annual prepay was collected. The MONEY layer therefore always runs;
+    // the identity problem (wrong completion profile posture) remains
+    // quarantined by the deferral's durable coverage exception until the
+    // next refresh restores the catalog identity and re-runs this
+    // sequence idempotently.
+    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    // Callers sync customers.waveguard_renewal_date from the PRE-slide end
+    // (or their own normalizedEnd), so renewal workflows would fire while
+    // coverage is still running — re-sync from the slid end here.
+    if (windowEnd !== termEnd) {
+      await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
     }
   }
   const coveredRows = coverageServiceType && coverageVisitCount
