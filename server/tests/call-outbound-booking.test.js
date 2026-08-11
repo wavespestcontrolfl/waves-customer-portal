@@ -21,7 +21,11 @@ const {
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('../services/call-booking-source-actions');
-const { runOutboundReviewConfirmHook, activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+const {
+  runOutboundReviewConfirmHook,
+  activateLegacyOutboundReviewRowIfNeeded,
+  sweepStrandedLegacyOutboundActivations,
+} = require('../services/outbound-review-confirm');
 const { transitionJobStatus } = require('../services/job-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
@@ -210,6 +214,30 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     // UPDATE keeps the stamp itself at-most-once.
     const db = makeDb({ ...legacyRow }, { stampRows: 0 });
     expect(await activateLegacyOutboundReviewRowIfNeeded(db, 'svc1', 'test')).toBe(false);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+  });
+
+  test('the hourly sweep activates a worked-but-unstamped legacy row (durable retry, Codex r5 P1)', async () => {
+    const state = { updates: [] };
+    const workedRow = { ...legacyRow, status: 'completed' };
+    const fn = (table) => {
+      const q = {};
+      ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
+        'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' ? [{ id: 'svc1' }] : []));
+      q.first = jest.fn(async () => (table === 'scheduled_services' ? { ...workedRow } : null));
+      q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return 1; });
+      q.insert = jest.fn(async () => 1);
+      q.del = jest.fn(async () => 1);
+      return q;
+    };
+    fn.fn = { now: () => new Date() };
+    fn.transaction = async (cb) => cb(fn);
+    fn.raw = jest.fn(async () => ({}));
+
+    const result = await sweepStrandedLegacyOutboundActivations(fn, { limit: 5 });
+    expect(result).toEqual({ candidates: 1, activated: 1 });
+    expect(state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
   });
 });

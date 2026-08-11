@@ -1117,6 +1117,18 @@ class SmartRebooker {
       logger.warn(`[rebooker] series escalation check failed for ${serviceId}: ${err.message}`);
     }
 
+    // Same legacy-activation seam as the single-visit path (Codex #3361 r5
+    // P0): the series update writes scheduled_services directly — a LEGACY
+    // outbound-review anchor moved (and possibly texted) here would stay
+    // customer_confirmed=false with its reminders, lead, and review card
+    // stranded. Best-effort post-commit, at-most-once via the helper.
+    try {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
+    } catch (activateErr) {
+      logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+    }
+
     return {
       success: true,
       originalDate: service.scheduled_date,

@@ -683,6 +683,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Stranded legacy outbound-review activation backstop (PR #3361, Codex r5
+  // P1): a worked pre-hold-removal review row whose post-commit activation
+  // was lost to a process exit has no promised later touch — this hourly
+  // sweep is the durable retry. Not gated: it is a correctness backstop for
+  // a removed lane, the query is tiny, and the legacy population only
+  // shrinks (runs become free no-ops once it drains).
+  cron.schedule('18 * * * *', async () => {
+    try {
+      await runExclusive('legacy-outbound-activation-sweep', async () => {
+        await require('./outbound-review-confirm').sweepStrandedLegacyOutboundActivations();
+      });
+    } catch (err) {
+      logger.error(`[legacy-activation-sweep] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {

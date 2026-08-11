@@ -17,6 +17,7 @@
  */
 
 const logger = require('./logger');
+const db = require('../models/db');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -286,4 +287,43 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
   }
 }
 
-module.exports = { runOutboundReviewConfirmHook, activateLegacyOutboundReviewRowIfNeeded };
+/**
+ * Hourly backstop for stranded legacy activations (Codex #3361 r5 P1): the
+ * per-path lazy activations (transitionJobStatus, the reschedule writers,
+ * the call-pipeline reuse paths) are fast paths, not the guarantee — a
+ * process exit between a transition's commit and its post-commit activation
+ * leaves a WORKED legacy row (confirmed/moved/en_route/completed/no_show)
+ * permanently unstamped with no later touch promised. This re-derives the
+ * obligation from persisted state: any un-confirmed outbound-review row
+ * whose status shows it was accepted or worked — anything but the untouched
+ * 'pending' park and the cancel/skip rejections — activates through the same
+ * hook-first helper. Idempotent (the helper's guarded stamp), bounded per
+ * run, and self-terminating: the legacy population only shrinks, so runs
+ * become free no-ops. Untouched pending rows are deliberately NOT swept —
+ * an unworked legacy booking still waits for the office (or its first
+ * touch).
+ */
+async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } = {}) {
+  const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+  const rows = await dbh('scheduled_services')
+    .where({ source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false })
+    .whereNotIn('status', ['pending', 'cancelled', 'skipped'])
+    .limit(limit)
+    .select('id');
+  let activated = 0;
+  for (const row of rows) {
+    if (await activateLegacyOutboundReviewRowIfNeeded(dbh, row.id, 'legacy-activation-sweep')) {
+      activated += 1;
+    }
+  }
+  if (rows.length) {
+    logger.info(`[legacy-activation-sweep] activated ${activated}/${rows.length} stranded legacy outbound-review rows`);
+  }
+  return { candidates: rows.length, activated };
+}
+
+module.exports = {
+  runOutboundReviewConfirmHook,
+  activateLegacyOutboundReviewRowIfNeeded,
+  sweepStrandedLegacyOutboundActivations,
+};
