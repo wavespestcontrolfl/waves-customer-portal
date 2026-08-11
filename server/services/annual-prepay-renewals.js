@@ -384,6 +384,19 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   return dates;
 }
 
+// Palm coverage family detection, shared by coverage matching and the
+// seeding identity guard (codex r18 pre-push P0/P1): word-boundary
+// fallback keeps 'Palmetto…' service types out when the resolver errors.
+function coverageFamilyIsPalm(coverageServiceType) {
+  try {
+    const { seedingFamilyKey } = require('./estimate-converter');
+    return seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection';
+  } catch (familyErr) {
+    logger.warn(`[annual-prepay] palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
+    return /\bpalm\b/i.test(String(coverageServiceType || ''));
+  }
+}
+
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -403,7 +416,30 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? rows
     : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  const matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  const isCommittedToTerm = (row) =>
+    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // PALM coverage candidates require identity or provenance (codex r18
+  // pre-push P0): matching is by service-type TEXT, and Waves sells
+  // genuine one-time palm injections — a name-matched one-time
+  // appointment inside the term window must never be adopted into
+  // prepaid coverage (attach + stamping both read this set, and the
+  // stamp would suppress its separate completion invoice). A palm row
+  // qualifies only when it CARRIES the recurring identity (id or
+  // snapshot) or already belongs to this term; ambiguous rows are
+  // excluded and the seeder creates a correctly-identified visit
+  // instead (fail closed).
+  if (coverageFamilyIsPalm(coverageServiceType)) {
+    let semiannualPalmId = null;
+    try {
+      semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
+    } catch { semiannualPalmId = null; }
+    const carriesRecurringPalmIdentity = (row) =>
+      (semiannualPalmId && row.service_id === semiannualPalmId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
+    matching = matching.filter((row) => carriesRecurringPalmIdentity(row) || isCommittedToTerm(row));
+  }
   if (matching.length <= coverageVisitCount) return matching;
 
   // More matching candidates than sold visits: keep the visits already committed
@@ -413,9 +449,6 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // leaving more than coverageVisitCount visits prepaid and skipping completion
   // billing on the extra work. Fill any remaining slots with the earliest
   // uncommitted matches, then return the selection in date order.
-  const isCommittedToTerm = (row) =>
-    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
-    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   const selectedIds = new Set(
     [...matching.filter(isCommittedToTerm), ...matching.filter((row) => !isCommittedToTerm(row))]
       .slice(0, coverageVisitCount)
@@ -676,14 +709,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // identity guard entirely and seed name-only visits at the wrong
   // cadence. Detection uncertainty counts as palm when the type names
   // palm (word-boundary — 'Palmetto…' never trips it).
-  let coverageIsPalm = false;
-  try {
-    const { seedingFamilyKey } = require('./estimate-converter');
-    coverageIsPalm = seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection';
-  } catch (familyErr) {
-    logger.warn(`[annual-prepay] term ${term.id}: palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
-    coverageIsPalm = /\bpalm\b/i.test(String(coverageServiceType));
-  }
+  const coverageIsPalm = coverageFamilyIsPalm(coverageServiceType);
   if (coverageIsPalm) {
     // Palm coverage is semiannual-only (owner ruling 2026-08-11): any
     // other recorded cadence is invalid term data — seeding it would
@@ -912,6 +938,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     return true;
   };
 
+  // Concurrent-adoption filter (codex r18 pre-push P0): same rule as
+  // coverageRowsForTerm — a palm row adopted under the occupancy lock
+  // must carry the recurring identity or already belong to this term,
+  // or a genuine one-time palm appointment on the same day would be
+  // swallowed into prepaid coverage.
+  const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+    && (!coverageIsPalm
+      || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
+      || (term?.id != null && String(row.annual_prepay_term_id) === String(term.id)));
+
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
@@ -941,7 +978,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
         if (concurrentAdoptable) return;
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate,
@@ -970,7 +1007,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
       } catch (recheckErr) {
         logger.warn(`[annual-prepay] term ${term.id} post-failure adoption recheck failed (${recheckErr.message})`);
       }

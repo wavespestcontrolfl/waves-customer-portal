@@ -438,6 +438,8 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), parentInsert, childInsert],
       services: [
+        // coverageRowsForTerm's palm identity filter looks the id up first.
+        query({ first: { id: 'cat-palm-semi' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -481,9 +483,13 @@ describe('annual prepay renewal helpers', () => {
         notes: {}, estimated_duration_minutes: {},
       },
     });
+    // Committed to THIS term: name-only rows without identity or
+    // provenance are excluded from palm coverage matching entirely
+    // (codex r18 pre-push P0 — a genuine one-time sale must never be
+    // adopted), so the legacy-adoption case is a term-attached row.
     const adoptedRow = {
       id: 'v-adopted', scheduled_date: '2026-06-15', service_type: 'Palm Injection',
-      service_id: null, status: 'pending',
+      service_id: null, annual_prepay_term_id: 'term-palm-adopt', status: 'pending',
     };
     const rowsQuery = query({ rows: [adoptedRow] });
     const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
@@ -491,6 +497,8 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
       services: [
+        // coverageRowsForTerm's palm identity filter looks the id up first.
+        query({ first: { id: 'cat-palm-semi' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -541,14 +549,20 @@ describe('annual prepay renewal helpers', () => {
       ],
     });
     const backfillUpdate = query({});
+    const replacementInsert = query({ returning: [{ id: 'svc-new', scheduled_date: '2026-12-15' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, replacementInsert],
       services: [
+        // coverageRowsForTerm's palm identity filter looks the id up first.
+        query({ first: { id: 'cat-palm-semi' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
     });
 
+    // The uncommitted one-time row is EXCLUDED from coverage matching, so
+    // coverage seeds a correctly-identified replacement visit instead of
+    // adopting the genuine one-time sale.
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-palm-stale',
       customer_id: 'customer-palm',
@@ -557,8 +571,8 @@ describe('annual prepay renewal helpers', () => {
       coverage_service_type: 'Palm Injection',
       coverage_visit_count: 2,
     }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
-      createdCount: 0,
-      existingCount: 2,
+      createdCount: 1,
+      existingCount: 1,
     });
 
     // Only the stale one-time id is retargeted — v-deliberate is excluded.
@@ -582,7 +596,7 @@ describe('annual prepay renewal helpers', () => {
     });
     setDbQueues({
       scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
-      services: [query({ first: undefined })],
+      services: [query({ first: undefined }), query({ first: undefined })],
       notifications: [query({ first: undefined })],
     });
 
@@ -638,6 +652,7 @@ describe('annual prepay renewal helpers', () => {
     });
     setDbQueues({
       scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
+      services: [query({ first: undefined })],
       notifications: [query({ first: undefined })],
     });
 
