@@ -801,14 +801,22 @@ async function applyFrozenExistingServiceExtension({
     // estimated_price when present, so a reprice that ignored it would
     // leave the invoice billing the old figure with no race at all.
     // FAIL CLOSED: if the lock cannot be taken, the family parks.
+    // The lock rides its own nested savepoint (guards round 1): a plain
+    // try/catch cannot un-abort a Postgres transaction — a failed SELECT
+    // would poison every later statement in this apply. The savepoint
+    // rollback restores the transaction; the ROW LOCKS a successful
+    // acquire takes survive the savepoint's release and persist to the end
+    // of the outer transaction, which is exactly the hold we need.
     let lockedFamilyById;
     try {
-      const lockedFamilyRows = await database('scheduled_services')
-        .whereIn('id', familyRows.map((row) => row.id))
-        .orderBy('id')
-        .forUpdate()
-        .select('id', 'estimated_price', 'primary_line_price');
-      lockedFamilyById = new Map(lockedFamilyRows.map((row) => [String(row.id), row]));
+      await database.transaction(async (lockSp) => {
+        const lockedFamilyRows = await lockSp('scheduled_services')
+          .whereIn('id', familyRows.map((row) => row.id))
+          .orderBy('id')
+          .forUpdate()
+          .select('id', 'estimated_price', 'primary_line_price');
+        lockedFamilyById = new Map(lockedFamilyRows.map((row) => [String(row.id), row]));
+      });
     } catch (lockErr) {
       logger.warn(`[estimate-converter] family row lock failed — parking ${svc.label || svc.key}: ${lockErr.message}`);
       summary.reviewFamilies.push(`${svc.label || svc.key} (could not lock appointments — apply manually)`);
@@ -1089,13 +1097,20 @@ async function applyFrozenExistingServiceExtension({
     }
     let prepayInvoiceByTerm = new Map();
     try {
-      const termRows = await database('annual_prepay_terms')
-        .whereIn('id', [...creditByTerm.keys()])
-        .select('id', 'prepay_invoice_id');
-      prepayInvoiceByTerm = new Map(termRows.map((row) => [String(row.id), row.prepay_invoice_id || null]));
+      // Nested savepoint, not a bare catch (guards round 1): a failed
+      // SELECT would abort the outer transaction and the marker-only
+      // fallback below could never post — the savepoint rollback is what
+      // actually makes this lookup best-effort. The marker alone still
+      // supports the in-line clawback; the grant just loses its
+      // sweep-recovery anchor.
+      await database.transaction(async (anchorSp) => {
+        const termRows = await anchorSp('annual_prepay_terms')
+          .whereIn('id', [...creditByTerm.keys()])
+          .select('id', 'prepay_invoice_id');
+        prepayInvoiceByTerm = new Map(termRows.map((row) => [String(row.id), row.prepay_invoice_id || null]));
+      });
     } catch (termErr) {
-      // Anchor lookup only — the marker alone still supports the in-line
-      // clawback; the grant just loses its sweep-recovery anchor.
+      prepayInvoiceByTerm = new Map();
       logger.warn(`[estimate-converter] prepay-invoice anchor lookup failed for extension credit: ${termErr.message}`);
     }
     for (const [termId, termCredit] of [...creditByTerm.entries()].sort(([a], [b]) => a.localeCompare(b))) {

@@ -2060,6 +2060,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // renewal-lapse (renewal_decision set) keeps its paid window, so the
       // whereNull guard leaves `updated` undefined and we don't clear.
       if (updated && updated.status === 'cancelled') {
+        // Lock order (deadlock guard, guards round 1): the accept
+        // transaction locks the CUSTOMER at entry, before the extension's
+        // scheduled_services family lock — while this leg would otherwise
+        // take scheduled_services locks (the stamp clears below) first and
+        // the customer (credit reversals) last. Same order both sides or a
+        // concurrent accept + refund for one customer can deadlock. On
+        // autocommit (conn === db) every statement is its own transaction
+        // and no multi-statement order exists to invert.
+        if (conn.isTransaction && updated.customer_id) {
+          await conn('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+        }
         await clearPrepaidStampsForTerm(term.id, conn);
         // Also reopen any per-visit invoices this term settled as NON-CASH coverage
         // (status='prepaid' by this term, or a partial with a coverage line) — the
@@ -2191,6 +2202,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       })
       .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
+      // Same customer-first lock order as the true-refund cancel branch
+      // above (deadlock guard vs the accept transaction).
+      if (conn.isTransaction && decided.customer_id) {
+        await conn('customers').where({ id: decided.customer_id }).forUpdate().first('id');
+      }
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
       // non-cash coverage — the refund voids their coverage too.

@@ -183,6 +183,9 @@ function fakeTrx({
     throw new Error(`unexpected table ${table}`);
   };
   database.isTransaction = true;
+  // Nested savepoints (family lock, anchor lookup) re-enter with the same
+  // client, the way knex hands the parent trx a savepoint-scoped clone.
+  database.transaction = async (cb) => cb(database);
   return { database, updates, auditRows };
 }
 
