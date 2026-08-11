@@ -40,8 +40,8 @@ const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
 
 // URL-shortener hosts. One shortened link in an SMS can burn the A2P 10DLC
 // registration, and A2P is non-resubmittable — this rule is downside
-// protection, not style. Matched as hostnames (word-boundary + '/'), never
-// as substrings of longer domains.
+// protection, not style. Matched as exact extracted hostnames (subdomains
+// of a shortener included), never as substrings of longer domains.
 const URL_SHORTENER_HOSTS = [
   'bit.ly', 'tinyurl.com', 'goo.gl', 't.co', 'ow.ly', 'is.gd', 'buff.ly',
   'rebrand.ly', 'cutt.ly', 'tiny.cc', 'rb.gy', 'shorturl.at', 'lnkd.in',
@@ -49,6 +49,26 @@ const URL_SHORTENER_HOSTS = [
 ];
 
 const SMS_SEGMENT_LIMIT = 2; // owner ruling: 2 segments is fine, 3+ is not
+
+/**
+ * Shortener host present in the text, or null. Compares extracted, exact
+ * hostnames (a shortener's own subdomains like www.tinyurl.com or a branded
+ * custom.bit.ly count; bit.ly.evil.com does not) — substring or word-boundary
+ * matching gets both of those wrong.
+ */
+function findShortenerHost(text) {
+  for (let tok of String(text || '').toLowerCase().split(/[\s<>()'"]+/)) {
+    tok = tok
+      .replace(/^[^a-z0-9]+/, '')
+      .replace(/^https?:\/\//, '')
+      .split(/[/?#:]/, 1)[0]
+      .replace(/[^a-z0-9]+$/, '');
+    if (!tok.includes('.')) continue;
+    const hit = URL_SHORTENER_HOSTS.find((h) => tok === h || tok.endsWith(`.${h}`));
+    if (hit) return hit;
+  }
+  return null;
+}
 
 // Bare-host detection for the SMS link-scheme rule. The ruling is
 // direction-specific: OUR portal link goes bare, every third-party link
@@ -115,8 +135,7 @@ const RULES = [
     name: 'no-url-shortener',
     applies: () => true,
     check: (text) => {
-      const lower = text.toLowerCase();
-      const hit = URL_SHORTENER_HOSTS.find((h) => new RegExp(`(?:^|[^a-z0-9.-])${h.replace(/\./g, '\\.')}(?:/|\\b)`).test(lower));
+      const hit = findShortenerHost(text);
       return hit ? `contains URL shortener "${hit}" — one shortened link can kill the A2P registration (non-resubmittable)` : null;
     },
   },

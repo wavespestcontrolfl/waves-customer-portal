@@ -58,6 +58,18 @@ describe('lintComms mechanics', () => {
     expect(r.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('flags www-prefixed and subdomain forms of a shortener host', () => {
+    for (const msg of ['Book at https://www.tinyurl.com/waves', 'Book at custom.bit.ly/waves']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');
+    }
+  });
+
+  it('does not flag a non-shortener host that merely starts with a shortener name', () => {
+    const r = lintComms('See https://bit.ly.evil.com/x for details', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
+  });
+
   it('flags any bare third-party host, not just g.page', () => {
     const r = lintComms('Leave us a review at trustpilot.com when you get a chance.', { channel: 'sms', audience: 'customer' });
     const hit = r.failures.find((f) => f.rule === 'portal-link-scheme');
