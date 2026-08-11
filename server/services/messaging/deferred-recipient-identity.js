@@ -38,10 +38,15 @@ function last10(v) {
  * @param {string} [args.label]                 log prefix
  * @returns {Promise<object>} metadata fragment to spread into the row's JSON:
  *   `{ refresh_customer_phone: true }` when the snapshot IS the account
- *   phone, `{ explicit_recipient: true }` otherwise. An unverifiable
- *   identity (lookup error, missing customer) FREEZES — falling back to a
- *   refresh would be a guess that can misdeliver, while freezing simply
- *   keeps the number the immediate send already used.
+ *   phone, `{ explicit_recipient: true }` when the account phone was READ
+ *   and differs (or the customer row is gone — a deterministic fact, not a
+ *   blip). A TRANSIENT lookup failure stamps
+ *   `{ recipient_identity_unverified: true }` (codex #3259 r24): freezing
+ *   on an error would assert "intentional alternate" about a number nobody
+ *   verified — if the snapshot WAS the account phone and the customer
+ *   changes it overnight, the frozen bearer link goes to the old number
+ *   under asserted customer trust. Unverified rows re-run the decision at
+ *   replay via resolveUnverifiedRecipient below.
  */
 async function recipientRefreshStamp({ customerId, recipientPhone, customerRow = null, label = 'deferred' }) {
   if (!customerId) return {};
@@ -55,9 +60,41 @@ async function recipientRefreshStamp({ customerId, recipientPhone, customerRow =
     }
     return { explicit_recipient: true };
   } catch (err) {
-    logger.warn(`[${label}] recipient identity check failed (${err.message}) — freezing the queued number`);
-    return { explicit_recipient: true };
+    logger.warn(`[${label}] recipient identity check failed (${err.message}) — deferring the refresh-vs-freeze decision to replay`);
+    return { recipient_identity_unverified: true };
   }
 }
 
-module.exports = { recipientRefreshStamp, last10 };
+/**
+ * Replay-side resolution for rows stamped `recipient_identity_unverified`.
+ *
+ * The enqueue-time question ("was the snapshot the account phone?") can only
+ * be safely re-answered here when the LIVE account phone still matches the
+ * snapshot — then refresh semantics apply and the live number is returned.
+ * A mismatch is genuinely ambiguous (customer changed their phone vs the
+ * snapshot was an explicit alternate all along), and either guess can hand
+ * a bearer link to the wrong person — so it does NOT send: returns
+ * { phone: null }, which the scheduled executor maps onto its existing
+ * bounded-retry-then-terminal rail (terminal hooks release once-ever claims
+ * so the backstop paths re-send fresh with a correctly classified
+ * recipient). A failed lookup here is also { phone: null } — retry.
+ *
+ * @returns {Promise<{ phone: string|null, reason?: string }>}
+ */
+async function resolveUnverifiedRecipient({ customerId, snapshotPhone, label = 'deferred' }) {
+  if (!customerId) return { phone: null, reason: 'no-customer' };
+  try {
+    const acct = await db('customers').where({ id: customerId }).first('phone');
+    const live = String(acct?.phone || '').trim();
+    if (live && last10(live) === last10(snapshotPhone)) {
+      return { phone: live };
+    }
+    logger.warn(`[${label}] unverified-recipient row for customer ${customerId} cannot be resolved (live phone ${live ? 'differs from' : 'missing vs'} snapshot) — holding, not sending`);
+    return { phone: null, reason: 'identity-unresolved' };
+  } catch (err) {
+    logger.warn(`[${label}] unverified-recipient lookup failed for customer ${customerId} (${err.message}) — holding for retry`);
+    return { phone: null, reason: 'lookup-failed' };
+  }
+}
+
+module.exports = { recipientRefreshStamp, resolveUnverifiedRecipient, last10 };

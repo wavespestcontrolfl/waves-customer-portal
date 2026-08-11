@@ -454,7 +454,7 @@ const REGISTRY = {
         if (!meta.scheduled_service_id) return { eligible: true };
         const svc = await db('scheduled_services')
           .where({ id: meta.scheduled_service_id })
-          .first('status', 'card_link_sent_at', 'customer_id');
+          .first('status', 'card_link_sent_at', 'customer_id', 'scheduled_date');
         if (!svc) return { eligible: false, reason: 'visit-missing' };
         const status = String(svc.status || '').toLowerCase();
         // The canonical request path's OWN live-status test: anything
@@ -467,6 +467,28 @@ const REGISTRY = {
         const { LIVE_VISIT_STATUSES } = require('../appointment-card-request');
         if (!LIVE_VISIT_STATUSES.includes(status)) {
           return { eligible: false, reason: `visit-${status}` };
+        }
+        // A card-capture link is a PRE-visit ask — once the appointment's
+        // ET instant has passed, texting the 64-hex bearer link is wrong
+        // even if the row is still 'pending' (an early visit's status often
+        // lags the tech's arrival; codex r24). scheduledServiceApptTime is
+        // the canonical DATE+TIME→ET composition; throwOnError so a lookup
+        // blip holds the row (outer catch → retryable) instead of reading
+        // as "no time → eligible". A row with no window_start falls back to
+        // the calendar-day test: same-day is still a useful pre-visit ask,
+        // an earlier day is not. Suppression runs onTerminal, releasing the
+        // claim + owned row so the previsit backstop re-evaluates fresh.
+        const { scheduledServiceApptTime } = require('../appointment-reminders');
+        const apptTime = await scheduledServiceApptTime(meta.scheduled_service_id, { throwOnError: true });
+        if (apptTime && Date.now() >= apptTime.getTime()) {
+          return { eligible: false, reason: 'visit-started' };
+        }
+        if (!apptTime) {
+          const ymd = svc.scheduled_date instanceof Date
+            ? svc.scheduled_date.toISOString().slice(0, 10)
+            : String(svc.scheduled_date || '').slice(0, 10);
+          const { etDateString } = require('../../utils/datetime-et');
+          if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
         }
         if (meta.card_claim_stamp) {
           const stampMs = new Date(meta.card_claim_stamp).getTime();
@@ -928,10 +950,10 @@ async function onTerminalDeferredReplay(entryPoint, claimMeta = {}) {
 // clear re-runs harmlessly.
 const TERMINAL_HOOK_MAX_ATTEMPTS = 5;
 
-async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}) {
+async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}, { alreadyClaimed = false } = {}) {
   const entry = entryFor(entryPoint);
   if (!entry || typeof entry.onTerminal !== 'function') return { ok: true };
-  if (msgId) {
+  if (msgId && !alreadyClaimed) {
     await db('sms_log').where({ id: msgId }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', true, 'terminal_attempts', COALESCE((metadata->>'terminal_attempts')::int, 0) + 1)"),
       updated_at: new Date(),
@@ -990,7 +1012,34 @@ async function sweepPendingTerminalHooks({ limit = 25, now = new Date() } = {}) 
       logger.error(`[deferred-replay] terminal hook ${meta.entry_point ? 'EXHAUSTED' : 'has no entry_point'} for ${row.id} (${meta.entry_point || 'unknown'}) — obligation handoff may need manual sync`);
       continue;
     }
-    const res = await runTerminalHookDurably(row.id, meta.entry_point, meta);
+    // Single-winner claim (codex r24): on a multi-pod deployment every
+    // scheduler tick runs this sweep, and an unclaimed row would have its
+    // hook run — and its five-attempt budget burned — once PER POD. The
+    // guarded UPDATE is the lease: it must still see terminal_pending,
+    // the exact attempt count this pod read, and an updated_at older than
+    // the age floor; the winner's attempt increment + updated_at bump
+    // makes every concurrent (and every next-5-minutes) claim miss.
+    // Missing terminal_attempts reads as 0 — rows stamped atomically at
+    // the executor's terminal flip carry only terminal_pending.
+    const attemptsRaw = Number.isFinite(Number(meta.terminal_attempts)) && meta.terminal_attempts != null
+      ? Number(meta.terminal_attempts) : 0;
+    let claimedRows = 0;
+    try {
+      claimedRows = await db('sms_log')
+        .where({ id: row.id })
+        .whereRaw("metadata->>'terminal_pending' = 'true'")
+        .whereRaw("COALESCE((metadata->>'terminal_attempts')::int, 0) = ?", [attemptsRaw])
+        .where('updated_at', '<', new Date(now.getTime() - 5 * 60 * 1000))
+        .update({
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_attempts', ?::int)", [attemptsRaw + 1]),
+          updated_at: new Date(),
+        });
+    } catch (err) {
+      logger.warn(`[deferred-replay] terminal-hook sweep claim failed for ${row.id}: ${err.message}`);
+      continue;
+    }
+    if (!claimedRows) continue;
+    const res = await runTerminalHookDurably(row.id, meta.entry_point, meta, { alreadyClaimed: true });
     if (res.ok) reran += 1;
   }
   return { candidates: rows.length, reran };

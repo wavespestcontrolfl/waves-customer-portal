@@ -112,14 +112,17 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
     expect(meta.explicit_recipient).toBe(true);
     expect(db._inserts[0].row.to_phone).toBe(EST.customer_phone);
 
-    // Unverifiable identity freezes too — the immediate path's own number,
-    // never a guessed refresh.
+    // Transient lookup failure defers the decision to replay (r24) —
+    // freezing would assert "intentional alternate" about a number nobody
+    // verified, and if the snapshot WAS the account phone the frozen
+    // bearer link could ride a number the customer changes overnight.
     db._inserts.length = 0;
     db._firstImpl = () => { throw new Error('db down'); };
     await sendDualChannel(EST, { sms: 'Follow-up body', email: EMAIL });
     meta = JSON.parse(db._inserts[0].row.metadata);
     expect(meta.refresh_customer_phone).toBeUndefined();
-    expect(meta.explicit_recipient).toBe(true);
+    expect(meta.explicit_recipient).toBeUndefined();
+    expect(meta.recipient_identity_unverified).toBe(true);
   });
 
   test('a failed requeue releases the claim for a full retry', async () => {

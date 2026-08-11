@@ -64,6 +64,21 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
 // reintroduce exactly the staleness the flag exists to prevent, so the cron
 // retries the row instead of sending.
 async function resolveScheduledRecipient(msg, claimMeta) {
+  // Rows whose refresh-vs-freeze decision could not be made at enqueue
+  // (transient identity-lookup failure, codex #3259 r24) re-run it here:
+  // send only when the live account phone still matches the snapshot
+  // (refresh semantics); ambiguity or another lookup failure returns null
+  // onto the bounded-retry-then-terminal rail — never a guess that could
+  // hand a bearer link to the wrong person.
+  if (claimMeta?.recipient_identity_unverified === true && msg.customer_id) {
+    const { resolveUnverifiedRecipient } = require('./messaging/deferred-recipient-identity');
+    const resolved = await resolveUnverifiedRecipient({
+      customerId: msg.customer_id,
+      snapshotPhone: msg.to_phone,
+      label: 'scheduled-sms',
+    });
+    return resolved.phone;
+  }
   if (claimMeta?.refresh_customer_phone !== true || !msg.customer_id) return msg.to_phone;
   try {
     const freshCustomer = await db('customers').where({ id: msg.customer_id }).first('phone');

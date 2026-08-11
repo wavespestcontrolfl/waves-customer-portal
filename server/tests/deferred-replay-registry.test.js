@@ -30,6 +30,12 @@ jest.mock('../services/appointment-card-request', () => ({
   // disagree on what a live visit is.
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
 }));
+jest.mock('../services/appointment-reminders', () => ({
+  // Canonical DATE+TIME→ET composition the card recheck consults (r24).
+  // Defaults to a future instant so pre-r24 pins keep exercising their own
+  // suppression reasons; instant-sensitive tests override with ...Once.
+  scheduledServiceApptTime: jest.fn(async () => new Date(Date.now() + 60 * 60 * 1000)),
+}));
 const mockGetAppointmentContacts = jest.fn(() => [{ phone: '+19415557777' }]);
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: (...a) => mockGetAppointmentContacts(...a),
@@ -482,9 +488,10 @@ describe('deferred-replay registry', () => {
       q.update = jest.fn(async () => 1);
       return q;
     };
-    const upd = { where: jest.fn(() => upd), update: jest.fn(async () => 1) };
+    const upd = { where: jest.fn(() => upd), whereRaw: jest.fn(() => upd), update: jest.fn(async () => 1) };
 
-    // Retryable row: hook re-runs and succeeds.
+    // Retryable row: claimed (guarded lease UPDATE returns 1), hook
+    // re-runs and succeeds.
     let first = true;
     const selectChain = makeSelectChain([{
       id: 'sms-9',
@@ -494,6 +501,20 @@ describe('deferred-replay registry', () => {
     const res = await sweepPendingTerminalHooks({ now: new Date('2026-08-08T12:00:00Z') });
     expect(res).toEqual({ candidates: 1, reran: 1 });
     expect(mockVmClaims.clearLeadClaim).toHaveBeenCalledWith('lead-9');
+
+    // Lost claim race (r24): another pod's guarded UPDATE won — this pod
+    // must NOT run the hook or burn an attempt.
+    jest.clearAllMocks();
+    first = true;
+    const raced = makeSelectChain([{
+      id: 'sms-11',
+      metadata: JSON.stringify({ entry_point: 'voicemail_lead_sms_deferred', lead_id: 'lead-11', terminal_pending: true, terminal_attempts: 1 }),
+    }]);
+    const claimMiss = { where: jest.fn(() => claimMiss), whereRaw: jest.fn(() => claimMiss), update: jest.fn(async () => 0) };
+    db.mockImplementation(() => { if (first) { first = false; return raced; } return claimMiss; });
+    const resRaced = await sweepPendingTerminalHooks({ now: new Date('2026-08-08T12:00:00Z') });
+    expect(resRaced).toEqual({ candidates: 1, reran: 0 });
+    expect(mockVmClaims.clearLeadClaim).not.toHaveBeenCalled();
 
     // Exhausted row: cleared (no infinite loop), hook NOT re-run.
     jest.clearAllMocks();
@@ -617,6 +638,34 @@ describe('deferred-replay registry', () => {
       waves_customer_id: 'cust-1',
     });
     expect(setupFailure.eligible).toBe(true);
+  });
+
+  test('card request recheck (r24): a passed appointment instant suppresses the bearer link', async () => {
+    const { scheduledServiceApptTime } = require('../services/appointment-reminders');
+
+    // The visit's ET instant has passed but its status still says
+    // 'pending' (an early visit's status often lags the tech's arrival) —
+    // the pre-visit card ask must not fire mid-service.
+    db.mockReturnValueOnce(firstChain({ status: 'pending', card_link_sent_at: null, customer_id: 'cust-1', scheduled_date: '2026-08-11' }));
+    scheduledServiceApptTime.mockResolvedValueOnce(new Date(Date.now() - 60 * 1000));
+    const started = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(started.eligible).toBe(false);
+    expect(started.reason).toBe('visit-started');
+
+    // No window_start on the row → calendar-day fallback: an earlier ET
+    // day suppresses, same-day stays a useful pre-visit ask.
+    db.mockReturnValueOnce(firstChain({ status: 'pending', card_link_sent_at: null, customer_id: 'cust-1', scheduled_date: '2000-01-01' }));
+    scheduledServiceApptTime.mockResolvedValueOnce(null);
+    const past = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(past.eligible).toBe(false);
+    expect(past.reason).toBe('visit-past');
+
+    // Appt-time lookup failure holds the row (fail closed) — it must never
+    // read as "no time on file → eligible".
+    db.mockReturnValueOnce(firstChain({ status: 'pending', card_link_sent_at: null, customer_id: 'cust-1', scheduled_date: '2026-08-11' }));
+    scheduledServiceApptTime.mockRejectedValueOnce(new Error('db down'));
+    const held = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
+    expect(held).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test("card request recheck (r20): a 'rescheduled' pending-rebook placeholder suppresses — the replay must not consume the claim the re-slotted visit needs", async () => {
