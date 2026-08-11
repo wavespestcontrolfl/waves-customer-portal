@@ -2534,11 +2534,18 @@ const STATION_ACTIVITY_WITH_RE = new RegExp(
   `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\s+${STATION_ACTIVITY_MOD_SRC}${STATION_EVIDENCE_OF_SRC}${STATION_ACTIVITY_MOD_SRC}(?:activity|feeding|consumption|hits?)\\b`,
   'gi',
 );
-// "on the property LINE/perimeter" is a LOCATION, not a roster-total
-// construction (codex r3 on #3358) — the total claim must end at
-// "property", not inside a longer location phrase.
+// A roster TOTAL requires an explicit assertion (codex r4 on #3358 —
+// owner-accepted scope 2026-08-11): "there are N stations" or "N stations
+// (are) installed / in place". Any "N stations … on the property" phrase
+// alone is a LOCATION — "Activity was observed at 2 bait stations on the
+// property" identifies the activity subset's whereabouts, and claiming it
+// as the property total discarded accurate copy. "A total of N stations
+// were checked" belongs to stations_checked (the passive checked matcher
+// claims it through the total-of exemption above), so the total form
+// deliberately excludes it.
 const STATION_TOTAL_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:(?:are\\s+)?(?:installed|in\\s+place)|(?:on|around|across)\\s+(?:the\\s+|your\\s+)?property(?!\\s+(?:line|lines|perimeter|edge|edges|border|borders|corner|corners|boundary|boundaries|fence)))\\b`,
+  `\\bthere\\s+(?:are|is)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`
+  + `|\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:are\\s+|were\\s+)?(?:installed|in\\s+place)\\b`,
   'gi',
 );
 const STATION_INACCESSIBLE_RE = new RegExp(
@@ -2839,8 +2846,29 @@ const LEVEL_CLAIM_BANDS = {
   moderate: 2,
   high: 3, heavy: 3, severe: 3, extreme: 3,
 };
-const LEVEL_CLAIM_WORD_RE = /\b(very\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)\b(?!-)/gi;
-const LEVEL_CLAIM_NOUN_RE = /\b(?:activity|infestation|pressure)\b/i;
+// A level word claims a level ONLY when bound to the noun it qualifies
+// (codex r4 on #3358 — owner-accepted scope 2026-08-11): clause-level
+// co-occurrence read "Heavy activity near the LIGHT fixture" as a
+// low-band claim and "Low activity near the HIGH ceiling" as a high one,
+// discarding accurate copy. Two bindings only:
+//   attributive — "heavy (termite) activity", the level word directly
+//   modifying the noun through at most a short whitelisted modifier run;
+//   predicative — "activity was heavy", the noun linked to the level word
+//   through a copular verb.
+// consumption/feeding join the noun set (they directly drive the
+// bait-station and mosquito scores). Anything else — "heavy rain",
+// "high ceiling", "light fixture", "heavy levels" — claims nothing.
+const LEVEL_WORD_SRC = '(very\\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)';
+const LEVEL_NOUN_SRC = '(?:activity|infestation|pressure|feeding|consumption)';
+const LEVEL_ATTR_MOD_SRC = '(?:(?:cockroach|roach|german|palmetto|termite|rodent|mosquito|flea|tick|ant|pest|bait|overall|general|visible|current|surface|interior|exterior|feeding)\\s+){0,3}';
+const LEVEL_CLAIM_ATTRIBUTIVE_RE = new RegExp(
+  `\\b${LEVEL_WORD_SRC}\\b(?!-)\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
+  'gi',
+);
+const LEVEL_CLAIM_PREDICATIVE_RE = new RegExp(
+  `\\b${LEVEL_NOUN_SRC}(?:\\s+levels?)?\\s+(?:was|were|is|are|appears?|appeared|looks?|looked|seems?|seemed|remains?|remained|stays?|stayed|has\\s+been|had\\s+been|been)\\s+(?:(?:very|still|quite|rather|somewhat|fairly|relatively|now)\\s+)*${LEVEL_WORD_SRC}\\b(?!-)`,
+  'gi',
+);
 // Exemptions scope to the CLAIM they qualify, not the whole clause (codex
 // P1 r2 on #3354: "activity was heavy today and can continue between
 // visits" must not let the trailing "can" launder the completed heavy
@@ -2930,13 +2958,20 @@ function activityLevelContradictions(text, finalBand) {
   if (!finalBand) return [];
   const found = [];
   for (const clause of clauses(String(text || ''))) {
-    if (!LEVEL_CLAIM_NOUN_RE.test(clause)) continue;
-    for (const match of clause.matchAll(LEVEL_CLAIM_WORD_RE)) {
-      const word = match[1].toLowerCase().replace(/\s+/g, ' ');
+    // Both bindings collect into one claim list; the exemption machinery
+    // then runs per claim against its own before/after spans.
+    const claims = [];
+    for (const re of [LEVEL_CLAIM_ATTRIBUTIVE_RE, LEVEL_CLAIM_PREDICATIVE_RE]) {
+      for (const match of clause.matchAll(new RegExp(re.source, 'gi'))) {
+        claims.push({ index: match.index, length: match[0].length, word: match[1] });
+      }
+    }
+    for (const claim of claims) {
+      const word = claim.word.toLowerCase().replace(/\s+/g, ' ');
       const claimBand = LEVEL_CLAIM_BANDS[word];
       if (!claimBand || Math.abs(claimBand - finalBand) < 2) continue;
-      const before = clause.slice(0, match.index);
-      const afterClause = clause.slice(match.index + match[0].length);
+      const before = clause.slice(0, claim.index);
+      const afterClause = clause.slice(claim.index + claim.length);
       const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
       if (intentGovernsLevelClaim(before) || intentGovernsLevelClaimFromAfter(afterClause)) continue;
       if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;

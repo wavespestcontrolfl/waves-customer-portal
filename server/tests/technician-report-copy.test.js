@@ -605,6 +605,43 @@ describe('typed snapshot — technician report body in the generic tail composit
       .not.toEqual([]);
   });
 
+  // Round-4 #3358 (owner-accepted scope 2026-08-11): level words bind to
+  // the noun they qualify, and roster totals require an explicit
+  // assertion — locations never claim.
+  test('level words bind to their noun — locations never claim a level (codex #3358 r4)', () => {
+    const { activityLevelContradictions } = require('../services/service-report/activity-indicators');
+    // "light fixture" / "high ceiling" are locations, not level claims.
+    expect(activityLevelContradictions('Heavy activity was observed near the light fixture.', 3))
+      .toEqual([]);
+    expect(activityLevelContradictions('Low activity was observed near the high ceiling.', 1))
+      .toEqual([]);
+    // The bound claim itself still screens under an opposite pin.
+    expect(activityLevelContradictions('Heavy activity was observed near the light fixture.', 1))
+      .not.toEqual([]);
+    // consumption/feeding drive the bait-station and mosquito scores and
+    // participate in the reconciliation.
+    expect(activityLevelContradictions('Bait consumption was heavy today.', 1))
+      .not.toEqual([]);
+    expect(activityLevelContradictions('We found heavy feeding at the back stations.', 1))
+      .not.toEqual([]);
+  });
+
+  test('roster totals require an explicit assertion — a location phrase never claims (codex #3358 r4)', () => {
+    const { countContradictions } = require('../services/service-report/activity-indicators');
+    expect(countContradictions(
+      'Activity was observed at 2 bait stations on the property.',
+      { total_stations: '12', stations_with_activity: '2' },
+    )).toEqual([]);
+    expect(countContradictions(
+      'There are 20 stations on the property.',
+      { total_stations: '18' },
+    )).not.toEqual([]);
+    expect(countContradictions(
+      '12 bait stations are installed around the home.',
+      { total_stations: '10' },
+    )).not.toEqual([]);
+  });
+
   test('negated and subject-position intent qualifiers stay governed (codex #3358)', () => {
     const base = {
       projectType: 'cockroach',
