@@ -4179,7 +4179,13 @@ const EstimateConverter = {
             // pattern, and skipping its duplicate check would insert a
             // second appointment beside an active commercial-lawn series
             // the previous raw-pattern gate correctly caught.
+            // ...and the bypass requires NON-CONFLICTING visit fields
+            // (codex r13 P1): { visitsPerYear: 1, visits: 2 } first-alias
+            // reads as 1, but an ambiguous row is not DEFINITIVELY
+            // one-time — it stands down to the guard like any other
+            // recurring-reading unit.
             const oneApplicationPalm = seedingFamilyKey(svc) === 'palm_injection'
+              && !visitCountFieldsConflict(svc)
               && visitsPerYearForRecurringService(svc) === 1;
             if (seedingPattern || (pattern && !oneApplicationPalm)) {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {

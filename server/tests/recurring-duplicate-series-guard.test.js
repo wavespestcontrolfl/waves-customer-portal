@@ -577,6 +577,10 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(bypassDef).toBeGreaterThan(autoStep);
     expect(bypassDef).toBeLessThan(seedingGate);
     expect(converterSrc.slice(bypassDef, seedingGate)).toContain('visitsPerYearForRecurringService(svc) === 1');
+    // The bypass requires NON-CONFLICTING visit fields (codex r13 P1):
+    // { visitsPerYear: 1, visits: 2 } first-alias reads as 1 but is not
+    // DEFINITIVELY one-time — ambiguous rows stand down to the guard.
+    expect(converterSrc.slice(bypassDef, seedingGate)).toContain('!visitCountFieldsConflict(svc)');
     // Bare raw-inference gating (the pre-fix shape) must not come back.
     expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
