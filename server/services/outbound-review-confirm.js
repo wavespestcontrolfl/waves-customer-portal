@@ -119,7 +119,33 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         const postSlot = await db('scheduled_services')
           .where({ id: svc.id })
           .first('scheduled_date', 'window_start');
-        if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
+        if (postSlot && !postSlot.window_start && slotStart) {
+          // The verified slot went WINDOWLESS (a concurrent edit cleared
+          // the arrival time after our registration armed a start): never
+          // resync to the fabricated 09:00 fallback — close both reminder
+          // windows on the armed row so the cron cannot text a time nobody
+          // chose (Codex #3361 r18 P2). Deliberately NOT hand-writing the
+          // windows_preclosed placeholder flags: they carry trigger-managed
+          // sibling invariants; closed sent-flags achieve the same silence,
+          // and a later edit that sets a real window re-arms them through
+          // its own handleReschedule resync (start moved → flags
+          // recompute).
+          const closedWindows = await db('appointment_reminders')
+            .where({ scheduled_service_id: svc.id, cancelled: false })
+            .update({
+              reminder_72h_sent: true,
+              reminder_72h_sent_at: new Date(),
+              reminder_24h_sent: true,
+              reminder_24h_sent_at: new Date(),
+              updated_at: new Date(),
+            });
+          if (!closedWindows) {
+            coreLegsOk = false;
+            logger.warn(`[${routeTag}] windowless close after concurrent move missed for ${svc.id} — leaving retryable`);
+          } else {
+            logger.info(`[${routeTag}] reminder windows closed after concurrent windowless move for ${svc.id}`);
+          }
+        } else if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
           || String(postSlot.window_start || '') !== String(slotStart || ''))) {
           // expectSchedule = the observed slot, enforced atomically inside
           // handleReschedule: a SECOND move (B) landing after the postSlot
