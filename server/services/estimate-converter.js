@@ -328,7 +328,18 @@ const STANDALONE_SUPPLEMENT_ROUTES = {
 // contradicts (monthly/quarterly + 2 visits) must fall through to normal
 // validation and decline (codex #3349 r4 P1).
 function explicitCadenceFieldForService(svc = {}) {
-  return [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
+  // Every cadence-bearing FIELD spelling persisted on accepted lines —
+  // including `cadence`/`planFrequency`, which estimate-public and the
+  // per-application reader persist but inferRecurringPattern does not
+  // read (codex r7 P1: a palm row { cadence: 'monthly', visitsPerYear: 2 }
+  // must count as cadence-bearing so the forced rule stands down and the
+  // contradictory data declines through normal validation).
+  return [
+    svc.frequency, svc.frequencyKey, svc.frequency_key,
+    svc.recurringPattern, svc.recurring_pattern,
+    svc.cadence, svc.cadenceKey, svc.cadence_key,
+    svc.planFrequency,
+  ]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
     .find(Boolean) || null;
 }

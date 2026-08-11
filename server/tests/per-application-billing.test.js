@@ -257,6 +257,11 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     // still resolves — the force is only for cadence-less builder lines.
     const explicit = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(explicit, { service_type: 'Palm Injection' }, null)).toBe('semiannual');
+    // ALL persisted cadence-field spellings count — `cadence` included
+    // (codex r7 P1): a monthly-cadence 2-visit palm row is contradictory
+    // and declines, never forced.
+    const cadenceSpelled = { service: 'palm_injection', name: 'Palm Injection', cadence: 'monthly', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(cadenceSpelled, { service_type: 'Palm Injection' }, null)).toBe(null);
   });
 });
 
