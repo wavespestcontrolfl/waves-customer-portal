@@ -611,13 +611,33 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // already applies: honest only when the contract is UNIFORMLY prepaid
       // at one allocation — a mixed or uneven contract keeps the scheduled
       // price rather than picking one row's allocation to stand for all.
-      const firstAllocation = Number(
-        contractRows.find((row) => Number(row.prepaid_amount) > 0)?.prepaid_amount,
-      );
-      const uniformlyPrepaid = contractRows.length > 0
+      // splitCoverageAmount puts the ENTIRE cent remainder on the final visit
+      // ($455.01 over 4 = 113.75/113.75/113.75/113.76), so an uneven
+      // allocation is the NORMAL persisted shape of a prepaid term, not
+      // corrupt data (codex #3353 r7). Demanding exact equality here rejected
+      // that shape and fell through to the undiscounted list price — showing
+      // $120 for a term the customer demonstrably paid ~$113.75 on.
+      //
+      // The AVERAGE of a splitCoverageAmount series is exactly total ÷ visits,
+      // which is precisely "what they paid per application". Bounded to a
+      // spread of at most one cent per visit (the largest remainder that
+      // function can produce) so genuinely different allocations — two terms
+      // collapsed into one contract group — still withhold instead of
+      // averaging into a figure nobody paid.
+      const prepaidAmounts = contractRows
+        .map((row) => Number(row.prepaid_amount))
+        .filter((amount) => Number.isFinite(amount) && amount > 0);
+      const fullyPrepaid = contractRows.length > 0
         && contractRows.every((row) => !!row.annual_prepay_term_id)
-        && firstAllocation > 0
-        && contractRows.every((row) => sameCents(row.prepaid_amount, firstAllocation));
+        && prepaidAmounts.length === contractRows.length;
+      const allocationSpreadCents = fullyPrepaid
+        ? Math.round((Math.max(...prepaidAmounts) - Math.min(...prepaidAmounts)) * 100)
+        : 0;
+      const uniformlyPrepaid = fullyPrepaid
+        && allocationSpreadCents <= contractRows.length;
+      const prepaidPerVisit = uniformlyPrepaid
+        ? round2(prepaidAmounts.reduce((sum, amount) => sum + amount, 0) / prepaidAmounts.length)
+        : null;
       // Cadence belongs to the CONTRACT, not the family (codex #3353 r4):
       // monthly pest at one property and quarterly at another are different
       // schedules, and picking the first resolvable row for both would be an
@@ -629,14 +649,20 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         serviceAddress: address,
         scheduledPerVisit,
         // The figure this contract actually bills at — the paid allocation
-        // when prepaid, else the scheduled price.
-        perVisit: uniformlyPrepaid ? round2(firstAllocation) : scheduledPerVisit,
+        // when prepaid, else the scheduled price. A FULLY prepaid contract
+        // whose allocations are too spread to average shows NOTHING rather
+        // than the list price: the active term is positive evidence against
+        // that price, so substituting it would be the same mistake as
+        // inheriting a catalog cadence over a live one. A PARTLY prepaid
+        // contract keeps the scheduled price, which is genuine for the
+        // visits that aren't prepaid.
+        perVisit: prepaidPerVisit ?? (fullyPrepaid ? null : scheduledPerVisit),
         prepaid: uniformlyPrepaid,
         // Per-contract provenance: one prepaid property alongside one billing
         // at its scheduled price must not describe BOTH as a paid allocation.
-        spendSource: uniformlyPrepaid
+        spendSource: prepaidPerVisit != null
           ? 'prepaid_allocation'
-          : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+          : ((!fullyPrepaid && scheduledPerVisit != null) ? 'scheduled_estimate' : 'unavailable'),
         cadenceLabel: cadenceLabelFor(contractCadence?.frequency),
         visitsPerYear: contractCadence?.visitsPerYear ?? null,
         activeScheduledVisits: contractRows.length,

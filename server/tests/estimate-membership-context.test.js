@@ -1283,6 +1283,50 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test("a split-remainder prepaid term quotes what was paid, not the list price", async () => {
+    const database = fakeDb({
+      // splitCoverageAmount($455.01, 4) → 113.75 / 113.75 / 113.75 / 113.76.
+      // The cent remainder lands on the final visit BY DESIGN, so demanding
+      // exact equality would reject a perfectly normal term and quote the
+      // $120 list price the paid term disproves.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75 },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.76 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // $455.01 / 4 = $113.7525 → $113.75 to the cent.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 113.75,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('a fully prepaid contract with unrelatable allocations withholds rather than showing list price', async () => {
+    const database = fakeDb({
+      // Not a split remainder — two genuinely different allocations. Averaging
+      // would invent a figure nobody paid, and the list price is disproven by
+      // the active term, so the honest answer is nothing.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.
