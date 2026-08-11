@@ -432,6 +432,25 @@ describe('scheduler wiring (source pins)', () => {
   });
 });
 
+describe('processing_started_at durability (source pins)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('finalization never clears the snapshot bound\'s anchor (audit P1 r9)', () => {
+    const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    // A finalized old force-reprocessed call must keep its last-pass
+    // timestamp: the phone snapshot's COALESCE falls back to
+    // created_at + the retry window otherwise, dropping the lead the late
+    // pass actually linked — and once the call ages out of the scan
+    // window, no arm protects that lead from the irreversible organic
+    // label. In-flight state is processing_token/status; every
+    // processing_started_at reader COALESCEs behind a status guard.
+    expect(proc).not.toMatch(/processing_started_at: null/);
+    // Both claim paths (sweep and force-reprocess) stamp it.
+    expect((proc.match(/processing_started_at: new Date\(\)/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe('migration (source pins)', () => {
   const fs = require('fs');
   const path = require('path');

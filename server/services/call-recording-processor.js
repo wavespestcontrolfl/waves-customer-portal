@@ -5595,6 +5595,13 @@ const CallRecordingProcessor = {
           processing_status: 'processing',
           processing_token: procToken,
           processing_generation: db.raw('processing_generation + 1'),
+          // DURABLE — finalization must NOT clear this (pre-push audit P1,
+          // ambiguity-record r9). It records when the LAST processing pass
+          // started, and the bridge-ambiguity phone snapshot bounds its
+          // lead capture on it: every pass that can link a lead — the
+          // age-unlimited force-reprocess included — claims here first.
+          // In-flight state is carried by processing_token/status alone;
+          // every reader COALESCEs behind a status guard.
           processing_started_at: new Date(),
           updated_at: new Date(),
         }, ['processing_generation']);
@@ -5632,6 +5639,13 @@ const CallRecordingProcessor = {
           processing_status: 'processing',
           processing_token: procToken,
           processing_generation: db.raw('processing_generation + 1'),
+          // DURABLE — finalization must NOT clear this (pre-push audit P1,
+          // ambiguity-record r9). It records when the LAST processing pass
+          // started, and the bridge-ambiguity phone snapshot bounds its
+          // lead capture on it: every pass that can link a lead — the
+          // age-unlimited force-reprocess included — claims here first.
+          // In-flight state is carried by processing_token/status alone;
+          // every reader COALESCEs behind a status guard.
           processing_started_at: new Date(),
           updated_at: new Date(),
         }, ['processing_generation']);
@@ -5819,7 +5833,6 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
@@ -5970,7 +5983,6 @@ const CallRecordingProcessor = {
             review_status: null,
             customer_id: null,
             processing_token: null,
-            processing_started_at: null,
             updated_at: new Date(),
           });
         if (rejected === 0) {
@@ -6037,7 +6049,6 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'no_transcription',
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -6087,7 +6098,6 @@ const CallRecordingProcessor = {
         processing_status: 'extraction_failed',
         extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       }).returning(['extraction_attempts']);
       const attempts = Number(failedRow?.extraction_attempts) || 0;
@@ -6295,7 +6305,6 @@ const CallRecordingProcessor = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       };
       if (extracted.is_voicemail) {
@@ -7340,7 +7349,6 @@ const CallRecordingProcessor = {
             processing_status: extracted.is_spam ? 'spam' : 'processed',
             review_status: 'open',
             processing_token: null,
-            processing_started_at: null,
             // A definitive rejection that finalizes 'processed' (wrong
             // number with is_spam false) needs the durable marker or the
             // bridge re-attributes it next scan (pre-push P1 r16). A
@@ -12781,7 +12789,6 @@ const CallRecordingProcessor = {
         .update({
           processing_status: finalStatus,
           processing_token: null,
-          processing_started_at: null,
           // Address unverifiable / caller-not-owner / missing surname, or a
           // customer-less recovery lead that failed to persist → open the call for
           // human review instead of letting it look fully processed.
@@ -13055,7 +13062,6 @@ const CallRecordingProcessor = {
             processing_status: 'extraction_failed',
             extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
-            processing_started_at: null,
             updated_at: new Date(),
           }).returning(['extraction_attempts']);
         if (!releasedRows.length) {
