@@ -1542,7 +1542,12 @@ async function applyBridge(options = {}) {
     ambiguousCallIds: ambiguousCandidateCallIds,
     scanWindowStart: new Date(Date.now() - (scanDays - 1) * 24 * 60 * 60 * 1000),
     scanStartedAt,
-    rescanTrusted: !preview.scanFailed && !capHit && !writeFailed,
+    // configured is part of trust (codex P2, r4 GH round): an apply while
+    // Google Ads is unconfigured runs NO scan (configured:false,
+    // scanFailed:false, empty matches) — absence of ambiguity from a scan
+    // that never ran must not rescan-clear anything. The scheduler treats
+    // unconfigured as uncertainty; this path now does too.
+    rescanTrusted: !!preview.configured && !preview.scanFailed && !capHit && !writeFailed,
   });
 
   return {
@@ -1674,14 +1679,15 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     // scan window. The snapshot names the CANDIDATE leads the processor
     // could have reused for this call, and it is TEMPORALLY BOUNDED
     // (pre-push audit P1 r4): a REUSED lead necessarily existed before
-    // the call's last processing pass. That bound is evidence-anchored,
-    // not assumed (codex P1, r3 GH round): the automatic retry lane ends
-    // at created_at + the shared extraction retry window, but an admin
-    // force-reprocess has no age limit — and any processing pass WRITES
-    // the call row, so GREATEST(created_at + window, updated_at) covers
-    // every pass that could have linked a lead, while the daily re-record
-    // of a still-open ambiguity refreshes the snapshot after such a late
-    // pass. The exact pick ("newest eligible exact-phone match at
+    // the call's last processing pass. The bound is anchored to
+    // PROCESSING-SPECIFIC evidence (codex P1s, r3+r4 GH rounds): the
+    // automatic retry lane ends at created_at + the shared extraction
+    // retry window, and every pass that can link a lead — the
+    // age-unlimited admin force-reprocess included — goes through a claim
+    // write that stamps processing_started_at. Generic updated_at was
+    // rejected here (disposition edits and triage sync move it, widening
+    // the horizon with non-processing writes); the daily re-record of a
+    // still-open ambiguity refreshes the snapshot after a late pass. The exact pick ("newest eligible exact-phone match at
     // processing time") is not reconstructible post-hoc — claim states
     // move under it — so the hold keeps every candidate (over-holding a
     // coexisting same-number lead is recoverable; a wrong organic label
@@ -1698,7 +1704,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
            ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
           AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
             = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
-          AND l.created_at < GREATEST(cl.created_at + make_interval(secs => ?), cl.updated_at)
+          AND l.created_at < GREATEST(cl.created_at + make_interval(secs => ?), COALESCE(cl.processing_started_at, cl.created_at))
         WHERE cl.id IN (${ids.map(() => '?').join(', ')})
        ON CONFLICT DO NOTHING`,
       [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...ids],
@@ -1706,6 +1712,19 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     if (reconcileIds.length) {
       // Lazy require: this module and call-attribution require each other.
       const { retireCallAttributionRow, retireRowPreservingHistory } = require('./call-attribution');
+      // A call already carrying the durable paid claim is NEVER a
+      // retirement target (codex P1, r4 GH round): record-level 'bridged'
+      // stickiness only protects calls that HAVE a record — an
+      // already-bridged call first sighted as an ambiguous candidate (or
+      // one bridged since its record resolved) would enter this loop and
+      // lose its valid paid row, which nothing recreates while the
+      // ambiguity persists (the apply path skipped the match). The
+      // resolver marks these records 'bridged' right after this
+      // transaction commits.
+      const bridgedCalls = new Set((await trx('call_log')
+        .whereIn('id', reconcileIds)
+        .whereNotNull('google_ads_call_resource_name')
+        .select('id')).map((r) => String(r.id)));
       const resolvedAtById = new Map(existing
         .filter((r) => r.resolved_at != null && r.resolve_reason !== 'bridged')
         .map((r) => [String(r.call_log_id), r.resolved_at]));
@@ -1718,6 +1737,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         .filter((s) => { try { return isBridgeTargetNumber(s.twilio_phone_number); } catch { return false; } })
         .map((s) => s.id);
       for (const callId of reconcileIds) {
+        if (bridgedCalls.has(callId)) continue;
         // PROVENANCED arm — reopens AND first sightings. On a non-bridged
         // bridge-target call a provenanced row can only be the seven-day
         // fallback's organic write (call-time attribution is suppressed

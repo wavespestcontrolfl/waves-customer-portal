@@ -128,11 +128,12 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(snap[0]).toMatch(/cl\.from_phone/);
     expect(snap[0]).toMatch(/RIGHT\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(snap[0]).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\)\) >= 10/);
-    // TEMPORALLY BOUNDED (audit P1 r4) and EVIDENCE-ANCHORED (codex P1 GH
-    // r3): the automatic retry lane ends at created_at + the shared retry
-    // window, but an admin force-reprocess has no age limit — any
-    // processing pass writes the call row, so updated_at covers it.
-    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), cl\.updated_at\)/);
+    // TEMPORALLY BOUNDED (audit P1 r4), anchored to PROCESSING-SPECIFIC
+    // evidence (codex P1s GH r3+r4): every pass that can link a lead —
+    // the age-unlimited force-reprocess included — goes through a claim
+    // write stamping processing_started_at. Generic updated_at was
+    // rejected (disposition edits and triage sync move it).
+    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), COALESCE\(cl\.processing_started_at, cl\.created_at\)\)/);
     expect(snap[1]).toEqual([7 * 24 * 60 * 60, 'call-1', 'call-2']);
   });
 
@@ -159,6 +160,25 @@ describe('recordAmbiguousBridgeCalls', () => {
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
     expect(mockRetire).not.toHaveBeenCalled();
     expect(mockRetireRow).not.toHaveBeenCalled();
+  });
+
+  test('a FIRST-SIGHTED call that is already BRIDGED is never a retirement target (codex P1 GH r4)', async () => {
+    // Record-level stickiness only protects calls that HAVE a record; an
+    // already-bridged call first sighted as an ambiguous candidate has
+    // none, and retiring its provenanced row would destroy the valid paid
+    // attribution nothing recreates. The live paid claim on the call row
+    // itself is the guard.
+    listQueueByTable.bridge_ambiguous_calls = [[]]; // first sighting
+    listQueueByTable.call_log = [[{ id: 'call-1' }]]; // carries google_ads_call_resource_name
+    listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).not.toHaveBeenCalled();
+    expect(mockRetireRow).not.toHaveBeenCalled();
+    // The guard read is the live paid-claim predicate on the call rows.
+    const guardRead = builders.find((b) => b._table === 'call_log'
+      && b._wheres.some(([m, col]) => m === 'whereNotNull' && col === 'google_ads_call_resource_name'));
+    expect(guardRead).toBeTruthy();
+    expect(guardRead._wheres).toContainEqual(['whereIn', 'id', ['call-1']]);
   });
 
   test('a REOPEN retires the attribution rows written while the hold was lifted (codex P1 r2)', async () => {
@@ -406,7 +426,9 @@ describe('scheduler wiring (source pins)', () => {
     expect(apply).toMatch(/ambiguousCallIds: ambiguousCandidateCallIds/);
     expect(apply).toMatch(/\(scanDays - 1\) \* 24 \* 60 \* 60 \* 1000/);
     expect(apply).toMatch(/scanStartedAt,/);
-    expect(apply).toMatch(/rescanTrusted: !preview\.scanFailed && !capHit && !writeFailed/);
+    // configured is part of trust (codex P2 GH r4): an unconfigured apply
+    // runs no scan, and absence from a scan that never ran clears nothing.
+    expect(apply).toMatch(/rescanTrusted: !!preview\.configured && !preview\.scanFailed && !capHit && !writeFailed/);
   });
 });
 
