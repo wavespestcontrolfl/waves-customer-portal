@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -2800,10 +2800,13 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
   try {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    const config = getServiceLineConfig(svc.service_type);
+    // Type-aware (not just line-aware): cockroach-family visits default to
+    // a 120-min interior window (owner rule 2026-08-11) — the editor's
+    // defaults must match what a fresh completion would persist.
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
     const defaults = {
-      exteriorMinutes: Number(config?.advisoryDefaults?.exterior_reentry_min) || 0,
-      interiorMinutes: Number(config?.advisoryDefaults?.interior_reentry_min) || 0,
+      exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
     };
     // Schema lookup failures PROPAGATE (same posture as the time-on-site
     // edit): a degraded {} would silently report "no record" for a visit
@@ -6460,15 +6463,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // no lower than the default so a 0-hr / "until dry" product still shows
             // a sensible dry-down window.
             const productReentryMin = await maxProductReentryMinutes(trx, products || []);
+            // Type-aware base: cockroach-family visits default to a 120-min
+            // INTERIOR window (owner rule 2026-08-11) instead of the pest
+            // line's 30 — see getAdvisoryDefaults.
+            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
             const advisoryDefaultsForVisit = productReentryMin != null
               ? {
-                ...reportConfig.advisoryDefaults,
+                ...lineAdvisoryDefaults,
                 exterior_reentry_min: Math.max(
-                  Number(reportConfig.advisoryDefaults?.exterior_reentry_min) || 0,
+                  Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
                   productReentryMin,
                 ),
               }
-              : reportConfig.advisoryDefaults;
+              : lineAdvisoryDefaults;
             // Treatment Zone Mapper trace = explicit exterior scope (the
             // trace is drawn on the satellite exterior) — keeps the
             // dry-down timer on typed closeouts that hide area chips.
@@ -6515,7 +6522,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               tracedExteriorZone,
             });
             recordInsert.advisory = serializeJsonb(advisoryNormalized);
-            const interiorBefore = reportConfig.advisoryDefaults?.interior_reentry_min ?? null;
+            const interiorBefore = lineAdvisoryDefaults?.interior_reentry_min ?? null;
             const interiorAfter = advisoryNormalized.interior_reentry_min ?? null;
             if (interiorBefore !== interiorAfter) {
               logger.info('[completion] re-entry scope normalized', {

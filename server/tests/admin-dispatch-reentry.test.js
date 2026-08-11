@@ -67,7 +67,7 @@ const router = require('../routes/admin-dispatch');
 const { reentryEditPlan, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
-const { SERVICE_LINE_CONFIGS } = require('../services/service-report/service-line-configs');
+const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
@@ -83,6 +83,55 @@ describe('service-line advisory defaults', () => {
     expect(SERVICE_LINE_CONFIGS.pest.advisoryDefaults).toMatchObject({
       exterior_reentry_min: 30,
       interior_reentry_min: 30,
+    });
+  });
+
+  // Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
+  // INTERIOR re-entry window; the exterior dry-down keeps the pest line's
+  // 30-minute default.
+  test('cockroach-family service types default to 120 min interior, 30 min exterior', () => {
+    for (const type of [
+      'Cockroach Control',
+      'German Roach Knockdown',
+      'Native Roach Knockdown',
+      'Palmetto Bug Treatment', // legacy pre-rename naming
+      'German Roach Cleanout',
+      // Keyed catalog values — snake_case has no \b before "roach"
+      // (underscore is \w), so detection normalizes separators first.
+      'cockroach_control',
+      'german_roach_cleanout',
+      'german_roach_knockdown',
+      'german-roach-cleanout',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+      });
+    }
+  });
+
+  // Pre-existing quirk, pinned deliberately: the KEY 'palmetto_roach_knockdown'
+  // slips past detectServiceLine's early \bpalmetto\b → pest check (no word
+  // boundary in snake_case) and the service-normalizer's substring
+  // includes('palm') then classifies it tree_shrub — so the whole report,
+  // not just re-entry, would render as tree & shrub for that key. The
+  // cockroach override correctly stays out of non-pest lines; display names
+  // ("Palmetto Bug Treatment", "Native Roach Knockdown") are unaffected.
+  test('the palmetto snake_case KEY stays on its detected line (tree_shrub) — override does not fire', () => {
+    expect(getAdvisoryDefaults('palmetto_roach_knockdown')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 0,
+    });
+  });
+
+  test('non-cockroach types keep their line defaults', () => {
+    expect(getAdvisoryDefaults('Quarterly Pest Control')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 30,
+    });
+    expect(getAdvisoryDefaults('Lawn Care')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 0,
     });
   });
 });

@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -3629,7 +3629,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         : {}),
     });
   const advisory = normalizeAdvisoryForTreatmentScope({
-    ...config.advisoryDefaults,
+    // Type-aware defaults (cockroach-family visits default to a 120-min
+    // interior window — owner rule 2026-08-11); the STORED advisory still
+    // wins whenever the completion persisted one.
+    ...getAdvisoryDefaults(service.service_type),
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, {
