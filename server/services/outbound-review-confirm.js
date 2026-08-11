@@ -114,12 +114,30 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
           .first('scheduled_date', 'window_start');
         if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
           || String(postSlot.window_start || '') !== String(slotStart || ''))) {
-          await AppointmentReminders.handleReschedule(
+          // expectSchedule = the observed slot, enforced atomically inside
+          // handleReschedule: a SECOND move (B) landing after the postSlot
+          // read makes this stale resync miss instead of stomping B's own
+          // sync back to A (Codex #3361 r12 P2). handleReschedule is
+          // fail-soft (null on no-row/invalid-time/error) — a null here is
+          // an unsynced slot, so the leg fails and the sweep retries
+          // (Codex #3361 r12 P2).
+          const resynced = await AppointmentReminders.handleReschedule(
             svc.id,
             `${dateOnly(postSlot.scheduled_date)}T${postSlot.window_start || '09:00'}`,
-            { sendNotification: false },
+            {
+              sendNotification: false,
+              expectSchedule: {
+                date: dateOnly(postSlot.scheduled_date),
+                windowStart: postSlot.window_start || null,
+              },
+            },
           );
-          logger.info(`[${routeTag}] reminder slot resynced after concurrent move for ${svc.id}`);
+          if (resynced === null) {
+            coreLegsOk = false;
+            logger.warn(`[${routeTag}] reminder slot resync returned null for ${svc.id} — leaving retryable`);
+          } else {
+            logger.info(`[${routeTag}] reminder slot resynced after concurrent move for ${svc.id}`);
+          }
         }
       } catch (postSyncErr) {
         coreLegsOk = false;
