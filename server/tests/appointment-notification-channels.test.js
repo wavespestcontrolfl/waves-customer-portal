@@ -130,6 +130,22 @@ describe('deliverAppointmentNotice channel routing', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test("'both': window-held SMS leg -> email goes out NOW, notice still defers (r14)", async () => {
+    // The boundary re-check held the SMS at the provider handoff. The
+    // email leg is not subject to the window: it must send immediately,
+    // while the false return leaves the caller's row unmarked so the
+    // sweep replays the SMS leg at 8:00 AM (the email send is idempotent
+    // per occurrence, so the replay can't double-deliver it). No admin
+    // alert — a hold is a deferral, not an unreachable customer.
+    const smsAttempt = jest.fn(async () => false);
+    const smsOutcome = { blockedCode: 'QUIET_HOURS_HOLD' };
+    const reached = await deliverAppointmentNotice(args({ channel: 'both', smsAttempt, smsOutcome }));
+
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test("'both': both channels fail -> raises no-reachable-channel alert", async () => {
     AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: false, skipped: true, reason: 'missing_email' });
     const smsAttempt = jest.fn(async () => false);

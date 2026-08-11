@@ -747,7 +747,53 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           if (!smsResult.sent) {
             logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           }
-          await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
+          // Send-window hold: the menu is the lead's entry into the intake
+          // state machine (lead_intake_status seeds 'awaiting_service'
+          // below), so a dropped auto-reply strands intake for a night
+          // form-fill. Requeue on the scheduled-SMS rail — the executor
+          // sends it at 8:00 AM with bounded retries — and KEEP the
+          // unresolved claim (twilio_sid null): the queued row now owns
+          // this phone's one menu, and the fail-closed once-ever guard
+          // must not re-arm while it's pending. from_phone pins the
+          // location line already resolved for this lead. On an enqueue
+          // failure, fall through to normal claim settlement (the hold is
+          // deterministic no-delivery → claim released, a re-submit
+          // re-arms).
+          let heldQueued = false;
+          if (!smsResult.sent
+            && smsResult.code === 'QUIET_HOURS_HOLD'
+            && smsResult.deferred
+            && smsResult.nextAllowedAt) {
+            try {
+              await db('sms_log').insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(location.id),
+                to_phone: phoneFormatted,
+                message_body: replyMsg,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: 'auto_reply',
+                metadata: JSON.stringify({
+                  entry_point: 'lead_webhook_auto_reply_deferred',
+                  lead_source: leadSource.source,
+                  original_block_code: smsResult.code,
+                  refresh_customer_phone: true,
+                  // The executor settles the once-ever claim from this key:
+                  // real provider sid → stamp; suppressed/terminal → delete
+                  // the null-sid claim so a later form submission re-arms.
+                  lead_auto_reply_phone_digits: phoneDigits,
+                }),
+              });
+              heldQueued = true;
+              logger.info(`[lead-webhook] Auto-reply for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            } catch (queueErr) {
+              logger.error(`[lead-webhook] Held auto-reply requeue failed for customer ${customer.id}: ${queueErr.message}`);
+            }
+          }
+          if (!heldQueued) {
+            await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
+          }
         }
       }
 

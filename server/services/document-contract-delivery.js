@@ -526,6 +526,10 @@ async function sendPreparedChannel(prepared, req, {
       smsConsentBasis,
       smsEntryPoint,
       smsMetadata,
+      // 'system' = the reminder cron (fenced, defers its holds); anything
+      // else reached here through an authenticated admin route.
+      operatorInitiated: req?.actorType !== 'system',
+      deferOnHold: req?.actorType === 'system',
     });
 }
 
@@ -622,11 +626,14 @@ async function sendSmsDelivery({
   smsConsentBasis = null,
   smsEntryPoint = null,
   smsMetadata = null,
+  operatorInitiated = false,
+  deferOnHold = false,
 }) {
   const originalMessageType = action === 'reminder' ? 'document_request_reminder' : 'document_request';
+  const renderedBody = smsBody({ contract, customer, signingUrl, action, smsPurpose });
   const result = await sendCustomerMessage({
     to: recipient,
-    body: smsBody({ contract, customer, signingUrl, action, smsPurpose }),
+    body: renderedBody,
     channel: 'sms',
     audience: 'customer',
     purpose: smsPurpose,
@@ -634,6 +641,11 @@ async function sendSmsDelivery({
     identityTrustLevel: 'phone_matches_customer',
     consentBasis: smsConsentBasis || undefined,
     entryPoint: smsEntryPoint || (action === 'reminder' ? 'document_request_manual_reminder' : 'document_request_manual_send'),
+    // Send-window operator marker — derived from the caller's actor: an
+    // authenticated admin clicking "send for signature" after 8 PM means
+    // now; the 6:10 AM reminder cron passes actorType 'system' and stays
+    // fenced (its held texts defer below instead).
+    ...(operatorInitiated ? { operatorInitiated: true } : {}),
     metadata: {
       original_message_type: smsMetadata?.original_message_type || originalMessageType,
       contractId: contract.id,
@@ -643,6 +655,53 @@ async function sendSmsDelivery({
     },
   });
   if (!result.sent) {
+    // Send-window hold on the cron path: the 6:10 AM ET reminder cron runs
+    // OUTSIDE the window, so without a rail every SMS e-sign reminder
+    // would be held — lost when the email leg landed, or re-held forever
+    // for SMS-only recipients. Queue the rendered reminder for the window
+    // open and report delivered-shape success (the queued row owns it).
+    if (deferOnHold
+      && result.code === 'QUIET_HOURS_HOLD'
+      && result.deferred
+      && result.nextAllowedAt) {
+      const TWILIO_NUMBERS = require('../config/twilio-numbers');
+      await db('sms_log').insert({
+        customer_id: contract.customer_id || null,
+        direction: 'outbound',
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: recipient,
+        message_body: renderedBody,
+        status: 'scheduled',
+        scheduled_for: new Date(result.nextAllowedAt),
+        message_type: originalMessageType,
+        metadata: JSON.stringify({
+          entry_point: 'document_request_reminder_deferred',
+          contract_id: contract.id,
+          // The signing URL frozen in the body above is a BEARER token
+          // (codex r22): an admin re-send between this hold and 8 AM runs
+          // activatePreparedDelivery, which mints a new token and replaces
+          // share_token_hash — the queued link then resolves to nothing at
+          // contracts-public. Persist the hash this body was rendered for
+          // so the replay can detect the rotation and suppress instead of
+          // texting a dead link.
+          share_token_hash: contract.share_token_hash || null,
+          original_block_code: result.code,
+          replay_purpose: smsPurpose,
+          ...(smsConsentBasis ? { consent_basis: smsConsentBasis } : {}),
+          refresh_customer_phone: !!contract.customer_id,
+          resolve_from_by_customer: !!contract.customer_id,
+        }),
+      });
+      logger.info(`[document-delivery] SMS ${action} for contract ${contract.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+      return {
+        ok: true,
+        provider: 'scheduled',
+        scheduled: true,
+        providerMessageId: null,
+        auditLogId: result.auditLogId || null,
+        segmentCount: result.segmentCount,
+      };
+    }
     const err = deliveryError(result.reason || result.code || 'SMS could not be sent.', 422, result.code || 'SMS_DELIVERY_FAILED');
     err.deliveryResult = result;
     throw err;

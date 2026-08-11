@@ -44,6 +44,7 @@ const { loadSuppressionState, checkSuppression } = require('./validators/suppres
 const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
+const { checkSendWindow } = require('./validators/send-window');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
@@ -178,6 +179,16 @@ async function sendCustomerMessage(input) {
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
+    // Send window IMMEDIATELY after the pure input check (codex r26): the
+    // window verdict must never be masked by a DB-dependent validator's
+    // fail-closed result. A transient contact-state failure at 21:00 used
+    // to surface CONSENT_LOOKUP_FAILED instead of QUIET_HOURS_HOLD, and
+    // one-shot callers (Stripe billing notices) queue only on the hold —
+    // they'd log the consent failure and lose the notice permanently. No
+    // consent answer is needed tonight anyway: the row queues, and the
+    // morning replay re-runs this whole pipeline — suppression, consent,
+    // compliance — against CURRENT state before dispatch.
+    { name: 'check_send_window',          fn: () => checkSendWindow(sendInput, policy, contactState) },
     { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
     { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
     { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
@@ -201,6 +212,13 @@ async function sendCustomerMessage(input) {
         code: result.code,
         reason: result.reason,
         validator: step.name,
+        // Deferral contract (send-window): callers that reschedule off
+        // { retryable, deferred, nextAllowedAt } — review requests, card-
+        // request nudges — must see a window block as "try again at 8 AM",
+        // not a terminal refusal.
+        retryable: result.retryable === true,
+        deferred: result.deferred === true,
+        nextAllowedAt: result.nextAllowedAt || undefined,
       };
       break;
     }
@@ -225,17 +243,21 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
+      ...(blockedBy.retryable ? { retryable: true } : {}),
+      ...(blockedBy.deferred ? { deferred: true } : {}),
+      ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
     };
   }
 
-  // 6.5 Caller-supplied final recheck — the LAST await before the provider
-  //     handoff, so callers with race-sensitive sends (clarify asks: an
-  //     answer can arrive while the validators above run) get their
-  //     freshest possible abort point inside the canonical path. Fail
-  //     closed: a throwing check blocks the send.
+  // 6.5 Caller-supplied final recheck — the last caller-visible abort point
+  //     before dispatch (only the provider-internal send-window boundary
+  //     re-check runs later), so callers with race-sensitive sends (clarify
+  //     asks: an answer can arrive while the validators above run) get
+  //     their freshest possible abort point inside the canonical path.
+  //     Fail closed: a throwing check blocks the send.
   if (typeof preDispatchCheck === 'function') {
     let verdict;
     try {
@@ -270,8 +292,48 @@ async function sendCustomerMessage(input) {
     }
   }
 
-  // 7. Dispatch to provider
-  const providerOutcome = await dispatchToProvider(sendInput);
+  // 7. Dispatch to provider. preSendCheck is the send-window boundary
+  // re-check, run by the provider IMMEDIATELY before the Twilio
+  // messages.create() call: the pipeline check above ran before the
+  // line-type Lookup and the caller's preDispatchCheck, and the provider
+  // itself awaits an internal-redirect check, the SMS-template lookup and a
+  // customer/location query before the handoff — any of which can straddle
+  // the 20:00 ET cutoff. Re-checking at the last await means a send that
+  // entered the pipeline at 19:59 can't reach Twilio at 20:01. Same
+  // deferral contract as the pipeline block; cheap (pure clock math) and a
+  // no-op for exempt inputs.
+  const providerOutcome = await dispatchToProvider(sendInput, {
+    preSendCheck: () => checkSendWindow(sendInput, policy, contactState),
+  });
+
+  // 7.5 Provider-handoff block (preSendCheck said no): map back onto the
+  // same blocked/deferral contract as a pipeline validator, with a
+  // dedicated validator name so audit rows distinguish the boundary race
+  // from the ordinary pipeline block.
+  if (providerOutcome.blocked) {
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['check_send_window_boundary'],
+      blockedBy: { code: providerOutcome.code, reason: providerOutcome.error },
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      code: providerOutcome.code,
+      reason: providerOutcome.error,
+      ...(providerOutcome.retryable ? { retryable: true } : {}),
+      ...(providerOutcome.deferred ? { deferred: true } : {}),
+      ...(providerOutcome.nextAllowedAt ? { nextAllowedAt: providerOutcome.nextAllowedAt } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
 
   // 8. Persist final audit row with provider outcome. A throw past this
   // point carries the KNOWN provider outcome on the error, so callers with
@@ -369,9 +431,9 @@ function validateContract(input) {
  * Per-channel provider routing. Only sms ships in this commit; email and
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
-async function dispatchToProvider(input) {
+async function dispatchToProvider(input, hooks = {}) {
   if (input.channel === 'sms') {
-    return sendViaTwilio(input);
+    return sendViaTwilio(input, hooks);
   }
   return {
     sent: false,

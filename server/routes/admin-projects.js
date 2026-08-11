@@ -3915,10 +3915,45 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
               scheduled_sms_log_id: smsClaim.id,
             },
           });
-          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
-          channels.sms = result.sent
-            ? { ok: true }
-            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          // Send-window hold: the claim row IS an sms_log row, so flip it
+          // onto the scheduled rail at the window open — the executor
+          // replays the exact body from the claim itself. Counted as a
+          // successful channel ONLY when the email leg already delivered
+          // (the customer holds the report; the text is the follow-up
+          // copy). An SMS-ONLY release must NOT mark a paid official
+          // report 'released' on a merely-queued text — it keeps the old
+          // failed path (revertToHeld → the payment-settled sweep retries
+          // inside the window), and the claim row stays 'failed' so
+          // nothing double-sends. If a queued email-backed replay later
+          // terminally blocks, the registry's onTerminal restores the
+          // hold when no email delivered (belt for future flows).
+          if (!result.sent
+            && result.code === 'QUIET_HOURS_HOLD'
+            && result.deferred
+            && result.nextAllowedAt
+            && channels.email?.ok) {
+            await db('sms_log').where({ id: smsClaim.id }).update({
+              status: 'scheduled',
+              scheduled_for: new Date(result.nextAllowedAt),
+              updated_at: db.fn.now(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                entry_point: 'project_report_hold_release_deferred',
+                project_id: refreshed.id,
+                email_delivered: true,
+                original_block_code: result.code,
+                replay_purpose: 'support_resolution',
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              })]),
+            });
+            channels.sms = { ok: true, scheduled: true };
+            logger.info(`[admin-projects] Report-release SMS for project ${refreshed.id} held outside the 8AM-8PM ET send window — claim rescheduled for ${result.nextAllowedAt}`);
+          } else {
+            await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+            channels.sms = result.sent
+              ? { ok: true }
+              : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          }
         }
       } catch (err) {
         channels.sms = { ok: false, error: err.message };

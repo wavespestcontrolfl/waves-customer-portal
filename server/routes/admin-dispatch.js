@@ -3827,6 +3827,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
           feeOutcome: noShowFeeOutcome,
+          // Authenticated dispatcher action with an explicit notify
+          // choice — operator provenance for the 8AM-8PM send window
+          // (same contract as the rain-out/quick-move moves).
+          operatorInitiated: true,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 
@@ -9655,6 +9659,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
+      // 'deferred' = a send-window hold requeued the text on the
+      // scheduled-SMS rail; that queued row owns the obligation, so a
+      // re-completion must not send a second copy.
+      || recordStructuredNotes.completionSmsStatus === 'deferred'
       || completionSmsSendingFresh;
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
@@ -9836,12 +9844,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // was marked succeeded would text the same decline twice. 'sending' also
     // counts as handled for DEDUPE (a crash mid-send has an unknown outcome
     // and a duplicate payment text is worse than a drop — the admin
-    // payment-failed bell covers the drop), but only a confirmed 'sent'
-    // suppresses the completion SMS's pay link.
+    // payment-failed bell covers the drop), as does 'deferred' (a queued
+    // scheduled-rail row owns the one notice; its registry hooks settle the
+    // status to sent/failed), but only a confirmed 'sent' suppresses the
+    // completion SMS's pay link.
     const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
     if (priorPaymentFailedNoticeStatus === 'sent') {
       paymentFailedNoticeSent = true;
-    } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
+    } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id
@@ -9894,17 +9904,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
           });
           paymentFailedNoticeSent = !!failResult.sent;
-          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
+          // Send-window hold: the decline is deliberately independent of
+          // completion messaging — when the operator skipped the separate
+          // completion SMS, this notice is the ONLY carrier of the failure
+          // + pay link, and an unqueued 'failed' silently commits an unpaid
+          // invoice with no customer-facing collection path. Queue the
+          // exact rendered notice on the scheduled rail; the registry's
+          // recheck suppresses a meanwhile-paid/payer-billed invoice, its
+          // finalize runs the same markDeliverySent + notes flip as the
+          // inline success below, and its onTerminal restores 'failed'.
+          // The completion SMS keeps its pay link either way (only a
+          // confirmed 'sent' drops it) — a morning double-link is coherent
+          // copy; a night with no link is not.
+          let paymentFailedNoticeDeferred = false;
+          if (!failResult.sent && failResult.code === 'QUIET_HOURS_HOLD' && failResult.deferred && failResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: paymentFailedBody,
+                status: 'scheduled',
+                scheduled_for: new Date(failResult.nextAllowedAt),
+                message_type: 'payment_failed',
+                metadata: JSON.stringify({
+                  entry_point: 'autopay_completion_decline_deferred',
+                  service_record_id: record.id,
+                  invoice_id: invoice.id,
+                  pay_url: payUrl,
+                  original_message_type: 'payment_failed',
+                  original_block_code: failResult.code,
+                  replay_purpose: 'payment_failure',
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              paymentFailedNoticeDeferred = true;
+            } catch (queueErr) {
+              logger.error(`[dispatch] held payment-failed notice requeue failed for invoice ${invoice.id} — recording failed (completion SMS keeps the pay link): ${queueErr.message}`);
+            }
+          }
+          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
-          else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
+          else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
           await mergeRecordNotesKeys(record.id, {
             paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
             ...(failResult.sent
               ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
-              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
+              : (paymentFailedNoticeDeferred ? {} : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError })),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
-          if (!failResult.sent) {
+          if (paymentFailedNoticeDeferred) {
+            logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
+          } else if (!failResult.sent) {
             logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
           } else {
             // The notice DELIVERED the pay link — the invoice must finalize
@@ -10254,7 +10308,93 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
-          if (!smsResult.sent) {
+          // Send-window hold: a late completion (catch-up bookkeeping after
+          // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
+          // worker retries a 'blocked' status — so the held text is requeued
+          // on the scheduled-SMS rail and goes out at the window open.
+          // Queued as the plain-SMS body (no MMS attachment): the executor
+          // replays text-only, mirroring this route's own MMS→SMS fallback.
+          // The bundled review link rides inside the queued body, so the
+          // review claim is NOT marked failed on this path. If the enqueue
+          // itself fails, fall through to the ordinary blocked handling.
+          let completionHoldQueued = false;
+          if (!smsResult.sent
+            && smsResult.code === 'QUIET_HOURS_HOLD'
+            && smsResult.deferred
+            && smsResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              // Queue row + 'deferred' notes marker commit ATOMICALLY: the
+              // marker is what the re-completion idempotency guard reads
+              // (completionSmsAlreadyHandled), so a committed queue row
+              // without it would let a later re-completion send a second
+              // completion text while the first still sits queued.
+              const deferredDelta = {
+                completionSmsStatus: 'deferred',
+                completionSmsDeferredTo: smsResult.nextAllowedAt,
+              };
+              await db.transaction(async (trx) => {
+                await trx('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: sentSmsBody,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: sentSmsType,
+                metadata: JSON.stringify({
+                  entry_point: 'dispatch_completion_deferred',
+                  service_record_id: record.id,
+                  original_block_code: smsResult.code,
+                  refresh_customer_phone: true,
+                  // from_phone above is a NOT-NULL placeholder — the
+                  // executor resolves the customer's LOCATION number at
+                  // send time so the morning text stays on their thread.
+                  resolve_from_by_customer: true,
+                  // Delivery-time finalization references (services/
+                  // dispatch-completion-deferred.js, invoked by the
+                  // scheduled-SMS executor AFTER the provider accepts): the
+                  // invoice draft→sent flip, the bundled review's delivered
+                  // mark, and the combined-receipt claim all run at actual
+                  // delivery — never here, so a terminally-blocked replay
+                  // leaves the invoice in draft on the operator's radar.
+                  ...(invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink
+                    ? { mark_invoice_delivery: true, invoice_id: invoice.id, pay_url: payUrl }
+                    : {}),
+                  ...(bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)
+                    ? { bundled_review_request_id: bundledReviewRequestId }
+                    : {}),
+                  ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id
+                    ? { stamp_receipt_invoice_id: invoice.id }
+                    : {}),
+                }),
+                });
+                await trx('service_records').where({ id: record.id }).update({
+                  structured_notes: trx.raw(
+                    "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+                    [JSON.stringify(deferredDelta)],
+                  ),
+                });
+              });
+              Object.assign(smsNotesDelta, deferredDelta);
+              completionHoldQueued = true;
+              // The bundled review ask rides inside the queued body. Its
+              // standalone fallback is armed by the scheduled-SMS executor
+              // ONLY if the queued row terminally blocks — a fixed timer
+              // here would race a still-retryable replay and double-text
+              // the ask (delivered replays mark the request delivered via
+              // the finalization hook instead).
+            } catch (queueErr) {
+              logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
+            }
+          }
+          if (completionHoldQueued) {
+            // Notes marker already committed atomically with the queue row
+            // above — only sync the in-memory snapshot here.
+            record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
+            logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } else if (!smsResult.sent) {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
@@ -11883,6 +12023,9 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // record shows which operator drove the send / authored the note.
       actorUserId: req.technicianId || null,
       initiatedBy: 'admin',
+      // Authenticated dispatch-board click — the moved SMS is exempt from
+      // the 8AM-8PM send window (operator-initiated, not machine-initiated).
+      operatorInitiated: true,
     });
 
     if (!result.ok) {
@@ -12049,6 +12192,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
               purpose: 'appointment',
               customerId: svc.customer_id,
               identityTrustLevel: 'phone_matches_customer',
+              // Authenticated dispatcher explicitly asked to notify the
+              // customer of the series move — exempt from the 8AM-8PM send
+              // window like the neighboring rain-out and quick-move actions
+              // (nothing re-enqueues this exact message; a held night send
+              // would silently drop the notice for a next-morning move).
+              operatorInitiated: true,
               metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
             });
             notificationSent = !(msg?.blocked || msg?.sent === false);

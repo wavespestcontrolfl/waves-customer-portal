@@ -94,7 +94,7 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
 // phone match or customer_id), pause the cron touch and let Virginia
 // handle it live. Soft-fails if the messages/conversations tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14) {
+async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
   const cutoff = new Date(Date.now() - days * 86400000);
   try {
     const q = db("messages")
@@ -117,6 +117,12 @@ async function hasRepliedRecently(est, days = 14) {
     const row = await q;
     return !!row;
   } catch (e) {
+    // Cron path fails OPEN (a skipped nudge self-heals on the next stage
+    // tick). The REPLAY path must fail CLOSED instead (codex #3259 r27):
+    // the queued row is a one-shot bearer-link send, and "reply state
+    // unverifiable" is exactly when it must not fire — the caller
+    // propagates the error onto the executor's bounded retry rail.
+    if (throwOnError) throw e;
     logger.warn(`[est-followup] reply-pause check skipped: ${e.message}`);
     return false; // fail open
   }
@@ -124,7 +130,7 @@ async function hasRepliedRecently(est, days = 14) {
 
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
-async function safetyGate(est, now = new Date()) {
+async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
   if (wasRecentlyOpened(est, 2, now.getTime()))
@@ -137,9 +143,34 @@ async function safetyGate(est, now = new Date()) {
   const conv = await customerConvertedSince(est);
   if (conv.converted)
     return { skip: true, reason: `customer-converted:${conv.reason}` };
-  if (await hasRepliedRecently(est))
+  if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
+}
+
+// Replay-time eligibility for a quiet-hours-deferred follow-up SMS: the
+// scheduled-SMS executor calls this before dispatching a row queued by
+// sendDualChannel's hold path. Overnight the recipient may have accepted or
+// declined the estimate, booked/paid through the email leg, or replied —
+// exactly the states safetyGate suppresses before an immediate send, so the
+// same gate runs again here. A read failure FAILS CLOSED as retryable:
+// authorizing delivery on an unchecked condition could nudge a customer who
+// already declined or paid — the executor reschedules the row and re-checks
+// on the next pass instead.
+async function deferredFollowupStillEligible(estimateId) {
+  try {
+    const est = await db("estimates").where({ id: estimateId }).first();
+    if (!est) return { eligible: false, reason: "estimate-missing" };
+    // replay:true — the reply-pause lookup THROWS on a transient failure
+    // here (codex r27) instead of the cron path's fail-open false, so an
+    // unverifiable reply state lands in the catch below and holds the row.
+    const gate = await safetyGate(est, new Date(), { replay: true });
+    if (gate.skip) return { eligible: false, reason: gate.reason };
+    return { eligible: true };
+  } catch (e) {
+    logger.warn(`[est-followup] replay eligibility recheck failed for ${estimateId} (holding for retry): ${e.message}`);
+    return { eligible: false, reason: "recheck-failed", retryable: true };
+  }
 }
 
 async function renderTemplate(templateKey, vars, context = {}) {
@@ -334,6 +365,7 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // claimStage() flag is still primary; idempotency is belt-and-suspenders.
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
+  let smsHold = null;
   if (est.customer_phone && sms) {
     try {
       const result = await sendCustomerMessage({
@@ -361,6 +393,13 @@ async function sendDualChannel(est, { sms, email }) {
         logger.warn(
           `[est-followup] SMS blocked for estimate ${est.id}: ${result.code || "unknown"} ${result.reason || ""}`,
         );
+        // Send-window hold (this cron ticks at night too): not a delivery
+        // failure — the held SMS leg is requeued durably below rather than
+        // letting the email leg mark the stage attempted with the SMS leg
+        // permanently unsent.
+        if (result.code === "QUIET_HOURS_HOLD" && result.deferred && result.nextAllowedAt) {
+          smsHold = result;
+        }
       } else {
         attempted = true;
       }
@@ -368,6 +407,66 @@ async function sendDualChannel(est, { sms, email }) {
       logger.error(
         `[est-followup] SMS failed for estimate ${est.id}: ${e.message}`,
       );
+    }
+  }
+  // A held SMS leg is persisted on the scheduled-SMS rail (the same rail
+  // the deferred voicemail text-back uses) and the email leg proceeds NOW.
+  // Releasing the claim to "re-fire at 8 AM" instead would silently drop
+  // touches: stage candidates live in bounded age windows (24-48h /
+  // 48-72h), so a nighttime candidate near its upper bound can be
+  // ineligible by morning — losing BOTH legs. With the row queued, the
+  // stage finalizes (attempted=true) and the executor sends the text at
+  // the window open with bounded retries + a fresh phone read. If the
+  // enqueue fails, fall back to releasing the claim — the next tick
+  // retries the whole touch while the candidate is still eligible.
+  if (smsHold) {
+    try {
+      const TWILIO_NUMBERS = require("../config/twilio-numbers");
+      // Recipient identity decides the replay's refresh behavior (card-link
+      // precedent, codex r19/r20; shared with the accept/extension enqueues
+      // since r22): a linked estimate's captured phone can legitimately
+      // differ from the account phone (the persistence contact guard
+      // accepts an email-only match), and the replay must not swap the
+      // bearer estimate link onto the account holder.
+      const { recipientRefreshStamp } = require("./messaging/deferred-recipient-identity");
+      const recipientStamp = await recipientRefreshStamp({
+        customerId: est.customer_id,
+        recipientPhone: est.customer_phone,
+        label: "est-followup",
+      });
+      await db("sms_log").insert({
+        customer_id: est.customer_id || null,
+        direction: "outbound",
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: est.customer_phone,
+        message_body: sms,
+        status: "scheduled",
+        scheduled_for: new Date(smsHold.nextAllowedAt),
+        message_type: "estimate_followup",
+        metadata: JSON.stringify({
+          entry_point: "estimate_follow_up_deferred",
+          estimate_id: est.id,
+          followup_stage: email?.stage || null,
+          original_block_code: smsHold.code,
+          // Customer rows resolve their LOCATION from-number at send time
+          // (from_phone above is a NOT-NULL placeholder) and re-read the
+          // live phone ONLY when the snapshot was the account phone;
+          // anonymous lead rows persist the transactional consent basis
+          // the immediate send ran under (same as the voicemail deferral).
+          ...(est.customer_id
+            ? { ...recipientStamp, resolve_from_by_customer: true }
+            : { consent_basis: { status: "transactional_allowed", source: "estimate_follow_up" } }),
+        }),
+      });
+      attempted = true;
+      logger.info(
+        `[est-followup] SMS for estimate ${est.id} held — outside 8AM-8PM ET send window; queued for ${smsHold.nextAllowedAt}`,
+      );
+    } catch (queueErr) {
+      logger.error(
+        `[est-followup] Held SMS requeue failed for estimate ${est.id}: ${queueErr.message} — releasing the stage claim for a full retry`,
+      );
+      return false;
     }
   }
   if (est.customer_email && email?.templateKey) {
@@ -1432,10 +1531,13 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
+// Called by the scheduled-SMS executor before replaying a deferred touch.
+module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
   renderTemplate,
+  deferredFollowupStillEligible,
   checkDepositAbandoned,
   checkPaymentStepAbandoned,
   paymentStepStillRequiresCard,

@@ -102,6 +102,9 @@ const mockGetTemplate = jest.fn(async () => 'Hi Pat! Secure your visit: https://
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: (...a) => mockGetTemplate(...a),
 }));
+jest.mock('../config/twilio-numbers', () => ({
+  getOutboundNumber: () => '+19410000000',
+}));
 
 const {
   requestCardForAppointment,
@@ -359,6 +362,56 @@ describe('the send', () => {
     });
     expect(res.action).toBe('sent');
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19419998888' }));
+  });
+
+  test('window-held queue: an explicit alternate recipient is FROZEN — no primary-phone refresh at replay (r19 P1)', async () => {
+    // blocked:true = validator stop (the pipeline never reached the
+    // provider) — the shape the send-window boundary actually returns.
+    const windowHold = { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: '2099-07-20T12:00:00Z' };
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+
+    // Consented alternate (AI call pipeline redirect): the queued row keeps
+    // the chosen recipient. refresh_customer_phone here would make
+    // resolveScheduledRecipient swap the 64-hex bearer link onto the
+    // account holder's number at 8 AM — a different person than the
+    // immediate path's explicit recipient decision.
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', recipientPhone: '+19419998888' });
+    const queued = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].to_phone).toBe('+19419998888');
+    const meta = JSON.parse(queued[0].metadata);
+    expect(meta.explicit_recipient).toBe(true);
+    expect(meta.refresh_customer_phone).toBeUndefined();
+
+    // The account holder's own number (default path) keeps the send-time
+    // refresh — a stale snapshot must not ride customer trust.
+    mockDbTouches = [];
+    mockTableHandlers = baseHandlers();
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'booking' });
+    const queuedDefault = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queuedDefault).toHaveLength(1);
+    const metaDefault = JSON.parse(queuedDefault[0].metadata);
+    expect(metaDefault.refresh_customer_phone).toBe(true);
+    expect(metaDefault.explicit_recipient).toBeUndefined();
+
+    // A recipientPhone that IS the account number (formatting differences
+    // aside) also refreshes — identity, not string equality.
+    mockDbTouches = [];
+    mockTableHandlers = baseHandlers();
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'booking', recipientPhone: '9415551234' });
+    const queuedSame = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queuedSame).toHaveLength(1);
+    const metaSame = JSON.parse(queuedSame[0].metadata);
+    expect(metaSame.refresh_customer_phone).toBe(true);
+    expect(metaSame.explicit_recipient).toBeUndefined();
   });
 
   test('an abandoned inline pending row gets its ONE text — same token, no new row', async () => {

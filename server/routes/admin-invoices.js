@@ -688,8 +688,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // payer AP inbox receives it and the invoice is finalized; self-pay
             // invoices keep the existing SMS-only immediate send.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id)
-              : await InvoiceService.sendViaSMS(invoice.id);
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true })
+              : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true });
           } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
             sendResult = { sent: false, error: sendErr.message };
@@ -736,7 +736,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
 
     for (const invoiceId of invoiceIds) {
       try {
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { operatorInitiated: true });
         if (result.ok) {
           sent.push({
             invoiceId,
@@ -812,7 +812,12 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       try {
         // The batch path pairs every SMS with the sendReceiptEmail attempt
         // above — declare the sidecar so email-only customers skip the text.
-        const r = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true });
+        // operatorInitiated: the admin confirmed "Send N receipts via
+        // SMS + email?" for these specific invoices, same as the single
+        // manual-resend routes below — without it an after-hours batch
+        // holds the SMS leg, the email success stamps receipt_sent_at,
+        // and the chosen text is dropped for good.
+        const r = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true, operatorInitiated: true });
         if (r?.sent) {
           smsOk = true;
         } else {
@@ -930,6 +935,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       requestReview,
       reviewDelayMinutes,
       emailRecipientOverride,
+      operatorInitiated: true,
     });
     if (!result.ok) {
       return res.status(400).json(result);
@@ -1383,7 +1389,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       // recordActivity:false because this route writes its own activity_log
       // row below with the memo and channel mix.
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both' });
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
@@ -1667,7 +1673,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       }
       if (via === 'sms' || via === 'both') {
         try {
-          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both' });
+          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
           smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
         } catch (err) {
           smsResult = { ok: false, error: err.message };
@@ -2330,7 +2336,10 @@ router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
 // POST /:id/followup/send-now — fires the next touch immediately
 router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
   try {
-    await FollowUps.sendNextTouchNow(req.params.id);
+    // Authenticated operator click — "now" means now: the SMS leg is exempt
+    // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
+    // cron path passes nothing and stays fenced.
+    await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
