@@ -959,20 +959,28 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
            AND (${lawnLikeSql}))`,
       [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
     )
-    // …plus membership evidence the system itself produced.
-    .where(function membershipEvidence() {
-      this.whereExists(function membershipEmail() {
-        // recipient_id is varchar (it can address technicians/tests too);
-        // cast the uuid side or Postgres rejects the comparison.
-        this.select(db.raw('1')).from('email_messages as em')
-          .whereRaw('em.recipient_id = c.id::text')
-          .where('em.recipient_type', 'customer')
-          .whereIn('em.template_key', MEMBERSHIP_EVIDENCE_TEMPLATES);
-      }).orWhereExists(function planRate() {
-        this.select(db.raw('1')).from('customer_plan_rates as cpr')
-          .whereRaw('cpr.customer_id = c.id');
-      });
-    })
+    // …plus CURRENT membership evidence the system itself produced. A
+    // membership.started email is durable — cancellation sends
+    // membership.canceled without deleting it (codex #3341 r4 P2) — so the
+    // latest POSITIVE signal (started/welcome email, or a plan-rate row,
+    // which also survives cancellation) must be strictly newer than the
+    // latest cancellation email. No positive signal at all ⇒ both sides
+    // collapse to epoch and the strict inequality excludes the customer,
+    // preserving the evidence requirement. recipient_id is varchar (it can
+    // address technicians/tests too); cast the uuid side or Postgres
+    // rejects the comparison.
+    .whereRaw(
+      `GREATEST(
+         COALESCE((SELECT MAX(em.created_at) FROM email_messages em
+                    WHERE em.recipient_id = c.id::text AND em.recipient_type = 'customer'
+                      AND em.template_key IN (?, ?)), 'epoch'::timestamptz),
+         COALESCE((SELECT MAX(cpr.created_at) FROM customer_plan_rates cpr
+                    WHERE cpr.customer_id = c.id), 'epoch'::timestamptz)
+       ) > COALESCE((SELECT MAX(emc.created_at) FROM email_messages emc
+                      WHERE emc.recipient_id = c.id::text AND emc.recipient_type = 'customer'
+                        AND emc.template_key = ?), 'epoch'::timestamptz)`,
+      [...MEMBERSHIP_EVIDENCE_TEMPLATES, 'membership.canceled'],
+    )
     .select(
       'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
