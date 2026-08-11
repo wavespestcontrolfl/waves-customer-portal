@@ -121,10 +121,18 @@ export default function SecureAppointmentPage() {
   // Latches the disclosure version carried by the payload THIS tab rendered
   // (latched, not live: a post-secure refresh nulls the note, but the
   // consent echo must reflect what was shown when the customer agreed).
+  // Mirrored into sessionStorage because a 3DS confirmSetup is a FULL-PAGE
+  // redirect: the component remounts on return and calls /complete before
+  // any payload fetch, so an in-memory ref alone would echo nothing and
+  // permanently stamp a 3DS customer's consent non-sticky. Same-tab only by
+  // design — a different tab/browser has no proof of what THIS tab showed.
   const stickyVersionRef = useRef(null);
   useEffect(() => {
-    if (data?.stickyDisclosureVersion) stickyVersionRef.current = data.stickyDisclosureVersion;
-  }, [data]);
+    if (data?.stickyDisclosureVersion) {
+      stickyVersionRef.current = data.stickyDisclosureVersion;
+      try { sessionStorage.setItem(`waves-sdv-${token}`, data.stickyDisclosureVersion); } catch { /* storage unavailable — ref still covers the no-redirect path */ }
+    }
+  }, [data, token]);
 
   // Re-pull the page payload (plan availability can change under us — the
   // office edits the visit, a term appears). Server truth wins.
@@ -166,13 +174,17 @@ export default function SecureAppointmentPage() {
   }, [token]);
 
   const complete = useCallback(async (setupIntentId) => {
+    // Echo the disclosure version THIS tab's render carried — the server
+    // stamps the sticky-window consent marker from it, so it must come
+    // from the page state the customer actually saw, never a constant.
+    // sessionStorage fallback covers the 3DS redirect return, where the
+    // remounted component completes before any payload fetch.
+    let sdv = stickyVersionRef.current;
+    if (!sdv) { try { sdv = sessionStorage.getItem(`waves-sdv-${token}`) || null; } catch { sdv = null; } }
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // Echo the disclosure version THIS tab's render carried — the server
-      // stamps the sticky-window consent marker from it, so it must come
-      // from the page state the customer actually saw, never a constant.
-      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: stickyVersionRef.current || undefined }),
+      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: sdv || undefined }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
