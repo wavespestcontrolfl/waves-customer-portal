@@ -2584,7 +2584,9 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       .select('customer_id', 'note', 'invoice_id');
     const seenTerms = new Set();
     for (const grant of extGrants) {
-      const termMatch = String(grant.note || '').match(/\(term ([0-9a-f-]+),/i);
+      // Anything up to the marker's comma is the id — prod ids are UUIDs,
+      // but the parse must not silently skip a grant over id shape.
+      const termMatch = String(grant.note || '').match(/\(term ([^,)]+),/i);
       const termId = termMatch ? termMatch[1] : null;
       if (!termId || seenTerms.has(termId)) continue;
       seenTerms.add(termId);
@@ -2594,10 +2596,19 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       if (!anchorInvoice) continue;
       const anchorStatus = String(anchorInvoice.status || '').toLowerCase();
       if (!INVOICE_CANCELLED_STATUSES.has(anchorStatus)) continue;
+      // The refunded ANCHOR is the whole evidence (codex #3344 r1 P1): a
+      // refunded term that had already decided renewal keeps its
+      // 'renewed'/'switch_plan' status through the inline refund path, so
+      // requiring status='cancelled' here would permanently skip exactly
+      // the grants a lost refund sync strands. The anchor is self-correct
+      // the other way too: a re-paid invoice (lost-dispute revival) leaves
+      // the cancelled set, and a DISPUTE parks the invoice at 'overdue' —
+      // never a mid-dispute clawback. The term row is only needed for its
+      // identity; the reversal itself is marker-deduped and balance-capped.
       const term = await conn('annual_prepay_terms')
         .where({ id: termId })
         .first('id', 'customer_id', 'status');
-      if (!term || term.status !== 'cancelled') continue;
+      if (!term) continue;
       summary.reversed += await reverseWaveguardExtensionCredits(term, conn);
     }
   } catch (err) {

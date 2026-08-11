@@ -12,6 +12,8 @@ jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn().mockResolvedValue(undefined),
   reverseAppliedCredit: jest.fn().mockResolvedValue(0),
   autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
+  WAVEGUARD_EXTENSION_CREDIT_BY: 'system:waveguard_tier_extension',
+  WAVEGUARD_EXTENSION_REVERSAL_BY: 'system:waveguard_tier_extension_reversal',
 }));
 
 const db = require('../models/db');
@@ -440,6 +442,60 @@ describe('annual prepay late-payment gap fixes', () => {
         'annual_prepay_terms as t': [query({ rows: [bareTerm] })],
         customer_credit_ledger: [query({ rows: [grant] })],
         invoices: [query({ first: { id: 'inv-1', status: 'paid' } })],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // WaveGuard extension-credit recovery pass — the refunded ANCHOR is the
+    // whole evidence (codex #3344 r1 P1): a refunded term that already
+    // decided renewal keeps 'renewed'/'switch_plan' status, so a
+    // status='cancelled' filter would permanently strand exactly the grants
+    // a lost refund sync leaves behind.
+    test('extension grant on a DECIDED (renewed) term with a refunded prepay anchor still recovers', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })], // dated loop — no covered terms
+        annual_prepay_terms: [
+          query({ columnInfo: {} }), // expired-window marker pass column probe → skipped
+          query({ first: { id: 'term-9', customer_id: 'cust-1', status: 'renewed' } }),
+        ],
+        customer_credit_ledger: [
+          query({ rows: [extGrant] }), // extension grant class scan
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: grants for the term
+          query({ rows: [] }), // reversal: prior reversal notes
+        ],
+        invoices: [query({ first: { id: 'inv-prepay', status: 'refunded' } })],
+        customers: [query({ first: { id: 'cust-1', account_credits: '10.00' } })],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: -4.9,
+        createdBy: 'system:waveguard_tier_extension_reversal',
+      }), conn);
+    });
+
+    test('extension grant whose prepay anchor is still collectible is never clawed by the sweep', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [query({ first: { id: 'inv-prepay', status: 'paid' } })],
       });
 
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
