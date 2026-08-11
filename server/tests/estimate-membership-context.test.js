@@ -1114,7 +1114,11 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
-  test('an unresolvable series pattern falls back to the catalog cadence', async () => {
+  // Superseded by the r6 rule: a 'custom' pattern with NO interval days is a
+  // declared live recurrence we cannot name, so it must withhold rather than
+  // inherit the catalog default. This test asserted the inverse when it was
+  // written in r4 — the rule changed, so its expectation did too.
+  test('a bare custom pattern with no interval days withholds cadence', async () => {
     const database = fakeDb({
       scheduledRows: [
         { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, recurring_pattern: 'custom' },
@@ -1125,8 +1129,11 @@ describe('current-spend cadence and stamped billing basis', () => {
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
     expect(spend.currentServices[0]).toEqual(expect.objectContaining({
-      cadenceLabel: 'Quarterly',
-      visitsPerYear: 4,
+      cadenceLabel: null,
+      visitsPerYear: null,
+      // The price basis is unaffected — the scheduled price still stands.
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
     }));
   });
 
@@ -1215,6 +1222,65 @@ describe('current-spend cadence and stamped billing basis', () => {
     expect(byAddress['1 Palm St, Bradenton, 34203'].perVisit).toBe(114);
     expect(byAddress['2 Oak Ave, Venice, 34285'].spendSource).toBe('scheduled_estimate');
     expect(byAddress['2 Oak Ave, Venice, 34285'].perVisit).toBe(100);
+  });
+
+  test('a weekly series shows NO cadence rather than inheriting the catalog default', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      // The scheduler supports weekly; normalizeCoverageCadence can't name it
+      // and cadenceFromIntervalDays rejects 7 days as a non-coverage cadence.
+      // Falling back to the quarterly catalog would show 4/yr and divide
+      // $100/mo by 4 — a per-application figure for a plan that isn't billed
+      // that way.
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'weekly', recurring_interval_days: 7,
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: null,
+      visitsPerYear: null,
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('a series declaring no recurrence of its own still uses the catalog cadence', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Quarterly', visitsPerYear: 4,
+    }));
+  });
+
+  test('a prepaid allocation does not carry the superseded invoice\'s payment date', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Otherwise the panel reads "prepaid allocation · 2026-01-10", dating the
+    // current allocation to the payment it superseded.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      spendSource: 'prepaid_allocation',
+      currentPerVisit: 114,
+      lastPaidAt: null,
+    }));
   });
 
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {

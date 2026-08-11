@@ -419,9 +419,7 @@ async function loadCadenceByRowId(database, customerId) {
       // 'monthly_nth_weekday' IS monthly; named cadences go through
       // normalizeCoverageCadence; and everything it can't name — notably
       // 'custom' carrying recurring_interval_days = 42 — resolves from the
-      // interval days. Only a series that resolves NOTHING falls back to the
-      // catalog default, because an unresolvable pattern is genuinely unknown
-      // rather than known-different.
+      // interval days.
       const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
       const liveCadence = rawPattern === 'monthly_nth_weekday'
         ? 'monthly'
@@ -432,6 +430,24 @@ async function loadCadenceByRowId(database, customerId) {
           frequency: liveCadence,
           visitsPerYear: coverageCadenceVisitsPerYear(liveCadence),
         }];
+      }
+      // A series that DECLARES a live recurrence we cannot name yields NO
+      // cadence — never the catalog default (codex #3353 r6). weekly and
+      // biweekly are the concrete cases: the scheduler supports both,
+      // normalizeCoverageCadence doesn't name them and cadenceFromIntervalDays
+      // deliberately rejects their 7/14-day intervals as non-coverage
+      // cadences, so the catalog fallback would show a weekly series as its
+      // catalog quarterly (4/yr) and divide a monthly rate by 4.
+      //
+      // The RULE, not just those two patterns: an unresolvable live override
+      // is known-different, not unknown, so inheriting the catalog asserts
+      // something we have positive evidence against. Showing nothing is the
+      // honest failure — a null cadence omits the label and suppresses the
+      // monthly-rate division rather than quoting a wrong per-application
+      // figure. The catalog only speaks for a series that declares no
+      // recurrence of its own.
+      if (rawPattern || Number(row.recurring_interval_days) > 0) {
+        return [row.id, { frequency: null, visitsPerYear: null }];
       }
       return [row.id, {
         frequency: row.frequency || null,
@@ -750,7 +766,11 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         if (monthlyDerivedPerApplication != null) return 'monthly_rate_derived';
         return 'unavailable';
       })(),
-      lastPaidAt: usableLastPaid?.paidAt || null,
+      // Only when the invoice is what the figure came FROM (codex #3353 r6).
+      // When an active prepaid allocation outranks a superseded per-visit
+      // invoice, carrying that invoice's date renders as "prepaid allocation
+      // · 2026-01-10" and dates the current allocation to the old payment.
+      lastPaidAt: activePrepaidBasis != null ? null : (usableLastPaid?.paidAt || null),
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the
       // rows aren't property-split) so multi-property spend stays itemized.
