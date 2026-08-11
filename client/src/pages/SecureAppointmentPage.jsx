@@ -179,14 +179,22 @@ export default function SecureAppointmentPage() {
     setState('secured');
   }, [token]);
 
-  const complete = useCallback(async (setupIntentId) => {
-    // Echo the disclosure version THIS tab's render carried — the server
-    // stamps the sticky-window consent marker from it, so it must come
-    // from the page state the customer actually saw, never a constant.
-    // sessionStorage fallback covers the 3DS redirect return, where the
-    // remounted component completes before any payload fetch.
+  // The disclosure version THIS tab's render carried — the server stamps
+  // the sticky-window consent marker from it, so it must come from the
+  // page state the customer actually saw, never a constant. sessionStorage
+  // fallback covers the 3DS redirect return, where the remounted component
+  // completes before any payload fetch. Also the retry predicate for
+  // completion_in_progress (Codex #3342 r10 P1): a pending echo is worth
+  // waiting out the webhook's claim for; no echo → nothing to record, so
+  // the secured render should not be delayed.
+  const pendingStickyEcho = useCallback(() => {
     let sdv = stickyVersionRef.current;
     if (!sdv) { try { sdv = sessionStorage.getItem(`waves-sdv-${token}`) || null; } catch { sdv = null; } }
+    return sdv;
+  }, [token]);
+
+  const complete = useCallback(async (setupIntentId) => {
+    const sdv = pendingStickyEcho();
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -199,7 +207,7 @@ export default function SecureAppointmentPage() {
       throw err;
     }
     return res.json();
-  }, [token]);
+  }, [token, pendingStickyEcho]);
 
   useEffect(() => {
     let cancelled = false;
@@ -223,15 +231,33 @@ export default function SecureAppointmentPage() {
           // customer has no reason to reload — waiting for one would make
           // the kept params decorative. If the retries exhaust, the
           // server's refresh instruction surfaces on the secured card.
+          // completion_in_progress is retried the same way WHEN an echo is
+          // pending (Codex #3342 r10 P1): the webhook holding the claim
+          // completes without a disclosure echo and stamps non-sticky, so
+          // breaking out here would silently keep the reschedule-then-
+          // cancel dodge for a customer who attested — retry until the row
+          // exits 'completing' and /complete records the echo on the
+          // completed row idempotently. No pending echo → the old
+          // fall-through is right (nothing to record; the GET renders
+          // completing rows as secured).
+          const retryable = (code) => code === 'consent_echo_failed'
+            || (code === 'completion_in_progress' && !!pendingStickyEcho());
           let completed = false;
           for (let attempt = 0; attempt < 3 && !completed && !cancelled; attempt += 1) {
             try {
               await complete(redirectIntent);
               completed = true;
             } catch (err) {
-              if (err?.code !== 'consent_echo_failed') break; // other errors: fall through to page state
+              if (!retryable(err?.code)) break; // other errors: fall through to page state
               if (attempt === 2) {
-                if (!cancelled) setError(err.message || 'Your card is saved — please refresh this page.');
+                // The kept params make a reload retry the idempotent
+                // /complete, so the exhaustion notice must instruct one —
+                // the completion_in_progress server copy doesn't.
+                if (!cancelled) {
+                  setError(err?.code === 'completion_in_progress'
+                    ? 'Your card is saved — please refresh this page in a moment.'
+                    : (err.message || 'Your card is saved — please refresh this page.'));
+                }
                 break;
               }
               await new Promise((resolve) => { setTimeout(resolve, 1500 * (attempt + 1)); });
@@ -265,13 +291,17 @@ export default function SecureAppointmentPage() {
     if (busy || !captureRef.current?.isReady()) return;
     setBusy(true);
     setError(null);
+    // Hoisted so the completion_in_progress retry below can re-POST the
+    // SAME SetupIntent — the server pins the webhook-first echo to it.
+    let confirmedIntentId = null;
     try {
       const confirmed = await captureRef.current.confirmSetup();
       if (!confirmed.ok) {
         setError(confirmed.error || 'That card could not be saved. Try again.');
         return;
       }
-      await complete(confirmed.setupIntentId);
+      confirmedIntentId = confirmed.setupIntentId;
+      await complete(confirmedIntentId);
       // Re-pull the payload so the secured confirmation renders the FROZEN
       // row terms, never this render's pre-completion disclosure (Codex
       // #3153 r16 — a concurrent tab or a monotonic-down stamp can make
@@ -287,9 +317,28 @@ export default function SecureAppointmentPage() {
       }
       // The Stripe webhook (or another tab) won the completion claim and
       // is saving this card right now — the SetupIntent already succeeded,
-      // so the durable webhook path finishes it. Not a failure. Re-pull so
-      // the secured render carries the frozen row terms (Codex #3153 r16).
+      // so the durable webhook path finishes it. Not a failure. But the
+      // webhook tail carries no disclosure echo and stamps non-sticky, so
+      // when THIS render disclosed the sticky window, retry /complete
+      // until the row exits 'completing' and the echo records on the
+      // completed row idempotently (Codex #3342 r10 P1) — unlike the 3DS
+      // return there are no URL params here, so a reload never retries
+      // and in-page retries are the only chance to record it. Exhaustion
+      // renders secured without the echo: the marker stays false, which
+      // fails toward the customer (non-sticky), never toward a charge.
       if (err?.code === 'completion_in_progress') {
+        if (pendingStickyEcho() && confirmedIntentId) {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            await new Promise((resolve) => { setTimeout(resolve, 1500 * (attempt + 1)); });
+            try {
+              await complete(confirmedIntentId);
+              break;
+            } catch (retryErr) {
+              if (retryErr?.code !== 'completion_in_progress'
+                && retryErr?.code !== 'consent_echo_failed') break;
+            }
+          }
+        }
         await refreshOrSecured();
         return;
       }
@@ -305,7 +354,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh, refreshOrSecured]);
+  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
