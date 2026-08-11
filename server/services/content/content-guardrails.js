@@ -3207,13 +3207,21 @@ const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['�
 //   2. Other scheduling objects exclude only when NO drying context
 //      follows in the sentence: "confirm the timing after the visit based
 //      on drying conditions" is the current treatment visit and passes.
-// A scheduling noun BEFORE "timing" is appointment timing too (Codex
-// #3348 r5): "confirm the appointment timing" — the lookbehind rejects a
-// compound scheduling object on the left the same way the lookaheads
-// police the right. (Server-side only: lookbehind never ships in client
-// chunks.)
+// "timing" binds by ALLOWLIST, not noun blocklist (Codex #3348 r5/r6 —
+// blocklisting scheduling nouns was whack-a-mole: "appointment timing",
+// then "route timing", "billing timing"...). A compound noun on the left
+// only qualifies when it is a determiner, a confirmation verb, or a
+// re-entry word; an "of/for" object on the right must bind to re-entry/
+// drying context. The two prepositional branches below keep the earlier
+// verdicts: next/upcoming objects are ALWAYS appointment timing, other
+// scheduling objects defuse only when drying context follows. (Lookbehind
+// is server-side only — never ships in client chunks.)
+// "entry" alone is allowlisted because the hyphen in "re-entry" makes it
+// its own word for the lookbehind's boundary.
+const TIMING_LEFT_ALLOW_SRC = "(?:the|a|their|your|its|that|this|exact|precise|right|proper|confirms?|confirmed|verif(?:y|ies|ied)|advises?|advised|on|know|knows|re-?entry|entry|dry(?:ing)?|safety|safe|return)";
 const TIMING_GAP_SRC = "(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?";
-const TIMING_OBJ_SRC = "(?<!\\b(?:visit|appointment|arrival|estimate|quote|call|application|service)[\\s-])timing"
+const TIMING_OBJ_SRC = `(?<!\\b(?!${TIMING_LEFT_ALLOW_SRC}\\b)[a-z][a-z-]*[\\s-])timing`
+  + `(?!\\s+(?:of|for)\\b(?![^.!?\\n]{0,40}?\\b(?:re-?ent\\w+|dry\\w*|safe\\b|return\\w*)\\b))`
   + `(?!${TIMING_GAP_SRC}\\b(?:next|upcoming)\\s+(?:visit|appointment|arrival|application|service)\\b)`
   + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call|service|application)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;
 const TECH_CONFIRMS_RE = new RegExp(
