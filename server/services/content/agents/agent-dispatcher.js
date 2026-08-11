@@ -204,7 +204,7 @@ class AgentDispatcher {
         metadata: { source: 'autonomous-content-engine', opportunity_id: brief.opportunity_id },
       });
     } catch (err) {
-      return { ok: false, reason: `session_create_failed: ${err.message}` };
+      return { ok: false, reason: `session_create_failed: ${err.message}`, agent_id: route.agent_id };
     }
     const sessionId = session.id;
     // Arm the writer's in-loop self-lint (W1) with the caller's precomputed
@@ -229,7 +229,7 @@ class AgentDispatcher {
       // transient initial-message failure must not leak it into the
       // process-global maps.
       clearDraft(sessionId);
-      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId };
+      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
@@ -242,6 +242,7 @@ class AgentDispatcher {
         ok: false,
         reason: `streaming_failed: ${err.message}`,
         session_id: sessionId,
+        agent_id: route.agent_id,
         partial_draft: partial || null,
         duration_ms: Date.now() - t0,
       };
