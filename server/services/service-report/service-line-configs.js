@@ -226,7 +226,11 @@ const COCKROACH_SERVICE_TYPE_RE = /\b(?:cock)?roach(?:es)?\b|\bpalmetto\b/i;
 const COCKROACH_INTERIOR_REENTRY_MIN = 120;
 
 function isCockroachServiceType(serviceType) {
-  return COCKROACH_SERVICE_TYPE_RE.test(String(serviceType || ''));
+  // Keyed catalog values (german_roach_cleanout) hide the word boundary
+  // \broach\b needs — underscores are \w, so normalize _/- separators to
+  // spaces before matching. Display names pass through unchanged.
+  const text = String(serviceType || '').replace(/[_-]+/g, ' ');
+  return COCKROACH_SERVICE_TYPE_RE.test(text);
 }
 
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the

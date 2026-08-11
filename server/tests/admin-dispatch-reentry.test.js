@@ -96,12 +96,32 @@ describe('service-line advisory defaults', () => {
       'Native Roach Knockdown',
       'Palmetto Bug Treatment', // legacy pre-rename naming
       'German Roach Cleanout',
+      // Keyed catalog values — snake_case has no \b before "roach"
+      // (underscore is \w), so detection normalizes separators first.
+      'cockroach_control',
+      'german_roach_cleanout',
+      'german_roach_knockdown',
+      'german-roach-cleanout',
     ]) {
       expect(getAdvisoryDefaults(type)).toMatchObject({
         exterior_reentry_min: 30,
         interior_reentry_min: 120,
       });
     }
+  });
+
+  // Pre-existing quirk, pinned deliberately: the KEY 'palmetto_roach_knockdown'
+  // slips past detectServiceLine's early \bpalmetto\b → pest check (no word
+  // boundary in snake_case) and the service-normalizer's substring
+  // includes('palm') then classifies it tree_shrub — so the whole report,
+  // not just re-entry, would render as tree & shrub for that key. The
+  // cockroach override correctly stays out of non-pest lines; display names
+  // ("Palmetto Bug Treatment", "Native Roach Knockdown") are unaffected.
+  test('the palmetto snake_case KEY stays on its detected line (tree_shrub) — override does not fire', () => {
+    expect(getAdvisoryDefaults('palmetto_roach_knockdown')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 0,
+    });
   });
 
   test('non-cockroach types keep their line defaults', () => {
