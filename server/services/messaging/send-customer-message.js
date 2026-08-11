@@ -179,15 +179,22 @@ async function sendCustomerMessage(input) {
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
+    // Send window IMMEDIATELY after the pure input check (codex r26): the
+    // window verdict must never be masked by a DB-dependent validator's
+    // fail-closed result. A transient contact-state failure at 21:00 used
+    // to surface CONSENT_LOOKUP_FAILED instead of QUIET_HOURS_HOLD, and
+    // one-shot callers (Stripe billing notices) queue only on the hold —
+    // they'd log the consent failure and lose the notice permanently. No
+    // consent answer is needed tonight anyway: the row queues, and the
+    // morning replay re-runs this whole pipeline — suppression, consent,
+    // compliance — against CURRENT state before dispatch.
+    { name: 'check_send_window',          fn: () => checkSendWindow(sendInput, policy, contactState) },
     { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
     { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
     { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
     { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
-    // Send window before line-type: a deferred-to-morning send must not pay
-    // for a Lookup it isn't going to use tonight.
-    { name: 'check_send_window',          fn: () => checkSendWindow(sendInput, policy, contactState) },
     // Last: only pay for a Twilio line-type Lookup when the message would
     // otherwise actually send (gated dark behind GATE_PROACTIVE_LINETYPE_LOOKUP).
     { name: 'check_line_type',            fn: () => checkLineType(sendInput, policy, contactState) },

@@ -82,6 +82,24 @@ describe('send-window helpers', () => {
     expect(open.toISOString()).toBe('2026-11-01T13:00:00.000Z');
     expect(isWithinSendWindowET(open)).toBe(true);
   });
+
+  test('nextSendWindowOpenET late on the spring-forward eve advances ONE ET date (codex r26 P1)', () => {
+    // 2026-03-07 11:30 PM EST (04:30Z Mar 8); DST starts Mar 8 2:00 AM ET.
+    // "+24 absolute hours" lands at 00:30 EDT on Mar 9 — TWO ET dates later
+    // — and would delay every held SMS a full extra day. The next open is
+    // Mar 8 8:00 AM EDT = 12:00Z.
+    const springForwardEve = new Date('2026-03-08T04:30:00Z');
+    const open = nextSendWindowOpenET(springForwardEve);
+    expect(open.toISOString()).toBe('2026-03-08T12:00:00.000Z');
+    expect(isWithinSendWindowET(open)).toBe(true);
+  });
+
+  test('nextSendWindowOpenET pre-dawn on the spring-forward day itself → same day 8:00 EDT', () => {
+    // 2026-03-08 1:30 AM EST (06:30Z) — before the jump; same-day open is
+    // 8:00 AM EDT = 12:00Z.
+    const preJump = new Date('2026-03-08T06:30:00Z');
+    expect(nextSendWindowOpenET(preJump).toISOString()).toBe('2026-03-08T12:00:00.000Z');
+  });
 });
 
 describe('checkSendWindow validator', () => {

@@ -21,7 +21,7 @@
  * before 20:00. DST is handled by etParts (Intl-based).
  */
 
-const { etParts } = require('../../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const SEND_WINDOW_START_HOUR_ET = 8; // inclusive — sends allowed from 08:00 ET
 const SEND_WINDOW_END_HOUR_ET = 20; // exclusive — no sends at/after 20:00 ET
@@ -36,26 +36,26 @@ function isWithinSendWindowET(date = new Date()) {
  * window, tomorrow 08:00 ET when called during or after it. Callers use it
  * for `nextAllowedAt` on deferred results (review requests already
  * reschedule themselves from that field) and for the reminders' same-day
- * skip decision. Computed by stepping in UTC and re-reading ET wall-clock,
- * so a DST boundary between now and the target can't skew the hour.
+ * skip decision.
+ *
+ * The target is an ET CALENDAR date, never "now + 24 hours" (codex r26 P1):
+ * from a late evening before the spring DST transition, +24 absolute hours
+ * crosses TWO ET calendar dates (23:30 EST + 24h = 00:30 EDT two dates
+ * later) and every held SMS would slip an extra day. Advancing from a noon
+ * anchor is DST-proof — noon plus 24 hours lands at 11:00 or 13:00 on the
+ * next ET date in the worst case, never on the date after it — and
+ * parseETDateTime composes 08:00 on that date with the correct offset for
+ * that specific day.
  */
 function nextSendWindowOpenET(date = new Date()) {
   const { hour } = etParts(date);
-  // Start from the current instant and roll forward to the target ET date.
-  let target = new Date(date.getTime());
+  let targetYmd = etDateString(date);
   if (hour >= SEND_WINDOW_START_HOUR_ET) {
-    // During or after today's window — next open is tomorrow.
-    target = new Date(target.getTime() + 24 * 3600 * 1000);
+    // During or after today's window — next open is tomorrow (ET calendar).
+    const noonET = parseETDateTime(`${targetYmd}T12:00:00`);
+    targetYmd = etDateString(new Date(noonET.getTime() + 24 * 3600 * 1000));
   }
-  // Snap to 08:00 ET on the target's ET calendar date. Iterate because a
-  // DST transition can shift the wall-clock by an hour after arithmetic.
-  for (let i = 0; i < 3; i++) {
-    const p = etParts(target);
-    const deltaMinutes = (SEND_WINDOW_START_HOUR_ET - p.hour) * 60 - p.minute;
-    if (deltaMinutes === 0 && p.second === 0) break;
-    target = new Date(target.getTime() + deltaMinutes * 60 * 1000 - p.second * 1000);
-  }
-  return target;
+  return parseETDateTime(`${targetYmd}T08:00:00`);
 }
 
 module.exports = {

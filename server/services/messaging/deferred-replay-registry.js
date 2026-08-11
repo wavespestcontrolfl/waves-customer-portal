@@ -67,7 +67,29 @@ const REGISTRY = {
       // safetyGate the follow-up engine uses.
       if (!meta.estimate_id) return { eligible: true };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
-      return deferredFollowupStillEligible(meta.estimate_id);
+      const eligible = await deferredFollowupStillEligible(meta.estimate_id);
+      if (eligible?.eligible === false) return eligible;
+      // Expiry pin (codex r26): the frozen body names the FIRST grant's
+      // "{new_expiry}"/"{days_added}". An admin re-extension before 08:00
+      // moves expires_at again (and sends its own immediate confirmation),
+      // so a mismatch means this copy is obsolete — suppress rather than
+      // contradict the newer grant. Legacy rows without the stamp keep the
+      // safetyGate-only behavior; a read failure holds the row (fail
+      // closed), never "can't verify → send".
+      if (meta.granted_expires_at) {
+        try {
+          const est = await db('estimates').where({ id: meta.estimate_id }).first('expires_at');
+          if (!est) return { eligible: false, reason: 'estimate-missing' };
+          const live = est.expires_at ? new Date(est.expires_at).getTime() : null;
+          const granted = new Date(meta.granted_expires_at).getTime();
+          if (live === null || Number.isNaN(granted) || live !== granted) {
+            return { eligible: false, reason: 'extension-superseded' };
+          }
+        } catch (err) {
+          return failClosed('estimate-extension', meta.estimate_id, err);
+        }
+      }
+      return { eligible: true };
     },
   },
 
@@ -819,8 +841,20 @@ async function visitStillUpcoming(scheduledServiceId, label, slotSnapshot = null
     const ymd = svc.scheduled_date instanceof Date
       ? svc.scheduled_date.toISOString().slice(0, 10)
       : String(svc.scheduled_date || '').slice(0, 10);
-    const { etDateString } = require('../../utils/datetime-et');
+    const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
     if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
+    // Same-day instant check (codex r26): the calendar-date test alone lets
+    // an 08:00 replay deliver a frozen confirmation/prep text for a visit
+    // whose window already opened — a next-day-07:00 hold replays at 08:00
+    // with the tech mid-service. Compose the ET appointment instant from
+    // the fields already loaded (the card-request recheck's contract);
+    // rows on visits with no window_start keep the date-only behavior.
+    if (ymd && svc.window_start) {
+      const startInstant = parseETDateTime(`${ymd}T${String(svc.window_start).slice(0, 8)}`);
+      if (startInstant && !Number.isNaN(startInstant.getTime()) && Date.now() >= startInstant.getTime()) {
+        return { eligible: false, reason: 'visit-started' };
+      }
+    }
     // Slot pin (codex r25): rows whose frozen body announces a date/window
     // carry a snapshot of the slot they were rendered against. A second
     // move before the window opens — SmartRebooker forces status straight

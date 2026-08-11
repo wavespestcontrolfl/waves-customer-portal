@@ -30,6 +30,11 @@ jest.mock('../services/appointment-card-request', () => ({
   // disagree on what a live visit is.
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
 }));
+jest.mock('../services/estimate-follow-up', () => ({
+  // The extension recheck runs the follow-up safetyGate FIRST (r7); the
+  // r26 expiry-pin tests exercise the stamp comparison behind it.
+  deferredFollowupStillEligible: jest.fn(async () => ({ eligible: true })),
+}));
 jest.mock('../services/appointment-reminders', () => ({
   // Canonical DATE+TIME→ET composition the card recheck consults (r24).
   // Defaults to a future instant so pre-r24 pins keep exercising their own
@@ -673,6 +678,51 @@ describe('deferred-replay registry', () => {
     const res = await recheckDeferredReplay('appointment_card_request_deferred', { scheduled_service_id: 'ss-1' });
     expect(res.eligible).toBe(false);
     expect(res.reason).toBe('visit-rescheduled');
+  });
+
+  test('visit-anchored replays (r26): a same-day visit whose ET window already opened suppresses', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const todayET = etDateString();
+
+    // Window opened at 00:00 ET today — any replay after midnight is
+    // at-or-after service start.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: todayET, window_start: '00:00:00' }));
+    const started = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 'ss-1' });
+    expect(started.eligible).toBe(false);
+    expect(started.reason).toBe('visit-started');
+
+    // A future-dated visit with a window is untouched by the instant check.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: '2099-01-01', window_start: '09:00:00' }));
+    const future = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 'ss-1' });
+    expect(future.eligible).toBe(true);
+  });
+
+  test('extension replay (r26): a re-extension before the window open suppresses the first grant\'s copy', async () => {
+    // The stamped grant no longer matches the live expires_at — an admin
+    // re-extended overnight and sent their own confirmation.
+    db.mockReturnValueOnce(firstChain({ expires_at: '2026-09-01T00:00:00.000Z' }));
+    const superseded = await recheckDeferredReplay('estimate_extension_deferred', {
+      estimate_id: 'est-1',
+      granted_expires_at: '2026-08-25T00:00:00.000Z',
+    });
+    expect(superseded.eligible).toBe(false);
+    expect(superseded.reason).toBe('extension-superseded');
+
+    // Matching grant replays.
+    db.mockReturnValueOnce(firstChain({ expires_at: '2026-08-25T00:00:00.000Z' }));
+    const current = await recheckDeferredReplay('estimate_extension_deferred', {
+      estimate_id: 'est-1',
+      granted_expires_at: '2026-08-25T00:00:00.000Z',
+    });
+    expect(current.eligible).toBe(true);
+
+    // Read failure holds the row — never "can't verify → send".
+    db.mockReturnValueOnce(throwChain());
+    const held = await recheckDeferredReplay('estimate_extension_deferred', {
+      estimate_id: 'est-1',
+      granted_expires_at: '2026-08-25T00:00:00.000Z',
+    });
+    expect(held).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test('notice-contact slot pin (r25): a second overnight move suppresses the frozen first-move copy', async () => {

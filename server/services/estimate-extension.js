@@ -342,6 +342,12 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
                   estimate_id: estimate.id,
                   original_block_code: smsResult.code,
                   replay_purpose: 'estimate_followup',
+                  // The expiry this body NAMES (codex r26): an admin
+                  // re-extension before 08:00 moves expires_at again, and
+                  // the frozen "{new_expiry}" copy would contradict the
+                  // newer grant's own confirmation. The recheck suppresses
+                  // when the live expires_at no longer matches.
+                  granted_expires_at: newExpiry.toISOString(),
                   ...(estimate.customer_id
                     ? { ...recipientStamp, resolve_from_by_customer: true }
                     : { consent_basis: { status: 'transactional_allowed', source: entryPoint } }),
