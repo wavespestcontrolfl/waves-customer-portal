@@ -84,6 +84,18 @@ describe('lintComms mechanics', () => {
     expect(plain.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('catches shorteners beyond the fixed list via the short-host fingerprint', () => {
+    for (const msg of ['Pay at https://tiny.one/x today', 'Pay at https://v.gd/x today', 'Pay at https://zz.gd/x today']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');
+    }
+    // Sanctioned g.page and prose abbreviation pairs never match.
+    const gpage = lintComms('We would love a review: https://g.page/r/waves-review', { channel: 'sms', audience: 'customer' });
+    expect(gpage.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
+    const prose = lintComms('Communication is key, e.g. we text before arrival at 3 p.m. sharp.', { channel: 'sms', audience: 'customer' });
+    expect(prose.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
+  });
+
   it('decodes multibyte percent-encoded unicode before folding', () => {
     const r = lintComms('Book at https://bit%EF%BC%8Ely/x today', { channel: 'sms', audience: 'customer' });
     expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');

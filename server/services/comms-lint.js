@@ -45,8 +45,21 @@ const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
 const URL_SHORTENER_HOSTS = [
   'bit.ly', 'tinyurl.com', 'goo.gl', 't.co', 'ow.ly', 'is.gd', 'buff.ly',
   'rebrand.ly', 'cutt.ly', 'tiny.cc', 'rb.gy', 'shorturl.at', 'lnkd.in',
-  's.id', 'soo.gd', 'bl.ink', 'snip.ly',
+  's.id', 'soo.gd', 'bl.ink', 'snip.ly', 'tiny.one', 'v.gd', 'x.gd',
+  'u.to', 'qr.ae', 'shorte.st', 'clck.ru',
 ];
+
+// A blocklist can never be complete (rain-out.js documents the same:
+// tiny.one, v.gd, …), so a second LAYER catches the shortener fingerprint:
+// a registrable two-label host whose second-level label is 1–2 characters
+// (t.co, v.gd, zz.gd) is a shortener shape no legitimate draft link uses —
+// EXCEPT sanctioned g.page review links. psl validation keeps prose pairs
+// ("e.g", "p.m") out.
+function isShortHostFingerprint(host) {
+  if (host === 'g.page') return false;
+  const parts = host.split('.');
+  return parts.length === 2 && parts[0].length <= 2 && psl.isValid(host);
+}
 
 const SMS_SEGMENT_LIMIT = 2; // owner ruling: 2 segments is fine, 3+ is not
 
@@ -71,6 +84,7 @@ function findShortenerHost(text) {
     const host = m[0];
     const hit = URL_SHORTENER_HOSTS.find((h) => host === h || host.endsWith(`.${h}`));
     if (hit) return hit;
+    if (isShortHostFingerprint(host)) return host;
   }
   return null;
 }
