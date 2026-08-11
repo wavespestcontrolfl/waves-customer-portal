@@ -435,8 +435,20 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     // A count that CONTRADICTS the line's resolved cadence is stale quote
     // debris — it neither blocks nor rides (an accepted quarterly plan with
     // a stale 12-visit pest line must still combine — pre-push P1).
-    const primaryVisitsRaw = visitsPerYearForRecurringService(primary);
-    const companionVisitsRaw = visitsPerYearForRecurringService(companion);
+    // CONFLICTING visit-count aliases are unresolvable, not debris (codex
+    // r12 P1): the readers below select the first alias, and the synthetic
+    // combo row discards the source fields — so the per-line conflict
+    // declines could never see the contradiction again. Treated as "no
+    // explicit count", the lawn route's requireVisitsMatch declines the
+    // combine and the untouched row falls to the per-line gates (which
+    // decline it to office scheduling); on accept-frequency routes the
+    // combine stands but the contested count never rides.
+    const primaryVisitsRaw = visitCountFieldsConflict(primary)
+      ? null
+      : visitsPerYearForRecurringService(primary);
+    const companionVisitsRaw = visitCountFieldsConflict(companion)
+      ? null
+      : visitsPerYearForRecurringService(companion);
     const primaryVisits = primaryVisitsRaw
       && RecurringAppointmentSeeder.patternFromVisitsPerYear(primaryVisitsRaw) === primaryPattern
       ? primaryVisitsRaw

@@ -92,6 +92,44 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(remaining).toHaveLength(2);
   });
 
+  test('a lawn line with CONFLICTING visit-count aliases never combines (Codex r12 P1)', () => {
+    // { visitsPerYear: 6, visits: 9 } is unresolvable, not stale debris —
+    // first-alias reading would combine a 6-visit combo and discard the
+    // contradiction the per-line conflict declines key on. The row must
+    // stay standalone so those gates route it to office scheduling.
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', visitsPerYear: 6, visits: 9 },
+      { name: 'Tree & Shrub Care Program', visitsPerYear: 6 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('a T&S companion with CONFLICTING visit-count aliases never combines (Codex r12 P1)', () => {
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', appsPerYear: 6 },
+      { name: 'Tree & Shrub Care Program', visitsPerYear: 6, visits: 9 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('conflicting pest counts on an accepted-frequency combo: combine stands, count never rides (Codex r12 P1)', () => {
+    // Pest primaries ride the ACCEPTED plan cadence (stale-debris doctrine),
+    // so a contested count set doesn't block the combo — but it must not be
+    // first-alias-read into the synthetic row either.
+    const { combos } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control', visitsPerYear: 4, visits: 12 },
+        { name: 'Termite Bait', service: 'termite_bait' },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.frequency).toBe('quarterly');
+    expect(combos[0].service.visitsPerYear).toBeUndefined();
+  });
+
   test('lawn + T&S without explicit visit counts stay separate (visits required for this route)', () => {
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly' },
