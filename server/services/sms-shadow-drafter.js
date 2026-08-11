@@ -76,15 +76,6 @@ const DRAFTER = 'house_voice';
 const PROMPT_VERSION = 'house_voice_v10';
 const SHADOW_STATUS = 'shadow';
 
-/**
- * Commercial/business account per customers.property_type, for the comms-lint
- * per-application exemption. Case-normalized — rows carry both 'commercial'
- * and 'Commercial' (same comparison as the admin-schedule tax path).
- */
-function isCommercialProperty(customer) {
-  return ['commercial', 'business'].includes(String(customer?.property_type || '').toLowerCase());
-}
-
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
 // behaves like v6); count is bounded so the prompt can't balloon.
 const FEWSHOT_ENABLED = process.env.SHADOW_FEWSHOT !== 'false';
@@ -955,9 +946,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // used twice: recorded as flags on every row, and consulted before the
     // autonomous rung below. These drafts are replies on an existing
     // customer thread — the transactional class under the #3343 STOP-line
-    // ruling — so stopExpected is a known false, never a guess. Commercial
-    // accounts are exempt from the per-application wording rule, so the
-    // lint context carries the customer's class.
+    // ruling — so stopExpected is a known false, never a guess. The
+    // commercial exemption is deliberately NOT asserted here: it covers
+    // commercial PROPOSAL surfaces (AGENTS.md), and an SMS thread reply is
+    // never a proposal — a commercial account's per-visit contract wording
+    // demotes to the human card rather than riding the autonomous rung
+    // (owner may widen this; see PR #3348 discussion).
     const commsLint = require('./comms-lint');
     // Billing lane comes from the aggregator's authoritative field: monthly
     // members legitimately hear their "/mo" dues, so the plan-total rule
@@ -968,7 +962,6 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       channel: 'sms',
       audience: 'customer',
       stopExpected: false,
-      commercial: isCommercialProperty(customer),
       monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
       // The plan-total rule exempts the annual-prepay lane (prepay messages
       // legitimately state the yearly total already paid).
@@ -1226,7 +1219,6 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
 
 module.exports = {
   draftShadowReply,
-  isCommercialProperty,
   generateGroundedDraft,
   generateDraftOnce,
   draftRouteFor,

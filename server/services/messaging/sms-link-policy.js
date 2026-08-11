@@ -16,4 +16,23 @@ const SCHEMELESS_SMS_HOSTS = [
   'waves-customer-portal-production.up.railway.app',
 ];
 
-module.exports = { SCHEMELESS_SMS_HOSTS };
+// Textual link checks miss hosts hidden behind encodings that a URL parser
+// (or a tapping thumb) canonicalizes back to the real hostname: `bit%2ely`,
+// fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`, zero-width joins
+// (codex PR P1, originally in rain-out.js — moved here so every SMS link
+// check shares one canonicalizer). NFKC fold, unicode dot forms → '.',
+// zero-width chars stripped, then bounded percent-decode.
+function normalizeForLinkCheck(raw) {
+  let out = String(raw).normalize('NFKC');
+  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
+  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  for (let i = 0; i < 3; i++) {
+    let decoded;
+    try { decoded = decodeURIComponent(out); } catch { break; }
+    if (decoded === out) break;
+    out = decoded;
+  }
+  return out;
+}
+
+module.exports = { SCHEMELESS_SMS_HOSTS, normalizeForLinkCheck };

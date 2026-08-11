@@ -70,6 +70,25 @@ describe('lintComms mechanics', () => {
     expect(r.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('catches shorteners hidden behind unicode dots and percent-encoding', () => {
+    for (const msg of ['Book at https://bit。ly/waves', 'Book at https://bit．ly/waves', 'Book at https://bit%2Ely/waves']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');
+    }
+  });
+
+  it('counts segments on the normalized body the send path dispatches', () => {
+    const body = `We’ll be out Friday between 10 and noon. ${'a'.repeat(100)}`;
+    const r = lintComms(body, { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).toContain('plain-punctuation');
+    expect(r.failures.map((f) => f.rule)).not.toContain('sms-segment-limit');
+  });
+
+  it('a leading plan unit binds through a billing noun, not any later amount', () => {
+    const balance = lintComms('Your monthly service is Friday, and your balance is $117.', { channel: 'sms', audience: 'customer', monthlyBilled: false });
+    expect(balance.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+  });
+
   it('catches shortener URLs glued to prose punctuation', () => {
     for (const msg of ['Pay here:https://bit.ly/x', 'Pay here,https://tinyurl.com/x', 'See:bit.ly/x']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer' });

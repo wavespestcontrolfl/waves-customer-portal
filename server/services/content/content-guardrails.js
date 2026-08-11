@@ -3201,8 +3201,11 @@ const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['�
 // the application before re-entry" concerns re-entry — an intervening
 // re-entry/dry/safe/return word defuses the exclusion, and bare
 // "application"/"service" only count as scheduling objects with a
-// next/upcoming determiner.
-const TIMING_OBJ_SRC = "timing(?!(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?\\b(?:visit|appointment|arrival|estimate|quote|call|(?:next|upcoming)\\s+(?:application|service))\\b)";
+// next/upcoming determiner. The exclusion is also defused when drying
+// context FOLLOWS the scheduling word in the same sentence (Codex #3348
+// r3): "confirm the timing after the visit based on drying conditions"
+// is the treatment visit, not a future appointment.
+const TIMING_OBJ_SRC = "timing(?!(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?\\b(?:visit|appointment|arrival|estimate|quote|call|(?:next|upcoming)\\s+(?:application|service))\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))";
 const TECH_CONFIRMS_RE = new RegExp(
   `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:${TIMING_OBJ_SRC}|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,

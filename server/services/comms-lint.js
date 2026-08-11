@@ -63,7 +63,9 @@ function findShortenerHost(text) {
   // position (leftmost-greedy), so bit.ly inside bit.ly.evil.com is never
   // extracted on its own.
   const candidateRe = /(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,}/g;
-  const lower = String(text || '').toLowerCase();
+  // Canonicalize first (shared with rain-out): fullwidth/ideographic dots,
+  // zero-width joins, and percent-encoding must not hide a shortener host.
+  const lower = normalizeForLinkCheck(String(text || '')).toLowerCase();
   let m;
   while ((m = candidateRe.exec(lower)) !== null) {
     const host = m[0];
@@ -80,7 +82,7 @@ function findShortenerHost(text) {
 // preview). The TLD list is deliberately curated — a false positive on
 // prose ("no.problem") costs more than a missed exotic TLD nothing we
 // send uses.
-const { SCHEMELESS_SMS_HOSTS } = require('./messaging/sms-link-policy');
+const { SCHEMELESS_SMS_HOSTS, normalizeForLinkCheck } = require('./messaging/sms-link-policy');
 function isBareExemptHost(host) {
   const h = String(host || '').toLowerCase();
   return SCHEMELESS_SMS_HOSTS.includes(h) || h === 'wavespestcontrol.com' || h.endsWith('.wavespestcontrol.com');
@@ -114,7 +116,7 @@ function findBareThirdPartyHost(text) {
   // stripped span stops at delimiters (comma, semicolon, quotes, brackets):
   // \S+ would swallow a comma-glued neighbor ("https://example.com,yelp.com")
   // and hide the bare host riding behind it.
-  const stripped = String(text || '')
+  const stripped = normalizeForLinkCheck(String(text || ''))
     .replace(/https?:\/\/[^\s,;'"<>()]+/gi, ' ')
     .replace(/[^\s,;'"<>()]+@[^\s,;'"<>()]+/g, ' ');
   BARE_HOST_RUN_RE.lastIndex = 0;
@@ -146,7 +148,7 @@ function smsSegmentCount(text) {
 // machine-written AND silently flip SMS encoding to UCS-2. Classification
 // delegates to the canonical GSM-7 normalizer's replacement set \u2014 a local
 // character list here would drift from it.
-const { findTypographicChar } = require('./messaging/gsm-normalize');
+const { findTypographicChar, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // "Reply to this message" only counts as boilerplate in CLOSER position:
 // end of message, terminal punctuation, or a genuine courtesy tail ("if
@@ -185,7 +187,7 @@ const RULES = [
     name: 'portal-link-scheme',
     applies: (ctx) => ctx.channel === 'sms',
     check: (text) => {
-      const schemed = text.match(SCHEMED_PORTAL_RE);
+      const schemed = normalizeForLinkCheck(text).match(SCHEMED_PORTAL_RE);
       if (schemed) {
         return `portal link carries a scheme — ${schemed[1]} goes bare in SMS`;
       }
@@ -227,7 +229,11 @@ const RULES = [
       // ("your monthly plan total is $117").
       const amountSrc = String.raw`(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))`;
       const unitAfterRe = new RegExp(`${amountSrc}(?:\\s*\\/\\s*(mo|month|yr|year)\\b|\\s+(?:per|a|each|every)\\s+(mo|month|yr|year)\\b|\\s+(monthly|yearly|annually)\\b)`, 'gi');
-      const unitBeforeRe = new RegExp(`\\b(monthly|yearly|annual(?:ized)?)\\b[^.!?\\n]{0,40}?${amountSrc}`, 'gi');
+      // The leading unit binds through a billing noun — "your monthly plan
+      // total is $117" — never through unrelated facts ("your monthly
+      // service is Friday, and your balance is $117" quotes a balance, not
+      // a plan total).
+      const unitBeforeRe = new RegExp(`\\b(monthly|yearly|annual(?:ized)?)\\b\\s+(?:plan|pricing|price|rate|total|cost|bill(?:ing)?|payment|amount|dues|charge|subscription|spread)\\b[^.!?\\n]{0,30}?${amountSrc}`, 'gi');
       const hits = [];
       let m;
       while ((m = unitAfterRe.exec(text)) !== null) hits.push({ span: m[0], unit: (m[1] || m[2] || m[3]).toLowerCase() });
@@ -261,9 +267,14 @@ const RULES = [
     name: 'sms-segment-limit',
     applies: (ctx) => ctx.channel === 'sms',
     check: (text) => {
-      const segs = smsSegmentCount(text);
+      // Count what Twilio actually receives: the send path normalizes
+      // typographic punctuation before dispatch (send-customer-message), so
+      // the segment verdict runs on the same normalized body — the
+      // plain-punctuation rule separately flags the source characters.
+      const body = normalizeGsmPunctuation(text);
+      const segs = smsSegmentCount(body);
       return segs > SMS_SEGMENT_LIMIT
-        ? `${segs} SMS segments (limit ${SMS_SEGMENT_LIMIT})${isGsm7(text) ? '' : ' — non-GSM characters forced UCS-2 encoding'}`
+        ? `${segs} SMS segments (limit ${SMS_SEGMENT_LIMIT})${isGsm7(body) ? '' : ' — non-GSM characters forced UCS-2 encoding'}`
         : null;
     },
   },
