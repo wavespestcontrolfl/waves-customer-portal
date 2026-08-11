@@ -1090,8 +1090,16 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // above.
   if (coverageCatalogServiceId && cols.service_id) {
     try {
+      // A row whose service_key_snapshot already records a DIFFERENT
+      // durable identity is not name-only (codex r17 pre-push P1) — only
+      // rows with no identity evidence at all, or whose id/snapshot
+      // explicitly names the KNOWN one-time palm row, are retargeted.
+      const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
       const retargetable = (row) => row && row.id
-        && (!row.service_id || (staleOneTimePalmId && row.service_id === staleOneTimePalmId));
+        && (
+          (!row.service_id && (!row.service_key_snapshot || oneTimePalmSnapshot(row)))
+          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId)
+        );
       const backfillIds = [...existingRows, ...adoptedConcurrentRows]
         .filter(retargetable)
         .map((row) => row.id);
@@ -1107,7 +1115,22 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .update(patch);
       }
     } catch (err) {
-      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity backfill skipped: ${err.message}`);
+      // FAIL CLOSED (codex r17 pre-push P1): reporting success here would
+      // let coverage processing continue while adopted visits keep the
+      // one-time identity — the exact wrong-billing posture this backfill
+      // exists to prevent. Durable, deduped exception + deferred result;
+      // the next idempotent term refresh retries the backfill.
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage identity backfill FAILED (${err.message}) — filing coverage exception`);
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'Adopted palm coverage visits could not be linked to the recurring catalog identity — until the next term refresh succeeds, their completions would bill as one-time work. Re-save the term to retry, or link the visits to Semiannual Palm Injection manually.');
+      return {
+        createdCount: createdRows.length,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows,
+        effectiveTermEnd,
+        reason: 'palm_identity_backfill_failed',
+      };
     }
   }
 

@@ -246,60 +246,44 @@ exports.down = async function down(knex) {
     }
   }
 
-  // Retention doctrine (20260809000000 exemplar): delete only when NOTHING
-  // references the row. Scheduled visits and completed service records
-  // COUNT as references — a rollback after any palm series was accepted or
-  // completed must retain the row and its typed profile wholesale, or
-  // durable identity is lost and live recurring visits fall through name
-  // resolution to the one-time palm profile (wrong completion/portal
-  // posture). Add-on/package wiring is likewise retained.
-  const retainedKeys = new Set();
-  const removableIds = [];
-  for (const entry of state.services) {
-    if (!entry || !entry.id) continue;
+  // Shared reference counter (codex r17 pre-push P1): the same evidence
+  // that retains a SERVICE row also retains a HEALED profile — visits,
+  // records, add-on/package wiring, snapshots, and name-only references
+  // all resolve typed completion behavior through the key.
+  const countServiceReferences = async (id, key, row) => {
     let refs = 0;
     if (await knex.schema.hasTable('service_addons')) {
-      refs += (await knex('service_addons').where({ parent_service_id: entry.id }).pluck('parent_service_id')).length;
-      refs += (await knex('service_addons').where({ addon_service_id: entry.id }).pluck('addon_service_id')).length;
+      refs += (await knex('service_addons').where({ parent_service_id: id }).pluck('parent_service_id')).length;
+      refs += (await knex('service_addons').where({ addon_service_id: id }).pluck('addon_service_id')).length;
     }
     if (await knex.schema.hasTable('service_package_items')) {
-      refs += (await knex('service_package_items').where({ service_id: entry.id }).pluck('service_id')).length;
+      refs += (await knex('service_package_items').where({ service_id: id }).pluck('service_id')).length;
     }
     if (await knex.schema.hasTable('scheduled_services')) {
-      refs += (await knex('scheduled_services').where({ service_id: entry.id }).pluck('service_id')).length;
+      refs += (await knex('scheduled_services').where({ service_id: id }).pluck('service_id')).length;
       // Completion resolution also treats service_key_snapshot as durable
       // identity evidence (codex r8 P1): a visit with the snapshot, a null
       // service_id, and a non-alias label still resolves this row.
       if (await knex.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
-        refs += (await knex('scheduled_services').where({ service_key_snapshot: entry.key }).pluck('id')).length;
+        refs += (await knex('scheduled_services').where({ service_key_snapshot: key }).pluck('id')).length;
       }
     }
     if (await knex.schema.hasTable('scheduled_service_addons')) {
-      refs += (await knex('scheduled_service_addons').where({ service_id: entry.id }).pluck('service_id')).length;
-      // Add-ons carry the same durable snapshot as scheduled_services
-      // (20260716000000 added+backfilled it on both tables): an add-on with
-      // a null service_id and a non-alias name still resolves this row via
-      // service_key_snapshot (pre-push r12 P1 — mirrors the check above).
+      refs += (await knex('scheduled_service_addons').where({ service_id: id }).pluck('service_id')).length;
+      // Add-on snapshot mirrors the scheduled_services check (pre-push r12
+      // P1): 20260716000000 added+backfilled the snapshot on both tables.
       if (await knex.schema.hasColumn('scheduled_service_addons', 'service_key_snapshot')) {
-        refs += (await knex('scheduled_service_addons').where({ service_key_snapshot: entry.key }).pluck('id')).length;
+        refs += (await knex('scheduled_service_addons').where({ service_key_snapshot: key }).pluck('id')).length;
       }
     }
     if (await knex.schema.hasTable('service_records')) {
-      refs += (await knex('service_records').where({ service_id: entry.id }).pluck('service_id')).length;
+      refs += (await knex('service_records').where({ service_id: id }).pluck('service_id')).length;
     }
     if (await knex.schema.hasTable('service_discount_rules')) {
-      refs += (await knex('service_discount_rules').where({ service_key: entry.key }).pluck('service_key')).length;
+      refs += (await knex('service_discount_rules').where({ service_key: key }).pluck('service_key')).length;
     }
     if (await knex.schema.hasTable('discounts')) {
-      refs += (await knex('discounts').where({ service_key_filter: entry.key }).pluck('service_key_filter')).length;
-    }
-    // Ownership check BEFORE any mutation (codex r6 P2, mirroring the
-    // roll-forward's rule): a row an admin renamed/repurposed under a
-    // different key is theirs now — neither deactivate nor delete it.
-    const row = await knex('services').where({ id: entry.id }).first();
-    if (row && row.service_key !== entry.key) {
-      console.warn(`[palm-semiannual] down: row ${entry.id} now carries key "${row.service_key}" (was ${entry.key}) — admin-repurposed, leaving untouched`);
-      continue;
+      refs += (await knex('discounts').where({ service_key_filter: key }).pluck('service_key_filter')).length;
     }
     // Name-only references count too (exemplar's alias sweep): a visit
     // scheduled under the row's name/short name without a service_id still
@@ -320,6 +304,29 @@ exports.down = async function down(knex) {
         }
       }
     }
+    return refs;
+  };
+
+  // Retention doctrine (20260809000000 exemplar): delete only when NOTHING
+  // references the row. Scheduled visits and completed service records
+  // COUNT as references — a rollback after any palm series was accepted or
+  // completed must retain the row and its typed profile wholesale, or
+  // durable identity is lost and live recurring visits fall through name
+  // resolution to the one-time palm profile (wrong completion/portal
+  // posture). Add-on/package wiring is likewise retained.
+  const retainedKeys = new Set();
+  const removableIds = [];
+  for (const entry of state.services) {
+    if (!entry || !entry.id) continue;
+    // Ownership check BEFORE any mutation (codex r6 P2, mirroring the
+    // roll-forward's rule): a row an admin renamed/repurposed under a
+    // different key is theirs now — neither deactivate nor delete it.
+    const row = await knex('services').where({ id: entry.id }).first();
+    if (row && row.service_key !== entry.key) {
+      console.warn(`[palm-semiannual] down: row ${entry.id} now carries key "${row.service_key}" (was ${entry.key}) — admin-repurposed, leaving untouched`);
+      continue;
+    }
+    const refs = await countServiceReferences(entry.id, entry.key, row);
     if (refs > 0) {
       retainedKeys.add(entry.key);
       // Retain-AND-DEACTIVATE (exemplar 20260809000000): the rollback must
@@ -335,6 +342,7 @@ exports.down = async function down(knex) {
   const profileEntries = (state.profiles || [])
     .map((entry) => (typeof entry === 'string' ? { key: entry, healed: false } : entry))
     .filter((entry) => entry && entry.key);
+  const retainedHealedKeys = new Set();
   if (profileEntries.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
     for (const { key, healed } of profileEntries) {
       if (retainedKeys.has(key)) continue;
@@ -361,6 +369,20 @@ exports.down = async function down(knex) {
         console.warn(`[palm-semiannual] down: profile ${key} serves a live service row (${currentService.id}) — leaving untouched`);
         continue;
       }
+      // A HEALED profile with LIVE REFERENCES is retained too (codex r17
+      // pre-push P1): visits scheduled after the heal resolve their typed
+      // completion through this profile — the r11 never-ours deletion only
+      // applies while nothing references the service. Same evidence set as
+      // service retention (countServiceReferences), and the retained key
+      // is recorded below so a later rollback still tracks the marker.
+      if (healed && currentService) {
+        const healedRefs = await countServiceReferences(currentService.id, key, currentService);
+        if (healedRefs > 0) {
+          retainedHealedKeys.add(key);
+          console.warn(`[palm-semiannual] down: HEALED profile ${key} has ${healedRefs} live reference(s) — leaving untouched`);
+          continue;
+        }
+      }
       const profile = await knex('service_completion_profiles').where({ service_key: key }).first();
       if (!profile) continue;
       if (!String(profile.notes || '').includes(PROFILE_MARKER)) {
@@ -383,14 +405,14 @@ exports.down = async function down(knex) {
     // reactivate exactly the rows this migration created; a clean rollback
     // (nothing retained) clears the record entirely (exemplar doctrine).
     const retained = state.services.filter((entry) => entry && retainedKeys.has(entry.key));
-    if (retained.length > 0) {
+    if (retained.length > 0 || retainedHealedKeys.size > 0) {
       // Retained PROFILE provenance persists too (codex r4 P2): the
       // retained service's marker profile survives this rollback, and a
       // later roll-forward must resume tracking it — otherwise a second
       // rollback (after the references clear) would delete the service row
       // but skip the now-untracked marker profile, leaving an active
       // orphan that could silently attach to a future same-key service.
-      const retainedProfiles = profileEntries.filter((entry) => retainedKeys.has(entry.key));
+      const retainedProfiles = profileEntries.filter((entry) => retainedKeys.has(entry.key) || retainedHealedKeys.has(entry.key));
       await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: retainedProfiles, retained }) });
       console.warn(`[palm-semiannual] down: recorded ${retained.length} retained row(s) (+${retainedProfiles.length} profile(s)) for roll-forward reactivation`);
     } else {

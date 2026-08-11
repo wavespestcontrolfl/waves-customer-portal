@@ -277,6 +277,21 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(profileRow(db)).toBeUndefined();
   });
 
+  test('a HEALED profile with live visit references is RETAINED on rollback (codex r17 pre-push P1)', async () => {
+    // Palm visits scheduled after the heal resolve their typed completion
+    // through this profile — the never-ours deletion only applies while
+    // nothing references the service.
+    const db = emptyDb();
+    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', is_active: true });
+    await migration.up(fakeKnex(db));
+    db.scheduled_services.push({ id: 'v1', service_id: 'admin-pre', service_type: 'Adam Custom Palm Program', status: 'pending' });
+    await migration.down(fakeKnex(db));
+    expect(profileRow(db)).toBeDefined();
+    // The retained healed profile stays TRACKED for a later rollback.
+    const state = stateValue(db);
+    expect((state?.profiles || []).some((entry) => (entry.key || entry) === KEY)).toBe(true);
+  });
+
   test('down() leaves a row an admin REPURPOSED before the first rollback — neither deactivated nor deleted (codex r6 P2)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
