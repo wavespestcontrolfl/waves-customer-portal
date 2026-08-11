@@ -32,10 +32,13 @@
  * (customer_portal / active_portal_customer — a recurring palm customer
  * is an active portal customer, unlike the token_only one-time lane).
  *
- * Self-healing + rollback mechanics mirror 20260808070000 (foam): insert
- * skips an existing row, the profile never clobbers or attaches to a row
- * an admin deactivated, down() removes only UUID-recorded rows it proved
- * it inserted and retains anything wired into add-ons/packages.
+ * Self-healing mechanics mirror 20260808070000 (foam): insert skips an
+ * existing row and the profile never clobbers or attaches to a row an
+ * admin deactivated. Rollback follows the 20260809000000 retention
+ * doctrine: down() removes only UUID-recorded rows it proved it inserted,
+ * and ONLY when nothing references them — scheduled visits and completed
+ * service records count, so a rollback after any palm series exists
+ * retains the row and profile wholesale (live identity preserved).
  */
 
 const SERVICE = {
@@ -195,11 +198,13 @@ exports.down = async function down(knex) {
     }
   }
 
-  // Deleting a services row CASCADES through service_addons and
-  // service_package_items — if an admin wired the palm program into an
-  // add-on pairing or package after deploy, rollback must not silently
-  // destroy that configuration. A referenced service is retained
-  // wholesale: row, FK links, and its typed profile.
+  // Retention doctrine (20260809000000 exemplar): delete only when NOTHING
+  // references the row. Scheduled visits and completed service records
+  // COUNT as references — a rollback after any palm series was accepted or
+  // completed must retain the row and its typed profile wholesale, or
+  // durable identity is lost and live recurring visits fall through name
+  // resolution to the one-time palm profile (wrong completion/portal
+  // posture). Add-on/package wiring is likewise retained.
   const retainedKeys = new Set();
   const removableIds = [];
   for (const entry of state.services) {
@@ -212,9 +217,24 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasTable('service_package_items')) {
       refs += (await knex('service_package_items').where({ service_id: entry.id }).pluck('service_id')).length;
     }
+    if (await knex.schema.hasTable('scheduled_services')) {
+      refs += (await knex('scheduled_services').where({ service_id: entry.id }).pluck('service_id')).length;
+    }
+    if (await knex.schema.hasTable('scheduled_service_addons')) {
+      refs += (await knex('scheduled_service_addons').where({ service_id: entry.id }).pluck('service_id')).length;
+    }
+    if (await knex.schema.hasTable('service_records')) {
+      refs += (await knex('service_records').where({ service_id: entry.id }).pluck('service_id')).length;
+    }
+    if (await knex.schema.hasTable('service_discount_rules')) {
+      refs += (await knex('service_discount_rules').where({ service_key: entry.key }).pluck('service_key')).length;
+    }
+    if (await knex.schema.hasTable('discounts')) {
+      refs += (await knex('discounts').where({ service_key_filter: entry.key }).pluck('service_key_filter')).length;
+    }
     if (refs > 0) {
       retainedKeys.add(entry.key);
-      console.warn(`[palm-semiannual] down: ${entry.key} (${entry.id}) is referenced by ${refs} add-on/package row(s) — retaining row and profile (admin configuration preserved)`);
+      console.warn(`[palm-semiannual] down: ${entry.key} (${entry.id}) is referenced by ${refs} visit/record/add-on/package/discount row(s) — retaining row and profile (live identity preserved)`);
     } else {
       removableIds.push(entry.id);
     }
@@ -233,13 +253,10 @@ exports.down = async function down(knex) {
     }
   }
 
+  // No unlinking here by construction: a row is only removable when the
+  // reference count above — which includes scheduled_services and
+  // service_records — was zero, so there is nothing to null out.
   if (removableIds.length > 0 && (await knex.schema.hasTable('services'))) {
-    if (await knex.schema.hasColumn('service_records', 'service_id')) {
-      await knex('service_records').whereIn('service_id', removableIds).update({ service_id: null });
-    }
-    if (await knex.schema.hasColumn('scheduled_services', 'service_id')) {
-      await knex('scheduled_services').whereIn('service_id', removableIds).update({ service_id: null });
-    }
     await knex('services').whereIn('id', removableIds).del();
   }
 

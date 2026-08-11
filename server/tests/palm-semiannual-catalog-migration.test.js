@@ -200,26 +200,42 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(profileRow(db)).toBeUndefined();
   });
 
-  test('down() removes only UUID-recorded rows and marker-carrying profiles; unlinks visits first', async () => {
+  test('down() with NO references removes the UUID-recorded row and marker-carrying profile', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    await migration.down(fakeKnex(db));
+
+    expect(svcRow(db)).toBeUndefined();
+    expect(profileRow(db)).toBeUndefined();
+    expect(stateValue(db)).toBeUndefined();
+  });
+
+  test('down() RETAINS the row and profile when live palm visits reference it (rollback must not orphan identity)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     const insertedId = svcRow(db).id;
     db.scheduled_services.push({ id: 'v1', service_id: insertedId });
     await migration.down(fakeKnex(db));
 
-    expect(svcRow(db)).toBeUndefined();
-    expect(profileRow(db)).toBeUndefined();
-    expect(db.scheduled_services[0].service_id).toBeNull();
-    expect(stateValue(db)).toBeUndefined();
-  });
-
-  test('down() retains a row wired into an add-on pairing, profile included', async () => {
-    const db = emptyDb();
-    await migration.up(fakeKnex(db));
-    db.service_addons.push({ parent_service_id: svcRow(db).id, addon_service_id: 'other' });
-    await migration.down(fakeKnex(db));
-
+    // A rollback after an accepted palm series keeps identity intact:
+    // row, typed profile, and the visit's service_id all survive.
     expect(svcRow(db)).toBeDefined();
     expect(profileRow(db)).toBeDefined();
+    expect(db.scheduled_services[0].service_id).toBe(insertedId);
+  });
+
+  test('down() retains on completed service records and add-on wiring too', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    db.service_records.push({ id: 'r1', service_id: svcRow(db).id });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db)).toBeDefined();
+    expect(profileRow(db)).toBeDefined();
+
+    const db2 = emptyDb();
+    await migration.up(fakeKnex(db2));
+    db2.service_addons.push({ parent_service_id: db2.services.find((r) => r.service_key === KEY).id, addon_service_id: 'other' });
+    await migration.down(fakeKnex(db2));
+    expect(db2.services.find((r) => r.service_key === KEY)).toBeDefined();
   });
 });
