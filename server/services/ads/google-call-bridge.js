@@ -1820,24 +1820,28 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
           .join('leads as l', 'l.id', 'asa.lead_id')
           .whereIn('asa.lead_id', snapLeadIds)
           .whereIn('l.lead_source_id', bridgeSourceIds)
-          // NULL provenance OR BORROWED provenance (codex P1, r7 GH
-          // round): the sweep's organic write on a phone-reused lead
-          // resolves the lead's ORIGINAL sid call as provenance — not the
-          // ambiguous call that reused it — so the exact-call retirement
-          // misses it and a NULL-only filter here did too. A row whose
-          // provenance points at a call WITHOUT the durable paid claim is
-          // still the sweep's own post-resolution write (call-time
-          // attribution and backfill stay suppressed for bridge-target
-          // leads); a paid claim's row is protected by its call's live
-          // bridge evidence — the same guard the reconcile loop applies.
-          // retireRowPreservingHistory handles both shapes: history-free
-          // rows delete, history-bearing rows demote to legacy.
+          // NULL provenance OR BORROWED-FROM-HISTORY provenance (codex
+          // P1s, r7+r8 GH rounds): the sweep's organic write on a
+          // phone-reused lead resolves the lead's ORIGINAL sid call as
+          // provenance — not the ambiguous call that reused it — so the
+          // exact-call retirement misses it and a NULL-only filter here
+          // did too. Borrowed provenance always points at a call that
+          // PREDATES the resolution (the lead's founding call), so a
+          // provenanced row qualifies only when its source call both
+          // lacks the durable paid claim AND predates resolvedAt — a
+          // later inbound call on a NON-bridge tracking number (whose
+          // call-time attribution is NOT suppressed) writes a legitimate
+          // row provenanced to itself, post-resolution on both counts,
+          // and must be preserved. retireRowPreservingHistory handles
+          // both retired shapes: history-free rows delete, history-
+          // bearing rows demote to legacy.
           .where(function interimProvenance() {
             this.whereNull('asa.source_call_id')
-              .orWhereNotExists(function bridgedProvenanceCall() {
+              .orWhereExists(function borrowedFromHistory() {
                 this.select(1).from('call_log as clb')
                   .whereRaw('clb.id = asa.source_call_id')
-                  .whereNotNull('clb.google_ads_call_resource_name');
+                  .whereNull('clb.google_ads_call_resource_name')
+                  .where('clb.created_at', '<', resolvedAt);
               });
           })
           .whereNull('asa.gclid')

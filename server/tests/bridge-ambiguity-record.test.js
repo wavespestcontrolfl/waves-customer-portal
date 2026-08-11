@@ -241,18 +241,21 @@ describe('recordAmbiguousBridgeCalls', () => {
       && b._wheres.some(([m]) => m === 'forUpdate'));
     expect(leadLock).toBeTruthy();
     expect(leadLock._wheres).toContainEqual(['whereIn', 'id', ['lead-7']]);
-    // BORROWED provenance is retired too (codex P1 GH r7): the sweep's
-    // organic write on a phone-reused lead resolves the lead's ORIGINAL
-    // sid call as provenance, so the interim predicate accepts NULL OR
-    // non-bridged provenance — only a live paid claim protects a row.
+    // BORROWED-FROM-HISTORY provenance is retired too (codex P1s GH
+    // r7+r8): the sweep's organic write on a phone-reused lead resolves
+    // the lead's ORIGINAL sid call as provenance — a call predating the
+    // resolution. A provenanced row qualifies only when its source call
+    // lacks the paid claim AND predates resolvedAt; a later non-bridge
+    // call's own legitimate row (post-resolution provenance) is preserved.
     const asaRead2 = builders.find((b) => b._table === 'ad_service_attribution as asa');
     const provArm = asaRead2._wheres.find(([m, fn]) => m === 'where' && typeof fn === 'function' && fn.name === 'interimProvenance');
     expect(provArm).toBeTruthy();
     const src2 = require('fs').readFileSync(require('path').join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
-    const interim = src2.split('function interimProvenance')[1].slice(0, 600);
+    const interim = src2.split('function interimProvenance')[1].slice(0, 700);
     expect(interim).toMatch(/whereNull\('asa\.source_call_id'\)/);
-    expect(interim).toMatch(/orWhereNotExists\(function bridgedProvenanceCall\(\)/);
-    expect(interim).toMatch(/whereNotNull\('clb\.google_ads_call_resource_name'\)/);
+    expect(interim).toMatch(/orWhereExists\(function borrowedFromHistory\(\)/);
+    expect(interim).toMatch(/whereNull\('clb\.google_ads_call_resource_name'\)/);
+    expect(interim).toMatch(/where\('clb\.created_at', '<', resolvedAt\)/);
   });
 
   test('an OPEN row (locked but never resolved) retires nothing — no interim write can exist under a live hold', async () => {
