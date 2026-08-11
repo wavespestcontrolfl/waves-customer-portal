@@ -96,7 +96,6 @@ const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -10431,20 +10430,21 @@ const CallRecordingProcessor = {
     // when the service was UNCLEAR (noMatch) under fail-open, so the existing
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
-    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
-    // confirmed booking on an OUTBOUND call still creates the appointment — but
-    // PENDING/needs-review (status/consent/SMS handled below). It requires a
-    // REAL resolved service (a catalog row, or ok on a non-generic service):
-    // the Waves-Assessment generic fallback is inbound-only (see above), so an
-    // unclear/generic outbound call stays unbooked for the office.
-    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    // Outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a confirmed
+    // booking on an OUTBOUND call creates the appointment live, same as an
+    // inbound one (owner directive 2026-08-11 — the office-review hold was
+    // removed). It requires a REAL resolved service (a catalog row, or ok on a
+    // non-generic service): the Waves-Assessment generic fallback is
+    // inbound-only (see above), so an unclear/generic outbound call stays
+    // unbooked for the office.
+    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
     const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     // Outbound requires a REAL catalog row (never a coarse ok-label with
     // service_id null) AND must respect a hard veto: resolveSchedulableCallService
     // returns ok:false WITHOUT noMatch for an unsupported/admin-only call, and
     // that must stay un-bookable even if a catalog keyword happened to match.
-    const outboundCanCreate = outboundReviewBooking
+    const outboundCanCreate = outboundAutoBooking
       && !!callBookingCatalogRow
       && (serviceResolution.ok || serviceResolution.noMatch === true);
     const canCreateAppointmentFromCall = !genericBookingUnbookable
@@ -11082,15 +11082,12 @@ const CallRecordingProcessor = {
                   // conversion failure) must not strand the lead as open. The
                   // helper's won/duplicate + ownership guards make this a no-op
                   // when the lead already converted.
-                  // Don't convert the lead for a pending outbound-review booking
-                  // (same as the fresh-insert path) — it closes from the office
-                  // confirmation, not a reused/reprocessed pending row.
                   // A covered re-service is a $0 callback, not a closed sale
                   // (codex #3222 follow-up): converting the lead would record
                   // a won deal and promote funnel metrics off a free visit —
                   // judged from the REUSED row's own identity (codex #3231:
                   // a reprocess may resolve differently than what booked).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  if (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11199,11 +11196,10 @@ const CallRecordingProcessor = {
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
-                  // conversion as the reuse path above, same outbound-review
-                  // exception (that lead closes from the office confirmation)
-                  // and the same re-service exception ($0 callback, not a sale
-                  // — judged from the ATTACHED row's own identity, codex #3231).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  // conversion as the reuse path above, same re-service
+                  // exception ($0 callback, not a sale — judged from the
+                  // ATTACHED row's own identity, codex #3231).
+                  if (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11443,12 +11439,9 @@ const CallRecordingProcessor = {
                     estimated_price: null,
                     create_invoice_on_complete: false,
                   } : {}),
-                  // Outbound-callback bookings land PENDING/needs-review (the
-                  // office confirms in dispatch, which arms reminders); inbound
-                  // confirmed bookings auto-confirm as before.
-                  status: outboundReviewBooking ? 'pending' : 'confirmed',
-                  customer_confirmed: !outboundReviewBooking,
-                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
+                  status: 'confirmed',
+                  customer_confirmed: true,
+                  confirmed_at: new Date(),
                   notes: [
                     // Customer-visible (GET /api/schedule returns notes verbatim):
                     // keep it customer-safe. The office review cue lives in
@@ -11466,9 +11459,6 @@ const CallRecordingProcessor = {
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
-                    outboundReviewBooking
-                      ? 'Outbound callback — CONFIRM with customer before dispatch (pending review).'
-                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
@@ -11489,11 +11479,7 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  // Distinct marker for a pending outbound-review booking so the
-                  // customer self-service routes (schedule.js) hide/refuse it
-                  // until the office confirms — same dispatch-owned treatment as
-                  // a call follow-up.
-                  source_action: outboundReviewBooking ? CALL_OUTBOUND_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
+                  source_action: 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -11511,60 +11497,28 @@ const CallRecordingProcessor = {
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
-                  // EXCEPT outbound-review rows (pre-push P0): those are
-                  // not a closed deal until the office confirms — the
-                  // evidence is written by runOutboundReviewConfirmHook at
-                  // confirmation, never for a booking the customer might
-                  // not have agreed to.
-                  if (!outboundReviewBooking) {
-                    await require('./inspection-credit').markBookingForInspectionCredit(trx, {
-                      customerId: created.customer_id,
+                  await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                    customerId: created.customer_id,
+                    scheduledServiceId: created.id,
+                    source: 'phone_call',
+                  });
+                  // A phone-booked appointment is the deal closing — convert the
+                  // call's lead to won in the SAME transaction (mirrors the
+                  // admin-leads schedule-appointment route), so the conversion
+                  // can't commit without the appointment row. Every other booking
+                  // path already converts; this one silently didn't, stranding
+                  // phone-booked callers as `new` in the pipeline. EXCEPT a
+                  // covered re-service: a $0 callback is not a closed sale
+                  // (codex #3222 follow-up) — the caller is already a plan
+                  // customer and the lead must not record a won deal.
+                  if (!isReServiceCatalogRow(callBookingCatalogRow) || callQuotePromised) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
                       scheduledServiceId: created.id,
-                      source: 'phone_call',
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
                     });
-                  }
-                  if (outboundReviewBooking) {
-                    // A pending outbound-callback booking is NOT a closed deal
-                    // yet — the office confirms it first. Do NOT convert the lead
-                    // to won (that would show a phantom closed sale in pipeline/
-                    // conversion metrics that reverts if staff reject the review).
-                    // The lead closes from the office confirmation path instead.
-                    // Surface the pending booking for that review — and carry
-                    // the ORIGINATING lead id (+ the booking-time quote flag)
-                    // on the card: the booking can reuse an existing unclaimed
-                    // phone lead that never gets customer_id stamped, so the
-                    // confirm hook's customer_id lookup alone would miss it.
-                    await trx('triage_items')
-                      .insert(buildTriageItem({
-                        callLogId: call.id,
-                        flag: 'outbound_booking_review',
-                        extraction: v2ApprovedExtraction || extracted,
-                        severity: 'advisory',
-                        extraPayload: {
-                          lead_id: leadId || null,
-                          keep_open_for_quote: !!callQuotePromised,
-                        },
-                      }))
-                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-                  } else {
-                    // A phone-booked appointment is the deal closing — convert the
-                    // call's lead to won in the SAME transaction (mirrors the
-                    // admin-leads schedule-appointment route), so the conversion
-                    // can't commit without the appointment row. Every other booking
-                    // path already converts; this one silently didn't, stranding
-                    // phone-booked callers as `new` in the pipeline. EXCEPT a
-                    // covered re-service: a $0 callback is not a closed sale
-                    // (codex #3222 follow-up) — the caller is already a plan
-                    // customer and the lead must not record a won deal.
-                    if (!isReServiceCatalogRow(callBookingCatalogRow) || callQuotePromised) {
-                      await convertCallLeadOnPhoneBooking(trx, {
-                        leadId,
-                        customerId,
-                        scheduledServiceId: created.id,
-                        callSid,
-                        keepOpenForQuote: callQuotePromised,
-                      });
-                    }
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
@@ -11594,11 +11548,10 @@ const CallRecordingProcessor = {
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
-                  // unless this is a pending outbound-review booking (closes from
-                  // the office confirmation path) or a covered re-service ($0
-                  // callback, not a sale — judged from the reused row's own
-                  // identity, codex #3231).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised)) {
+                  // unless this is a covered re-service ($0 callback, not a
+                  // sale — judged from the reused row's own identity, codex
+                  // #3231).
+                  if (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11668,13 +11621,7 @@ const CallRecordingProcessor = {
               // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused && outboundReviewBooking) {
-                // A pending outbound booking must NOT arm reminders yet — the
-                // reminder cron doesn't skip 'pending', so this would text the
-                // customer before the office confirms. Reminders are armed at
-                // the office-confirm transition (admin-schedule) instead.
-                logger.info(`[call-proc] Outbound review booking ${svc.id} PENDING — reminders armed on office confirm`);
-              } else if (!scheduleWasReused) {
+              if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -11683,7 +11630,7 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
-              } else if (!outboundReviewBooking) {
+              } else {
                 // Idempotency-conflict REPLAY of a call booking (Codex
                 // #3178 r37 P2): the first attempt committed the visit +
                 // evidence but may have died before its side-effects ran —
@@ -11963,7 +11910,7 @@ const CallRecordingProcessor = {
           // saved-method auto-secure, dedup, one-text-ever, the email leg
           // riding a confirmed text) and is idempotent on reused/attached
           // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
-          if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          if (scheduledServiceId && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -11998,13 +11945,7 @@ const CallRecordingProcessor = {
             }
           }
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && outboundReviewBooking) {
-            // Pending outbound booking — never auto-text a "confirmed" appt the
-            // customer hasn't been re-confirmed on. Keep scheduledServiceId so
-            // the downstream audit doesn't treat this as a skipped booking.
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound-callback booking (no auto-text at booking)`);
-            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
-          } else if (scheduledServiceId && v2SmsBlocked) {
+          if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             // Keep scheduledServiceId (same rule as the outbound branch
             // above): the schedule row EXISTS — dropping the id made the

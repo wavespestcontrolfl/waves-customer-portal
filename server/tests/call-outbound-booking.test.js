@@ -1,8 +1,9 @@
-// Review-gated outbound-callback bookings (2026-07-11). A confirmed booking on
-// an OUTBOUND call creates the appointment PENDING/needs-review with a distinct
-// source_action so the customer can't self-confirm it, and an
-// outbound_booking_review triage item for the office. These verify the shared
-// markers + the triage lane; the insert-side / route filters are integration.
+// Outbound-callback booking legacy-row compatibility. The office-review hold
+// was removed 2026-08-11 (owner directive): new outbound bookings land live
+// via the normal ai_call_pipeline path. The distinct source_action marker,
+// triage lane, and confirm hook remain so rows created PENDING before the
+// removal still confirm cleanly (arm reminders, convert the lead, resolve
+// their card). These verify that legacy machinery.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
