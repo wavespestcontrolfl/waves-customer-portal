@@ -94,10 +94,13 @@ const BARE_HOST_RE = new RegExp(
 /** First bare (scheme-less) third-party host in the text, or null. */
 function findBareThirdPartyHost(text) {
   // Scheme-qualified URLs already satisfy the rule and email addresses are
-  // not links — remove both before scanning for what's left bare.
+  // not links — remove both before scanning for what's left bare. The
+  // stripped span stops at delimiters (comma, semicolon, quotes, brackets):
+  // \S+ would swallow a comma-glued neighbor ("https://example.com,yelp.com")
+  // and hide the bare host riding behind it.
   const stripped = String(text || '')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/\S+@\S+/g, ' ');
+    .replace(/https?:\/\/[^\s,;'"<>()]+/gi, ' ')
+    .replace(/[^\s,;'"<>()]+@[^\s,;'"<>()]+/g, ' ');
   BARE_HOST_RE.lastIndex = 0;
   let m;
   while ((m = BARE_HOST_RE.exec(stripped)) !== null) {

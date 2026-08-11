@@ -104,6 +104,13 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('still sees a bare host glued behind a qualified URL or email', () => {
+    for (const msg of ['See https://example.com,yelp.com today', 'Email contact@wavespestcontrol.com;trustpilot.com has details']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+    }
+  });
+
   it('does not match a TLD inside a longer word', () => {
     const r = lintComms('Join the yelp.community discussion group', { channel: 'sms', audience: 'customer' });
     expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
