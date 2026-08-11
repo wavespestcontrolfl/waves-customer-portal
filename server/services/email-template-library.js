@@ -578,21 +578,33 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   return template.suppression_group_key || template.send_stream || null;
 }
 
-async function activeSuppressionFor(template, email, suppressionGroupKey) {
-  if (!email) return null;
+// ALL suppressions that would block this send. The schema permits several
+// active rows per address (a bounce AND a do_not_email), and which one
+// "the" suppression is depends on the caller: the send path only needs any
+// one (activeSuppressionFor), but a caller classifying WHY an address is
+// blocked (the lawn-email gap check) must see every applicable row —
+// picking an arbitrary first match there let a bounce mask a coexisting
+// opt-out (codex #3341 r3 P2).
+async function activeSuppressionsFor(template, email, suppressionGroupKey) {
+  if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
   const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
-    return rows.find((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase())) || null;
+    return rows.filter((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase()));
   }
-  return rows.find((row) => (
+  return rows.filter((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
     globalTypes.has(String(row.suppression_type || '').toLowerCase())
-  )) || null;
+  ));
+}
+
+async function activeSuppressionFor(template, email, suppressionGroupKey) {
+  const rows = await activeSuppressionsFor(template, email, suppressionGroupKey);
+  return rows[0] || null;
 }
 
 // A suppressed recipient blocks the send BEFORE SendGrid (correct — never
@@ -1263,6 +1275,7 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  activeSuppressionsFor,
   renderTemplate,
   renderVersion,
   loadTemplateByKey,

@@ -905,9 +905,165 @@ async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
   return gaps;
 }
 
+// Membership evidence is AUTHORITATIVE CURRENT STATE — the same
+// hasMembership predicate the membership lifecycle emails key off (extracted
+// to services/membership-state.js, one shared copy). Email history was
+// deliberately abandoned as evidence here (codex #3341 r4 + pre-push P1
+// chain): email_messages rows are delivery artifacts — senders skip when the
+// address is missing/invalid — so a no-email member (exactly the class a gap
+// check exists to find) never accumulates email evidence, cancellation
+// leaves started rows behind, and reactivation emits a different key. The
+// customers row is current-state truth for all of those at once.
+
+/**
+ * Membership-evidence gap leg (owner ruling 2026-08-10). The evidence-based
+ * gap check above shares the sender's predicate BY DESIGN, which leaves one
+ * blind spot: a customer whose CURRENT state says recurring member
+ * (hasMembership on the customers row — real tier or paid monthly rate,
+ * excluding auto-derived label-only rows) but whose lawn visits were never
+ * stamped as a recurring series and who has no demonstrated cadence yet. They fail the evidence filter, so the Monday
+ * sweep AND findLawnEmailAudienceGaps are both blind to them — indefinitely,
+ * not just for one week (verified live 2026-08-10: a new member's first lawn
+ * visit booked as a one-time, no future row). This leg pages that class; the
+ * fix is operational (book/stamp their series) — it never widens the send
+ * audience itself.
+ *
+ * Membership evidence alone is deliberately NOT lawn evidence (memberships
+ * span pest and lawn programs), so the leg also requires a live lawn-flavored
+ * visit on or after the trailing cutoff — future visits included, since an
+ * unstamped future one-time booking is exactly the "stamp the series" case.
+ * A pest-only member with a single one-time lawn add-on can page here; that
+ * is an accepted false positive (one dismissible card) — the alternative is
+ * a real member silently excluded forever.
+ */
+async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
+  const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
+  const todayET = etDateString(now);
+  const lawnLikeSql = LAWN_SERVICE_TYPE_LIKES
+    .map(() => 'LOWER(ss3.service_type) LIKE ?')
+    .join(' OR ');
+  const nonLivePlaceholders = NON_LIVE_VISIT_STATUSES.map(() => '?').join(', ');
+  const rows = await db('customers as c')
+    .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
+    .whereNull('c.deleted_at')
+    // Only live customers: a churned/lead-stage member with unstamped visits
+    // is not a send-audience loss (stage alone already excludes them).
+    .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
+    .where('c.active', true)
+    // NOT already visible to the sweep (or to the evidence-based gap legs,
+    // which cover everything this filter admits).
+    .whereNot(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+    // A live lawn-flavored visit since the trailing cutoff (no upper bound —
+    // an unstamped FUTURE one-time lawn booking is still this class).
+    .whereRaw(
+      `EXISTS (SELECT 1 FROM scheduled_services ss3
+         WHERE ss3.customer_id = c.id
+           AND ss3.status NOT IN (${nonLivePlaceholders})
+           AND ss3.scheduled_date >= ?
+           AND (${lawnLikeSql}))`,
+      [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
+    )
+    // …plus a coarse SQL prefilter for membership state; the EXACT rule
+    // (tier-key normalization, non-membership labels, auto-derived
+    // label-only rows) runs in JS below via the shared hasMembership /
+    // isAutoDerivedTierLabelRow predicates — never a SQL re-implementation
+    // that could diverge from them.
+    .where(function membershipStatePrefilter() {
+      this.whereNotNull('c.waveguard_tier').orWhere('c.monthly_rate', '>', 0);
+    })
+    .select(
+      'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
+      // Fields the exact membership predicates below read.
+      'c.waveguard_tier', 'c.monthly_rate', 'c.waveguard_tier_source', 'c.billing_mode',
+      db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
+      db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
+      // The most recent visit evidencing the class, so the watchdog can key
+      // its dedupe to the OFFENDING BOOKING (codex #3341 r3 P2): a customer
+      // fixed once and regressed later — stamped series cancelled, replaced
+      // by another one-time — carries a new visit id and pages again,
+      // while the same unresolved card stays deduped day after day.
+      db.raw(
+        `(SELECT ss4.id FROM scheduled_services ss4
+           WHERE ss4.customer_id = c.id
+             AND ss4.status NOT IN (${nonLivePlaceholders})
+             AND ss4.scheduled_date >= ?
+             AND (${lawnLikeSql.replace(/ss3\./g, 'ss4.')})
+           ORDER BY ss4.scheduled_date DESC, ss4.id DESC LIMIT 1) as trigger_visit_id`,
+        [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
+      ),
+    );
+  // Lazy requires: self-booking-plan-sync is a heavy module and this leg
+  // runs once per daily watchdog tick.
+  const { hasMembership } = require('./membership-state');
+  const { isAutoDerivedTierLabelRow } = require('./self-booking-plan-sync');
+  const { resolveBillingLane } = require('./billing-lane');
+  const gaps = [];
+  // Intentional opt-out: never pageable, same rule as the evidence legs.
+  // Membership must hold under the EXACT shared predicates: hasMembership
+  // (real tier or paid monthly rate) minus auto-derived label-only rows —
+  // the same pairing the lifecycle emails use (admin-customers.js) — and
+  // the resolved billing lane must not be one_time (codex #3341 r5 P2):
+  // an explicit one_time lane means NO recurring relationship no matter
+  // what tier/rate values linger on the row, the same lane gate
+  // sendMembershipStarted suppresses on. resolveBillingLane is the
+  // existing resolver; per_visit/per_application stay in — a real tier
+  // billed at completion IS an ongoing plan.
+  for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok
+    && hasMembership(row) && !isAutoDerivedTierLabelRow(row)
+    && resolveBillingLane(row).mode !== 'one_time')) {
+    // Same prerequisite validators as findLawnEmailAudienceGaps (codex
+    // #3341 r1 P2): stamping the series makes the customer evidence-
+    // positive, but the SENDER still skips an unusable email or bad
+    // coordinates — one card must list everything standing between the
+    // customer and Monday, or the operator fixes half and gets paged
+    // again by the evidence leg on a later run.
+    const fixable = ['no_recurring_marked_lawn_visit'];
+    if (!isEmailLike(r.email)) {
+      fixable.push(r.email ? 'unusable_email' : 'no_email');
+    } else {
+      // Active suppressions block sendTemplate even after stamping (codex
+      // #3341 r2 P2) — evaluated with the sender's OWN gate on this
+      // sweep's stream, never a copy of its rules. ALL applicable rows are
+      // inspected (r3 P2: several can be active at once, and an arbitrary
+      // first match let a bounce mask a coexisting opt-out): any consent
+      // suppression (do_not_email, spam_complaint, unsubscribes incl.
+      // group-scoped) wins — the customer's own choice is never pageable,
+      // same rule as the prefs opt-outs above. Only a pure bounce rides
+      // the card as a fixable deliverability failure (the bounce-rescue
+      // lane exists to repair addresses). The evidence legs don't need
+      // this: their customers reach the sender, whose blocked operational
+      // sends already alert (alertBlockedOperationalSend); this class
+      // never reaches the sender, so this card is their only signal.
+      const suppressions = await EmailTemplateLibrary.activeSuppressionsFor(
+        { suppression_group_key: SUPPRESSION_GROUP }, r.email, SUPPRESSION_GROUP,
+      );
+      if (suppressions.length) {
+        const allBounces = suppressions.every(
+          (row) => String(row.suppression_type || '').toLowerCase() === 'bounce',
+        );
+        if (!allBounces) continue;
+        fixable.push('bounced_email');
+      }
+    }
+    const lat = numberOrNull(r.latitude);
+    const lng = numberOrNull(r.longitude);
+    if (lat == null || lng == null) fixable.push('no_coordinates');
+    else if (lat === 0 && lng === 0) fixable.push('placeholder_coordinates');
+    gaps.push({
+      customerId: r.id,
+      name: [r.first_name, r.last_name].filter(Boolean).join(' '),
+      kind: 'unstamped_member',
+      fixable,
+      triggerVisitId: r.trigger_visit_id || null,
+    });
+  }
+  return gaps;
+}
+
 module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
+  findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
   fetchUpcomingWeekRainForecast,
