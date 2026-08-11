@@ -510,6 +510,58 @@ describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec �
   });
 });
 
+describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation (Codex #3342 r1 P1)', () => {
+  it('a saved-method hold from an attesting accept is sticky-capable — its only consent surface is the accept page', async () => {
+    stubDb([null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sticky_window_disclosed: true, status: 'held' }),
+    ]));
+  });
+  it('a saved-method hold from a legacy/non-attesting accept stays non-sticky', async () => {
+    stubDb([null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sticky_window_disclosed: false, status: 'held' }),
+    ]));
+  });
+  it('the retried-accept update path ANDs the marker (monotonic — never upgrades a stale false)', async () => {
+    stubDb([{ id: 'hold-existing' }]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
+    });
+    const patch = mockDbUpdates.find((p) => p.status === 'held');
+    expect(String(patch.sticky_window_disclosed.__raw)).toContain('sticky_window_disclosed AND');
+  });
+  it('the SI conflict path ANDs the accept attestation with the mint/reuse marker', async () => {
+    // SI path: term lookup first() → existing pending terms row.
+    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    const merges = [];
+    const prevHandler = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = prevHandler(table);
+      const origInsert = chain.insert;
+      chain.insert = (payload) => {
+        origInsert(payload);
+        return { onConflict: () => ({ merge: (m) => { merges.push(m); return Promise.resolve(1); } }) };
+      };
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: 'si_1', paymentMethodId: 'pm_cap', disclosureVersion: 'sticky_v1',
+    });
+    expect(String(merges[0].sticky_window_disclosed.__raw)).toContain('AND excluded.sticky_window_disclosed');
+  });
+});
+
 describe('recordCardHoldHeld — freezes the accepted amount at booking (Codex #2821 P1)', () => {
   it('stamps accepted_amount onto a fresh hold row (insert path)', async () => {
     stubDb([null]); // no existing SI-less held row → insert path

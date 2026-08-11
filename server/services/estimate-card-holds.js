@@ -244,7 +244,7 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attached to the customer separately (post-commit, retryable) via
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
-async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, trx = db }) {
+async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, disclosureVersion = null, trx = db }) {
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
@@ -274,6 +274,12 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
   const frozenAccepted = Number.isFinite(acceptedNum) && acceptedNum > 0
     ? Math.round(acceptedNum * 100) / 100
     : null;
+  // The ACCEPTING tab's disclosure attestation (Codex #3342 r1 P1): saved-
+  // method holds never pass through /card-hold-intent, so this is their only
+  // chance to record that the accept surface showed the sticky-window
+  // sentence. SI-path rows AND it with the mint/reuse marker below — the
+  // row only ever moves toward the customer.
+  const stickyDisclosed = disclosureVersion === CARD_HOLD_STICKY_DISCLOSURE_VERSION;
   const fields = {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId || null,
@@ -281,6 +287,7 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     no_show_fee_amount: noShowFee,
     cancel_window_hours: windowHours,
     accepted_amount: frozenAccepted,
+    sticky_window_disclosed: stickyDisclosed,
     agreed_at: trx.fn.now(),
     held_at: trx.fn.now(),
     status: 'held',
@@ -290,7 +297,12 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     await trx('estimate_card_holds')
       .insert({ estimate_id: estimateId, stripe_setup_intent_id: setupIntentId, ...fields })
       .onConflict('stripe_setup_intent_id')
-      .merge(fields);
+      .merge({
+        ...fields,
+        // AND with the mint/reuse marker — a true survives only when BOTH
+        // the minting render and the accepting tab attested the sentence.
+        sticky_window_disclosed: trx.raw('estimate_card_holds.sticky_window_disclosed AND excluded.sticky_window_disclosed'),
+      });
   } else {
     // Saved-method hold (spec §3.2 auto-satisfy): no SetupIntent exists, so
     // the unique-SI upsert can't dedupe — Postgres treats NULLs as distinct
@@ -302,7 +314,13 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
       .orderBy('created_at', 'desc')
       .first('id');
     if (savedMethodRow) {
-      await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update(fields);
+      await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update({
+        ...fields,
+        // Monotonic on the retried-accept path too: a stale row's false is
+        // never upgraded by a later attested retry (the consent trail
+        // belongs to the accept that actually booked).
+        sticky_window_disclosed: trx.raw('sticky_window_disclosed AND ?', [stickyDisclosed]),
+      });
     } else {
       await trx('estimate_card_holds').insert({ estimate_id: estimateId, stripe_setup_intent_id: null, ...fields });
     }

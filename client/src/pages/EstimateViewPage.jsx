@@ -4366,6 +4366,10 @@ function EstimateViewPageInner() {
           slotId: existingAppointment ? undefined : selectedSlotId,
           existingAppointmentId: existingAppointment?.id,
           paymentMethodPreference: paymentPreference,
+          // Attests which card-hold fee-policy copy THIS bundle renders —
+          // bump in lockstep with the disclosure sentence (saved-method
+          // holds have no other consent surface to record it from).
+          cardHoldDisclosureVersion: 'sticky_v1',
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
