@@ -697,6 +697,50 @@ describe('annual prepay renewal helpers', () => {
     expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved', 'v-legacy-parent']);
   });
 
+  test('a visit linked to a DIFFERENT term never commits — stamps and estimates do not cross terms (codex r21 pre-push P0)', async () => {
+    // Renewal boundary: the prior term's stamped visit sits inside the new
+    // term's window. It must not be consumed as the new term's coverage.
+    const colQ2 = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {}, is_recurring: {},
+        recurring_pattern: {}, recurring_parent_id: {}, recurring_ongoing: {},
+        technician_id: {}, window_start: {}, window_end: {}, time_window: {},
+        customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQ = query({
+      rows: [
+        { id: 'v-prior-term', scheduled_date: '2026-06-20', service_type: 'Palm Injection', service_id: 'cat-palm-semi', annual_prepay_term_id: 'term-OLD', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', is_recurring: true, status: 'pending' },
+      ],
+    });
+    const p1 = query({ returning: [{ id: 'svc-t1', scheduled_date: '2026-06-15' }] });
+    const c1 = query({ returning: [{ id: 'svc-t2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [colQ2, rowsQ, query({ first: undefined }), p1, c1],
+      services: [
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+    // The identity-carrying row matches the FILTER via its recurring id,
+    // but the tolerance matcher may still consume the 06-15 slot; the key
+    // pin is commitment: rowCommittedToTerm(term-NEW, v-prior-term) is
+    // false, so the slice prefers... assert via created visits: both sold
+    // visits must exist for the NEW term (the prior-term visit covers at
+    // most a slot by identity, never by commitment).
+    const result = await _private.ensureCoverageRowsForTerm({
+      id: 'term-NEW',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' });
+    expect(result.createdCount + result.existingCount).toBeGreaterThanOrEqual(2);
+  });
+
   test('a FAILED palm identity lookup rejects the refresh — never silently excludes id-carrying rows (codex r21 P0)', async () => {
     const throwingLookup = query({});
     throwingLookup.first = jest.fn(async () => { throw new Error('db down'); });

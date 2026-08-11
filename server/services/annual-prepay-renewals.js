@@ -397,6 +397,14 @@ function rowCommittedToTerm(term, row) {
   // appointment matching the coverage text must never join the committed
   // set, displace an already-stamped visit in the slice, or absorb a
   // prepaid stamp of its own.
+  // A row EXPLICITLY linked to a different term belongs to that term
+  // (codex r21 pre-push P0, fourth pass): its prepaid stamp or shared
+  // estimate must not let a neighboring/boundary term consume it, or the
+  // newly paid term seeds short while the other term's visit double-counts.
+  const linkedToOtherTerm = row.annual_prepay_term_id != null
+    && term?.id != null
+    && String(row.annual_prepay_term_id) !== String(term.id);
+  if (linkedToOtherTerm) return false;
   const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
     || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   if (directCommitment) return true;
