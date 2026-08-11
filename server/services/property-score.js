@@ -37,6 +37,10 @@ const {
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+// Best-effort: the tree/shrub module also carries vision plumbing — a load
+// failure degrades that component to raw overall_score, never the endpoint.
+let formatAssessmentScores = null;
+try { ({ formatAssessmentScores } = require('./tree-shrub-assessment')); } catch { formatAssessmentScores = null; }
 const { getAreaRainfall } = require('./lawn-water-area');
 const { dateOnlyString } = require('../utils/date-only');
 // ET calendar discipline: elapsed-millisecond day math drifts across DST
@@ -98,7 +102,9 @@ async function hasServiceLike(customerId, patterns, knex) {
   for (const svc of rows) {
     try {
       const profile = await resolveCompletionProfileForScheduledService(svc, knex);
-      if (String(profile?.billingType || '').toLowerCase() !== 'one_time') return true;
+      // Affirmative recurring only — the resolver's null fallback (unmatched
+      // catalog row) must not read as a program.
+      if (String(profile?.billingType || '').toLowerCase() === 'recurring') return true;
     } catch {
       // Unresolvable profile: skip the row rather than claim an active program.
     }
@@ -141,12 +147,15 @@ async function pestComponent(customerId, knex) {
   // serviceLine-scoped: mosquito is a separate component — a mosquito visit's
   // score must never stand in for Pest Pressure.
   const history = await loadHistoryForCustomer(knex, customerId, { serviceLine: 'pest', limit: 6 }).catch(() => []);
-  const latest = Array.isArray(history) && history.length ? history[0] : null;
-
-  if (latest && latest.service_record_id) {
-    const fullRow = await loadScoreForServiceRecord(knex, latest.service_record_id).catch(() => null);
+  // Walk newest → oldest: a newest row the customer must not see (one-time
+  // visit, opted-out service line) skips to the next VISIBLE score instead of
+  // hiding an older valid one. A visible-but-insufficient view stops the walk
+  // — surfacing an older score behind a newer insufficient one would be stale.
+  for (const rowRef of Array.isArray(history) ? history : []) {
+    if (!rowRef || !rowRef.service_record_id) continue;
+    const fullRow = await loadScoreForServiceRecord(knex, rowRef.service_record_id).catch(() => null);
     const serviceRecord = await knex('service_records')
-      .where({ id: latest.service_record_id })
+      .where({ id: rowRef.service_record_id })
       .first()
       .catch(() => null);
     // Catalog-resolved one-time exclusion — the view's label heuristic misses
@@ -157,12 +166,13 @@ async function pestComponent(customerId, knex) {
       : false;
     const view = buildPestPressureCustomerView({
       config,
-      scoreRow: fullRow || latest,
+      scoreRow: fullRow || rowRef,
       serviceRecord,
       historyRows: history,
       oneTimeExcluded,
     });
-    if (view && view.score != null) {
+    if (!view) continue;
+    if (view.score != null) {
       const score = pressureToHealth(view.score);
       // trendDelta is current-minus-previous in the engine's 0–5 scale.
       const previousScore = view.trendDelta != null
@@ -181,9 +191,7 @@ async function pestComponent(customerId, knex) {
         asOf: view.date,
       };
     }
-    if (view) {
-      return { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' };
-    }
+    return { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' };
   }
 
   const monitored = await hasServiceLike(customerId, ['%pest%'], knex);
@@ -237,10 +245,18 @@ async function treeShrubComponent(customerId, knex) {
     .orderBy('created_at', 'desc')
     .limit(2)
     .catch(() => []);
-  const scored = rows.filter((r) => r && r.overall_score != null);
+  // formatAssessmentScores computes the category-fallback overall for legacy
+  // rows whose overall_score is null — the same formatter the tree/shrub
+  // report surface uses.
+  const overallOf = (r) => (formatAssessmentScores
+    ? formatAssessmentScores(r)?.overallScore
+    : (r?.overall_score ?? null));
+  const scored = rows
+    .map((r) => ({ row: r, overall: overallOf(r) }))
+    .filter((x) => x.overall != null);
   if (scored.length) {
-    const score = roundOrNull(scored[0].overall_score);
-    const previousScore = scored[1] ? roundOrNull(scored[1].overall_score) : null;
+    const score = roundOrNull(scored[0].overall);
+    const previousScore = scored[1] ? roundOrNull(scored[1].overall) : null;
     const delta = score != null && previousScore != null ? score - previousScore : null;
     return {
       ...base,
@@ -249,7 +265,7 @@ async function treeShrubComponent(customerId, knex) {
       previousScore,
       delta,
       reason: movementReason(delta),
-      asOf: dateOnlyString(scored[0].service_date),
+      asOf: dateOnlyString(scored[0].row.service_date),
     };
   }
   const monitored = await hasServiceLike(customerId, ['%tree%', '%shrub%'], knex);
