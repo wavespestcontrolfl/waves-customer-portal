@@ -586,8 +586,10 @@ async function getOptions(serviceId) {
   // counter needs to predict the assembled SMS. The link clause uses the
   // visit's EXISTING short link when one was already minted (read-only —
   // opening the sheet must not grow short_codes) and otherwise a
-  // same-length placeholder code; the counter is advisory either way,
-  // commit() re-renders the real body and is the enforcer.
+  // same-length placeholder code. commit() prefers the SAME existing code
+  // when it builds the real body (codex PR P2 — a legacy odd-length code
+  // vs a fresh mint must not flip a boundary case between counter and
+  // enforcer); the counter stays advisory, commit() is the enforcer.
   let customCompose = null;
   if (customReasonEnabled()) {
     let composeUrl = null;
@@ -760,6 +762,14 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       if (!body) {
         logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} missing/disabled — moved ${serviceId} without SMS`);
         return { sent: false, reason: 'missing_template' };
+      }
+      // Same two belts commit()'s pre-check wears (codex PR P2s): a body
+      // that lost the dispatcher's message or exceeds the cap must not
+      // send from an unvalidated caller either.
+      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+      if (!body.includes(normalizeGsmPunctuation(customerNote))) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render dropped the dispatcher message for ${serviceId} — no SMS`);
+        return { sent: false, reason: 'custom_message_dropped' };
       }
       const { countSegments } = require('./messaging/segment-counter');
       if (countSegments(body).segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {
@@ -974,7 +984,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
     if (notifyCustomer) {
       if (!note) return { ok: false, reason: 'custom_requires_note' };
-      const { url } = await buildRescheduleLink(serviceId, { customerId: service.cust_id || service.customer_id });
+      // Reuse the visit's EXISTING short code before minting: the
+      // reschedule target is deterministic per visit (stable token, codes
+      // never expire), and the sheet's live counter estimated against the
+      // existing code — minting here could produce a different-length URL
+      // than the one the counter measured (codex PR P2: a legacy 5-char
+      // code vs a fresh 10-char mint flips a boundary case).
+      const { existingShortUrlFor } = require('./short-url');
+      const url = (await existingShortUrlFor({
+        kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
+      })) || (await buildRescheduleLink(serviceId, { customerId: service.cust_id || service.customer_id })).url;
       const body = await renderCustomMovedBody({
         firstName: service.first_name,
         serviceType: service.service_type,
@@ -986,8 +1005,19 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       });
       // Missing/disabled custom row: the message that IS the reason can't
       // send, so fail the move here instead of silently moving the visit
-      // messageless (the disabled row is the ops kill switch).
+      // messageless (the disabled row is the ops kill switch). Same
+      // rejection when an admin edit dropped {custom_message} from the
+      // template — the shared validator doesn't require declared variables
+      // to be used, so a render can be truthy while carrying none of the
+      // dispatcher's words, and this flow's whole promise is that it does
+      // (codex PR P2). Compare against the GSM-normalized note: that is
+      // the form the renderer embeds.
       if (!body) return { ok: false, reason: 'custom_message_unavailable' };
+      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+      if (!body.includes(normalizeGsmPunctuation(note))) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render dropped the dispatcher message for ${serviceId} — rejecting pre-move`);
+        return { ok: false, reason: 'custom_message_unavailable' };
+      }
       const { countSegments } = require('./messaging/segment-counter');
       const seg = countSegments(body);
       if (seg.segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {

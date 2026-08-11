@@ -267,29 +267,52 @@ const GSM_BASIC_SET = new Set(
 );
 const GSM_EXT_SET = new Set(['{', '}', '[', ']', '~', '|', '\\', '^', '€', '\f']);
 // Compact mirror of the send path's GSM punctuation normalizer: smart
-// quotes/dashes → plain, Unicode space family → space, invisibles dropped,
-// ellipsis → '...'. Counting the normalized form keeps an iOS smart
-// apostrophe from reading as a UCS-2 flip the send path will prevent.
+// quotes/dashes → plain, Unicode space family → space, invisibles dropped.
+// Counting the normalized form keeps an iOS smart apostrophe from reading
+// as a UCS-2 flip the send path will prevent. Ellipsis is handled
+// conditionally below, mirroring the server.
 function gsmNormalizeForCount(text) {
   return String(text)
     .replace(/[‘’‚‛′ʼ`´]/g, "'")
     .replace(/[“”„‟″]/g, '"')
     .replace(/[‐‑‒–—―−•]/g, '-')
     .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-    .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '')
-    .replace(/…/g, '...');
+    .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '');
+}
+// GSM-7 slot count, or null when any char forces UCS-2.
+function gsmSlotsOrNull(text) {
+  let slots = 0;
+  for (const ch of text) {
+    if (GSM_EXT_SET.has(ch)) { slots += 2; continue; }
+    if (!GSM_BASIC_SET.has(ch)) return null;
+    slots += 1;
+  }
+  return slots;
+}
+function segmentCount(text) {
+  const slots = gsmSlotsOrNull(text);
+  if (slots != null) return slots <= 160 ? (slots ? 1 : 0) : Math.ceil(slots / 153);
+  return text.length <= 70 ? 1 : Math.ceil(text.length / 67);
 }
 // Characters left inside the 2-segment cap for a predicted body (negative =
 // over). GSM-7: 2×153 = 306 slots; UCS-2: 2×67 = 134 UTF-16 units.
+// Ellipsis mirrors the server's CONDITIONAL expansion (gsm-normalize.js):
+// '…' becomes '...' only when that lands the whole body on GSM-7 without
+// costing segments — when another non-GSM char keeps the body UCS-2, the
+// server keeps the cheaper one-unit '…' and so must this counter (codex
+// PR P2: always-expanding disagreed with the server at the 134-unit
+// boundary).
 function twoSegmentRemaining(body) {
-  const norm = gsmNormalizeForCount(body);
-  let slots = 0;
-  for (const ch of norm) {
-    if (GSM_EXT_SET.has(ch)) { slots += 2; continue; }
-    if (!GSM_BASIC_SET.has(ch)) return { remaining: 134 - norm.length, ucs2: true };
-    slots += 1;
+  let norm = gsmNormalizeForCount(body);
+  if (norm.includes('…')) {
+    const expanded = norm.replace(/…/g, '...');
+    if (gsmSlotsOrNull(expanded) != null && segmentCount(expanded) <= segmentCount(norm)) {
+      norm = expanded;
+    }
   }
-  return { remaining: 306 - slots, ucs2: false };
+  const slots = gsmSlotsOrNull(norm);
+  if (slots != null) return { remaining: 306 - slots, ucs2: false };
+  return { remaining: 134 - norm.length, ucs2: true };
 }
 // Mirror of the server's customer-facing option label (customerArrivalOption
 // in rain-out.js): "Fri, Aug 14, 8:00 AM - 10:00 AM" — the arrival window

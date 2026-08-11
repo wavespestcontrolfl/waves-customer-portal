@@ -1894,6 +1894,39 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
+    test('commit reuses the visit\'s EXISTING short code — counter estimate and enforcer measure the same URL', async () => {
+      // codex PR P2: getOptions' counter estimates with the existing code,
+      // so commit must build the body with the SAME one — a legacy
+      // odd-length code vs a fresh 10-char mint flips boundary cases.
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
+      });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/l/abcde');
+    });
+
+    test('a template edit that drops {custom_message} rejects the move pre-commit — never a messageless "custom" text', async () => {
+      // codex PR P2: the template validator doesn't require declared
+      // variables to be USED, so a render can be truthy while carrying
+      // none of the dispatcher's words — the one thing this flow promises.
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      renderSmsTemplate.mockImplementationOnce(async () => 'Hi Pat - your appointment moved.');
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
     test('series-anchor path: the prebuilt SMS quotes the NORMALIZED on-the-hour window that actually books', async () => {
       // codex r2 P1: an off-hour custom-time target on a recurring visit is
       // floored to the hour by the series path — the SMS must be rendered
