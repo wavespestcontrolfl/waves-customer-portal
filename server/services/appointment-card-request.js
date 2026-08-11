@@ -292,6 +292,22 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
 // trigger re-attempts; enrollment is idempotent, so a concurrent double
 // run resolves as already_enrolled.
 async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
+  // Write-time live-status re-check (Codex #3361 r9 P1): the caller's
+  // entry read can be stale by the time this runs (the legacy-activation
+  // hook window), and enabling Auto Pay + writing a satisfied row for a
+  // just-rejected visit leaves an enrollment nothing releases — the
+  // cancellation follow-through only unwinds requests it can find at
+  // cancel time. Same LIVE_VISIT_STATUSES contract as the entry check;
+  // fail toward skip (retryable on the next trigger).
+  try {
+    const live = await db('scheduled_services').where({ id: visit.id }).first('status');
+    if (!live || !LIVE_VISIT_STATUSES.includes(live.status)) {
+      return skip(`visit_not_live_at_secure:${live ? live.status : 'missing'}`);
+    }
+  } catch (err) {
+    logger.warn(`[appt-card-request] live-status re-check failed for visit ${visit.id} — auto-secure skipped (retryable): ${err.message}`);
+    return skip('status_recheck_failed');
+  }
   try {
     const { enrollConsentedMethod } = require('./autopay-enrollment');
     const enrollment = await enrollConsentedMethod({
