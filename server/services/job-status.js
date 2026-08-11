@@ -328,14 +328,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // review state — confirm approves it, cancel/skip reject it (the dispatch
     // Skip action). Any other (en_route/on_site/completed/etc.) is blocked.
     if (!['confirmed', 'cancelled', 'skipped'].includes(toStatus)) {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      // Single shared classifier — same function the sanctioned confirmation
+      // points (tech-track dispatch-implies-confirm) key their bypass on, so
+      // guard and bypass can never drift.
+      const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
       const guardRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed');
-      if (guardRow
-        && guardRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && guardRow.status === 'pending'
-        && !guardRow.customer_confirmed) {
+      if (isPendingOutboundReviewBooking(guardRow)) {
         // Typed operational conflict, not a plain Error: shared-writer callers
         // (tech-track en-route/on-site, dispatch, admin-schedule) allow
         // 'pending' as a source status, so this is an EXPECTED block for them
