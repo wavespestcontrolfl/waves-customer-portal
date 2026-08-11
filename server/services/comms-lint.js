@@ -119,8 +119,11 @@ function findBareThirdPartyHost(text) {
   // stripped span stops at delimiters (comma, semicolon, quotes, brackets):
   // \S+ would swallow a comma-glued neighbor ("https://example.com,yelp.com")
   // and hide the bare host riding behind it.
+  // Lowercased before scanning: the host-run regex is lowercase-only and
+  // WWW.EPA.GOV must not evade it.
   const stripped = normalizeForLinkCheck(String(text || ''))
-    .replace(/https?:\/\/[^\s,;'"<>()]+/gi, ' ')
+    .toLowerCase()
+    .replace(/https?:\/\/[^\s,;'"<>()]+/g, ' ')
     .replace(/[^\s,;'"<>()]+@[^\s,;'"<>()]+/g, ' ');
   BARE_HOST_RUN_RE.lastIndex = 0;
   let m;

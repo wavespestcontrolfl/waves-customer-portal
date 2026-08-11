@@ -3215,7 +3215,7 @@ const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['�
 const TIMING_GAP_SRC = "(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?";
 const TIMING_OBJ_SRC = "(?<!\\b(?:visit|appointment|arrival|estimate|quote|call|application|service)[\\s-])timing"
   + `(?!${TIMING_GAP_SRC}\\b(?:next|upcoming)\\s+(?:visit|appointment|arrival|application|service)\\b)`
-  + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;
+  + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call|service|application)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;
 const TECH_CONFIRMS_RE = new RegExp(
   `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:${TIMING_OBJ_SRC}|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,

@@ -142,8 +142,8 @@ describe('lintComms mechanics', () => {
     expect(schemed.failures.map((f) => f.rule)).toContain('portal-link-scheme');
   });
 
-  it('flags bare edu/gov hosts too', () => {
-    for (const msg of ['More detail at edis.ifas.ufl.edu if curious.', 'See www.epa.gov for the label.']) {
+  it('flags bare edu/gov hosts too, regardless of letter case', () => {
+    for (const msg of ['More detail at edis.ifas.ufl.edu if curious.', 'See www.epa.gov for the label.', 'See WWW.EPA.GOV for the label.']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
       expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
     }
