@@ -1602,11 +1602,21 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
   const ids = rows.map((r) => String(r.call_log_id));
   let retired = 0;
   const reopenedIds = await db.transaction(async (trx) => {
-    const reopened = (await trx('bridge_ambiguous_calls')
+    // Lock EVERY existing row for the batch — open ones included (pre-push
+    // audit P1 r5): filtering the locked read to resolved rows left open
+    // rows unlocked, so a concurrent resolver could resolve one (and its
+    // tick sweep the lead organic) between this read and the upsert — the
+    // upsert then re-opened it silently, off the reopened list, and the
+    // interim row was never retired. With all rows locked, a resolver
+    // blocks until commit and its re-evaluated predicates stand down; one
+    // that committed first is visible here as resolved and gets retired.
+    const existing = await trx('bridge_ambiguous_calls')
       .whereIn('call_log_id', ids)
-      .whereNotNull('resolved_at')
       .forUpdate()
-      .select('call_log_id')).map((r) => String(r.call_log_id));
+      .select('call_log_id', 'resolved_at');
+    const reopened = existing
+      .filter((r) => r.resolved_at != null)
+      .map((r) => String(r.call_log_id));
     await trx('bridge_ambiguous_calls')
       .insert(rows)
       .onConflict('call_log_id')

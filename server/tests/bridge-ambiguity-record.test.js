@@ -88,12 +88,19 @@ describe('recordAmbiguousBridgeCalls', () => {
     // unretired. The reopen read locks FOR UPDATE inside the transaction.
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
     expect(mockDb.transaction).toHaveBeenCalledTimes(1);
-    const reopenRead = builders.find(
+    const lockedRead = builders.find(
       (b) => b._table === 'bridge_ambiguous_calls'
-        && b._wheres.some(([m]) => m === 'forUpdate')
-        && b._wheres.some(([m, col]) => m === 'whereNotNull' && col === 'resolved_at'),
+        && b._wheres.some(([m]) => m === 'forUpdate'),
     );
-    expect(reopenRead).toBeTruthy();
+    expect(lockedRead).toBeTruthy();
+    // EVERY existing row for the batch is locked — open ones included
+    // (audit P1 r5): a resolved-only filter left open rows unlocked, so a
+    // concurrent resolver could resolve one mid-transaction and the
+    // silent re-open never retired the interim organic row. The resolved
+    // subset is derived from the locked read, not a second filter.
+    expect(lockedRead._wheres).toContainEqual(['whereIn', 'call_log_id', ['call-1']]);
+    expect(lockedRead._wheres.some(([m, col]) => m === 'whereNotNull' && col === 'resolved_at')).toBe(false);
+    expect(lockedRead._wheres).toContainEqual(['select', 'call_log_id', 'resolved_at']);
   });
 
   test('records SNAPSHOT the leads matching the caller leg — the durable identity for the indefinite phone hold (audit P1 r3)', async () => {
@@ -134,7 +141,9 @@ describe('recordAmbiguousBridgeCalls', () => {
     // dedupes by lead), so the reopen retires the interim rows through the
     // shared history-preserving primitive — in the SAME transaction as the
     // reopen upsert, so a crash cannot strand the interim row (audit P1 r3).
-    listQueueByTable.bridge_ambiguous_calls = [[{ call_log_id: 'call-1' }]]; // previously RESOLVED
+    listQueueByTable.bridge_ambiguous_calls = [[
+      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z' }, // previously RESOLVED
+    ]];
     listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
     expect(mockRetire).toHaveBeenCalledTimes(1);
@@ -144,8 +153,16 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
   });
 
-  test('a FIRST sighting (never resolved) retires nothing — no interim write can exist under an open hold', async () => {
-    listQueueByTable.bridge_ambiguous_calls = [[]]; // no resolved rows among the batch
+  test('an OPEN row (locked but never resolved) retires nothing — no interim write can exist under a live hold', async () => {
+    listQueueByTable.bridge_ambiguous_calls = [[
+      { call_log_id: 'call-1', resolved_at: null }, // existing, still OPEN
+    ]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).not.toHaveBeenCalled();
+  });
+
+  test('a FIRST sighting (no existing row) retires nothing', async () => {
+    listQueueByTable.bridge_ambiguous_calls = [[]]; // nothing existing for the batch
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
     expect(mockRetire).not.toHaveBeenCalled();
   });
