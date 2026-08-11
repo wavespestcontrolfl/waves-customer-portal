@@ -179,6 +179,20 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(supportsConverterFollowUpSeeding({ frequency: 'monthly', visitsPerYear: 12 }, { service_type: 'Commercial Lawn Service' }, 'monthly')).toBe(false);
   });
 
+  test('a visit-count-only lawn row beats the accepted PEST plan fallback (codex r11 P1)', () => {
+    // Legacy mixed pest+lawn shape: the lawn row carries only
+    // visitsPerYear. Inference checks the pest fallback before the visit
+    // count, so without the forced-lawn resolution the gate would see
+    // 'quarterly' and decline a supported 9-visit lawn line.
+    expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, { service_type: 'Lawn Care' }, 'quarterly')).toBe('every_6_weeks');
+    expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6 }, { service_type: 'Lawn Care' }, 'monthly')).toBe('bimonthly');
+    expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 12 }, { service_type: 'Lawn Care' }, 'quarterly')).toBe('monthly');
+    // Retired 4-visit count maps to nothing and still declines.
+    expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 4 }, { service_type: 'Lawn Care' }, 'quarterly')).toBe(null);
+    // Prepay mirror records the same cadence the series seeds.
+    expect(EstimateConverter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'quarterly')).toBe('every_6_weeks');
+  });
+
   test('LEGACY lawn rows without explicit visits keep office scheduling', () => {
     // The lawn billing cadence (monthly) must never seed a 12-visit series
     // for a plan whose visit cadence is unknown — no visits, no series.

@@ -120,7 +120,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     });
     expect((stateValue(db).services || []).map((s) => s.key)).toEqual([KEY]);
     expect((stateValue(db).services || []).every((s) => s.id)).toBe(true);
-    expect(stateValue(db).profiles).toEqual([KEY]);
+    expect(stateValue(db).profiles).toEqual([{ key: KEY, healed: false }]);
   });
 
   test('END-TO-END: the catalog row feeds the converter seeding allowlist (the ruling this row exists for)', async () => {
@@ -205,7 +205,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(profileRow(db)).toMatchObject({ service_name_snapshot: 'Adam Custom Palm Program' });
     // State claims only what up() actually inserted — nothing here.
     expect((stateValue(db).services || [])).toEqual([]);
-    expect(stateValue(db).profiles).toEqual([KEY]);
+    expect(stateValue(db).profiles).toEqual([{ key: KEY, healed: true }]);
   });
 
   test('up() skips the profile for a row an admin deactivated (posture preserved)', async () => {
@@ -252,7 +252,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     await migration.down(fakeKnex(db));
     expect(svcRow(db).is_active).toBe(false);
     // Profile provenance survives the retaining rollback (codex r4 P2).
-    expect(stateValue(db).profiles).toEqual([KEY]);
+    expect(stateValue(db).profiles).toEqual([{ key: KEY, healed: false }]);
 
     await migration.up(fakeKnex(db));
     expect(svcRow(db).is_active).toBe(true);
@@ -260,7 +260,21 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     // The reactivated row re-enters the removable set (a future clean
     // rollback can remove it again once nothing references it).
     expect((stateValue(db).services || []).map((e) => e.id)).toContain(insertedId);
-    expect(stateValue(db).profiles).toEqual([KEY]);
+    expect(stateValue(db).profiles).toEqual([{ key: KEY, healed: false }]);
+  });
+
+  test('a profile HEALED onto a pre-existing service is removed on rollback — the admin service survives without our auto_send behavior (codex r11 P2)', async () => {
+    const db = emptyDb();
+    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', is_active: true });
+    await migration.up(fakeKnex(db));
+    expect(profileRow(db)).toBeDefined();
+    await migration.down(fakeKnex(db));
+
+    // The never-ours service lives on; the migration's only change — the
+    // healed typed profile — is reverted.
+    expect(db.services.find((r) => r.id === 'admin-pre')).toBeDefined();
+    expect(db.services.find((r) => r.id === 'admin-pre').is_active).toBe(true);
+    expect(profileRow(db)).toBeUndefined();
   });
 
   test('down() leaves a row an admin REPURPOSED before the first rollback — neither deactivated nor deleted (codex r6 P2)', async () => {

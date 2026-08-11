@@ -92,7 +92,12 @@ async function recordState(knex, state) {
     }
     const merged = {
       services: [...byId.values()],
-      profiles: [...new Set([...prior.profiles, ...state.profiles])],
+      profiles: [...new Map(
+        [...prior.profiles, ...state.profiles]
+          .map((entry) => (typeof entry === 'string' ? { key: entry, healed: false } : entry))
+          .filter((entry) => entry && entry.key)
+          .map((entry) => [entry.key, entry]),
+      ).values()],
     };
     await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify(merged) });
   } else {
@@ -211,8 +216,14 @@ exports.up = async function up(knex) {
     active: true,
     notes: PROFILE_MARKER,
   });
-  inserted.profiles.push(SERVICE.service_key);
-  console.log(`[palm-semiannual] ${SERVICE.service_key}: profile inserted → service_report/palm_injection/auto_send`);
+  // Record HOW the profile landed (codex r11 P2): healed onto a
+  // pre-existing/admin-created service vs inserted alongside our own row.
+  // A healed profile is the migration's ONLY change for that key, so
+  // rollback removes it even though the (never-ours) service lives on;
+  // a profile inserted with our service keeps the r9 live-row guard.
+  const healedOntoExisting = !inserted.services.some((entry) => entry && entry.key === SERVICE.service_key);
+  inserted.profiles.push({ key: SERVICE.service_key, healed: healedOntoExisting });
+  console.log(`[palm-semiannual] ${SERVICE.service_key}: profile inserted → service_report/palm_injection/auto_send${healedOntoExisting ? ' (healed onto pre-existing service)' : ''}`);
 
   await recordState(knex, inserted);
 };
@@ -314,8 +325,11 @@ exports.down = async function down(knex) {
     }
   }
 
-  if (state.profiles.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
-    for (const key of state.profiles) {
+  const profileEntries = (state.profiles || [])
+    .map((entry) => (typeof entry === 'string' ? { key: entry, healed: false } : entry))
+    .filter((entry) => entry && entry.key);
+  if (profileEntries.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
+    for (const { key, healed } of profileEntries) {
       if (retainedKeys.has(key)) continue;
       // Admin-recreated row guard (exemplar 20260809000000): if our UUID is
       // gone but the key lives on under a NEW UUID (admin deleted and
@@ -330,8 +344,13 @@ exports.down = async function down(knex) {
       // "did-we-insert-it" condition would leave the replacement's typed
       // profile unprotected on the following rollback. A profile is only
       // deletable when no live service row answers to its key.
+      // A HEALED profile is the migration's only change for the key — it
+      // must not survive rollback merely because the never-ours service
+      // still exists (codex r11 P2). A profile inserted alongside our own
+      // service keeps the r9 guard: any live same-key row outside the
+      // removable set (e.g. an admin replacement) retains it.
       const currentService = await knex('services').where({ service_key: key }).first();
-      if (currentService && !removableIds.includes(currentService.id)) {
+      if (!healed && currentService && !removableIds.includes(currentService.id)) {
         console.warn(`[palm-semiannual] down: profile ${key} serves a live service row (${currentService.id}) — leaving untouched`);
         continue;
       }
@@ -364,7 +383,7 @@ exports.down = async function down(knex) {
       // rollback (after the references clear) would delete the service row
       // but skip the now-untracked marker profile, leaving an active
       // orphan that could silently attach to a future same-key service.
-      const retainedProfiles = state.profiles.filter((key) => retainedKeys.has(key));
+      const retainedProfiles = profileEntries.filter((entry) => retainedKeys.has(entry.key));
       await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: retainedProfiles, retained }) });
       console.warn(`[palm-semiannual] down: recorded ${retained.length} retained row(s) (+${retainedProfiles.length} profile(s)) for roll-forward reactivation`);
     } else {

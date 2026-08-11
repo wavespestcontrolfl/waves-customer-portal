@@ -2133,6 +2133,10 @@ const LAWN_CADENCE_CATALOG_KEYS = {
   monthly: 'lawn_care_monthly',
 };
 
+// Each sold lawn visit count maps to exactly one cadence (quarterly/4 is
+// retired) — the forced-lawn resolution and its prepay mirror share this.
+const LAWN_VISITS_PATTERNS = { 6: 'bimonthly', 9: 'every_6_weeks', 12: 'monthly' };
+
 // The lawn/palm links added 2026-08-11 are IDENTITY-ONLY (codex #3349 P1):
 // the catalog lookups below also copy default_duration_minutes onto the
 // visit, and the lawn rows carry 45 while the estimate-slot system books
@@ -2543,6 +2547,19 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     // declines via the gate's contradiction check.
     return 'semiannual';
   }
+  // Lawn visit-count-only lines (codex r11 P1): a supported legacy lawn
+  // row carrying only visitsPerYear beside a pest plan resolves the PEST
+  // fallback cadence (inference checks fallbackFrequency before the visit
+  // count) and the gate declines it. Each sold count maps to exactly one
+  // cadence — force it when the line has no cadence field, or when its
+  // field AGREES (spellings inference can't read); a disagreeing count
+  // still declines through the gate's exact-visits check.
+  if (seedingFamilyKey(svc, parentRow) === 'lawn_care'
+    && !isCommercialRecurringLine(svc, parentRow)) {
+    const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
+    const lawnField = explicitCadenceFieldForService(svc);
+    if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
@@ -2577,6 +2594,14 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
+  }
+  // Forced-lawn mirror (codex r11 P1): the prepay term must record the
+  // cadence the series will actually seed, not the plan fallback a
+  // visit-count-only lawn row would otherwise inherit.
+  if (seedingFamilyKey(svc) === 'lawn_care' && !isCommercialRecurringLine(svc)) {
+    const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
+    const lawnField = explicitCadenceFieldForService(svc);
+    if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
   const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
