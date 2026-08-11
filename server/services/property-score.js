@@ -35,16 +35,12 @@ const {
   loadScoreForServiceRecord,
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
+const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { dateOnlyString } = require('../utils/date-only');
-
-// ET calendar date (YYYY-MM-DD) `daysBack` days before today. en-CA gives the
-// ISO date form; the timeZone pin keeps the window on the business calendar
-// regardless of host TZ (Railway runs UTC).
-function etDate(daysBack = 0) {
-  return new Date(Date.now() - daysBack * 86400000)
-    .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-}
+// ET calendar discipline: elapsed-millisecond day math drifts across DST
+// seams, so windows come from the shared ET helpers.
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 function roundOrNull(value) {
   return value == null || !Number.isFinite(Number(value)) ? null : Math.round(Number(value));
@@ -65,15 +61,29 @@ function movementReason(delta) {
   return 'Holding steady since your last assessment.';
 }
 
-// Any scheduled service whose type matches one of the LIKE patterns —
-// the same catalog-inference idiom applyLawnServiceFilter uses.
+// Current program coverage for a service family (LIKE patterns, the same
+// catalog-inference idiom applyLawnServiceFilter uses), scoped to evidence
+// the program is CURRENT: an upcoming pending/confirmed visit, or a
+// completed visit within the trailing 366 ET days (annual is the longest
+// program cadence). 'cancelled' never counts; 'rescheduled' is a phantom
+// placeholder holding a stale date (see routes/schedule.js) and never
+// counts either.
 async function hasServiceLike(customerId, patterns, knex) {
+  const today = etDateString();
+  const yearAgo = etDateString(addETDays(new Date(), -366));
   const row = await knex('scheduled_services as ss')
     .where('ss.customer_id', customerId)
     .where(function () {
       patterns.forEach((p, i) => {
         if (i === 0) this.whereRaw('LOWER(ss.service_type) LIKE ?', [p]);
         else this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [p]);
+      });
+    })
+    .where(function () {
+      this.where(function () {
+        this.whereIn('ss.status', ['pending', 'confirmed']).andWhere('ss.scheduled_date', '>=', today);
+      }).orWhere(function () {
+        this.where('ss.status', 'completed').andWhere('ss.scheduled_date', '>=', yearAgo);
       });
     })
     .first('ss.id')
@@ -122,11 +132,18 @@ async function pestComponent(customerId, knex) {
       .where({ id: latest.service_record_id })
       .first()
       .catch(() => null);
+    // Catalog-resolved one-time exclusion — the view's label heuristic misses
+    // one-time services whose names carry no cadence word (Fire Ant, Tick
+    // Control…); the report paths pass this too. Fail toward showing nothing.
+    const oneTimeExcluded = serviceRecord
+      ? await isOneTimePressureExcludedRecord(serviceRecord, knex).catch(() => true)
+      : false;
     const view = buildPestPressureCustomerView({
       config,
       scoreRow: fullRow || latest,
       serviceRecord,
       historyRows: history,
+      oneTimeExcluded,
     });
     if (view && view.score != null) {
       const score = pressureToHealth(view.score);
@@ -192,8 +209,12 @@ async function termiteComponent(customerId, knex) {
 
 async function treeShrubComponent(customerId, knex) {
   const base = { key: 'tree_shrub', label: 'Trees & Shrubs' };
+  // service_date first — a late-entered older visit must not become the
+  // current assessment (created_at is only the tie-breaker, matching the
+  // established tree/shrub trend ordering).
   const rows = await knex('tree_shrub_assessments')
     .where({ customer_id: customerId, confirmed_by_tech: true })
+    .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
     .limit(2)
     .catch(() => []);
@@ -209,7 +230,7 @@ async function treeShrubComponent(customerId, knex) {
       previousScore,
       delta,
       reason: movementReason(delta),
-      asOf: dateOnlyString(scored[0].created_at),
+      asOf: dateOnlyString(scored[0].service_date),
     };
   }
   const monitored = await hasServiceLike(customerId, ['%tree%', '%shrub%'], knex);
@@ -263,7 +284,7 @@ async function rainSummary(customerId, knex) {
     .catch(() => null);
   const areaId = customer?.lawn_water_area_id;
   if (!areaId) return null;
-  const inches = await getAreaRainfall(areaId, etDate(6), etDate(0), knex);
+  const inches = await getAreaRainfall(areaId, etDateString(addETDays(new Date(), -6)), etDateString(), knex);
   if (inches == null) return null;
   return {
     inches7d: inches,
@@ -308,5 +329,5 @@ async function buildPropertyScore(customerId, knex = db) {
 module.exports = {
   buildPropertyScore,
   // exported for tests
-  _test: { composeOverall, pressureToHealth, movementReason, etDate },
+  _test: { composeOverall, pressureToHealth, movementReason, hasServiceLike },
 };
