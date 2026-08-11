@@ -300,6 +300,11 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(isPalmInjectionFamily({ service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment' })).toBe(false);
     expect(isPalmInjectionFamily({ name: 'Palm Tree Nutritional Treatment' })).toBe(false);
     expect(isPalmInjectionFamily({ name: 'Pest Initial Palmetto Knockdown' })).toBe(false);
+    // Bare historical labels lack both the key and the nutritional word —
+    // POSITIVE injection evidence is required (codex r21 P0).
+    expect(isPalmInjectionFamily({ name: 'Palm Treatment' })).toBe(false);
+    expect(isPalmInjectionFamily({ name: 'Palm' })).toBe(false);
+    expect(isPalmInjectionFamily({ name: 'Semiannual Palm Injection Service' })).toBe(true);
   });
 
   test('a POPULATED invalid visit count declines — never read as a legacy count-less line (codex r18 P1)', () => {

@@ -731,6 +731,30 @@ describe('annual prepay renewal helpers', () => {
     }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 4,
     });
+
+    // The bare historical 'Palm Treatment' label (codex r21 P0) is the
+    // nutritional lane too — same untouched path.
+    // scheduledServiceColumns is cached within the process — the second
+    // run consumes no columnInfo entry.
+    setDbQueues({
+      scheduled_services: [
+        query({ rows: [] }), query({ first: undefined }),
+        query({ returning: [{ id: 'svc-l1', scheduled_date: '2026-06-15' }] }),
+        query({ returning: [{ id: 'svc-l2', scheduled_date: '2026-09-15' }] }),
+        query({ returning: [{ id: 'svc-l3', scheduled_date: '2026-12-15' }] }),
+        query({ returning: [{ id: 'svc-l4', scheduled_date: '2027-03-15' }] }),
+      ],
+    });
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-legacy-label',
+      customer_id: 'customer-nut',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Treatment',
+      coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 4,
+    });
   });
 
   test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {

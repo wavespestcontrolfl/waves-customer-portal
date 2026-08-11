@@ -2643,6 +2643,7 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
 // terms keep gap-filling. Every INJECTION-specific gate asks here instead
 // of the raw family resolver.
 const PALM_NUTRITIONAL_RE = /nutritional|fertil/i;
+const PALM_INJECTION_TOKEN_RE = /injection/i;
 function isPalmInjectionFamily(svc = {}, parentRow = {}) {
   if (seedingFamilyKey(svc, parentRow) !== 'palm_injection') return false;
   const labels = [
@@ -2650,7 +2651,16 @@ function isPalmInjectionFamily(svc = {}, parentRow = {}) {
     svc.name, svc.serviceName, svc.service_name, svc.displayName, svc.label,
     parentRow?.service_type,
   ].map((value) => String(value || ''));
-  return !labels.some((value) => value === 'palm_treatment' || PALM_NUTRITIONAL_RE.test(value));
+  if (labels.some((value) => value === 'palm_treatment' || PALM_NUTRITIONAL_RE.test(value))) return false;
+  // POSITIVE injection evidence required (codex r21 P0): legacy prepay
+  // terms and service rows store the bare historical labels 'Palm' /
+  // 'Palm Treatment' (the service-library migration maps them to
+  // palm_treatment) with neither the underscored key nor a nutritional
+  // keyword — a palm-family label WITHOUT the injection token is the
+  // nutritional lane, never the injection program.
+  return labels.some((value) => value === 'palm_injection'
+    || value === 'palm_injection_semiannual'
+    || PALM_INJECTION_TOKEN_RE.test(value));
 }
 
 function palmRecurringEvidence(svc = {}, parentRow = {}) {
