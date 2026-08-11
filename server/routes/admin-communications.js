@@ -15,6 +15,7 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
+const smsTemplatesRouter = require('./admin-sms-templates');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
@@ -1194,6 +1195,16 @@ async function firstNameForPhone(last10, customerIds) {
   return agreedFirstName(rows);
 }
 
+// Composer link inserts are SMS bodies the operator sends verbatim — they
+// never pass through getTemplate, so the owned-host scheme strip (owner
+// directive 2026-08-01: portal links go bare in SMS) has to happen here.
+// Same renderer function as the template path (admin-sms-templates
+// stripPortalUrlScheme) so the two paths can never disagree about which
+// hosts go bare; third-party hosts keep their scheme.
+const stripSmsLinkScheme = typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
+  ? smsTemplatesRouter.stripPortalUrlScheme
+  : (s) => s;
+
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
@@ -1316,8 +1327,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
     res.json({
-      url,
-      line,
+      url: stripSmsLinkScheme(url),
+      line: stripSmsLinkScheme(line),
       firstName: recipientFirstName,
       appointment: {
         id: svc.id,
@@ -1429,7 +1440,13 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     const { url, line } = await buildReserviceLink(eligible.id);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
-    res.json({ url, line, customerId: eligible.id, lanes, firstName: recipientFirstName });
+    res.json({
+      url: stripSmsLinkScheme(url),
+      line: stripSmsLinkScheme(line),
+      customerId: eligible.id,
+      lanes,
+      firstName: recipientFirstName,
+    });
   } catch (err) {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
