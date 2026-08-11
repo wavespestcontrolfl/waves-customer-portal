@@ -368,6 +368,44 @@ async function loadLastPaidSpendByKey(database, customerId) {
   return spend;
 }
 
+// Visit cadence (frequency + visits/year) per scheduled row, from the service
+// catalog. DISPLAY ONLY — the staff spend panel reads "$95 per application ·
+// Quarterly (4/yr)" so the office can compare a new quote against what the
+// customer actually pays today, and the monthly-rate basis below divides by
+// this visit count. Degrades to an EMPTY Map on any error (CLAUDE.md r6): a
+// missing cadence hides the label and skips the derived basis, it never
+// breaks the panel or the membership snapshot that embeds it.
+async function loadCadenceByRowId(database, customerId) {
+  try {
+    const rows = await database('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      .select('s.id', 'svc.frequency', 'svc.visits_per_year');
+    return new Map(rows.map((row) => [row.id, {
+      frequency: row.frequency || null,
+      visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
+    }]));
+  } catch {
+    return new Map();
+  }
+}
+
+// Customer-facing cadence wording. "Every other month" beats the catalog's
+// "bimonthly", which reads as twice-a-month to half the people who see it.
+const CADENCE_LABEL = {
+  monthly: 'Monthly',
+  bimonthly: 'Every other month',
+  quarterly: 'Quarterly',
+  annual: 'Annual',
+  seasonal: 'Seasonal',
+};
+
+function cadenceLabelFor(frequency) {
+  const key = String(frequency || '').trim().toLowerCase();
+  if (!key) return null;
+  return CADENCE_LABEL[key] || key.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 // Explicit unit identity of a stamped address (null when none), extracted
 // with the same primitives sameStreetAddress uses internally so the two can
 // never disagree about what counts as a unit.
@@ -402,6 +440,11 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
+  const cadenceByRowId = await loadCadenceByRowId(database, customerId);
+  // Best-effort: the customer row backs the stamped per-application /
+  // monthly-rate basis of last resort below. A failed load simply leaves
+  // those fallbacks unavailable, exactly as before they existed.
+  const customer = await database('customers').where({ id: customerId }).first().catch(() => null);
   const byKey = new Map();
   const componentKeysByKey = new Map();
   const componentRowsByKey = new Map();
@@ -498,7 +541,41 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const scheduledPerVisit = contracts.some((contract) => contract.scheduledPerVisit != null)
       ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.scheduledPerVisit) || 0), 0))
       : null;
-    const currentPerVisit = usableLastPaid?.amount ?? scheduledPerVisit;
+    // Visit cadence for this family — the first row that resolves one. Used
+    // for the "· Quarterly (4/yr)" label and to divide the monthly rate
+    // below; null leaves both out rather than guessing a visit count.
+    const cadence = serviceRows
+      .map((row) => cadenceByRowId.get(row.id))
+      .find((entry) => entry && (entry.frequency || entry.visitsPerYear)) || null;
+    const visitsPerYear = cadence?.visitsPerYear ?? null;
+    // Customer-level billing stamps are a WHOLE-PLAN figure: the converter
+    // only writes customers.per_application_fee for a single-recurring-unit
+    // accept, and monthly_rate covers everything the customer buys.
+    // Attributing either to one service on a multi-service account would
+    // overstate that service, so both are gated to an account carrying
+    // exactly ONE recurring service with ONE contract — the same shape the
+    // converter's own stamp gate requires. Last resort, below both real
+    // evidence sources: legacy and multi-unit plans previously read
+    // "unavailable" here, which told the office nothing at all.
+    const singleUnitAccount = byKey.size === 1 && contracts.length === 1;
+    const stampedPerApplication = (singleUnitAccount
+      && customer?.billing_mode === 'per_application'
+      && Number(customer.per_application_fee) > 0)
+      ? round2(customer.per_application_fee)
+      : null;
+    // Monthly members never pay a per-application figure — this is the
+    // arithmetic equivalent for comparison against a quote, and the panel
+    // labels its source so staff never reads it as a charged amount.
+    const monthlyDerivedPerApplication = (singleUnitAccount
+      && stampedPerApplication == null
+      && Number(customer?.monthly_rate) > 0
+      && visitsPerYear > 0)
+      ? round2((Number(customer.monthly_rate) * 12) / visitsPerYear)
+      : null;
+    const currentPerVisit = usableLastPaid?.amount
+      ?? scheduledPerVisit
+      ?? stampedPerApplication
+      ?? monthlyDerivedPerApplication;
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
     const componentServiceAddresses = {};
     const componentServiceAddressesComplete = {};
@@ -529,7 +606,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       componentServiceAddresses,
       componentServiceAddressesComplete,
       currentPerVisit: currentPerVisit ?? null,
-      spendSource: usableLastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+      // Visit cadence for display — "Quarterly (4/yr)". Null on either half
+      // simply omits that half; the panel never invents a cadence.
+      cadenceLabel: cadenceLabelFor(cadence?.frequency),
+      visitsPerYear,
+      spendSource: usableLastPaid
+        ? 'last_paid_invoice'
+        : (scheduledPerVisit != null
+          ? 'scheduled_estimate'
+          : (stampedPerApplication != null
+            ? 'per_application_fee'
+            : (monthlyDerivedPerApplication != null ? 'monthly_rate_derived' : 'unavailable'))),
       lastPaidAt: usableLastPaid?.paidAt || null,
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the

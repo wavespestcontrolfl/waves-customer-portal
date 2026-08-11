@@ -31,6 +31,13 @@ function fakeDb({
   addonQueryThrows = false,
   mintedInvoiceLinks = [],
   mintedProbeThrows = false,
+  // Opt-in catalog-join support. WITHOUT catalogRows the builder has no
+  // leftJoin at all, so the catalog and cadence loaders throw and degrade
+  // exactly as they did before this parameter existed — every pre-existing
+  // test keeps its behavior byte-for-byte. Rows carry both loaders' columns
+  // (service_key/service_name for classification, frequency/visits_per_year
+  // for cadence); each loader reads only what it selected.
+  catalogRows = null,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -38,6 +45,7 @@ function fakeDb({
     // keys by customer/service_type and must keep returning paidInvoices.
     let probesServiceIds = false;
     const builder = {
+      ...(catalogRows ? { leftJoin: () => builder } : {}),
       where: () => builder,
       whereIn: (col) => {
         if (col === 'scheduled_service_id') probesServiceIds = true;
@@ -64,6 +72,7 @@ function fakeDb({
         return null;
       },
       select: async () => {
+        if (table === 'scheduled_services as s') return catalogRows || [];
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {
@@ -834,6 +843,145 @@ describe('computeMembershipContext', () => {
 // customer's current qualifying services at the delta rate, and the public
 // projection deliberately carries the prices + visit dates the customer page
 // renders.
+// Staff-panel context for pricing an upgrade: the cadence behind a
+// per-application figure, and a usable basis for the plans that carry no
+// invoice or scheduled price (legacy and monthly-lane members, which used to
+// read "unavailable" and tell the office nothing).
+describe('current-spend cadence and stamped billing basis', () => {
+  const memberWith = (extra) => ({
+    id: 'cust-1', first_name: 'Don', active: true, waveguard_tier: 'Bronze', ...extra,
+  });
+
+  test('catalog cadence surfaces as a label and a visit count', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+      catalogRows: [{
+        id: 'p1', service_key: 'pest_general_quarterly', service_name: 'Pest Control',
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      currentPerVisit: 117,
+      cadenceLabel: 'Quarterly',
+      visitsPerYear: 4,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('"bimonthly" reads as every other month, never twice a month', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-05', estimated_price: 80 }],
+      catalogRows: [{ id: 'l1', frequency: 'bimonthly', visits_per_year: 6 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].cadenceLabel).toBe('Every other month');
+  });
+
+  test('a single-service account with no invoice or scheduled price falls back to the stamped per-application fee', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 95,
+      spendSource: 'per_application_fee',
+      cadenceLabel: 'Quarterly',
+    }));
+  });
+
+  test('a monthly member with no per-visit evidence derives per application from the monthly rate', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 95 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // $95/mo x 12 / 4 visits — the arithmetic equivalent, labelled as derived
+    // so staff never reads it as an amount the customer was charged.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 285,
+      spendSource: 'monthly_rate_derived',
+    }));
+  });
+
+  test('a multi-service account never borrows the whole-plan billing stamp for one service', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95, monthly_rate: 150 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' },
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-06' },
+      ],
+      catalogRows: [
+        { id: 'p1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 'l1', frequency: 'bimonthly', visits_per_year: 6 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // The converter only stamps per_application_fee for a SINGLE-recurring-unit
+    // accept, so on a two-service account it is a whole-plan figure that
+    // belongs to neither line.
+    for (const service of spend.currentServices) {
+      expect(service.currentPerVisit).toBeNull();
+      expect(service.spendSource).toBe('unavailable');
+    }
+    expect(spend.currentSpendPerVisitTotal).toBe(0);
+  });
+
+  test('real payment evidence still outranks the billing stamp', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 117,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
+    // No catalogRows — the builder has no leftJoin, so the cadence loader
+    // throws exactly as it does against a database without the services table.
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      cadenceLabel: null,
+      visitsPerYear: null,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+});
+
 describe('existing-service tier extension snapshot', () => {
   afterEach(() => { mockExtendExistingGate = false; });
 
