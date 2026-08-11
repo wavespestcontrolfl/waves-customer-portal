@@ -304,8 +304,18 @@ async function rainSummary(customerId, knex) {
     .catch(() => null);
   const areaId = customer?.lawn_water_area_id;
   if (!areaId) return null;
-  const inches = await getAreaRainfall(areaId, etDateString(addETDays(new Date(), -6)), etDateString(), knex);
-  if (inches == null) return null;
+  // getAreaRainfall returns null on a partial window (undercount guard).
+  const raw = await getAreaRainfall(areaId, etDateString(addETDays(new Date(), -6)), etDateString(), knex);
+  if (raw == null) return null;
+  // Same calibration the lawn-water engine applies before presenting the
+  // property's water picture (adjusted_rain_7day_inches) — the card must
+  // agree with the irrigation snapshot and reports.
+  const area = await knex('lawn_water_areas')
+    .where({ id: areaId })
+    .first('rain_adjustment_factor')
+    .catch(() => null);
+  const factor = Number(area?.rain_adjustment_factor || 1) || 1;
+  const inches = Math.round(raw * factor * 100) / 100;
   return {
     inches7d: inches,
     windowDays: 7,
