@@ -2362,6 +2362,14 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // Same commercial rejection as lawn above (codex r6 P1) — a
     // commercial-property palm program stays office-scheduled.
     if (isCommercialRecurringLine(svc, parentRow)) return false;
+    // A cadence FIELD that disagrees with semiannual is contradictory
+    // data and declines HERE (codex r7 P1): inferRecurringPattern never
+    // reads `cadence`/`planFrequency`, so a { cadence: 'monthly',
+    // visitsPerYear: 2 } line still reaches this gate as 'semiannual'
+    // via visit-count inference — the gate is the only place the
+    // disagreement is visible.
+    const cadenceField = explicitCadenceFieldForService(svc);
+    if (cadenceField && cadenceField !== 'semiannual') return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'semiannual') return visits == null || visits === 2;
     return false;
@@ -2511,7 +2519,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // office schedules. Fail closed to no coverage cadence instead.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection') {
     const visits = visitsPerYearForRecurringService(svc);
-    if (inferred !== 'semiannual' || !(visits == null || visits === 2) || isCommercialRecurringLine(svc)) return null;
+    const cadenceField = explicitCadenceFieldForService(svc);
+    if (inferred !== 'semiannual'
+      || !(visits == null || visits === 2)
+      || (cadenceField && cadenceField !== 'semiannual')
+      || isCommercialRecurringLine(svc)) return null;
   }
   return inferred;
 }
