@@ -262,6 +262,20 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(EstimateConverter.annualPrepayCoverageCadence(agreeing, 'monthly')).toBe('semiannual');
   });
 
+  test('CONFLICTING visit-count aliases decline in seeding and prepay (mirror of the cadence-conflict rule)', () => {
+    // { visitsPerYear: 2, visits: 4 } must not seed whichever alias the
+    // reader happens to hit first.
+    const palmConflict = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 2, visits: 4 };
+    expect(supportsConverterFollowUpSeeding(palmConflict, {}, 'semiannual')).toBe(false);
+    expect(converterFollowUpSeedingPattern({ ...palmConflict, frequency: undefined }, { service_type: 'Palm Injection' }, 'quarterly')).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(palmConflict, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    const lawnConflict = { service: 'lawn_care', name: 'Bi-Monthly Lawn Care Service', frequency: 'bi_monthly', visitsPerYear: 6, visits: 9 };
+    expect(supportsConverterFollowUpSeeding(lawnConflict, {}, 'bimonthly')).toBe(false);
+    expect(EstimateConverter.annualPrepayCoverageCadence(lawnConflict, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    // Agreeing duplicate aliases are not a conflict.
+    expect(supportsConverterFollowUpSeeding({ ...palmConflict, visits: 2 }, {}, 'semiannual')).toBe(true);
+  });
+
   test('CONFLICTING cadence fields decline — behavior never depends on field precedence (codex r10 P1)', () => {
     // frequency 'semiannual' left beside a corrected cadence 'monthly'
     // (and the reverse) both decline: the force stands down and the

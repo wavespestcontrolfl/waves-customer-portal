@@ -357,6 +357,16 @@ function explicitCadenceFieldForService(svc = {}) {
   return 'conflicting_cadence_fields';
 }
 
+// Conflicting visit-count aliases (mirror of the cadence-field conflict
+// rule): { visitsPerYear: 2, visits: 4 } must decline, not seed whichever
+// alias firstPositiveNumber happens to read first.
+function visitCountFieldsConflict(svc = {}) {
+  const values = [svc.visitsPerYear, svc.appsPerYear, svc.visits, svc.apps, svc.treatmentsPerYear]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return new Set(values).size > 1;
+}
+
 function explicitServiceCadence(svc = {}) {
   const fromFields = explicitCadenceFieldForService(svc);
   if (fromFields) return fromFields;
@@ -2420,6 +2430,7 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // identity link and the reserved promotion from treating them as
     // residential (both gate on this pattern resolving).
     if (isCommercialRecurringLine(svc, parentRow)) return false;
+    if (visitCountFieldsConflict(svc)) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'bimonthly') return visits === 6;
     if (pattern === 'every_6_weeks') return visits === 9;
@@ -2445,6 +2456,7 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // disagreement is visible.
     const cadenceField = explicitCadenceFieldForService(svc);
     if (cadenceField && cadenceField !== 'semiannual') return false;
+    if (visitCountFieldsConflict(svc)) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'semiannual') return visits == null || visits === 2;
     return false;
@@ -2543,6 +2555,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // to office scheduling instead of being overridden.
   if (seedingFamilyKey(svc, parentRow) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
+    && !visitCountFieldsConflict(svc)
     && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc, parentRow)) {
     // Cadence-less OR semiannual-agreeing field both force (codex r9 P1):
@@ -2561,7 +2574,8 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // field AGREES (spellings inference can't read); a disagreeing count
   // still declines through the gate's exact-visits check.
   if (seedingFamilyKey(svc, parentRow) === 'lawn_care'
-    && !isCommercialRecurringLine(svc, parentRow)) {
+    && !isCommercialRecurringLine(svc, parentRow)
+    && !visitCountFieldsConflict(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
     const lawnField = explicitCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
@@ -2597,6 +2611,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // cadence-field restriction as the seeding rule (codex r4 P1).
   if (seedingFamilyKey(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
+    && !visitCountFieldsConflict(svc)
     && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
@@ -2604,7 +2619,9 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // Forced-lawn mirror (codex r11 P1): the prepay term must record the
   // cadence the series will actually seed, not the plan fallback a
   // visit-count-only lawn row would otherwise inherit.
-  if (seedingFamilyKey(svc) === 'lawn_care' && !isCommercialRecurringLine(svc)) {
+  if (seedingFamilyKey(svc) === 'lawn_care'
+    && !isCommercialRecurringLine(svc)
+    && !visitCountFieldsConflict(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
     const lawnField = explicitCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
@@ -2624,6 +2641,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const cadenceField = explicitCadenceFieldForService(svc);
     if (inferred !== 'semiannual'
       || !(visits == null || visits === 2)
+      || visitCountFieldsConflict(svc)
       || (cadenceField && cadenceField !== 'semiannual')
       || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;
   }
@@ -2637,6 +2655,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const visits = visitsPerYearForRecurringService(svc);
     const cadenceField = explicitCadenceFieldForService(svc);
     if (isCommercialRecurringLine(svc)
+      || visitCountFieldsConflict(svc)
       || (visits != null && LAWN_VISITS_PATTERNS[visits] !== inferred)
       || (cadenceField && cadenceField !== inferred)) return PREPAY_COVERAGE_INVALID;
   }
