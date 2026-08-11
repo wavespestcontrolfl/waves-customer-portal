@@ -99,6 +99,32 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       logger.error(`[${routeTag}] outbound-review reminder arm returned null (swallowed failure) for ${svc.id}`);
     } else {
       logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
+      // Post-registration slot verify (Codex #3361 r11 P2): a reschedule
+      // committing between the fresh read above and the insert can have
+      // run its own handleReschedule resync BEFORE the reminder row
+      // existed. One more read AFTER registration closes the ordering
+      // both ways — a move committed before this read is resynced here;
+      // a move committed after it finds the now-existing row and
+      // resyncs itself. A detected move whose resync fails marks the
+      // leg failed so the sweep retries (registration dedupes; the
+      // retry re-runs this verify).
+      try {
+        const postSlot = await db('scheduled_services')
+          .where({ id: svc.id })
+          .first('scheduled_date', 'window_start');
+        if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
+          || String(postSlot.window_start || '') !== String(slotStart || ''))) {
+          await AppointmentReminders.handleReschedule(
+            svc.id,
+            `${dateOnly(postSlot.scheduled_date)}T${postSlot.window_start || '09:00'}`,
+            { sendNotification: false },
+          );
+          logger.info(`[${routeTag}] reminder slot resynced after concurrent move for ${svc.id}`);
+        }
+      } catch (postSyncErr) {
+        coreLegsOk = false;
+        logger.warn(`[${routeTag}] post-registration slot verify failed for ${svc.id} — leaving retryable: ${postSyncErr.message}`);
+      }
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
