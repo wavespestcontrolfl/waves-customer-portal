@@ -225,6 +225,15 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(supportsConverterFollowUpSeeding({ name: 'Bi-Monthly Tree & Shrub Care Service', visitsPerYear: 6 }, {}, 'bimonthly')).toBe(true);
   });
 
+  test('"Palmetto" is NOT palm — the bare /palm/ substring hit declines on every surface (codex r8 P1)', () => {
+    const palmetto = { service: 'pest_initial_palmetto_knockdown', name: 'Palmetto Roach Knockdown', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(palmetto, { service_type: 'Palmetto Roach Knockdown' }, 'quarterly')).toBe(null);
+    expect(supportsConverterFollowUpSeeding(palmetto, {}, 'semiannual')).toBe(false);
+    // …and never seeds a quarterly PEST series via a remap either.
+    expect(supportsConverterFollowUpSeeding(palmetto, {}, 'quarterly')).toBe(false);
+    expect(EstimateConverter.annualPrepayCoverageCadence(palmetto, 'quarterly')).not.toBe('semiannual');
+  });
+
   test('COMMERCIAL palm lines never seed or force — office-scheduled (codex r6 P1)', () => {
     const commercial = { name: 'Commercial Palm Injection', service: 'palm_injection', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(commercial, { service_type: 'Commercial Palm Injection' }, 'quarterly')).toBe(null);

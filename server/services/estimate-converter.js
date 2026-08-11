@@ -2302,11 +2302,21 @@ function seedingFamilyKey(svc = {}, parentRow = {}) {
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow?.service_type });
   const fromLine = serviceKey && serviceKey !== 'service';
   let key = fromLine ? serviceKey : parentKey;
-  if (key === 'tree_shrub') {
-    const palmFirst = fromLine
-      ? recurringServiceKey(svc)
-      : recurringServiceKey({ name: parentRow?.service_type || '' });
-    if (palmFirst === 'palm_injection') key = 'palm_injection';
+  const palmFirst = fromLine
+    ? recurringServiceKey(svc)
+    : recurringServiceKey({ name: parentRow?.service_type || '' });
+  if (key === 'tree_shrub' && palmFirst === 'palm_injection') {
+    key = 'palm_injection';
+  } else if (key === 'palm_injection' && palmFirst !== 'palm_injection') {
+    // Reverse guard (codex r8 P1): the seeder's bare /palm/ substring also
+    // matches 'Palmetto' (pest_initial_palmetto_knockdown), while the
+    // converter's word-boundary detection (\bpalm(s)?\b / palm injection /
+    // palm tree) does not. A substring-only palm hit is NOT palm — return
+    // a sentinel no family branch matches, preserving the pre-existing
+    // decline outcome on every seeding surface (never remap to the
+    // converter's guess: 'pest_initial_…' text-resolves pest_control and
+    // would suddenly seed a quarterly pest series).
+    key = 'palm_substring_mismatch';
   }
   return key;
 }
