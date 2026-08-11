@@ -140,7 +140,11 @@ function cancelFeeLine() {
   // labels (e.g. "Quarterly Pest Control") the longer clause pushed rendered
   // plan-choice invites to a 4th segment (Codex #3077 r2). The /secure page
   // and email keep the fuller sentence.
-  return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
+  // Trailing-space clause (owner spacing pass 2026-08-11): the templates
+  // place {cancel_fee_line} directly before the card-security sentence so
+  // the two disclosures share one line; '' when the fee is off must leave
+  // that line starting cleanly at "We never".
+  return feeText ? `${feeText} fee only for last-minute cancels or no-shows. ` : '';
 }
 
 // ONE coherent read of the fee disclosure (Codex #3153 r4 P1): the note in
