@@ -35,6 +35,7 @@ const {
   loadScoreForServiceRecord,
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
+const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 // Best-effort: the tree/shrub module also carries vision plumbing — a load
@@ -66,44 +67,27 @@ function movementReason(delta) {
   return 'Holding steady since your last assessment.';
 }
 
-// Current RECURRING program coverage for a service family (LIKE patterns,
-// the same catalog-inference idiom applyLawnServiceFilter uses). Two
-// requirements, both from existing mechanisms:
-//   1. Currency: an upcoming pending/confirmed visit, or a completed visit
-//      within the trailing 366 ET days (annual is the longest program
-//      cadence). 'cancelled' never counts; 'rescheduled' is a phantom
-//      placeholder holding a stale date (see routes/schedule.js).
-//   2. Recurring identity: the visit's completion profile must not resolve
-//      to one_time billing (resolveCompletionProfileForScheduledService —
-//      the same catalog resolution the pest one-time exclusion uses), so
-//      One-Time Pest Control / one-off tree work never read as a program.
-async function hasServiceLike(customerId, patterns, knex) {
-  const today = etDateString();
-  const yearAgo = etDateString(addETDays(new Date(), -366));
+// Active recurring coverage for a service line, from existing mechanisms
+// end to end: LIVE rows only (pending/confirmed, today or later — terminal
+// completed/cancelled rows are not live coverage, and 'rescheduled' is a
+// phantom placeholder per routes/schedule.js), classified by the canonical
+// detectServiceLine, and required to resolve to an affirmative `recurring`
+// billing profile (resolveCompletionProfileForScheduledService — the same
+// catalog resolution the pest one-time exclusion uses). The resolver's null
+// fallback never reads as a program.
+async function hasActiveRecurringLine(customerId, line, knex) {
   const rows = await knex('scheduled_services as ss')
     .where('ss.customer_id', customerId)
-    .where(function () {
-      patterns.forEach((p, i) => {
-        if (i === 0) this.whereRaw('LOWER(ss.service_type) LIKE ?', [p]);
-        else this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [p]);
-      });
-    })
-    .where(function () {
-      this.where(function () {
-        this.whereIn('ss.status', ['pending', 'confirmed']).andWhere('ss.scheduled_date', '>=', today);
-      }).orWhere(function () {
-        this.where('ss.status', 'completed').andWhere('ss.scheduled_date', '>=', yearAgo);
-      });
-    })
-    .orderBy('ss.scheduled_date', 'desc')
-    .limit(5)
+    .whereIn('ss.status', ['pending', 'confirmed'])
+    .where('ss.scheduled_date', '>=', etDateString())
+    .orderBy('ss.scheduled_date', 'asc')
+    .limit(25)
     .select('ss.id', 'ss.service_id', 'ss.service_type')
     .catch(() => []);
   for (const svc of rows) {
+    if (detectServiceLine(svc.service_type) !== line) continue;
     try {
       const profile = await resolveCompletionProfileForScheduledService(svc, knex);
-      // Affirmative recurring only — the resolver's null fallback (unmatched
-      // catalog row) must not read as a program.
       if (String(profile?.billingType || '').toLowerCase() === 'recurring') return true;
     } catch {
       // Unresolvable profile: skip the row rather than claim an active program.
@@ -152,9 +136,12 @@ async function pestComponent(customerId, knex) {
   // hiding an older valid one. A visible-but-insufficient view stops the walk
   // — surfacing an older score behind a newer insufficient one would be stale.
   const historyRows = Array.isArray(history) ? history : [];
-  for (let i = 0; i < historyRows.length; i += 1) {
-    const rowRef = historyRows[i];
-    if (!rowRef || !rowRef.service_record_id) continue;
+  // One row → the full customer-visibility path (stored score row, service
+  // record, catalog one-time exclusion, buildPestPressureCustomerView).
+  // Used for the current AND the previous point, so hidden rows can never
+  // leak into either end of the delta.
+  const viewFor = async (rowRef) => {
+    if (!rowRef || !rowRef.service_record_id) return null;
     const fullRow = await loadScoreForServiceRecord(knex, rowRef.service_record_id).catch(() => null);
     const serviceRecord = await knex('service_records')
       .where({ id: rowRef.service_record_id })
@@ -166,22 +153,31 @@ async function pestComponent(customerId, knex) {
     const oneTimeExcluded = serviceRecord
       ? await isOneTimePressureExcludedRecord(serviceRecord, knex).catch(() => true)
       : false;
-    const view = buildPestPressureCustomerView({
+    return buildPestPressureCustomerView({
       config,
       scoreRow: fullRow || rowRef,
       serviceRecord,
       historyRows: history,
       oneTimeExcluded,
     });
+  };
+  for (let i = 0; i < historyRows.length; i += 1) {
+    const view = await viewFor(historyRows[i]);
     if (!view) continue;
     if (view.score != null) {
       const score = pressureToHealth(view.score);
-      // Previous point comes from the next older history row's
-      // displayed_score — the same basis as the current value. Reconstructing
-      // it from trend_delta breaks after a manual override (applyOverride
-      // changes displayed_score without recalculating the delta).
-      const olderRow = historyRows.slice(i + 1).find((r) => r && r.displayed_score != null);
-      const previousScore = olderRow ? pressureToHealth(Number(olderRow.displayed_score)) : null;
+      // Previous point: the next OLDER row that passes the same visibility
+      // path and carries a displayed score — the same basis as the current
+      // value. (trend_delta reconstruction breaks after a manual override;
+      // raw displayed_score would leak rows the customer can't see.)
+      let previousScore = null;
+      for (let j = i + 1; j < historyRows.length; j += 1) {
+        const olderView = await viewFor(historyRows[j]).catch(() => null);
+        if (olderView && olderView.score != null) {
+          previousScore = pressureToHealth(olderView.score);
+          break;
+        }
+      }
       return {
         ...base,
         status: 'scored',
@@ -198,7 +194,7 @@ async function pestComponent(customerId, knex) {
     return { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' };
   }
 
-  const monitored = await hasServiceLike(customerId, ['%pest%'], knex);
+  const monitored = await hasActiveRecurringLine(customerId, 'pest', knex);
   if (monitored) {
     return { ...base, status: 'active', reason: 'Your pest protection program is active.' };
   }
@@ -272,7 +268,7 @@ async function treeShrubComponent(customerId, knex) {
       asOf: dateOnlyString(scored[0].row.service_date),
     };
   }
-  const monitored = await hasServiceLike(customerId, ['%tree%', '%shrub%'], knex);
+  const monitored = await hasActiveRecurringLine(customerId, 'tree_shrub', knex);
   if (monitored) {
     return { ...base, status: 'pending', reason: 'Your tree & shrub score appears after the first confirmed assessment.' };
   }
@@ -281,7 +277,7 @@ async function treeShrubComponent(customerId, knex) {
 
 async function mosquitoComponent(customerId, knex) {
   const base = { key: 'mosquito', label: 'Mosquito' };
-  const monitored = await hasServiceLike(customerId, ['%mosquito%'], knex);
+  const monitored = await hasActiveRecurringLine(customerId, 'mosquito', knex);
   if (monitored) {
     return { ...base, status: 'active', reason: 'Your mosquito program is active.' };
   }
@@ -371,5 +367,5 @@ async function buildPropertyScore(customerId, knex = db) {
 module.exports = {
   buildPropertyScore,
   // exported for tests
-  _test: { composeOverall, pressureToHealth, movementReason, hasServiceLike },
+  _test: { composeOverall, pressureToHealth, movementReason, hasActiveRecurringLine },
 };
