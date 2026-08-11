@@ -2720,7 +2720,13 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 }
 
 function isReusableInvoice(inv) {
-  return inv && !['void', 'paid'].includes(inv.status);
+  // Terminal invoices are never reuse candidates (codex #3344 r9-round
+  // pre-push): every payment route rejects refunded/cancelled invoices, so
+  // reusing one links the project to a dead bill and blocks the
+  // replacement the in-lock re-checks deliberately allow. 'paid' stays
+  // excluded because reuse means "send for collection" — the already-billed
+  // guard owns settled invoices.
+  return inv && !['void', 'paid', ...TERMINAL_INVOICE_STATUSES].includes(inv.status);
 }
 
 const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)';
@@ -2848,7 +2854,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     if (project.scheduled_service_id || project.service_record_id) {
       const linked = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        .whereNotIn('status', ['void', 'paid'])
+        // Same terminal exclusion as the in-lock re-check below (codex
+        // #3344 r9-round pre-push): without it a refunded/cancelled
+        // invoice is adopted HERE and returned before the guarded
+        // recheck ever runs.
+        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
         .where(function invoiceLinkage() {
           if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
