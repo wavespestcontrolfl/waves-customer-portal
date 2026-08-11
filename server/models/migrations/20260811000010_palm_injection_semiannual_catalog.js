@@ -190,6 +190,24 @@ exports.up = async function up(knex) {
     await recordState(knex, inserted);
     return;
   }
+  // Same-key presence is NOT sufficient for healing (codex r18 pre-push
+  // P0): the converter treats this KEY as the semiannual recurring
+  // identity, so healing an auto-send profile onto a pre-existing row
+  // whose billing is one-time (or a non-semiannual cadence) would let a
+  // scheduled 2-visit series complete with per-application invoicing on
+  // top of the sold recurring/prepay plan. Only a verified
+  // recurring/semiannual row is healed; anything else fails closed with
+  // a loud warn for the operator. Rows this migration inserted always
+  // satisfy this (SERVICE literal above).
+  const rowFrequency = String(service.frequency || '').toLowerCase();
+  const rowIsRecurringSemiannual = service.billing_type === 'recurring'
+    && (rowFrequency === '' || rowFrequency === 'semiannual')
+    && (service.visits_per_year == null || Number(service.visits_per_year) === 2);
+  if (!rowIsRecurringSemiannual) {
+    console.warn(`[palm-semiannual] ${SERVICE.service_key}: pre-existing row is not a verified recurring/semiannual service (billing_type=${service.billing_type}, frequency=${service.frequency}, visits_per_year=${service.visits_per_year}) — NOT healing a profile onto it (fail closed); review the row before selling the program`);
+    await recordState(knex, inserted);
+    return;
+  }
   const existingProfile = await knex('service_completion_profiles')
     .where({ service_key: SERVICE.service_key })
     .first();
