@@ -223,7 +223,8 @@ describe('markEnRoute stale-attempt self-heal', () => {
 
     const result = await trackTransitions.markEnRoute('job-done');
 
-    expect(result.state).toBe('complete');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('terminal_status: completed');
     expect(db).toHaveBeenCalledTimes(1);
   });
 
@@ -246,8 +247,31 @@ describe('markEnRoute stale-attempt self-heal', () => {
 
     const result = await trackTransitions.markEnRoute('job-stuck-done');
 
-    expect(result.state).toBe('on_property');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('terminal_status: completed');
     expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
+  });
+
+  test('completion racing the heal cannot be flipped en route (status-first window)', async () => {
+    // The exact race the heal recursion creates: heal reset track_state to
+    // 'scheduled', a concurrent completion then persisted status='completed'
+    // before the recursive reload. The terminal-status guard rejects it.
+    const racedSvc = {
+      id: 'job-raced',
+      customer_id: 'cust-10',
+      technician_id: null,
+      status: 'completed',
+      track_state: 'scheduled',
+      scheduled_date: todayStr,
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(racedSvc));
+
+    const result = await trackTransitions.markEnRoute('job-raced');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('terminal_status: completed');
+    expect(db).toHaveBeenCalledTimes(1); // no flip UPDATE, no SMS
   });
 
   test('scheduled track_state with stale stamps: flip clears them atomically and un-suppresses the SMS', async () => {
