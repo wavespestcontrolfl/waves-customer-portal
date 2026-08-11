@@ -97,6 +97,36 @@ describe('lintComms mechanics', () => {
     expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
   });
 
+  it('catches bare hosts glued to prose punctuation', () => {
+    for (const msg of ['See:yelp.com for our reviews', 'Find us here [yelp.com] anytime', 'Reviews at,yelp.com']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+    }
+  });
+
+  it('does not match a TLD inside a longer word', () => {
+    const r = lintComms('Join the yelp.community discussion group', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+  });
+
+  it('flags dollar-anchored each/every visit forms but not scheduling prose', () => {
+    for (const msg of ['The plan is $117 each visit.', 'Service runs $99 every visit after the initial.', 'It comes to $30 a visit.']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('per-application-wording');
+    }
+    const ok = lintComms('We will text you before each visit.', { channel: 'sms', audience: 'customer' });
+    expect(ok.failures.map((f) => f.rule)).not.toContain('per-application-wording');
+  });
+
+  it('recognizes STOP tails beyond the reply/text verb forms', () => {
+    for (const msg of ['Your service is confirmed. STOP to unsubscribe', 'Send STOP to opt out anytime.', 'Msg&data rates may apply. Stop to end.']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer', stopExpected: false });
+      expect(r.failures.map((f) => f.rule)).toContain('stop-line-policy');
+    }
+    const prose = lintComms('Feel free to stop by the office to grab the report.', { channel: 'sms', audience: 'customer', stopExpected: false });
+    expect(prose.failures.map((f) => f.rule)).not.toContain('stop-line-policy');
+  });
+
   it('produces flags-array entries in the consumer shape', () => {
     const flags = lintFlags('So excited!! 🎉', { channel: 'sms', audience: 'customer' });
     expect(flags.length).toBeGreaterThan(0);

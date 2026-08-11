@@ -81,9 +81,14 @@ function findShortenerHost(text) {
 // ("no.problem") costs more than a missed exotic TLD nothing we send uses.
 const BARE_EXEMPT_HOST_RE = /(?:^|\.)wavespestcontrol\.com$/i;
 const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app'];
+// No left-boundary class: prose punctuation glued to a link ("See:yelp.com",
+// "[yelp.com]") must not hide it. Substring safety comes from greedy
+// leftmost matching — the maximal dotted host is consumed whole, so the tail
+// of a longer domain is never extracted on its own. The lookahead only has
+// to stop the TLD from matching inside a longer word ("yelp.community").
 const BARE_HOST_RE = new RegExp(
-  `(?:^|[\\s(])((?:[a-z0-9][a-z0-9-]*\\.)+(?:${BARE_HOST_TLDS.join('|')}))(?=[\\s).,!?:;'"]|/|$)`,
-  'gim'
+  `(?:[a-z0-9][a-z0-9-]*\\.)+(?:${BARE_HOST_TLDS.join('|')})(?![a-z0-9-])`,
+  'gi'
 );
 
 /** First bare (scheme-less) third-party host in the text, or null. */
@@ -96,7 +101,7 @@ function findBareThirdPartyHost(text) {
   BARE_HOST_RE.lastIndex = 0;
   let m;
   while ((m = BARE_HOST_RE.exec(stripped)) !== null) {
-    if (!BARE_EXEMPT_HOST_RE.test(m[1])) return m[1];
+    if (!BARE_EXEMPT_HOST_RE.test(m[0])) return m[0];
   }
   return null;
 }
@@ -157,9 +162,12 @@ const RULES = [
   {
     name: 'per-application-wording',
     applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial,
-    // "per visit", "per-visit", and the price-slash form "$117/visit" (the
-    // slash variant requires a preceding digit so URL paths never match).
-    check: (text) => (/\bper[\s-]+visit\b|\d\s*\/\s*visit\b/i.test(text)
+    // "per visit"/"per-visit" is intrinsically price-unit phrasing and always
+    // forbidden. "each/every/a visit" is ordinary scheduling language ("we
+    // text before each visit"), so those forms only count as price units when
+    // a dollar amount anchors them ("$117 each visit"); same for the slash
+    // form, where the digit anchor also keeps URL paths from matching.
+    check: (text) => (/\bper[\s-]+visit\b|\d\s*\/\s*visit\b|\$\s*\d[\d.,]*\s+(?:each|every|a)\s+visit\b/i.test(text)
       ? 'says "per visit" — recurring pricing is always "per application" (commercial accounts exempt)'
       : null),
   },
@@ -200,7 +208,14 @@ const RULES = [
     // its STOP line (the #3343 keep-list) — undefined skips, never guesses.
     applies: (ctx) => ctx.channel === 'sms' && typeof ctx.stopExpected === 'boolean',
     check: (text, ctx) => {
-      const hasStop = /reply\s+stop\b|txt\s+stop\b|text\s+stop\b/i.test(text);
+      // A STOP tail in any of its real forms: an instruction verb before it
+      // ("Reply STOP", "Send STOP"), an opt-out purpose after it ("STOP to
+      // unsubscribe"), or the bare uppercase keyword itself — house voice
+      // never shouts, so an all-caps STOP token is always the opt-out
+      // keyword, while lowercase prose ("stop by the office") never is.
+      const hasStop = /\b(?:reply|send|text|txt)\s+["']?stop\b/i.test(text)
+        || /\bstop\b[\s,]+(?:to|2)\s+(?:unsubscribe|opt[\s-]?out|cancel|end)\b/i.test(text)
+        || /\bSTOP\b/.test(text);
       if (ctx.stopExpected && !hasStop) return 'missing required STOP opt-out line (compliance/first-touch class)';
       if (!ctx.stopExpected && hasStop) return 'carries a STOP line — transactional messages to known customers go without one';
       return null;

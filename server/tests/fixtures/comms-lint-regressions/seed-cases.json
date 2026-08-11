@@ -156,6 +156,20 @@
       "provenance": "2026-08-11 codex round on #3348: only whitespace-separated \"per visit\" was caught — the slash and hyphen price forms say the same forbidden thing"
     },
     {
+      "name": "dollar-anchored each-visit pricing",
+      "text": "The quarterly plan works out to $117 each visit.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: each/every-visit price forms say the same forbidden unit; dollar anchor keeps scheduling prose (\"we text before each visit\") clean"
+    },
+    {
+      "name": "STOP-to-unsubscribe tail on transactional message",
+      "text": "Your service is confirmed for Thursday. STOP to unsubscribe.",
+      "context": { "channel": "sms", "audience": "customer", "stopExpected": false },
+      "expect": { "pass": false, "rules": ["stop-line-policy"] },
+      "provenance": "2026-08-11 codex round on #3348: the detector only knew reply/text/txt STOP — purpose-form tails are the same unwanted line on the #3343 transactional class"
+    },
+    {
       "name": "bare third-party host beyond g.page",
       "text": "You can also find us on yelp.com if that is easier.",
       "context": { "channel": "sms", "audience": "customer" },
