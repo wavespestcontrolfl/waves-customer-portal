@@ -2621,6 +2621,19 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
       || (cadenceField && cadenceField !== 'semiannual')
       || isCommercialRecurringLine(svc)) return null;
   }
+  // Lawn contradiction mirror (codex r11 P1): { frequency: 'monthly',
+  // visitsPerYear: 6 } seeds no series but would record 'monthly'
+  // coverage, and payment-time coverage would create six monthly visits.
+  // Reject CONTRADICTORY or commercial shapes only — a legacy row without
+  // explicit visits keeps its inferred cadence (pre-existing behavior,
+  // office scheduling unaffected).
+  if (seedingFamilyKey(svc) === 'lawn_care') {
+    const visits = visitsPerYearForRecurringService(svc);
+    const cadenceField = explicitCadenceFieldForService(svc);
+    if (isCommercialRecurringLine(svc)
+      || (visits != null && LAWN_VISITS_PATTERNS[visits] !== inferred)
+      || (cadenceField && cadenceField !== inferred)) return null;
+  }
   return inferred;
 }
 
@@ -3432,7 +3445,14 @@ const EstimateConverter = {
           const addUnit = async (serviceType, catalogServiceKey, knownServiceId = null) => {
             const serviceId = knownServiceId != null ? knownServiceId : await catalogIdFor(catalogServiceKey);
             if (!serviceType && serviceId == null) return;
-            lockUnits.push({ customerId, serviceType: serviceType || null, serviceId });
+            // Canonicalize palm-alias labels AT THE DEFINITION so every
+            // pre-pass entry locks the same family bucket the actual
+            // guards lock (they all pass guardServiceTypeFor now) — a raw
+            // 'Palm Tree Injections' here would pre-acquire the tree
+            // bucket while the guard later takes palm, reopening the
+            // cross-conversion deadlock the sorted pre-pass exists to
+            // prevent (codex r11 P1).
+            lockUnits.push({ customerId, serviceType: guardServiceTypeFor(serviceType) || null, serviceId });
           };
           const { remaining, combos, standalone } = combinedScheduling;
           if (reservationRowsExist) {
@@ -4410,7 +4430,7 @@ const EstimateConverter = {
           let coverageVisitCount;
           let coverageCadence;
           let seasonalPrepayCoverageUnsupported = false;
-          let palmPrepayCoverageInvalid = false;
+          let recurringPrepayCoverageInvalid = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
             // created the coverage series with the BOOKED service_type/cadence
@@ -4437,7 +4457,7 @@ const EstimateConverter = {
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
             } else if (cadence == null
-              && seedingFamilyKey(coverageSvc) === 'palm_injection') {
+              && ['palm_injection', 'lawn_care'].includes(seedingFamilyKey(coverageSvc))) {
               // Palm validation refused the cadence (contradictory visit
               // count or a commercial line). Falling through would set
               // coverageVisitCount with an undefined cadence, and
@@ -4445,7 +4465,7 @@ const EstimateConverter = {
               // 2-visit count back into semiannual — seeding the very
               // series the validation rejected (codex #3349 r7 P1). Fail
               // closed like the seasonal case.
-              palmPrepayCoverageInvalid = true;
+              recurringPrepayCoverageInvalid = true;
             } else {
               // Visits/year: prefer the line's explicit count (the series' own
               // source); else map from cadence. Values mirror inferCoverageCadence
@@ -4518,11 +4538,11 @@ const EstimateConverter = {
               err.statusCode = 422;
               throw err;
             }
-            if (palmPrepayCoverageInvalid) {
+            if (recurringPrepayCoverageInvalid) {
               const err = new Error(
-                'Annual prepay can\'t be created for this palm program — its cadence and visit count disagree (or it is a commercial line), so the converter refused to seed it. Fix the line\'s cadence or bill the prepay manually.'
+                'Annual prepay can\'t be created for this recurring program — its cadence and visit data disagree (or it is a commercial line), so the converter refused to seed it. Fix the line\'s cadence or bill the prepay manually.'
               );
-              err.code = 'ANNUAL_PREPAY_PALM_COVERAGE_INVALID';
+              err.code = 'ANNUAL_PREPAY_COVERAGE_CADENCE_INVALID';
               err.isOperational = true;
               err.status = 422;
               err.statusCode = 422;

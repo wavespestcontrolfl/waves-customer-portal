@@ -193,6 +193,19 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(EstimateConverter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'quarterly')).toBe('every_6_weeks');
   });
 
+  test('lawn prepay coverage rejects contradictory shapes; legacy cadence-only rows keep their inferred cadence (codex r11 P1)', () => {
+    const { annualPrepayCoverageCadence } = EstimateConverter;
+    // monthly frequency + 6 visits seeds nothing — coverage must not
+    // record monthly and let payment-time coverage create six monthly
+    // visits.
+    expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly', visitsPerYear: 6 }, null)).toBe(null);
+    expect(annualPrepayCoverageCadence({ service: 'commercial_lawn', name: 'Commercial Lawn Care', frequency: 'bi_monthly', visitsPerYear: 6 }, null)).toBe(null);
+    // Legacy shape without explicit visits keeps its inferred cadence.
+    expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'bi_monthly' }, null)).toBe('bimonthly');
+    // Matching shape records the seeded cadence.
+    expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Bi-Monthly Lawn Care Service', frequency: 'bi_monthly', visitsPerYear: 6 }, null)).toBe('bimonthly');
+  });
+
   test('LEGACY lawn rows without explicit visits keep office scheduling', () => {
     // The lawn billing cadence (monthly) must never seed a 12-visit series
     // for a plan whose visit cadence is unknown — no visits, no series.
