@@ -147,7 +147,9 @@ function setupDb({
     throw new Error(`Unexpected table query: ${table}`);
   });
   // The replay path now mints inside a transaction (row lock) — pass the
-  // same table-routed mock through as the trx client.
+  // same table-routed mock through as the trx client. The lock-order guard
+  // takes the customer key-share via raw SQL before the row lock.
+  db.raw = jest.fn().mockResolvedValue({ rows: [] });
   db.transaction = jest.fn(async (callback) => callback(db));
 
   return {
