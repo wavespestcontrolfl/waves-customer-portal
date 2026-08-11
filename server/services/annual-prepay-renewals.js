@@ -266,6 +266,36 @@ function coverageCadenceDays(value) {
   return null;
 }
 
+// Coverage cadence from a series' recurring_interval_days — the resolution
+// for patterns normalizeCoverageCadence can't name ('custom' carrying 42
+// days is really every-6-weeks). Lives HERE beside the other coverage-cadence
+// helpers rather than in a route file so its one definition serves every
+// consumer (moved from admin-invoices.js, which now imports it).
+function cadenceFromIntervalDays(days) {
+  const d = Number(days);
+  if (!Number.isFinite(d) || d <= 17) return null; // daily/weekly/biweekly: not coverage cadences
+  if (d >= 26 && d <= 35) return 'monthly';        // ~30
+  if (d >= 38 && d <= 48) return 'every_6_weeks';  // ~42
+  if (d >= 55 && d <= 66) return 'bimonthly';      // ~60
+  if (d >= 85 && d <= 96) return 'quarterly';      // ~90/91
+  if (d >= 115 && d <= 125) return 'triannual';    // ~120
+  if (d >= 170 && d <= 190) return 'semiannual';   // ~180
+  if (d >= 350 && d <= 380) return 'annual';       // ~365
+  return null;
+}
+
+// Visits per year for a coverage cadence — the inverse of the visit-count
+// branch in inferCoverageCadence, so the two can never disagree about what a
+// cadence means. every_6_weeks is 9 (the repo's established figure: a 42-day
+// cycle over a service year, not 365/42).
+function coverageCadenceVisitsPerYear(value) {
+  const cadence = normalizeCoverageCadence(value);
+  if (!cadence) return null;
+  if (cadence === 'every_6_weeks') return 9;
+  const months = coverageCadenceMonths(cadence);
+  return months ? 12 / months : null;
+}
+
 function coverageCadenceSchedule(value) {
   const cadence = normalizeCoverageCadence(value);
   const months = coverageCadenceMonths(cadence);
@@ -3677,6 +3707,8 @@ module.exports = {
     normalizeWindowStart,
     addMinutesHHMM,
     normalizeCoverageCadence,
+    cadenceFromIntervalDays,
+    coverageCadenceVisitsPerYear,
     coverageCadenceMonths,
     coverageCadenceDays,
     inferCoverageCadence,

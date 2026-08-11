@@ -1116,6 +1116,93 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('a custom series resolves its cadence from interval days, not the catalog', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' },
+      ],
+      // 'custom' names nothing on its own, but 42 days IS every-6-weeks (9/yr).
+      // Falling back to the quarterly catalog default would show 4/yr and turn
+      // $100/mo into $300 per application instead of ~$133.
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'custom', recurring_interval_days: 42,
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Every 6 weeks',
+      visitsPerYear: 9,
+      currentPerVisit: 133.33,
+    }));
+  });
+
+  test("the scheduler's monthly_nth_weekday pattern counts as monthly", async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 90 }],
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'monthly_nth_weekday',
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Monthly', visitsPerYear: 12,
+    }));
+  });
+
+  test('contracts on different schedules keep their own cadence; the family stays silent', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 60, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [
+        { id: 'a1', recurring_pattern: 'monthly', frequency: 'monthly', visits_per_year: 12 },
+        { id: 'b1', recurring_pattern: 'quarterly', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const service = spend.currentServices[0];
+    // One property is monthly, the other quarterly — showing either above BOTH
+    // would be an arbitrary pick out of an unordered query.
+    expect(service.cadenceLabel).toBeNull();
+    expect(service.visitsPerYear).toBeNull();
+    const byAddress = Object.fromEntries(service.contracts.map((c) => [c.serviceAddress, c]));
+    expect(byAddress['1 Palm St, Bradenton, 34203']).toEqual(expect.objectContaining({ cadenceLabel: 'Monthly', visitsPerYear: 12 }));
+    expect(byAddress['2 Oak Ave, Venice, 34285']).toEqual(expect.objectContaining({ cadenceLabel: 'Quarterly', visitsPerYear: 4 }));
+  });
+
+  test('a prepaid property beside a pay-per-visit one reports a mixed basis, not one source for both', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [
+        { id: 'a1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 'b1', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const service = spend.currentServices[0];
+    expect(service.spendSource).toBe('mixed_basis');
+    const byAddress = Object.fromEntries(service.contracts.map((c) => [c.serviceAddress, c]));
+    expect(byAddress['1 Palm St, Bradenton, 34203'].spendSource).toBe('prepaid_allocation');
+    expect(byAddress['1 Palm St, Bradenton, 34203'].perVisit).toBe(114);
+    expect(byAddress['2 Oak Ave, Venice, 34285'].spendSource).toBe('scheduled_estimate');
+    expect(byAddress['2 Oak Ave, Venice, 34285'].perVisit).toBe(100);
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.

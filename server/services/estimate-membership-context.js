@@ -402,13 +402,29 @@ async function loadCadenceByRowId(database, customerId) {
     // a raw visit count) resolves the same way it does everywhere else.
     // A pattern it cannot resolve (custom, seasonal, annual) falls back to
     // the catalog rather than guessing.
-    const { normalizeFrequencyKey, billingIntervalMonthsForFrequencyKey } = require('./billing-cadence');
+    const {
+      normalizeCoverageCadence,
+      cadenceFromIntervalDays,
+      coverageCadenceVisitsPerYear,
+    } = require('./annual-prepay-renewals')._private;
     return new Map(rows.map((row) => {
-      const liveKey = normalizeFrequencyKey(row.recurring_pattern);
-      if (liveKey) {
+      // Same three-step resolution admin-invoices' coverage suggestion uses,
+      // in the same order (codex #3353 r4): the scheduler's
+      // 'monthly_nth_weekday' IS monthly; named cadences go through
+      // normalizeCoverageCadence; and everything it can't name — notably
+      // 'custom' carrying recurring_interval_days = 42 — resolves from the
+      // interval days. Only a series that resolves NOTHING falls back to the
+      // catalog default, because an unresolvable pattern is genuinely unknown
+      // rather than known-different.
+      const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
+      const liveCadence = rawPattern === 'monthly_nth_weekday'
+        ? 'monthly'
+        : (normalizeCoverageCadence(row.recurring_pattern)
+          || cadenceFromIntervalDays(row.recurring_interval_days));
+      if (liveCadence) {
         return [row.id, {
-          frequency: liveKey,
-          visitsPerYear: 12 / billingIntervalMonthsForFrequencyKey(liveKey),
+          frequency: liveCadence,
+          visitsPerYear: coverageCadenceVisitsPerYear(liveCadence),
         }];
       }
       return [row.id, {
@@ -429,7 +445,10 @@ const CADENCE_LABEL = {
   monthly: 'Monthly',
   bi_monthly: 'Every other month',
   bimonthly: 'Every other month',
+  every_6_weeks: 'Every 6 weeks',
   quarterly: 'Quarterly',
+  triannual: 'Every 4 months',
+  semiannual: 'Twice a year',
   annual: 'Annual',
   seasonal: 'Seasonal',
 };
@@ -577,6 +596,13 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         && contractRows.every((row) => !!row.annual_prepay_term_id)
         && firstAllocation > 0
         && contractRows.every((row) => sameCents(row.prepaid_amount, firstAllocation));
+      // Cadence belongs to the CONTRACT, not the family (codex #3353 r4):
+      // monthly pest at one property and quarterly at another are different
+      // schedules, and picking the first resolvable row for both would be an
+      // arbitrary choice out of an unordered query.
+      const contractCadence = contractRows
+        .map((row) => cadenceByRowId.get(row.id))
+        .find((entry) => entry && (entry.frequency || entry.visitsPerYear)) || null;
       return {
         serviceAddress: address,
         scheduledPerVisit,
@@ -584,6 +610,13 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         // when prepaid, else the scheduled price.
         perVisit: uniformlyPrepaid ? round2(firstAllocation) : scheduledPerVisit,
         prepaid: uniformlyPrepaid,
+        // Per-contract provenance: one prepaid property alongside one billing
+        // at its scheduled price must not describe BOTH as a paid allocation.
+        spendSource: uniformlyPrepaid
+          ? 'prepaid_allocation'
+          : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+        cadenceLabel: cadenceLabelFor(contractCadence?.frequency),
+        visitsPerYear: contractCadence?.visitsPerYear ?? null,
         activeScheduledVisits: contractRows.length,
       };
     });
@@ -603,13 +636,18 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const effectivePerVisit = contracts.some((contract) => contract.perVisit != null)
       ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.perVisit) || 0), 0))
       : null;
-    // Visit cadence for this family — the first row that resolves one. Used
-    // for the "· Quarterly (4/yr)" label and to divide the monthly rate
-    // below; null leaves both out rather than guessing a visit count.
-    const cadence = serviceRows
-      .map((row) => cadenceByRowId.get(row.id))
-      .find((entry) => entry && (entry.frequency || entry.visitsPerYear)) || null;
-    const visitsPerYear = cadence?.visitsPerYear ?? null;
+    // Family-level cadence speaks ONLY when every contract agrees (codex
+    // #3353 r4). Contracts on different schedules each carry their own above,
+    // and the family stays silent rather than displaying one property's
+    // cadence over both. Single-contract keys — the overwhelming majority,
+    // and the only shape the monthly-rate division below can apply to —
+    // are unaffected.
+    const distinctCadences = new Set(contracts.map(
+      (contract) => `${contract.cadenceLabel || ''}|${contract.visitsPerYear ?? ''}`,
+    ));
+    const agreedCadence = distinctCadences.size === 1 ? contracts[0] : null;
+    const cadenceLabel = agreedCadence?.cadenceLabel ?? null;
+    const visitsPerYear = agreedCadence?.visitsPerYear ?? null;
     // Customer-level billing stamps are a WHOLE-PLAN figure: the converter
     // only writes customers.per_application_fee for a single-recurring-unit
     // accept, and monthly_rate covers everything the customer buys.
@@ -688,18 +726,24 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       componentServiceAddressesComplete,
       currentPerVisit: currentPerVisit ?? null,
       // Visit cadence for display — "Quarterly (4/yr)". Null on either half
-      // simply omits that half; the panel never invents a cadence.
-      cadenceLabel: cadenceLabelFor(cadence?.frequency),
+      // simply omits that half; the panel never invents a cadence, and a
+      // family whose contracts run different schedules stays null here.
+      cadenceLabel,
       visitsPerYear,
-      spendSource: activePrepaidBasis != null
-        ? 'prepaid_allocation'
-        : (usableLastPaid
-          ? 'last_paid_invoice'
-          : (effectivePerVisit != null
-            ? 'scheduled_estimate'
-            : (stampedPerApplication != null
-              ? 'per_application_fee'
-              : (monthlyDerivedPerApplication != null ? 'monthly_rate_derived' : 'unavailable')))),
+      // Family-level provenance. With several contracts on DIFFERENT bases
+      // (one prepaid, one billing its scheduled price) no single source is
+      // true of all of them, so it reports mixed_basis and the per-contract
+      // sources above carry the detail (codex #3353 r4).
+      spendSource: (() => {
+        const contractSources = new Set(contracts.map((contract) => contract.spendSource));
+        if (contracts.length > 1 && contractSources.size > 1) return 'mixed_basis';
+        if (activePrepaidBasis != null) return 'prepaid_allocation';
+        if (usableLastPaid) return 'last_paid_invoice';
+        if (effectivePerVisit != null) return 'scheduled_estimate';
+        if (stampedPerApplication != null) return 'per_application_fee';
+        if (monthlyDerivedPerApplication != null) return 'monthly_rate_derived';
+        return 'unavailable';
+      })(),
       lastPaidAt: usableLastPaid?.paidAt || null,
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the

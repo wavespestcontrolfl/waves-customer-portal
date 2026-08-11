@@ -79,6 +79,7 @@ function spendSourceLabel(value) {
   if (value === "prepaid_allocation") return "prepaid allocation";
   if (value === "per_application_fee") return "billing stamp";
   if (value === "monthly_rate_derived") return "derived from monthly rate";
+  if (value === "mixed_basis") return "mixed basis — see properties";
   return "price unavailable";
 }
 
@@ -319,7 +320,14 @@ export function CustomerAccountPanel({ account, profile }) {
                   className="mt-1.5 flex flex-wrap items-baseline justify-between gap-2 border-l border-zinc-200 pl-3"
                 >
                   <div className="text-[14px] text-zinc-500">
-                    {contract.serviceAddress || "Property not recorded"}
+                    {[
+                      contract.serviceAddress || "Property not recorded",
+                      contract.cadenceLabel,
+                      contract.visitsPerYear ? `${contract.visitsPerYear}/yr` : null,
+                      // Per-contract provenance: one property can be prepaid
+                      // while another bills its scheduled price.
+                      spendSourceLabel(contract.spendSource),
+                    ].filter(Boolean).join(" · ")}
                   </div>
                   <div className="ml-auto text-[14px] text-zinc-950">
                     {contract.perVisit == null ? "Not available" : money(contract.perVisit)}

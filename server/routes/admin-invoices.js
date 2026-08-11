@@ -30,18 +30,10 @@ const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 // prepay coverage cadence, with tolerance. Returns null for intervals that don't
 // correspond to a supported coverage cadence (e.g. weekly/biweekly or an
 // arbitrary custom gap) so we never guess one.
-function cadenceFromIntervalDays(days) {
-  const d = Number(days);
-  if (!Number.isFinite(d) || d <= 17) return null; // daily/weekly/biweekly: not coverage cadences
-  if (d >= 26 && d <= 35) return 'monthly';        // ~30
-  if (d >= 38 && d <= 48) return 'every_6_weeks';  // ~42
-  if (d >= 55 && d <= 66) return 'bimonthly';      // ~60
-  if (d >= 85 && d <= 96) return 'quarterly';      // ~90/91
-  if (d >= 115 && d <= 125) return 'triannual';    // ~120
-  if (d >= 170 && d <= 190) return 'semiannual';   // ~180
-  if (d >= 350 && d <= 380) return 'annual';       // ~365
-  return null;
-}
+// Moved to annual-prepay-renewals beside the other coverage-cadence helpers
+// so the estimate spend panel resolves custom/interval-day series with the
+// SAME mapping this route uses — one definition, no drift.
+const { cadenceFromIntervalDays } = AnnualPrepayRenewals._private;
 
 // Best-guess coverage for the annual-prepay modal: the customer's most common
 // active RECURRING scheduled-service label (NOT the invoice title, which can be

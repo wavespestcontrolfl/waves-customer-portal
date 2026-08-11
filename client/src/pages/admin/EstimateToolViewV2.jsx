@@ -148,6 +148,7 @@ const SPEND_SOURCE_LABEL = {
   prepaid_allocation: "prepaid allocation",
   per_application_fee: "billing stamp",
   monthly_rate_derived: "derived from monthly rate",
+  mixed_basis: "mixed basis — see properties",
 };
 
 // A service active at more than one property is several contracts, each with
@@ -159,6 +160,16 @@ const SPEND_SOURCE_LABEL = {
 function spendContractRows(service) {
   const contracts = Array.isArray(service?.contracts) ? service.contracts : [];
   return contracts.length > 1 ? contracts : [];
+}
+
+// Cadence + provenance detail, shared by the family row and each per-property
+// contract row (both carry the same three fields).
+function spendDetailParts(entry) {
+  return [
+    entry?.cadenceLabel,
+    entry?.visitsPerYear ? `${entry.visitsPerYear}/yr` : null,
+    SPEND_SOURCE_LABEL[entry?.spendSource] || null,
+  ].filter(Boolean);
 }
 
 function resolvePreSlabJobContextForForm(form) {
@@ -5842,11 +5853,7 @@ export default function EstimateToolViewV2({
                               </div>
                               <div className="text-14 text-zinc-500">
                                 {[
-                                  service.cadenceLabel,
-                                  service.visitsPerYear
-                                    ? `${service.visitsPerYear}/yr`
-                                    : null,
-                                  SPEND_SOURCE_LABEL[service.spendSource] || null,
+                                  ...spendDetailParts(service),
                                   service.qualifiesForWaveGuard === false
                                     ? "not a tier service"
                                     : null,
@@ -5881,7 +5888,10 @@ export default function EstimateToolViewV2({
                               className="flex flex-wrap items-baseline justify-between gap-2 mt-1.5 pl-3 border-l-hairline border-zinc-200"
                             >
                               <div className="text-14 text-zinc-500">
-                                {contract.serviceAddress || "Property not recorded"}
+                                {[
+                                  contract.serviceAddress || "Property not recorded",
+                                  ...spendDetailParts(contract),
+                                ].join(" · ")}
                               </div>
                               <div className="ml-auto text-14 text-zinc-900 tabular-nums">
                                 {contract.perVisit == null
