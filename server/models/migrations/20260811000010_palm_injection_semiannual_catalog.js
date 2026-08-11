@@ -126,6 +126,15 @@ exports.up = async function up(knex) {
         console.warn(`[palm-semiannual] roll-forward: previously retained row ${entry.key} (${entry.id}) is gone — skipping`);
         continue;
       }
+      // Ownership check (codex r5 P2): an admin who renamed/repurposed the
+      // retained row between down() and this up() owns it now — matching
+      // the UUID alone would reactivate their edited row, record it as
+      // migration-owned, AND still insert a replacement under the original
+      // key, letting a later rollback delete the admin's row.
+      if (row.service_key !== entry.key) {
+        console.warn(`[palm-semiannual] roll-forward: retained row ${entry.id} now carries key "${row.service_key}" (was ${entry.key}) — admin-repurposed, leaving untouched`);
+        continue;
+      }
       if (row.is_active === true) {
         console.log(`[palm-semiannual] roll-forward: previously retained row ${entry.key} already active — no-op`);
       } else {

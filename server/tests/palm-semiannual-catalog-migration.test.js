@@ -263,6 +263,25 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(stateValue(db).profiles).toEqual([KEY]);
   });
 
+  test('roll-forward skips a retained row an admin REPURPOSED under a different key (codex r5 P2)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const insertedId = svcRow(db).id;
+    db.scheduled_services.push({ id: 'v1', service_id: insertedId });
+    await migration.down(fakeKnex(db));
+    // Admin repurposes the retained (deactivated) row under a new key.
+    const repurposed = db.services.find((r) => r.id === insertedId);
+    repurposed.service_key = 'admin_custom_palm';
+
+    await migration.up(fakeKnex(db));
+    // The admin's row stays untouched and untracked…
+    expect(repurposed.is_active).toBe(false);
+    expect((stateValue(db).services || []).map((e) => e.id)).not.toContain(insertedId);
+    // …and up() inserts a fresh row under the original key.
+    expect(svcRow(db)).toBeDefined();
+    expect(svcRow(db).id).not.toBe(insertedId);
+  });
+
   test('retain → roll-forward → references clear → second rollback removes BOTH row and profile (no orphan marker profile)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
