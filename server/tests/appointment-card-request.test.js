@@ -918,6 +918,11 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(stamp.no_show_fee_amount.bindings).toContain(75);
     expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
     expect(stamp.cancel_window_hours.bindings).toContain(24);
+    // The sticky-window marker is monotonic like the terms (Codex #3342 r2
+    // P1): SEEDED true only on the row's first-ever disclosure (terms still
+    // NULL); a row first disclosed pre-deploy is never upgraded by a later
+    // render from another tab or a link scanner.
+    expect(String(stamp.sticky_window_disclosed.__raw)).toContain('CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END');
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
     expect(stamp.fee_agreed_at).toBeUndefined();
   });

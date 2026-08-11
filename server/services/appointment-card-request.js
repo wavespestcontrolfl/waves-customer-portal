@@ -721,8 +721,13 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
                 [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
               ),
               // The invitation's fee sentence discloses the sticky rule —
-              // stamp the frozen policy marker with the frozen terms.
-              sticky_window_disclosed: true,
+              // same monotonic seeding as the /secure render (Codex #3342
+              // r2 P1): first-ever disclosure seeds true; a row already
+              // disclosed (possibly pre-deploy, without the sentence) is
+              // never upgraded.
+              sticky_window_disclosed: db.raw(
+                'CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END',
+              ),
               updated_at: new Date(),
             });
           if (stampedRows !== 1) {
@@ -1348,9 +1353,15 @@ async function loadSecureCardPageData(token) {
         'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
         [feeDisclosure.windowHours, feeDisclosure.windowHours],
       );
-      // This render's note discloses the sticky rule — the frozen policy
-      // marker rides with the frozen terms it belongs to.
-      disclosure.sticky_window_disclosed = true;
+      // This render's note discloses the sticky rule — but the marker must
+      // stay MONOTONIC like the LEAST-stamped terms above (Codex #3342 r2
+      // P1): completion can't know which open tab's render was accepted, so
+      // sticky may only SEED on the row's first-ever disclosure (fee terms
+      // still NULL). A row first disclosed pre-deploy keeps false forever —
+      // a later GET (other tab, link scanner) never upgrades it.
+      disclosure.sticky_window_disclosed = db.raw(
+        'CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END',
+      );
     } else {
       disclosure.no_show_fee_amount = null;
       disclosure.cancel_window_hours = 0;
