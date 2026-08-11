@@ -696,6 +696,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // (migration rolled back) seeds without identity exactly as before.
   let coverageCatalogServiceId = null;
   let coverageCatalogKey = null;
+  let staleOneTimePalmId = null;
   if (coverageCadence === 'semiannual') {
     try {
       const { seedingFamilyKey } = require('./estimate-converter');
@@ -706,6 +707,16 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         if (catalogRow?.id) {
           coverageCatalogServiceId = catalogRow.id;
           coverageCatalogKey = catalogRow.service_key;
+          // The one-time palm row's id (codex r16 P1): an adopted legacy
+          // visit booked before the recurring row existed can carry it
+          // (estimate-public preserves ids on adoption), and completion
+          // trusts the id first. In this definitively semiannual coverage
+          // context that KNOWN id is stale — the backfill below retargets
+          // it, mirroring the converter's reserved-parent relink.
+          const oneTimeRow = await conn('services')
+            .where({ service_key: 'palm_injection' })
+            .first('id');
+          staleOneTimePalmId = oneTimeRow?.id || null;
         } else {
           // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
           // visits would knowingly hand them the one-time completion/
@@ -1064,24 +1075,32 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   }
 
   // Identity BACKFILL for adopted/matched palm coverage rows (codex #3349
-  // r15 pre-push P1): buildInsert stamps only NEW rows, but a name-only
-  // 'Palm Injection' visit the seeder matched (existingRows) or adopted
-  // under the occupancy lock still resolves the ONE-TIME catalog row at
-  // completion. Scoped to rows with NULL service_id — a row already
-  // carrying an id (including the one-time palm row) was deliberately
-  // booked that way and is never retargeted here. Fail-soft, like the
-  // stamps above.
+  // r15 pre-push P1 + r16 P1): buildInsert stamps only NEW rows, but a
+  // visit the seeder matched (existingRows) or adopted under the occupancy
+  // lock still resolves the ONE-TIME catalog row at completion — whether
+  // it is name-only (NULL service_id) or a legacy adoption carrying the
+  // one-time palm_injection id (estimate-public preserves ids on
+  // adoption, and completion trusts the id first). Both are retargeted in
+  // this definitively semiannual coverage context, mirroring the
+  // converter's reserved-parent relink. Any OTHER explicit id was a
+  // deliberate booking and stays untouched. Fail-soft, like the stamps
+  // above.
   if (coverageCatalogServiceId && cols.service_id) {
     try {
+      const retargetable = (row) => row && row.id
+        && (!row.service_id || (staleOneTimePalmId && row.service_id === staleOneTimePalmId));
       const backfillIds = [...existingRows, ...adoptedConcurrentRows]
-        .filter((row) => row && row.id && !row.service_id)
+        .filter(retargetable)
         .map((row) => row.id);
       if (backfillIds.length) {
         const patch = { service_id: coverageCatalogServiceId };
         if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
         await conn('scheduled_services')
           .whereIn('id', backfillIds)
-          .whereNull('service_id')
+          .where(function retargetScope() {
+            this.whereNull('service_id');
+            if (staleOneTimePalmId) this.orWhere('service_id', staleOneTimePalmId);
+          })
           .update(patch);
       }
     } catch (err) {

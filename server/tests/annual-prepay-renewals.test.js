@@ -437,7 +437,10 @@ describe('annual prepay renewal helpers', () => {
     const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), parentInsert, childInsert],
-      services: [query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } })],
+      services: [
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
     });
 
     await expect(_private.ensureCoverageRowsForTerm({
@@ -487,7 +490,10 @@ describe('annual prepay renewal helpers', () => {
     const backfillUpdate = query({});
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), childInsert, backfillUpdate],
-      services: [query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } })],
+      services: [
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
     });
 
     await expect(_private.ensureCoverageRowsForTerm({
@@ -503,6 +509,56 @@ describe('annual prepay renewal helpers', () => {
     });
 
     expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-adopted']);
+    expect(backfillUpdate.update).toHaveBeenCalledWith({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+    });
+  });
+
+  test('an adopted palm visit carrying the STALE one-time id is retargeted; other explicit ids stay (codex #3349 r16 P1)', async () => {
+    // Legacy adoption: booked before the recurring row existed, so it
+    // carries the one-time palm_injection id — completion trusts the id
+    // first, so it must be retargeted in this definitively semiannual
+    // context. An unrelated explicit id is a deliberate booking and stays.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        { id: 'v-stale', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', status: 'pending' },
+        { id: 'v-deliberate', scheduled_date: '2026-12-15', service_type: 'Palm Injection', service_id: 'svc-something-else', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate],
+      services: [
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-stale',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      existingCount: 2,
+    });
+
+    // Only the stale one-time id is retargeted — v-deliberate is excluded.
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-stale']);
     expect(backfillUpdate.update).toHaveBeenCalledWith({
       service_id: 'cat-palm-semi',
       service_key_snapshot: 'palm_injection_semiannual',
