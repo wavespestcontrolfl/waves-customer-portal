@@ -569,7 +569,7 @@ describe('the series creators consume the guard (source guards)', () => {
     const seedingGate = converterSrc.indexOf('if (seedingPattern || (pattern && !oneApplicationPalm)) {', autoStep);
     expect(seedingGate).toBeGreaterThan(autoStep);
     expect(seedingGate).toBeLessThan(autoGuard);
-    const bypassDef = converterSrc.indexOf("serviceKeyFor(svc) === 'palm_injection'", autoStep);
+    const bypassDef = converterSrc.indexOf("seedingFamilyKey(svc) === 'palm_injection'", autoStep);
     expect(bypassDef).toBeGreaterThan(autoStep);
     expect(bypassDef).toBeLessThan(seedingGate);
     expect(converterSrc.slice(bypassDef, seedingGate)).toContain('visitsPerYearForRecurringService(svc) === 1');

@@ -214,6 +214,17 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(supportsConverterFollowUpSeeding(semiannualLine, {}, 'quarterly')).toBe(false);
   });
 
+  test('the persisted "Palm Tree Injections" alias files as palm, not tree_shrub (codex r8 P1)', () => {
+    // The seeder's serviceKeyFor checks tree tokens before palm; the
+    // palm-first correction must land the alias in the palm family on
+    // every seeding surface — line-keyed and parent-keyed.
+    const aliasLine = { name: 'Palm Tree Injections', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(aliasLine, { service_type: 'Palm Tree Injections' }, 'quarterly')).toBe('semiannual');
+    expect(supportsConverterFollowUpSeeding({ ...aliasLine, frequency: 'semiannual' }, {}, 'semiannual')).toBe(true);
+    // A real tree & shrub line is untouched by the correction.
+    expect(supportsConverterFollowUpSeeding({ name: 'Bi-Monthly Tree & Shrub Care Service', visitsPerYear: 6 }, {}, 'bimonthly')).toBe(true);
+  });
+
   test('COMMERCIAL palm lines never seed or force — office-scheduled (codex r6 P1)', () => {
     const commercial = { name: 'Commercial Palm Injection', service: 'palm_injection', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(commercial, { service_type: 'Commercial Palm Injection' }, 'quarterly')).toBe(null);

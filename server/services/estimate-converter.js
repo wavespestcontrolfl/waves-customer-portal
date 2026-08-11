@@ -2156,7 +2156,7 @@ function remainingUnitCatalogKey(svc = {}) {
   // (visitsPerYear 1), and that treatment's correct identity is the
   // one-time lane's name-resolved row — linking it here would give a 1x
   // treatment the recurring billing/portal posture.
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection') {
+  if (seedingFamilyKey(svc) === 'palm_injection') {
     const svcName = svc.name || svc.serviceName || svc.service_name || 'Palm Injection';
     return converterFollowUpSeedingPattern(svc, { service_type: svcName }, undefined) === 'semiannual'
       ? 'palm_injection_semiannual'
@@ -2169,7 +2169,7 @@ function remainingUnitCatalogKey(svc = {}) {
   // works — the id link is durability, same rationale as the service_id
   // note below (codex 2026-08-08 r5). Pattern-gated: a legacy line that
   // resolves no sold cadence keeps the name-only path unchanged.
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'lawn_care') {
+  if (seedingFamilyKey(svc) === 'lawn_care') {
     const svcName = svc.name || svc.serviceName || svc.service_name || 'Lawn Care';
     const lawnPattern = converterFollowUpSeedingPattern(svc, { service_type: svcName }, undefined);
     return LAWN_CADENCE_CATALOG_KEYS[lawnPattern] || null;
@@ -2289,10 +2289,30 @@ function isCommercialRecurringLine(svc = {}, parentRow = {}) {
     .includes('commercial');
 }
 
-function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+// Family resolution with palm-first correction (codex r8 P1): the seeder's
+// serviceKeyFor checks tree tokens before palm, so persisted aliases like
+// 'Palm Tree Injections' — which estimate-public explicitly supports during
+// adoption — misfile as tree_shrub and would never seed, promote, or link.
+// The converter's recurringServiceKey puts palm first; prefer its palm
+// verdict whenever the seeder says tree_shrub. Every seeding surface (the
+// gate, the forced rules, the promotion, the lock pre-pass, the identity
+// link) resolves through THIS helper so they can never disagree.
+function seedingFamilyKey(svc = {}, parentRow = {}) {
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
-  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
-  const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
+  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow?.service_type });
+  const fromLine = serviceKey && serviceKey !== 'service';
+  let key = fromLine ? serviceKey : parentKey;
+  if (key === 'tree_shrub') {
+    const palmFirst = fromLine
+      ? recurringServiceKey(svc)
+      : recurringServiceKey({ name: parentRow?.service_type || '' });
+    if (palmFirst === 'palm_injection') key = 'palm_injection';
+  }
+  return key;
+}
+
+function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+  const key = seedingFamilyKey(svc, parentRow);
   if (key === 'pest_control') return pattern === 'quarterly';
   // Recurring foam is offered on all three cadences (quarterly/bimonthly/
   // monthly), so seed follow-ups for whichever pattern the customer accepted —
@@ -2470,7 +2490,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // frequency — semiannual included — takes the normal inference +
   // validation path, so contradictory data (monthly + 2 visits) declines
   // to office scheduling instead of being overridden.
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+  if (seedingFamilyKey(svc, parentRow) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
     && !explicitCadenceFieldForService(svc)
     && !isCommercialRecurringLine(svc, parentRow)) {
@@ -2505,7 +2525,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // while the actual series seeds semiannual — the payment-time coverage
   // refresh would then seed mismatched visits over the real series. Same
   // cadence-field restriction as the seeding rule (codex r4 P1).
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+  if (seedingFamilyKey(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
     && !explicitCadenceFieldForService(svc)
     && !isCommercialRecurringLine(svc)) {
@@ -2521,7 +2541,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // converter refused (e.g. monthly + 2 visits), or the payment-time
   // coverage refresh would seed monthly-spaced visits over a program the
   // office schedules. Fail closed to no coverage cadence instead.
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection') {
+  if (seedingFamilyKey(svc) === 'palm_injection') {
     const visits = visitsPerYearForRecurringService(svc);
     const cadenceField = explicitCadenceFieldForService(svc);
     if (inferred !== 'semiannual'
@@ -3386,7 +3406,7 @@ const EstimateConverter = {
               // the same sorted pre-pass — same inversion risk as the
               // termite/mosquito promotions above. Mirrors the promotion's
               // own name/pattern/key derivations exactly.
-              const fam = RecurringAppointmentSeeder.serviceKeyFor(svc);
+              const fam = seedingFamilyKey(svc);
               if (fam === 'lawn_care' || fam === 'palm_injection') {
                 const svcName = svc.name || svc.serviceName || svc.service_name
                   || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
@@ -3531,14 +3551,14 @@ const EstimateConverter = {
         // not promote either (office scheduling keeps its semantics).
         const promotedLawnPalmUnits = (remaining || [])
           .filter((line) => {
-            const fam = RecurringAppointmentSeeder.serviceKeyFor(line);
+            const fam = seedingFamilyKey(line);
             if (fam !== 'lawn_care' && fam !== 'palm_injection') return false;
             const lineName = line.name || line.serviceName || line.service_name
               || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
             return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
           })
           .map((line) => {
-            const fam = RecurringAppointmentSeeder.serviceKeyFor(line);
+            const fam = seedingFamilyKey(line);
             const lineName = line.name || line.serviceName || line.service_name
               || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
             const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
@@ -4014,7 +4034,7 @@ const EstimateConverter = {
             // pattern, and skipping its duplicate check would insert a
             // second appointment beside an active commercial-lawn series
             // the previous raw-pattern gate correctly caught.
-            const oneApplicationPalm = RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+            const oneApplicationPalm = seedingFamilyKey(svc) === 'palm_injection'
               && visitsPerYearForRecurringService(svc) === 1;
             if (seedingPattern || (pattern && !oneApplicationPalm)) {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
