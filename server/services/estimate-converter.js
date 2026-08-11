@@ -814,7 +814,7 @@ async function applyFrozenExistingServiceExtension({
           .whereIn('id', familyRows.map((row) => row.id))
           .orderBy('id')
           .forUpdate()
-          .select('id', 'estimated_price', 'primary_line_price');
+          .select('id', 'estimated_price', 'primary_line_price', 'annual_prepay_term_id');
         lockedFamilyById = new Map(lockedFamilyRows.map((row) => [String(row.id), row]));
       });
     } catch (lockErr) {
@@ -850,8 +850,21 @@ async function applyFrozenExistingServiceExtension({
       familyRows = familyRows.filter((row) => !compositeOrInvoicedIds.has(String(row.id)));
       if (!familyRows.length) continue;
     }
-    const prepaidRows = familyRows.filter((row) => !!row.annual_prepay_term_id);
-    const repriceRows = familyRows.filter((row) => !row.annual_prepay_term_id);
+    // Prepaid-vs-reprice classification comes from the LOCKED row (codex
+    // #3344 r7): annual-prepay activation can stamp annual_prepay_term_id
+    // between the unlocked liveRows read and the family lock above — the
+    // stale object would route a now-covered visit to the reprice path,
+    // lowering a price that will never be invoiced instead of issuing the
+    // promised prepaid-difference credit. A row missing from the locked
+    // set keeps its stale classification — BOTH downstream paths park such
+    // rows as drift (reprice: !locked; credit: locked re-read misses it),
+    // never write on them.
+    const rowIsPrepaid = (row) => {
+      const locked = lockedFamilyById.get(String(row.id));
+      return locked ? !!locked.annual_prepay_term_id : !!row.annual_prepay_term_id;
+    };
+    const prepaidRows = familyRows.filter((row) => rowIsPrepaid(row));
+    const repriceRows = familyRows.filter((row) => !rowIsPrepaid(row));
     let repriced = 0;
     let driftRows = 0;
     const repricedApplied = [];

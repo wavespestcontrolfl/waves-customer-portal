@@ -44,7 +44,7 @@ function fakeTrx({
   concurrentPrices = {}, addonLinks = [], invoiceLinks = [], probeThrows = false,
   invoiceLinksLateMint = [], concurrentPrepaid = {}, lockThrows = false,
   priorExtensionAudits = [], auditProbeThrows = false, familyLockThrows = false,
-  prepayTerms = [],
+  prepayTerms = [], concurrentStamp = {},
 } = {}) {
   const updates = [];
   const auditRows = [];
@@ -112,7 +112,17 @@ function fakeTrx({
                 if (!isFamilyLock && lockThrows) throw new Error('lock timeout');
                 return ids.map((id) => {
                   const key = String(id);
-                  if (isFamilyLock) return liveRow(key);
+                  if (isFamilyLock) {
+                    // concurrentStamp models a writer (annual-prepay
+                    // activation) that committed between the unlocked
+                    // liveRows read and this lock — the locked read sees
+                    // its fields, the stale objects don't (codex #3344 r7).
+                    const base = liveRow(key);
+                    if (base && Object.prototype.hasOwnProperty.call(concurrentStamp, key)) {
+                      return { ...base, ...concurrentStamp[key] };
+                    }
+                    return base;
+                  }
                   const base = mockRowsState.rows.find((r) => String(r.id) === key);
                   if (!base) return null;
                   if (Object.prototype.hasOwnProperty.call(concurrentPrepaid, key)) {
@@ -439,6 +449,36 @@ describe('applyFrozenExistingServiceExtension', () => {
       createdBy: 'system:waveguard_tier_extension',
     });
     expect(trx).toBe(database);
+  });
+
+  // Classification comes from the LOCKED row (codex #3344 r7): annual-prepay
+  // activation stamping annual_prepay_term_id between the unlocked read and
+  // the family lock must route the visit to the prepaid-difference CREDIT,
+  // not the reprice — a covered visit's list price is never invoiced, so a
+  // reprice would silently drop the promised savings.
+  test('a visit stamped prepaid between the read and the lock credits instead of repricing', async () => {
+    const { database, updates } = fakeTrx({
+      concurrentStamp: { 'row-1': { annual_prepay_term_id: 'term-9', prepaid_amount: 55 } },
+      concurrentPrepaid: { 'row-1': { annual_prepay_term_id: 'term-9', prepaid_amount: 55 } },
+      prepayTerms: [{ id: 'term-9', prepay_invoice_id: 'inv-prepay' }],
+    });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1', scheduled_date: '2099-10-28' }), // stale object: NOT prepaid
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    // row-2 stays a reprice; row-1 must NOT be price-written…
+    expect(summary.repricedRowCount).toBe(1);
+    expect(updates).toEqual([{ id: 'row-2', estimated_price: 49.5 }]);
+    // …it credits the frozen savings off its (matching) paid allocation.
+    expect(summary.creditAmount).toBe(5.5);
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      delta: 5.5,
+      note: expect.stringContaining('(term term-9, estimate e1)'),
+    }), database);
   });
 
   test('a prepaid visit without a usable paid allocation parks instead of a guessed credit', async () => {
