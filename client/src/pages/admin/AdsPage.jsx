@@ -472,17 +472,24 @@ function CallBridgeTab() {
     && !!match.callLog
     && match.callLog.googleAdsLeadMatched === false
   )).length;
-  const applyCount = readyCount + leadRetryCount;
   const configured = data?.configured !== false;
+  const scanFailed = data?.scanFailed === true;
   const targetNumber = data?.targetNumber?.formatted || "(941) 318-7612";
-  const canApply = configured && applyCount > 0 && !applying;
+  // A healthy scan with NOTHING to apply is still submittable (codex P1,
+  // ambiguity-record r4 GH round): applying a clean preview records and
+  // RESOLVES persisted ambiguity records — the only way a 31–90-day scan
+  // can clear an old record the daily cron's window never reaches. The
+  // server treats an empty apply as a no-op plus that bookkeeping.
+  const canApply = configured && !scanFailed && !applying;
   const applyLabel = applying
     ? "Applying..."
     : (readyCount > 0 && leadRetryCount > 0)
       ? "Apply ready + retry leads"
       : leadRetryCount > 0
         ? "Retry lead attribution"
-        : "Apply ready matches";
+        : readyCount > 0
+          ? "Apply ready matches"
+          : "Record clean rescan";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
