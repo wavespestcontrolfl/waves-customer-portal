@@ -537,16 +537,16 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
       expect.objectContaining({ sticky_window_disclosed: false, status: 'held' }),
     ]));
   });
-  it('the retried-accept update path ANDs the marker (monotonic — never upgrades a stale false)', async () => {
+  it('the retried-accept update path records the BOOKING accept\'s attestation (the consent trail belongs to the accept that booked)', async () => {
     stubDb([{ id: 'hold-existing' }]);
     await recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
     });
     const patch = mockDbUpdates.find((p) => p.status === 'held');
-    expect(String(patch.sticky_window_disclosed.__raw)).toContain('sticky_window_disclosed AND');
+    expect(patch.sticky_window_disclosed).toBe(true);
   });
-  it('the SI conflict path ANDs the accept attestation with the mint/reuse marker', async () => {
+  it('the SI conflict path carries the accept attestation onto the pending row — acceptance is the sole marker writer', async () => {
     // SI path: term lookup first() → existing pending terms row.
     stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
     const merges = [];
@@ -564,7 +564,25 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: 'si_1', paymentMethodId: 'pm_cap', disclosureVersion: 'sticky_v1',
     });
-    expect(String(merges[0].sticky_window_disclosed.__raw)).toContain('AND excluded.sticky_window_disclosed');
+    expect(merges[0].sticky_window_disclosed).toBe(true);
+    // And a NON-attesting accept records false the same way.
+    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    const secondBase = mockDbHandler;
+    const merges2 = [];
+    mockDbHandler = (table) => {
+      const chain = secondBase(table);
+      const origInsert = chain.insert;
+      chain.insert = (payload) => {
+        origInsert(payload);
+        return { onConflict: () => ({ merge: (m) => { merges2.push(m); return Promise.resolve(1); } }) };
+      };
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: 'si_1', paymentMethodId: 'pm_cap',
+    });
+    expect(merges2[0].sticky_window_disclosed).toBe(false);
   });
 });
 
@@ -894,36 +912,31 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
     expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
   });
 
-  it('the mint stamps sticky_window_disclosed ONLY for the attested disclosure version — stale clients stay non-sticky', async () => {
-    for (const [version, expected] of [['sticky_v1', true], [undefined, false], ['v0_legacy', false]]) {
-      const inserts = [];
-      const merges = [];
-      mockDbHandler = () => {
-        const chain = {};
-        for (const m of ['where', 'orderBy', 'count']) chain[m] = jest.fn(() => chain);
-        chain.first = jest.fn(() => Promise.resolve(null)); // no reusable pending row; generation count 0
-        chain.update = jest.fn(() => Promise.resolve(1));
-        chain.insert = jest.fn((payload) => {
-          inserts.push(payload);
-          return { onConflict: () => ({ merge: (m) => { merges.push(m); return Promise.resolve(1); } }) };
-        });
-        return chain;
-      };
-      mockCreateSetupIntent.mockResolvedValue({ id: `si_${version || 'none'}`, client_secret: 'cs_test' });
-      await createCardHoldSetupIntentForEstimate({ id: 'est1', customer_id: 'c1' }, version === undefined ? {} : { disclosureVersion: version });
-      expect(inserts).toHaveLength(1);
-      expect(inserts[0].sticky_window_disclosed).toBe(expected);
-      // Same-SI conflict (concurrent mixed-version mints racing one
-      // generation-idempotent intent) must drag the marker toward false —
-      // existing AND incoming — never keep a first-writer's true.
-      expect(String(merges[0].sticky_window_disclosed.__raw)).toContain('AND excluded.sticky_window_disclosed');
-    }
+  it('the mint NEVER writes the sticky marker — acceptance is the sole writer (a pre-consent seed could survive an old-worker accept)', async () => {
+    const inserts = [];
+    const merges = [];
+    mockDbHandler = () => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'count']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn(() => Promise.resolve(null)); // no reusable pending row; generation count 0
+      chain.update = jest.fn(() => Promise.resolve(1));
+      chain.insert = jest.fn((payload) => {
+        inserts.push(payload);
+        return { onConflict: () => ({ merge: (m) => { merges.push(m); return Promise.resolve(1); } }) };
+      });
+      return chain;
+    };
+    mockCreateSetupIntent.mockResolvedValue({ id: 'si_mint', client_secret: 'cs_test' });
+    await createCardHoldSetupIntentForEstimate({ id: 'est1', customer_id: 'c1' });
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].sticky_window_disclosed).toBeUndefined();
+    expect(merges[0].sticky_window_disclosed).toBeUndefined();
   });
 
-  it('legacy-client REUSE of a sticky-stamped pending intent downgrades the marker — never charged on a sentence that tab may not show', async () => {
+  it('pending-intent REUSE never touches the marker — nothing pre-consent does', async () => {
     const updates = [];
     const pendingRow = {
-      id: 'p1', stripe_setup_intent_id: 'si_reuse', sticky_window_disclosed: true,
+      id: 'p1', stripe_setup_intent_id: 'si_reuse',
       no_show_fee_amount: 49, cancel_window_hours: 24,
     };
     mockDbHandler = () => {
@@ -934,11 +947,7 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
       return chain;
     };
     mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_reuse', status: 'requires_payment_method', client_secret: 'cs_reuse' });
-    // Legacy client (no attested version) → the marker is stripped.
-    await createCardHoldSetupIntentForEstimate({ id: 'est1' }, {});
-    expect(updates.pop()).toEqual(expect.objectContaining({ sticky_window_disclosed: false }));
-    // Attested client → reuse leaves the marker untouched.
-    await createCardHoldSetupIntentForEstimate({ id: 'est1' }, { disclosureVersion: 'sticky_v1' });
+    await createCardHoldSetupIntentForEstimate({ id: 'est1' });
     expect(updates.pop()).not.toEqual(expect.objectContaining({ sticky_window_disclosed: expect.anything() }));
   });
 

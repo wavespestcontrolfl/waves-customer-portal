@@ -842,6 +842,28 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
   if (request.status === 'completed' || request.status === 'satisfied') {
+    // Webhook-first race (Codex #3342 r7 P1): when setup_intent.succeeded
+    // beats the browser's POST, the webhook tail stamped fee_agreed_at with
+    // sticky=false (no echo available). The browser's echo is the
+    // AUTHORITATIVE consent artifact — record it idempotently, pinned to
+    // the SAME SetupIntent this row completed with (proof it is the
+    // confirming tab), never on satisfied rows (no fee disclosure at all).
+    if (
+      request.status === 'completed'
+      && disclosureVersion === STICKY_DISCLOSURE_VERSION
+      && setupIntentId
+      && request.stripe_setup_intent_id === setupIntentId
+      && request.fee_agreed_at
+      && !request.sticky_window_disclosed
+    ) {
+      try {
+        await db('appointment_card_requests')
+          .where({ id: request.id, status: 'completed', stripe_setup_intent_id: setupIntentId })
+          .update({ sticky_window_disclosed: true, updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[appt-card-request] webhook-first consent echo record failed (non-fatal): ${err.message}`);
+      }
+    }
     return { ok: true, alreadyCompleted: true };
   }
 

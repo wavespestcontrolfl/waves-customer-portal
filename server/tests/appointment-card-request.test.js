@@ -681,6 +681,36 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(completed.sticky_window_disclosed).toBe(false);
   });
 
+  test('webhook-first race: the browser\'s later /complete records its consent echo on the completed row (Codex #3342 r7)', async () => {
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { updates.push(patch); return 1; };
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(updates.some((p) => p.sticky_window_disclosed === true)).toBe(true);
+  });
+
+  test('webhook-first race: a mismatched SetupIntent or missing echo records NOTHING on the completed row', async () => {
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_OTHER',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { updates.push(patch); return 1; };
+    // Mismatched intent + valid echo.
+    await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    // Matching intent + NO echo.
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(updates.some((p) => 'sticky_window_disclosed' in p)).toBe(false);
+  });
+
   test('happy path: saves, records consent, enrolls, marks the row completed', async () => {
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', ip: '1.2.3.4', userAgent: 'jest' });
     expect(res).toEqual({ ok: true });

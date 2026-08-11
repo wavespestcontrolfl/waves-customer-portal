@@ -4496,10 +4496,7 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/card-hold-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          // cardHoldDisclosureVersion attests which fee-policy copy THIS
-          // bundle renders — bump it in lockstep with the disclosure
-          // sentence (server stamps the sticky marker only on a match).
-          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, cardHoldDisclosureVersion: 'sticky_v1' }),
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {

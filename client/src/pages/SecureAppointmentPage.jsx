@@ -131,6 +131,12 @@ export default function SecureAppointmentPage() {
     if (data?.stickyDisclosureVersion) {
       stickyVersionRef.current = data.stickyDisclosureVersion;
       try { sessionStorage.setItem(`waves-sdv-${token}`, data.stickyDisclosureVersion); } catch { /* storage unavailable — ref still covers the no-redirect path */ }
+    } else if (data?.state === 'ready') {
+      // A READY payload WITHOUT the version means this tab now renders copy
+      // with no sticky sentence (old worker mid-deploy, or fee off) — the
+      // stale attestation must not outlive the render it described.
+      stickyVersionRef.current = null;
+      try { sessionStorage.removeItem(`waves-sdv-${token}`); } catch { /* ignore */ }
     }
   }, [data, token]);
 

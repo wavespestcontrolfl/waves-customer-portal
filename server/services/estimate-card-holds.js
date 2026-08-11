@@ -97,13 +97,15 @@ async function holdGeneration(estimateId) {
 // { clientSecret, setupIntentId, noShowFeeAmount, cancelWindowHours } for the
 // capture UI, or null when Stripe isn't configured.
 // Disclosure-version handshake: the CLIENT attests which fee-policy copy it
-// is rendering. A pre-deploy tab or cached bundle can call this endpoint
-// while still showing the old sentence, so the sticky marker may only be
-// stamped when the caller names the sticky-capable version — anything
-// else (missing, legacy, unknown) stays non-sticky.
+// is rendering, and the ACCEPT is the sole writer of the sticky marker
+// (Codex #3342 r7 P1) — a pre-consent mint-time seed could be preserved by
+// an old worker's accept during a rolling deploy (old recordCardHoldHeld
+// never touches the column), so nothing writes the marker before consent:
+// old-worker accepts leave the column at its default false, and only
+// new-worker accepts record the accepting tab's attestation.
 const CARD_HOLD_STICKY_DISCLOSURE_VERSION = 'sticky_v1';
 
-async function createCardHoldSetupIntentForEstimate(estimate, { disclosureVersion } = {}) {
+async function createCardHoldSetupIntentForEstimate(estimate) {
   const pending = await db('estimate_card_holds')
     .where({ estimate_id: estimate.id, status: 'pending' })
     .orderBy('created_at', 'desc')
@@ -115,15 +117,7 @@ async function createCardHoldSetupIntentForEstimate(estimate, { disclosureVersio
       // Reusable while the card hasn't been captured yet. A succeeded/canceled
       // intent is terminal — fall through and mint a fresh one.
       if (existing && ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing'].includes(existing.status)) {
-        // Monotonic disclosure downgrade (never upgrade): a reuse by a
-        // client that did NOT attest the sticky-capable copy strips the
-        // marker — the tab that ultimately confirms may be the one without
-        // the sentence, and the row may only ever move TOWARD the customer.
-        const attested = disclosureVersion === CARD_HOLD_STICKY_DISCLOSURE_VERSION;
-        await db('estimate_card_holds').where({ id: pending.id }).update({
-          updated_at: db.fn.now(),
-          ...(pending.sticky_window_disclosed && !attested ? { sticky_window_disclosed: false } : {}),
-        });
+        await db('estimate_card_holds').where({ id: pending.id }).update({ updated_at: db.fn.now() });
         // Return the terms FROZEN on this pending row (what the customer was
         // first shown), not live config — recordCardHoldHeld enforces these, so
         // the displayed consent must match.
@@ -150,24 +144,15 @@ async function createCardHoldSetupIntentForEstimate(estimate, { disclosureVersio
       stripe_setup_intent_id: setupIntent.id,
       no_show_fee_amount: cardHoldNoShowFee(),
       cancel_window_hours: cardHoldCancelWindowHours(),
-      // Stamped ONLY when the calling client attested it renders the
-      // sticky-capable copy ("Rescheduling is free but doesn't reset the
-      // cancellation window") — never as a column default, so rows minted
-      // by pre-deploy clients/code or by surfaces without the clause
-      // (saved-method auto-satisfy holds) stay non-sticky forever.
-      sticky_window_disclosed: disclosureVersion === CARD_HOLD_STICKY_DISCLOSURE_VERSION,
+      // Deliberately NO sticky_window_disclosed here (Codex #3342 r7 P1):
+      // the marker is written ONLY at acceptance from the accepting tab's
+      // attestation — a pre-consent seed could be preserved through an
+      // old-worker accept during a rolling deploy.
       status: 'pending',
       updated_at: db.fn.now(),
     })
     .onConflict('stripe_setup_intent_id')
-    .merge({
-      updated_at: db.fn.now(),
-      // Concurrent mixed-version mints can race to the SAME generation-
-      // idempotent SetupIntent — the losing insert's conflict path must
-      // still drag the marker toward false (existing AND incoming), or an
-      // attested first-writer would leave consent stamped for a legacy tab.
-      sticky_window_disclosed: db.raw('estimate_card_holds.sticky_window_disclosed AND excluded.sticky_window_disclosed'),
-    });
+    .merge({ updated_at: db.fn.now() });
 
   return {
     clientSecret: setupIntent.client_secret,
@@ -274,11 +259,12 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
   const frozenAccepted = Number.isFinite(acceptedNum) && acceptedNum > 0
     ? Math.round(acceptedNum * 100) / 100
     : null;
-  // The ACCEPTING tab's disclosure attestation (Codex #3342 r1 P1): saved-
-  // method holds never pass through /card-hold-intent, so this is their only
-  // chance to record that the accept surface showed the sticky-window
-  // sentence. SI-path rows AND it with the mint/reuse marker below — the
-  // row only ever moves toward the customer.
+  // The ACCEPTING tab's disclosure attestation is the SOLE writer of the
+  // sticky marker on this rail (Codex #3342 r7 P1): acceptance IS the
+  // consent moment, the accept surface shows the sentence, and old-worker
+  // accepts (which never touch the column) leave the default false — so a
+  // rolling deploy can never preserve a pre-consent seed. A missing/legacy
+  // attestation (old bundle) records false: fail toward free.
   const stickyDisclosed = disclosureVersion === CARD_HOLD_STICKY_DISCLOSURE_VERSION;
   const fields = {
     customer_id: customerId,
@@ -297,12 +283,7 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     await trx('estimate_card_holds')
       .insert({ estimate_id: estimateId, stripe_setup_intent_id: setupIntentId, ...fields })
       .onConflict('stripe_setup_intent_id')
-      .merge({
-        ...fields,
-        // AND with the mint/reuse marker — a true survives only when BOTH
-        // the minting render and the accepting tab attested the sentence.
-        sticky_window_disclosed: trx.raw('estimate_card_holds.sticky_window_disclosed AND excluded.sticky_window_disclosed'),
-      });
+      .merge(fields);
   } else {
     // Saved-method hold (spec §3.2 auto-satisfy): no SetupIntent exists, so
     // the unique-SI upsert can't dedupe — Postgres treats NULLs as distinct
@@ -314,13 +295,9 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
       .orderBy('created_at', 'desc')
       .first('id');
     if (savedMethodRow) {
-      await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update({
-        ...fields,
-        // Monotonic on the retried-accept path too: a stale row's false is
-        // never upgraded by a later attested retry (the consent trail
-        // belongs to the accept that actually booked).
-        sticky_window_disclosed: trx.raw('sticky_window_disclosed AND ?', [stickyDisclosed]),
-      });
+      // The accept that actually BOOKS is the consent trail — its
+      // attestation overwrites a superseded earlier attempt's row.
+      await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update(fields);
     } else {
       await trx('estimate_card_holds').insert({ estimate_id: estimateId, stripe_setup_intent_id: null, ...fields });
     }
