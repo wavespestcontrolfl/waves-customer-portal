@@ -188,7 +188,14 @@ function frozenFeeNoteForRow(request) {
   const windowHours = Number(request?.cancel_window_hours);
   if (!(fee > 0) || !(windowHours > 0)) return null;
   const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`;
+  // The reset sentence follows the row's own consent marker (pre-push r8
+  // P1): a legacy row (sticky_window_disclosed=false) never accepted the
+  // sticky rule and enforcement never sticky-charges it — its secured
+  // render must repeat the terms it accepted, not the current copy.
+  const stickyClause = request?.sticky_window_disclosed
+    ? `, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window`
+    : '';
+  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free${stickyClause}.`;
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {

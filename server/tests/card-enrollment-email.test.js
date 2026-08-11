@@ -293,6 +293,15 @@ describe('card-hold confirmation (gate on)', () => {
     expect(call.idempotencyKey).toBe('cardhold.confirmation:est-1');
   });
 
+  test('a sticky-marked hold\'s confirmation carries the reset sentence — the written record must match sticky enforcement (pre-push r8 P1)', async () => {
+    state.tables.estimate_card_holds = [{
+      no_show_fee_amount: '49.00', cancel_window_hours: 24, stripe_payment_method_id: 'pm_stripe_1', sticky_window_disclosed: true,
+    }];
+    await sendCardHoldConfirmation({ estimateId: 'est-1', customerId: 'cust-1' });
+    const call = mockSendTemplate.mock.calls[0][0];
+    expect(call.payload.fee_line).toBe('A $49.00 fee applies only if you cancel within 24 hours of your visit or we cannot get access. Rescheduling is free but doesn\'t reset the cancellation window.');
+  });
+
   test('surcharge line carries the QUANTIFIED disclosure from the canonical consent copy (Codex r3)', async () => {
     await sendCardHoldConfirmation({ estimateId: 'est-1', customerId: 'cust-1' });
     const line = mockSendTemplate.mock.calls[0][0].payload.surcharge_line;

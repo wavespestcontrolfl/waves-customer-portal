@@ -1096,6 +1096,18 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
     // Row values, never live config — and the exact enforced window stated.
+    // No sticky marker on the row → the terms it ACCEPTED, without the
+    // reset sentence (pre-push r8 P1): legacy rows are never sticky-charged
+    // and must never be shown the sticky rule.
+    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
+  });
+
+  test('a sticky-marked row\'s secured render carries the reset sentence it consented to', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24, sticky_window_disclosed: true,
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
     expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free, though a reschedule made within 24 hours doesn\'t reset the cancellation window.');
   });
 

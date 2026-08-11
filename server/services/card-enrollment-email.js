@@ -351,7 +351,7 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
     const hold = await db('estimate_card_holds')
       .where({ estimate_id: estimateId, status: 'held' })
       .orderBy('created_at', 'desc')
-      .first('no_show_fee_amount', 'cancel_window_hours', 'stripe_payment_method_id');
+      .first('no_show_fee_amount', 'cancel_window_hours', 'stripe_payment_method_id', 'sticky_window_disclosed');
     if (!hold) {
       logger.info(`[card-enrollment-email] no held row for estimate ${estimateId}; skipping card-hold confirmation`);
       return null;
@@ -363,8 +363,16 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
       : null;
     const fee = Number(hold.no_show_fee_amount);
     const windowHours = Number(hold.cancel_window_hours);
+    // The reset sentence follows the row's own consent marker (pre-push r8
+    // P1): a sticky-marked hold stays chargeable after an inside-window
+    // reschedule, so its written confirmation must say so — while a legacy
+    // hold keeps the wording it accepted (enforcement never sticky-charges
+    // it). Same accepted-copy sentence as the estimate accept UI.
+    const stickySentence = hold.sticky_window_disclosed
+      ? ' Rescheduling is free but doesn\'t reset the cancellation window.'
+      : '';
     const feeLine = Number.isFinite(fee) && fee > 0 && Number.isFinite(windowHours) && windowHours > 0
-      ? `A $${fee.toFixed(2)} fee applies only if you cancel within ${windowHours} hours of your visit or we cannot get access.`
+      ? `A $${fee.toFixed(2)} fee applies only if you cancel within ${windowHours} hours of your visit or we cannot get access.${stickySentence}`
       : 'No fee applies unless we cannot complete your visit.';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'cardhold.confirmation',
