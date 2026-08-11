@@ -345,36 +345,30 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
         && legacyRow.status === 'pending'
         && !legacyRow.customer_confirmed;
-      // COMPLETION is the billing moment: the completion route mints the
-      // invoice and auto-applies the available balance in its own
-      // continuation, which runs BEFORE the detached post-commit activation
-      // — so both the booking evidence AND the redemption must be durable
-      // before this transition returns (Codex #3361 r13/r14 P1). They are
-      // written on the GLOBAL connection, not the trx, deliberately: the
-      // redeemer only mints FROM committed events, so an in-trx event would
-      // be invisible to it. Pre-commit global writes are safe here — a
-      // rolled-back transition leaves an evidence row for a real booking
-      // (harmless, idempotent) and a minted credit whose every exit is
-      // already compensated (the cancel/skip money seam reverses it; a
-      // completion retry is a claim-guarded no-op). Neither table is
-      // touched by this trx, so no self-deadlock. Best-effort: a credit
-      // hiccup never blocks the completion; the hourly sweep stays the
-      // durable guarantee.
+      // COMPLETION is the billing moment: the inspection-credit booking
+      // evidence commits WITH this transition (same #3178 r33 rule as the
+      // office-confirm branch below) — in-trx, on `t`, atomic with the
+      // completion, so a rollback can never leak an event for a completion
+      // that didn't happen (Codex #3361 r15 P1) and no second connection
+      // ever waits on this trx's row locks (the r14 pre-commit global
+      // redemption deadlocked exactly that way and was reverted; the
+      // redeemer's FOR UPDATE on this booking must only ever run after
+      // commit). The REDEMPTION stays post-commit in the activation hook —
+      // its fast-redeem fires from this committed event (marked === 0) —
+      // under the platform's documented fast-path + hourly-sweep contract;
+      // the residual ordering against the route's invoice auto-apply is the
+      // same posture every at-booking redemption surface carries.
+      // Best-effort: an evidence hiccup never blocks the completion; the
+      // hook's own idempotent marker call is the belt.
       if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
         try {
-          const inspectionCredit = require('./inspection-credit');
-          await inspectionCredit.markBookingForInspectionCredit(db, {
+          await require('./inspection-credit').markBookingForInspectionCredit(t, {
             customerId: legacyRow.customer_id,
             scheduledServiceId: jobId,
             source: 'phone_call',
           });
-          await inspectionCredit.redeemInspectionCreditForBooking({
-            customerId: legacyRow.customer_id,
-            scheduledServiceId: jobId,
-            createdBy: 'system:inspection_credit_legacy_completion',
-          });
         } catch (evidenceErr) {
-          logger.warn(`[job-status] legacy completion credit evidence/redemption failed for ${jobId}: ${evidenceErr.message}`);
+          logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
         }
       }
     }

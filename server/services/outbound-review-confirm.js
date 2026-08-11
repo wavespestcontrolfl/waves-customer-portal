@@ -411,6 +411,13 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
   const rows = await dbh('scheduled_services')
     .where({ source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false })
     .whereNotIn('status', ['cancelled', 'skipped'])
+    // Random order (Codex #3361 r15 P2): with more rows than the batch cap,
+    // an unordered LIMIT could hand a batch of permanently-unactivatable
+    // rows (bad slot data, malformed payloads) to every run and starve the
+    // valid tail forever. Random sampling guarantees every eligible row
+    // keeps getting drawn; poisoned rows just fail their leg and stay
+    // unstamped without monopolizing the batch.
+    .orderBy(dbh.raw('random()'))
     .limit(limit)
     .select('id');
   let activated = 0;
