@@ -1796,12 +1796,18 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         // held/unattributed); history-bearing rows demote to
         // permanently-conservative legacy — the identical end-state the
         // provenanced arm's demote produces.
-        // REOPENS ONLY, deliberately: the born-after-resolution bound is
-        // what proves the row is the sweep's post-lift write, and marker
-        // rows predating the PR's records cannot exist (the table and the
-        // marker deploy together).
+        // FIRST SIGHTINGS run this arm too (codex P1, r9 GH round): a
+        // 31–90-day manual scan can discover ambiguity after the
+        // seven-day sweep already attributed a phone-reused lead, and
+        // that row may carry borrowed-or-NULL provenance the exact-call
+        // arm can't see. The old reopen-only gate was the legacy-row
+        // precaution — obsolete now that the MARKER is the anchor: legacy
+        // rows cannot carry attribution_basis, so any marked row on a
+        // candidate lead of a newly-discovered ambiguity is positively a
+        // sweep write now in doubt. Reopens keep the born-after-resolution
+        // bound as a belt (a pre-resolution marked row was already
+        // reconciled at its own first sighting).
         const resolvedAt = resolvedAtById.get(callId);
-        if (!resolvedAt) continue;
         const snapLeadIds = (await trx('bridge_ambiguous_call_leads')
           .where({ call_log_id: callId })
           .select('lead_id')).map((r) => String(r.lead_id));
@@ -1811,7 +1817,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         const interimRows = await trx('ad_service_attribution as asa')
           .whereIn('asa.lead_id', snapLeadIds)
           .where('asa.attribution_basis', 'bridge_unclaimed_sweep')
-          .where('asa.created_at', '>', resolvedAt)
+          .modify((qb) => { if (resolvedAt) qb.where('asa.created_at', '>', resolvedAt); })
           .select('asa.id');
         for (const row of interimRows) {
           retired += await retireRowPreservingHistory(trx, row.id);

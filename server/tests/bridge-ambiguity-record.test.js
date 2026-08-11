@@ -261,9 +261,26 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mockRetire).toHaveBeenCalledTimes(1);
     expect(mockRetire.mock.calls[0][1]).toBe('call-1');
     expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
-    // The SNAPSHOT arm stays reopen-only: without the born-after-resolution
-    // anchor a NULL-provenance match could be an untouchable legacy row.
-    expect(mockRetireRow).not.toHaveBeenCalled();
+  });
+
+  test('a FIRST sighting reconciles MARKED sweep rows too — no time anchor needed, the marker is the anchor (codex P1 GH r9)', async () => {
+    // A late-discovered ambiguity may follow a sweep write whose row
+    // carries borrowed-or-NULL provenance the exact-call arm can't see;
+    // legacy rows cannot carry attribution_basis, so a marked row on a
+    // candidate lead of a NEW ambiguity is positively a sweep write now
+    // in doubt.
+    listQueueByTable.bridge_ambiguous_calls = [[]]; // first sighting
+    listQueueByTable.ad_service_attribution = [[]]; // nothing exact-provenanced
+    listQueueByTable.bridge_ambiguous_call_leads = [[{ lead_id: 'lead-7' }]];
+    listQueueByTable.leads = [[{ id: 'lead-7' }]];
+    listQueueByTable['ad_service_attribution as asa'] = [[{ id: 'row-9' }]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetireRow).toHaveBeenCalledTimes(1);
+    expect(mockRetireRow.mock.calls[0][1]).toBe('row-9');
+    const asaRead = builders.find((b) => b._table === 'ad_service_attribution as asa');
+    expect(asaRead._wheres).toContainEqual(['where', 'asa.attribution_basis', 'bridge_unclaimed_sweep']);
+    // No born-after bound at first sighting — there is no resolution yet.
+    expect(asaRead._wheres.some(([m, col]) => m === 'where' && col === 'asa.created_at')).toBe(false);
   });
 
   test('no valid candidates → no insert at all', async () => {
