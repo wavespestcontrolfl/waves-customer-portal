@@ -633,8 +633,19 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       const allocationSpreadCents = fullyPrepaid
         ? Math.round((Math.max(...prepaidAmounts) - Math.min(...prepaidAmounts)) * 100)
         : 0;
+      // ONE term, and a spread no wider than that term could produce (codex
+      // #3353 r8, both corrections to r7's bound):
+      //  - splitCoverageAmount's remainder is at most count-1 cents, not
+      //    count — a two-visit series can differ by exactly one cent, so the
+      //    old `<= contractRows.length` admitted $100.00/$100.02;
+      //  - and the spread test alone can't tell one term's remainder from two
+      //    DIFFERENT terms that happen to land close together, which is the
+      //    case the bound existed to exclude. Term identity is the direct
+      //    check; the spread is the belt.
+      const prepaidTermIds = new Set(contractRows.map((row) => String(row.annual_prepay_term_id || '')));
       const uniformlyPrepaid = fullyPrepaid
-        && allocationSpreadCents <= contractRows.length;
+        && prepaidTermIds.size === 1
+        && allocationSpreadCents <= Math.max(0, contractRows.length - 1);
       const prepaidPerVisit = uniformlyPrepaid
         ? round2(prepaidAmounts.reduce((sum, amount) => sum + amount, 0) / prepaidAmounts.length)
         : null;
@@ -658,6 +669,12 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         // visits that aren't prepaid.
         perVisit: prepaidPerVisit ?? (fullyPrepaid ? null : scheduledPerVisit),
         prepaid: uniformlyPrepaid,
+        // A prepaid contract whose allocations could not be averaged: no
+        // figure of ANY provenance is trustworthy for it, so the family-level
+        // precedence must suppress the historical-invoice fallback too, not
+        // just the scheduled price (codex #3353 r8 — r7 suppressed only the
+        // latter, so a superseded per-visit invoice still surfaced).
+        prepaidWithoutBasis: fullyPrepaid && prepaidPerVisit == null,
         // Per-contract provenance: one prepaid property alongside one billing
         // at its scheduled price must not describe BOTH as a paid allocation.
         spendSource: prepaidPerVisit != null
@@ -738,11 +755,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const activePrepaidBasis = contracts.some((contract) => contract.prepaid)
       ? effectivePerVisit
       : null;
-    const currentPerVisit = activePrepaidBasis
-      ?? usableLastPaid?.amount
-      ?? effectivePerVisit
-      ?? stampedPerApplication
-      ?? monthlyDerivedPerApplication;
+    // A prepaid contract with no averageable basis poisons EVERY fallback
+    // below it: the paid term disproves the scheduled price, the customer-level
+    // stamps, and any older per-visit invoice alike (codex #3353 r8).
+    const prepaidWithoutBasis = contracts.some((contract) => contract.prepaidWithoutBasis);
+    const currentPerVisit = prepaidWithoutBasis
+      ? null
+      : (activePrepaidBasis
+        ?? usableLastPaid?.amount
+        ?? effectivePerVisit
+        ?? stampedPerApplication
+        ?? monthlyDerivedPerApplication);
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
     const componentServiceAddresses = {};
     const componentServiceAddressesComplete = {};
@@ -783,6 +806,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // true of all of them, so it reports mixed_basis and the per-contract
       // sources above carry the detail (codex #3353 r4).
       spendSource: (() => {
+        if (prepaidWithoutBasis) return 'unavailable';
         const contractSources = new Set(contracts.map((contract) => contract.spendSource));
         if (contracts.length > 1 && contractSources.size > 1) return 'mixed_basis';
         if (activePrepaidBasis != null) return 'prepaid_allocation';

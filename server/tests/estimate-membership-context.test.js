@@ -1327,6 +1327,44 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
+  test('an unaverageable prepaid contract withholds even when an older invoice exists', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140 },
+      ],
+      // The r7 fix suppressed only the scheduled price, so this superseded
+      // per-visit invoice still surfaced. A paid term disproves it too.
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('two different prepaid terms are never averaged together', async () => {
+    const database = fakeDb({
+      // $100.00 and $100.02 sit within the old count-based tolerance, but a
+      // TWO-visit splitCoverageAmount series can differ by at most one cent —
+      // and these are two distinct terms, so the $100.01 average is invented.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 100 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 100.02 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBeNull();
+    expect(spend.currentServices[0].spendSource).toBe('unavailable');
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.
