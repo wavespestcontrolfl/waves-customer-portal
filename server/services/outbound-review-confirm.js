@@ -17,6 +17,21 @@
  */
 
 const logger = require('./logger');
+const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+
+/**
+ * True when `svc` is an outbound-callback booking still awaiting office
+ * review — the exact state the shared-writer guard (job-status.js) blocks
+ * day-of transitions on. Callers that are themselves a sanctioned
+ * confirmation point (admin confirm, tech dispatch-implies-confirm) use
+ * this to decide whether to run the confirm flip + hook first.
+ */
+function isPendingOutboundReviewBooking(svc) {
+  return !!svc
+    && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+    && svc.status === 'pending'
+    && !svc.customer_confirmed;
+}
 
 function dateOnly(value) {
   if (!value) return null;
@@ -196,4 +211,4 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
 }
 
-module.exports = { runOutboundReviewConfirmHook };
+module.exports = { runOutboundReviewConfirmHook, isPendingOutboundReviewBooking };

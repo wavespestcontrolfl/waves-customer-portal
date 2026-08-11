@@ -17,7 +17,10 @@ const {
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('../services/call-booking-source-actions');
 const { transitionJobStatus } = require('../services/job-status');
-const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+const {
+  runOutboundReviewConfirmHook,
+  isPendingOutboundReviewBooking,
+} = require('../services/outbound-review-confirm');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
 
@@ -68,6 +71,32 @@ describe('outbound review booking — originating lead carried on the card', () 
     const payload = JSON.parse(item.payload);
     expect(payload.lead_id).toBe('lead-9');
     expect(payload.keep_open_for_quote).toBe(true);
+  });
+});
+
+describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection', () => {
+  // tech-track's en-route/on-site auto-confirm keys on this helper matching
+  // EXACTLY the shared-writer guard's condition (source_action + pending +
+  // !customer_confirmed) — a drift between the two either re-opens the 409
+  // popup or auto-confirms a row the guard would have allowed through anyway.
+  const base = {
+    source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+  };
+
+  test('matches a pending, unconfirmed outbound-review row', () => {
+    expect(isPendingOutboundReviewBooking(base)).toBe(true);
+  });
+
+  test('does NOT match other source_actions, non-pending status, confirmed rows, or missing rows', () => {
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: 'ai_call_pipeline' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: CALL_FOLLOWUP_SOURCE_ACTION })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'confirmed' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'cancelled' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, customer_confirmed: true })).toBe(false);
+    expect(isPendingOutboundReviewBooking(null)).toBe(false);
+    expect(isPendingOutboundReviewBooking(undefined)).toBe(false);
   });
 });
 

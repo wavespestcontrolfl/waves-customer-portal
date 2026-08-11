@@ -42,6 +42,10 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const trackTransitions = require('../services/track-transitions');
 const { transitionJobStatus } = require('../services/job-status');
 const {
+  isPendingOutboundReviewBooking,
+  runOutboundReviewConfirmHook,
+} = require('../services/outbound-review-confirm');
+const {
   buildOnSiteLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const {
@@ -79,7 +83,13 @@ router.post('/:id/en-route', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'status', 'scheduled_date');
+      // The trailing columns feed the outbound-review auto-confirm below
+      // (detection + the confirm hook's reminder/lead/credit legs).
+      .first(
+        'id', 'technician_id', 'status', 'scheduled_date',
+        'source_action', 'customer_confirmed', 'customer_id', 'window_start',
+        'service_type', 'source_call_log_id', 'is_callback', 'estimated_price',
+      );
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
@@ -124,6 +134,16 @@ router.post('/:id/en-route', async (req, res, next) => {
       });
     }
 
+    // Dispatch-implies-confirm (owner decision 2026-08-11): a pending
+    // outbound-callback booking used to 409 here ("pending office review").
+    // With one owner-operator running both portals, the assigned tech's
+    // field tap IS the review — so auto-confirm first (customer_confirmed
+    // stamped + pending → confirmed, same lifecycle semantics as the
+    // admin-dispatch confirm path), then continue to en_route. The shared-
+    // writer guard still blocks every other caller; the admin surfaces keep
+    // their explicit review flow.
+    const autoConfirmReview = isPendingOutboundReviewBooking(svc);
+
     // 1. Admin-side status flip via transitionJobStatus. Same
     // migration pattern as PRs #328 / #329 / #330. The trx + atomic
     // guard rejects on a concurrent transition; we surface as 409.
@@ -133,18 +153,30 @@ router.post('/:id/en-route', async (req, res, next) => {
     if (fromStatus !== 'en_route') {
       try {
         await db.transaction(async (trx) => {
+          if (autoConfirmReview) {
+            await trx('scheduled_services')
+              .where({ id: svc.id })
+              .update({ customer_confirmed: true });
+            await transitionJobStatus({
+              jobId: svc.id,
+              fromStatus: 'pending',
+              toStatus: 'confirmed',
+              transitionedBy: req.technicianId,
+              trx,
+            });
+          }
           await transitionJobStatus({
             jobId: svc.id,
-            fromStatus,
+            fromStatus: autoConfirmReview ? 'confirmed' : fromStatus,
             toStatus: 'en_route',
             transitionedBy: req.technicianId,
             trx,
           });
         });
       } catch (err) {
-        // The shared writer's review-booking guard is an EXPECTED block here
-        // (this route allows 'pending' as a source status) — surface it as a
-        // conflict, not a 500.
+        // The shared writer's review-booking guard should no longer fire on
+        // this path (auto-confirm above) — kept as a safety net for a race
+        // with a concurrent office reject.
         if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
           return res.status(409).json({
             error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
@@ -157,6 +189,16 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         }
         throw err;
+      }
+
+      // Confirm side effects (arm deferred reminders, convert the
+      // originating call lead, resolve the outbound_booking_review card,
+      // inspection-credit evidence) — the SAME post-commit best-effort hook
+      // the admin confirm paths run, so a field-confirmed booking is never
+      // confirmed-but-half-armed. Day-of arming sends nothing: the 72h leg
+      // only fires >24.25h out and the 24h leg only for tomorrow-ET visits.
+      if (autoConfirmReview) {
+        await runOutboundReviewConfirmHook(db, svc, 'tech-track');
       }
     }
 
@@ -178,7 +220,8 @@ router.post('/:id/en-route', async (req, res, next) => {
 
     logger.info(
       `[tech-track] en-route service=${svc.id} tech=${req.technicianId} ` +
-      `fromStatus=${fromStatus} smsSent=${result.smsSent} alreadyEnRoute=${!!result.alreadyEnRoute}`
+      `fromStatus=${fromStatus} smsSent=${result.smsSent} alreadyEnRoute=${!!result.alreadyEnRoute} ` +
+      `outboundReviewAutoConfirmed=${autoConfirmReview}`
     );
 
     res.json({
@@ -226,24 +269,41 @@ router.post('/:id/on-site', async (req, res, next) => {
       });
     }
 
+    // Dispatch-implies-confirm — same owner decision as the en-route leg
+    // above. Arrival without a prior En Route tap (geofence or manual) must
+    // not dead-end on the review popup either.
+    const autoConfirmReview = isPendingOutboundReviewBooking(svc);
+
     if (fromStatus !== 'on_site') {
       const arrivedAt = new Date();
       try {
         await db.transaction(async (trx) => {
           const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
+          if (autoConfirmReview) {
+            lifecycleUpdates.customer_confirmed = true;
+          }
           if (Object.keys(lifecycleUpdates).length > 0) {
             await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
           }
+          if (autoConfirmReview) {
+            await transitionJobStatus({
+              jobId: svc.id,
+              fromStatus: 'pending',
+              toStatus: 'confirmed',
+              transitionedBy: req.technicianId,
+              trx,
+            });
+          }
           await transitionJobStatus({
             jobId: svc.id,
-            fromStatus,
+            fromStatus: autoConfirmReview ? 'confirmed' : fromStatus,
             toStatus: 'on_site',
             transitionedBy: req.technicianId,
             trx,
           });
         });
       } catch (err) {
-        // Same expected-block translation as the en-route leg above.
+        // Same safety-net translation as the en-route leg above.
         if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
           return res.status(409).json({
             error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
@@ -256,6 +316,11 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         }
         throw err;
+      }
+
+      // Same post-commit confirm hook as the en-route leg above.
+      if (autoConfirmReview) {
+        await runOutboundReviewConfirmHook(db, svc, 'tech-track');
       }
     }
 
