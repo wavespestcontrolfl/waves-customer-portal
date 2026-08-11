@@ -2668,6 +2668,17 @@ function palmCatalogMissingError() {
   return err;
 }
 
+// HH:MM window-end arithmetic for promoted rows (codex r20 P1). Returns
+// null (caller keeps the copied end) when the start is unparseable or the
+// block would cross midnight.
+function windowEndFromStart(windowStart, durationMinutes) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
+  if (!m) return null;
+  const total = (Number(m[1]) * 60) + Number(m[2]) + Number(durationMinutes);
+  if (!Number.isFinite(total) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 function notifyPalmCatalogMissing(estimateId, customerId, context, bodyOverride) {
   logger.error(`[estimate-converter] palm scheduling failed closed — ${context} for estimate ${estimateId} routed to manual scheduling`);
   try {
@@ -3907,11 +3918,33 @@ const EstimateConverter = {
               noteKind: fam === 'palm_injection' ? 'palm injection program' : 'lawn program',
             };
           });
+        // Catalog identities of the reserved rows (codex r20 P1): an
+        // adopted appointment can carry a STALE label with the CORRECT
+        // catalog id — estimate-public classifies adoption catalog-first —
+        // so a label-only alreadyReserved check would promote a duplicate
+        // parent + series beside it. Fail-soft: a failed lookup leaves the
+        // map empty and the label check still applies.
+        const reservedServiceKeyById = new Map();
+        try {
+          const reservedIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+          if (reservedIds.length) {
+            const idRows = await database('services').whereIn('id', reservedIds).select('id', 'service_key');
+            for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+          }
+        } catch (idErr) {
+          logger.warn(`[estimate-converter] reserved catalog-key prefetch failed (label matching only): ${idErr.message}`);
+        }
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
           if (!reservedStart?.scheduled_date) break;
-          // A reserved row already covering this program means nothing to add.
+          // A reserved row already covering this program means nothing to
+          // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
+          // or snapshot), codex r20 P1.
           const unitKey = recurringServiceKey({ name: unit.service.name });
-          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey);
+          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey
+            || (unit.catalogServiceKey && (
+              reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey
+              || String(row.service_key_snapshot || '') === unit.catalogServiceKey
+            )));
           if (alreadyReserved) continue;
           try {
             // Copy the customer's picked slot onto the added row (Codex r2):
@@ -3973,6 +4006,15 @@ const EstimateConverter = {
                 unit.service, null, { service_type: standaloneRow.service_type },
               );
               if (familyDuration) standaloneRow.estimated_duration_minutes = familyDuration;
+            }
+            // The promoted row's window reflects ITS OWN duration (codex
+            // r20 P1): window_end was copied from the reserved visit, so a
+            // 90-minute reserved block would read as 90 minutes of this
+            // 60-minute job to overlap/dispatch consumers. Only overwrite
+            // when the recompute parses — otherwise the copied end stands.
+            if (standaloneRow.window_start && standaloneRow.window_end && standaloneRow.estimated_duration_minutes) {
+              const recomputedEnd = windowEndFromStart(standaloneRow.window_start, standaloneRow.estimated_duration_minutes);
+              if (recomputedEnd) standaloneRow.window_end = recomputedEnd;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already

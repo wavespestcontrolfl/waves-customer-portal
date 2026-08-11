@@ -623,6 +623,19 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(converterSrc).toContain('function palmRecurringLineInvalidError()');
   });
 
+  test('reserved-bundle promotion matches catalog identity and recomputes its window (codex r20 P1)', () => {
+    // alreadyReserved must see an adopted row with a STALE label but the
+    // CORRECT catalog id/snapshot — label-only matching promoted a
+    // duplicate parent + series beside it.
+    expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
+    expect(converterSrc).toContain('reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey');
+    expect(converterSrc).toContain("String(row.service_key_snapshot || '') === unit.catalogServiceKey");
+    // And the promoted row's window_end reflects its OWN duration, not the
+    // reserved visit's block.
+    expect(converterSrc).toContain('function windowEndFromStart(');
+    expect(converterSrc).toContain('windowEndFromStart(standaloneRow.window_start, standaloneRow.estimated_duration_minutes)');
+  });
+
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {
     // Route-entry preflight (fast, unlocked) still rejects the common case.
     expect(scheduleSrc).toContain('findActiveRecurringSeries(db, {');
