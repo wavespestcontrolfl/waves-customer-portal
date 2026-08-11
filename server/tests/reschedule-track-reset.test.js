@@ -181,6 +181,33 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(db).toHaveBeenCalledTimes(1);
   });
 
+  test('overnight overdue attempt is NOT healed: evidence on its own scheduled day', async () => {
+    // Visit scheduled yesterday, genuinely started late yesterday evening,
+    // re-tapped after midnight. Evidence date == scheduled_date proves it is
+    // that day's real attempt (overdue completions are deliberately
+    // allowed), so no rewind — the idempotent path answers.
+    const yesterday = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), -1));
+    const overnightSvc = {
+      id: 'job-overnight',
+      customer_id: 'cust-5',
+      technician_id: null,
+      status: 'on_site',
+      track_state: 'on_property',
+      scheduled_date: yesterday,
+      en_route_at: isoDaysAgo(1, 'T22:40'),
+      arrived_at: isoDaysAgo(1, 'T23:05'),
+      actual_start_time: isoDaysAgo(1, 'T23:05'),
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(overnightSvc));
+
+    const result = await trackTransitions.markEnRoute('job-overnight');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
+  });
+
   test('complete track_state never heals', async () => {
     const completeSvc = {
       id: 'job-done',
@@ -271,6 +298,28 @@ describe('visit timeline stale-timestamp guard', () => {
     expect(onSite).toBeDefined();
     const completed = timeline.events.find((e) => e.type === 'service_completed');
     expect(completed.occurredAt).toBeNull();
+  });
+
+  test('stale canonical column does not shadow a genuine fallback timestamp', () => {
+    // The staleness check applies per candidate: actual_start_time from the
+    // aborted attempt is skipped and the current-attempt arrival carried by
+    // a workflow event still renders.
+    const freshArrival = isoDaysAgo(0, 'T12:40');
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        completed_at: isoDaysAgo(0, 'T13:28'),
+        actual_start_time: isoDaysAgo(7, 'T14:54'),
+      },
+      workflowEvents: [
+        { type: 'technician_on_site', status: 'completed', timestamp: freshArrival },
+      ],
+      serviceLine: 'lawn',
+      config,
+    });
+    const onSite = timeline.events.find((e) => e.type === 'technician_on_site');
+    expect(onSite).toBeDefined();
+    expect(onSite.occurredAt).toBe(new Date(freshArrival).toISOString());
   });
 
   test('in-progress visit (no completion) keeps its timestamps', () => {

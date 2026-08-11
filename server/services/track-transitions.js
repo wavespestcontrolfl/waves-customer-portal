@@ -232,29 +232,35 @@ async function markEnRoute(serviceId, opts = {}) {
   }
 
   // Stale-attempt self-heal. A visit that was started on an EARLIER day,
-  // aborted, and moved to today can reach this tap still carrying the old
-  // attempt's track_state — every mover now rewinds this (rebooker
+  // aborted, and moved to a later date can reach this tap still carrying
+  // the old attempt's track_state — every mover now rewinds this (rebooker
   // needsLifecycleRewind), but rows moved before that fix, or by anything
   // outside the movers, are already broken: the atomic guard below would
   // treat the stale state as "already advanced" and silently skip the flip,
   // the timestamp, AND the customer's track-link SMS, and the report would
-  // render the old attempt's times (live incident 2026-08-11). Evidence
-  // from an earlier ET day cannot belong to today's attempt (the
-  // future-date guard above means we only ever run day-of or later), so
-  // rewind and take the normal flip. Same-day evidence is a genuine re-tap
-  // and stays on the idempotent path. No-evidence advanced states are left
+  // render the old attempt's times (live incident 2026-08-11). The proof of
+  // a reschedule is evidence predating the row's OWN scheduled_date — an
+  // attempt started on the visit's current scheduled day is that day's
+  // genuine attempt even when this tap lands after midnight (overdue
+  // visits are deliberately allowed above), so it stays on the idempotent
+  // path, as does same-day evidence. No-evidence advanced states are left
   // alone — nothing proves them stale. Never heals complete/cancelled.
-  if (!opts._afterStaleHeal && ['en_route', 'on_property'].includes(svc.track_state)) {
+  const scheduledDayStr = String(
+    svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || ''
+  ).slice(0, 10);
+  if (!opts._afterStaleHeal
+    && ['en_route', 'on_property'].includes(svc.track_state)
+    && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr)) {
     const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time]
       .map((v) => (v ? new Date(v).getTime() : NaN))
       .filter((ms) => Number.isFinite(ms));
-    if (evidenceMs.length && etDateString(new Date(Math.max(...evidenceMs))) < etDateString()) {
+    if (evidenceMs.length && etDateString(new Date(Math.max(...evidenceMs))) < scheduledDayStr) {
       const { LIVE_LIFECYCLE_RESET } = require('./rebooker');
       const healed = await db('scheduled_services')
         .where({ id: serviceId, track_state: svc.track_state })
         .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
       if (healed > 0) {
-        logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates today ET); proceeding with fresh en-route flip`);
+        logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
         return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
       }
       // Lost a race to a concurrent transition — fall through and let the

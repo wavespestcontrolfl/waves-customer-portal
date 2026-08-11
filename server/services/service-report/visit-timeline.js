@@ -264,12 +264,24 @@ function collapseSameTimeTimelineEvents(events = []) {
 // only drops timestamps on the too-early side.
 const MAX_PLAUSIBLE_VISIT_MS = 18 * 60 * 60 * 1000;
 
-function dropStalePreCompletion(timestamp, completedAt) {
-  if (!timestamp || !completedAt) return timestamp;
+function isStalePreCompletion(timestamp, completedAt) {
+  if (!timestamp || !completedAt) return false;
   const tsMs = Date.parse(timestamp);
   const completedMs = Date.parse(completedAt);
-  if (!Number.isFinite(tsMs) || !Number.isFinite(completedMs)) return timestamp;
-  return completedMs - tsMs > MAX_PLAUSIBLE_VISIT_MS ? null : timestamp;
+  if (!Number.isFinite(tsMs) || !Number.isFinite(completedMs)) return false;
+  return completedMs - tsMs > MAX_PLAUSIBLE_VISIT_MS;
+}
+
+// firstValidTimestamp with the staleness check applied PER CANDIDATE: a
+// stale canonical column (e.g. scheduled_services.actual_start_time from
+// the aborted attempt) must not shadow a genuine current-attempt timestamp
+// carried by a later source (structured / serviceData / workflow events).
+function firstPlausibleTimestamp(completedAt, values) {
+  for (const value of values) {
+    const timestamp = validTimestamp(value);
+    if (timestamp && !isStalePreCompletion(timestamp, completedAt)) return timestamp;
+  }
+  return null;
 }
 
 function buildVisitTimeline({
@@ -290,33 +302,6 @@ function buildVisitTimeline({
   const normalizedLine = normalizeTimelineServiceLine(serviceLine || service.service_line, serviceType || service.service_type);
   const completedReport = isCompletedReport({ service, structured, serviceData, workflowEvents });
 
-  const rawEnRouteAt = firstValidTimestamp(
-    service.en_route_at,
-    service.scheduled_en_route_at,
-    scheduledService.en_route_at,
-    structured.enRouteAt,
-    structured.en_route_at,
-    serviceData.enRouteAt,
-    serviceData.en_route_at,
-    workflowEventTimestamp(workflowEvents, 'technician_en_route'),
-  );
-  const rawOnSiteAt = firstValidTimestamp(
-    service.arrived_at,
-    service.actual_start_time,
-    service.check_in_time,
-    service.started_at,
-    service.scheduled_arrived_at,
-    service.scheduled_actual_start_time,
-    service.scheduled_check_in_time,
-    scheduledService.arrived_at,
-    scheduledService.actual_start_time,
-    scheduledService.check_in_time,
-    structured.arrivedAt,
-    structured.arrived_at,
-    serviceData.arrivedAt,
-    serviceData.arrived_at,
-    workflowEventTimestamp(workflowEvents, 'technician_on_site'),
-  );
   const completedAt = firstValidTimestamp(
     service.completed_at,
     service.actual_end_time,
@@ -334,8 +319,33 @@ function buildVisitTimeline({
     serviceData.service_completed_at,
     workflowEventTimestamp(workflowEvents, 'service_completed'),
   );
-  const enRouteAt = dropStalePreCompletion(rawEnRouteAt, completedAt);
-  const onSiteAt = dropStalePreCompletion(rawOnSiteAt, completedAt);
+  const enRouteAt = firstPlausibleTimestamp(completedAt, [
+    service.en_route_at,
+    service.scheduled_en_route_at,
+    scheduledService.en_route_at,
+    structured.enRouteAt,
+    structured.en_route_at,
+    serviceData.enRouteAt,
+    serviceData.en_route_at,
+    workflowEventTimestamp(workflowEvents, 'technician_en_route'),
+  ]);
+  const onSiteAt = firstPlausibleTimestamp(completedAt, [
+    service.arrived_at,
+    service.actual_start_time,
+    service.check_in_time,
+    service.started_at,
+    service.scheduled_arrived_at,
+    service.scheduled_actual_start_time,
+    service.scheduled_check_in_time,
+    scheduledService.arrived_at,
+    scheduledService.actual_start_time,
+    scheduledService.check_in_time,
+    structured.arrivedAt,
+    structured.arrived_at,
+    serviceData.arrivedAt,
+    serviceData.arrived_at,
+    workflowEventTimestamp(workflowEvents, 'technician_on_site'),
+  ]);
   const reportGeneratedAt = firstValidTimestamp(
     service.report_generated_at,
     structured.reportPublishedAt,
