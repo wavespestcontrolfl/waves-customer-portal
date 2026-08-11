@@ -92,15 +92,13 @@ const SCHEMED_PORTAL_RE = new RegExp(
   'i'
 );
 const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app', 'edu', 'gov', 'mil'];
-// No left-boundary class: prose punctuation glued to a link ("See:yelp.com",
-// "[yelp.com]") must not hide it. Substring safety comes from greedy
-// leftmost matching — the maximal dotted host is consumed whole, so the tail
-// of a longer domain is never extracted on its own. The lookahead only has
-// to stop the TLD from matching inside a longer word ("yelp.community").
-const BARE_HOST_RE = new RegExp(
-  `(?:[a-z0-9][a-z0-9-]*\\.)+(?:${BARE_HOST_TLDS.join('|')})(?![a-z0-9-])`,
-  'gi'
-);
+// Generic maximal dotted-host run, no TLD filter and no left-boundary
+// class: prose punctuation glued to a link ("See:yelp.com", "[yelp.com]")
+// must not hide it, and the exemption below must see the COMPLETE hostname
+// — a TLD-anchored match stops at ".com" and would exempt
+// portal.wavespestcontrol.com.evil.xyz as ours. TLD curation happens after
+// extraction.
+const BARE_HOST_RUN_RE = /(?:[a-z0-9][a-z0-9-]*\.)+[a-z0-9][a-z0-9-]*/g;
 
 /** First bare (scheme-less) third-party host in the text, or null. */
 function findBareThirdPartyHost(text) {
@@ -112,10 +110,18 @@ function findBareThirdPartyHost(text) {
   const stripped = String(text || '')
     .replace(/https?:\/\/[^\s,;'"<>()]+/gi, ' ')
     .replace(/[^\s,;'"<>()]+@[^\s,;'"<>()]+/g, ' ');
-  BARE_HOST_RE.lastIndex = 0;
+  BARE_HOST_RUN_RE.lastIndex = 0;
   let m;
-  while ((m = BARE_HOST_RE.exec(stripped)) !== null) {
-    if (!isBareExemptHost(m[0])) return m[0];
+  while ((m = BARE_HOST_RUN_RE.exec(stripped)) !== null) {
+    const host = m[0].toLowerCase();
+    // A host that EXTENDS an owned host is a lookalike, never ours — flag
+    // it regardless of its final TLD.
+    if (SCHEMELESS_SMS_HOSTS.some((h) => host.startsWith(`${h}.`))
+      || host.startsWith('wavespestcontrol.com.')
+      || host.includes('.wavespestcontrol.com.')) return m[0];
+    if (isBareExemptHost(host)) continue;
+    const tld = host.slice(host.lastIndexOf('.') + 1);
+    if (BARE_HOST_TLDS.includes(tld)) return m[0];
   }
   return null;
 }
@@ -196,19 +202,31 @@ const RULES = [
   {
     name: 'no-plan-total',
     // Combined plan totals ("$X/mo" / "$X/yr" / "$X monthly") never appear
-    // in customer copy (owner rule re-affirmed 2026-07-23) — EXCEPT true
-    // monthly-billed legacy plans (the dues figure IS their price),
-    // commercial proposals, and the annual-prepay lane (invoice/prepay
-    // surfaces are exempt: a prepay customer legitimately hears the yearly
-    // total they already paid). Only checkable when the caller can assert
-    // the billing lane (monthlyBilled === false); unknown skips.
+    // in customer copy (owner rule re-affirmed 2026-07-23). The exemptions
+    // are UNIT-SPECIFIC, not lane-wide: a monthly-billed legacy plan may
+    // hear its genuine monthly dues but never a yearly aggregate, and an
+    // annual-prepay customer may hear the yearly total they already paid
+    // but never a fabricated monthly spread. Commercial proposals are
+    // exempt entirely. Only checkable when the caller can assert the
+    // billing lane; unknown skips, never guesses.
     applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial
-      && ctx.monthlyBilled === false && ctx.billingMode !== 'annual_prepay',
-    check: (text) => {
+      && typeof ctx.monthlyBilled === 'boolean',
+    check: (text, ctx) => {
       // Amount: $117 / USD 117 / 117 dollars / 117 bucks. Unit: /mo, "per
       // month", "a year", or the adjectival "monthly"/"yearly"/"annually".
-      const m = text.match(/(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))(?:\s*\/\s*(?:mo|month|yr|year)\b|\s+(?:per|a|each|every)\s+(?:mo|month|yr|year)\b|\s+(?:monthly|yearly|annually)\b)/i);
-      return m ? `quotes a combined plan total "${m[0].trim()}" — plan totals never appear in customer copy (monthly-billed legacy plans exempt)` : null;
+      const re = /(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))(?:\s*\/\s*(mo|month|yr|year)\b|\s+(?:per|a|each|every)\s+(mo|month|yr|year)\b|\s+(monthly|yearly|annually)\b)/gi;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const unit = (m[1] || m[2] || m[3] || '').toLowerCase();
+        const monthlyUnit = unit === 'mo' || unit === 'month' || unit === 'monthly';
+        const allowed = monthlyUnit
+          ? ctx.monthlyBilled === true
+          : ctx.billingMode === 'annual_prepay';
+        if (!allowed) {
+          return `quotes a combined plan total "${m[0].trim()}" — plan totals never appear in customer copy (a lane's own genuine unit exempt)`;
+        }
+      }
+      return null;
     },
   },
   {

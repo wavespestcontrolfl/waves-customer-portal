@@ -139,21 +139,41 @@ describe('lintComms mechanics', () => {
     expect(ok.failures.map((f) => f.rule)).not.toContain('per-application-wording');
   });
 
-  it('flags plan totals only when the lane positively says not-monthly', () => {
-    for (const msg of ['Your plan is $117/mo.', 'That works out to $1,404/yr.', 'It runs $98 per month.', 'The service is $117 monthly.', 'It comes to 117 dollars per month.', 'About $1,404 annually.']) {
-      const fail = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: false });
-      expect(fail.failures.map((f) => f.rule)).toContain('no-plan-total');
-      const monthlyMember = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: true });
-      expect(monthlyMember.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+  it('flags plan totals whenever the lane is known and the unit is not the lane\'s own', () => {
+    const monthlyForms = ['Your plan is $117/mo.', 'It runs $98 per month.', 'The service is $117 monthly.', 'It comes to 117 dollars per month.'];
+    const yearlyForms = ['That works out to $1,404/yr.', 'About $1,404 annually.'];
+    for (const msg of [...monthlyForms, ...yearlyForms]) {
+      const nonMonthly = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: false });
+      expect(nonMonthly.failures.map((f) => f.rule)).toContain('no-plan-total');
       const unknownLane = lintComms(msg, { channel: 'sms', audience: 'customer' });
       expect(unknownLane.checked).not.toContain('no-plan-total');
     }
+    for (const msg of monthlyForms) {
+      const member = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: true });
+      expect(member.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+    }
+    for (const msg of yearlyForms) {
+      const member = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: true });
+      expect(member.failures.map((f) => f.rule)).toContain('no-plan-total');
+    }
   });
 
-  it('exempts the annual-prepay lane from the plan-total rule', () => {
-    const r = lintComms('Your annual prepay is $1,404/yr, already covered.', { channel: 'sms', audience: 'customer', monthlyBilled: false, billingMode: 'annual_prepay' });
-    expect(r.checked).not.toContain('no-plan-total');
-    expect(r.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+  it('plan-total exemptions are unit-specific, not lane-wide', () => {
+    const prepayYearly = lintComms('Your annual prepay is $1,404/yr, already covered.', { channel: 'sms', audience: 'customer', monthlyBilled: false, billingMode: 'annual_prepay' });
+    expect(prepayYearly.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+    const prepayMonthlySpread = lintComms('That works out to $98/mo across the year.', { channel: 'sms', audience: 'customer', monthlyBilled: false, billingMode: 'annual_prepay' });
+    expect(prepayMonthlySpread.failures.map((f) => f.rule)).toContain('no-plan-total');
+    const memberMonthly = lintComms('Your dues are $98.50/mo as always.', { channel: 'sms', audience: 'customer', monthlyBilled: true, billingMode: 'monthly_membership' });
+    expect(memberMonthly.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+    const memberYearlyAggregate = lintComms('That comes to $1,176/yr in total.', { channel: 'sms', audience: 'customer', monthlyBilled: true, billingMode: 'monthly_membership' });
+    expect(memberYearlyAggregate.failures.map((f) => f.rule)).toContain('no-plan-total');
+  });
+
+  it('never exempts a lookalike host that extends an owned host', () => {
+    for (const msg of ['Pay at portal.wavespestcontrol.com.evil.xyz/pay now', 'See portal.wavespestcontrol.com.evil.com for details']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+    }
   });
 
   it('does not read a mid-message reply instruction as a sign-off closer', () => {
