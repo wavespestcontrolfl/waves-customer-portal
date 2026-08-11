@@ -13,6 +13,12 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The real registry snapshots env at module load — re-read it per call so
+// the sticky tests can flip GATE_STICKY_CANCEL_WINDOW in beforeEach.
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((name) => name === 'stickyCancelWindow' && process.env.GATE_STICKY_CANCEL_WINDOW === 'true'),
+  gates: {},
+}));
 
 // No-show fee settlement + recap completion-invoice dependencies (lazy-required).
 const mockInvoiceCreate = jest.fn(async () => ({ id: 'inv1', token: 'tok1' }));

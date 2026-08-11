@@ -903,13 +903,21 @@ function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
 // reason) never stick: WE moved them. Rescheduling itself stays free either
 // way — only the cancel-after-late-reschedule loses its dodge.
 // Kill switch (dark-ship): sticky-window ENFORCEMENT is opt-in per
-// environment — GATE_STICKY_CANCEL_WINDOW, default OFF, same spelling
-// discipline as the money gates. The updated disclosure copy ships live
-// either way: copy stricter than enforcement is the safe direction (a
-// customer who believes the fee applies and gets a free release is never
-// harmed); enforcement stricter than copy never happens while dark.
+// environment — the registered stickyCancelWindow money gate
+// (GATE_STICKY_CANCEL_WINDOW), default OFF, consumed through the central
+// registry so gate-status reporting sees it. Fail closed on a registry
+// read error, mirroring isApptCardFeeRailEnabled. The updated disclosure
+// copy ships live either way: copy stricter than enforcement is the safe
+// direction (a customer who believes the fee applies and gets a free
+// release is never harmed); enforcement stricter than copy never happens
+// while dark.
 function isStickyCancelWindowEnabled() {
-  return process.env.GATE_STICKY_CANCEL_WINDOW === 'true';
+  try {
+    return require('../config/feature-gates').isEnabled('stickyCancelWindow');
+  } catch (err) {
+    logger.warn('[estimate-card-holds] sticky gate read failed — treating as off', { error: err.message });
+    return false;
+  }
 }
 
 // notBefore is the rail's CONSENT anchor (held_at for the card-hold rail,
