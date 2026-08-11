@@ -326,6 +326,11 @@ function TypeBadgeV2({ type }) {
 }
 
 function MessageMediaV2({ media = [], inverted = false }) {
+  // A signed media URL that fails to load (expired signature, offline) left a
+  // blank image box inside the bubble — on an outbound (dark) bubble that
+  // reads as a big empty black rectangle. Swap failed loads for a labeled
+  // chip that still links to the attachment.
+  const [failed, setFailed] = useState({});
   const items = Array.isArray(media) ? media.filter((m) => m?.url) : [];
   if (!items.length) return null;
   return (
@@ -345,12 +350,24 @@ function MessageMediaV2({ media = [], inverted = false }) {
           )}
         >
           {" "}
-          <img
-            src={item.url}
-            alt={item.fileName || `SMS attachment ${idx + 1}`}
-            className="h-28 w-full object-cover"
-            loading="lazy"
-          />{" "}
+          {failed[idx] ? (
+            <span
+              className={cn(
+                "flex items-center justify-center h-12 px-2 text-11",
+                inverted ? "text-white/80" : "text-ink-secondary",
+              )}
+            >
+              {item.fileName || "Attachment"}
+            </span>
+          ) : (
+            <img
+              src={item.url}
+              alt={item.fileName || `SMS attachment ${idx + 1}`}
+              className="h-28 w-full object-cover"
+              loading="lazy"
+              onError={() => setFailed((f) => ({ ...f, [idx]: true }))}
+            />
+          )}{" "}
         </a>
       ))}
     </div>
@@ -552,7 +569,9 @@ function ConversationViewV2({
               >
                 {" "}
                 <div className="text-13 leading-normal whitespace-pre-wrap break-words">
-                  {m.body ||
+                  {/* trim: a whitespace-only body (stray newlines) rendered as
+                      a giant empty bubble under whitespace-pre-wrap */}
+                  {(typeof m.body === "string" ? m.body.trim() : "") ||
                     (Array.isArray(m.media) && m.media.length ? "Photo" : "")}
                 </div>{" "}
                 <MessageMediaV2 media={m.media} inverted={isOut} />{" "}
