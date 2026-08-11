@@ -1933,9 +1933,6 @@ async function cancelAppointment(input) {
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
     }
-    if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-      return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
-    }
     throw err;
   }
 

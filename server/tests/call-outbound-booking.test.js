@@ -16,7 +16,6 @@ const {
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('../services/call-booking-source-actions');
-const { transitionJobStatus } = require('../services/job-status');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
@@ -68,25 +67,6 @@ describe('outbound review booking — originating lead carried on the card', () 
     const payload = JSON.parse(item.payload);
     expect(payload.lead_id).toBe('lead-9');
     expect(payload.keep_open_for_quote).toBe(true);
-  });
-});
-
-describe('transitionJobStatus — review-booking guard is a typed conflict', () => {
-  test('blocking a day-of transition on a pending review row throws OUTBOUND_REVIEW_UNCONFIRMED (not a bare Error)', async () => {
-    // tech-track / dispatch / admin-schedule allow 'pending' as a source
-    // status and translate this code to a 409 — a bare Error was a 500.
-    const chain = {
-      where: jest.fn(() => chain),
-      first: jest.fn(async () => ({
-        source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
-        status: 'pending',
-        customer_confirmed: false,
-      })),
-    };
-    const trx = jest.fn(() => chain);
-    await expect(
-      transitionJobStatus({ jobId: 'svc1', fromStatus: 'pending', toStatus: 'en_route', trx }),
-    ).rejects.toMatchObject({ code: 'OUTBOUND_REVIEW_UNCONFIRMED' });
   });
 });
 

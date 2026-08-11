@@ -12002,7 +12002,7 @@ const CallRecordingProcessor = {
             // Pending outbound booking — never auto-text a "confirmed" appt the
             // customer hasn't been re-confirmed on. Keep scheduledServiceId so
             // the downstream audit doesn't treat this as a skipped booking.
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound-callback booking (no auto-text at booking)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
