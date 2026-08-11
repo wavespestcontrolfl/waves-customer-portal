@@ -11943,14 +11943,37 @@ const CallRecordingProcessor = {
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
+          } else if (scheduledServiceId) {
+            // No call-level SMS clearance (TCPA gate blocked, or the
+            // implied-consent leg is held): the funnel's NON-messaging side
+            // still matters — a consented saved card auto-secures before any
+            // text (appointment-card-request step 2), and the ask itself
+            // rides the funnel's canonical send path, which enforces STORED
+            // consent + suppression — the same bare call the office-confirm
+            // hook makes (Codex #3361 P1). Deliberately NO
+            // call_sms_cleared_at stamp and NO call-recipient override:
+            // call-level clearance was not given, so the stamp the pre-visit
+            // backstop keys on must not assert it.
+            try {
+              const { requestCardForAppointment } = require('./appointment-card-request');
+              await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline' });
+            } catch (cardErr) {
+              logger.warn(`[call-proc] card-request funnel (stored-consent path) failed for visit ${scheduledServiceId}: ${cardErr.message}`);
+            }
           }
-          // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && v2SmsBlocked) {
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            // Keep scheduledServiceId (same rule as the outbound branch
-            // above): the schedule row EXISTS — dropping the id made the
-            // downstream approved-but-unbooked audit read this as a skipped
-            // booking, and starves the assessment pre-draft hook.
+          // Only send the confirmation if the schedule row landed. A
+          // v2-TCPA-blocked call (SMS consent not captured) still routes
+          // through the channel-aware delivery below with its SMS leg HELD —
+          // an email/both-preference customer keeps the email confirmation
+          // (AGENTS: TCPA consent before any SMS, email fallback; Codex
+          // #3361 P1). Default-'sms' customers stay silent exactly as
+          // before. Only full do-not-contact (email blocked too) skips
+          // entirely — keeping scheduledServiceId either way: the schedule
+          // row EXISTS, and dropping the id made the downstream
+          // approved-but-unbooked audit read this as a skipped booking,
+          // starving the assessment pre-draft hook.
+          if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
+            logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (!scheduleWasReused) {
@@ -12040,11 +12063,20 @@ const CallRecordingProcessor = {
                 smsAttempt: async () => {
                   smsRan = true;
                   let confirmationRearmed = false;
-                  // SMS leg held (implied consent, no consented recipient):
-                  // skip only the primary text — the channel email leg and
-                  // the gated fan-out/email-only legs below still run.
-                  const sendResult = holdImpliedSmsLeg
-                    ? { sent: false, blocked: true, code: 'implied_consent_non_ani_recipient' }
+                  // SMS leg held (implied consent with no consented
+                  // recipient, or the v2 TCPA gate blocked SMS): skip only
+                  // the primary text — the channel email leg and the gated
+                  // fan-out/email-only legs below still run (their own
+                  // consent gates: explicit-consent for SMS fan-out,
+                  // v2EmailBlocked for the email slots). The held codes
+                  // never match QUIET_HOURS_HOLD, so the 8 AM sweep re-arm
+                  // below cannot resurrect a consentless text.
+                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
+                    ? {
+                      sent: false,
+                      blocked: true,
+                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : 'v2_tcpa_gate',
+                    }
                     : await sendCustomerMessage({
                       to: smsRecipient,
                       body: smsBody,

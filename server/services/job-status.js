@@ -317,8 +317,54 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   let cancelNoticeLateClaim = false;
   let cancelNoticeCallerClaim = false;
   let cancelNoticeOutboxTs = null;
+  // Set inside doWrites when this transition lazily activated a legacy
+  // outbound-review row; read by the post-commit hook runner.
+  let legacyOutboundActivationRow = null;
 
   async function doWrites(t) {
+    // Legacy outbound-review rows (created PENDING before the 2026-08-11
+    // review-hold removal, PR #3361) activate lazily on their first live
+    // transition: the hold used to force an office confirm that armed
+    // reminders, converted the originating lead, and resolved the review
+    // card — with the guard gone, a straight pending → en_route/completed
+    // flip would silently skip all of it and strand the row half-armed
+    // (Codex #3361 P0). customer_confirmed is stamped in THIS trx; the
+    // confirm side effects run post-commit. The dispatch/schedule confirm
+    // routes stamp customer_confirmed themselves before calling this
+    // writer (same trx), so those paths skip here and keep their own hook
+    // call — no double run. Cancel/skip stay pure rejections.
+    if (!['cancelled', 'skipped'].includes(String(toStatus || '')) && String(fromStatus) === 'pending') {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      const legacyRow = await t('scheduled_services')
+        .where({ id: jobId })
+        .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
+          'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
+          'is_callback', 'estimated_price');
+      if (legacyRow
+        && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && legacyRow.status === 'pending'
+        && !legacyRow.customer_confirmed) {
+        await t('scheduled_services')
+          .where({ id: jobId })
+          .update({ customer_confirmed: true, confirmed_at: new Date() });
+        // Booking evidence commits WITH the activation, same rule as the
+        // office-confirm branch below (Codex #3178 r33) — best-effort,
+        // the hook's idempotent marker call is the belt.
+        try {
+          if (legacyRow.customer_id) {
+            await require('./inspection-credit').markBookingForInspectionCredit(t, {
+              customerId: legacyRow.customer_id,
+              scheduledServiceId: jobId,
+              source: 'phone_call',
+            });
+          }
+        } catch (evidenceErr) {
+          logger.warn(`[job-status] legacy outbound activation credit evidence failed for ${jobId}: ${evidenceErr.message}`);
+        }
+        legacyOutboundActivationRow = legacyRow;
+      }
+    }
+
     // Atomic guard: only update if the row is currently in fromStatus.
     // 0-row update means a racing transition already advanced past it
     // (or fromStatus is wrong). Either way, we abort — the audit log
@@ -726,6 +772,25 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     })();
   }
 
+  function processLegacyOutboundActivation() {
+    // Post-commit, fire-and-forget: the transition already committed, and
+    // every hook leg is internally best-effort (log + continue) — a failed
+    // side effect must never unwind the status flip. Idempotent legs
+    // (reminder registration dedupes, lead conversion is ownership-
+    // guarded, the card update no-ops when already resolved), so a
+    // reprocessed transition re-runs safely.
+    if (!legacyOutboundActivationRow) return;
+    const activated = legacyOutboundActivationRow;
+    void (async () => {
+      try {
+        const { runOutboundReviewConfirmHook } = require('./outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, activated, 'job-status-legacy-activation');
+      } catch (e) {
+        logger.warn(`[job-status] legacy outbound activation hook failed for ${activated.id}: ${e.message}`);
+      }
+    })();
+  }
+
   function maybeReparkFollowupObligation() {
     // Cancelling/skipping/no-showing a completion-linked follow-up child
     // resurfaces the source visit's owed follow-up as a fresh dispatch
@@ -781,6 +846,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
           processCancelNoticeClaim();
+          processLegacyOutboundActivation();
         })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
@@ -805,6 +871,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
   processCancelNoticeClaim();
+  processLegacyOutboundActivation();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,
