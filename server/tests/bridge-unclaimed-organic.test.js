@@ -194,7 +194,7 @@ describe('scheduler wiring', () => {
     // bridge scan is mid-claim, and a deploy-overlap instance skips the pair
     // atomically — never the fallback without the bridge.
     expect(src).toMatch(/runExclusive\('google-call-bridge-organic'/);
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 7000);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
     const bridgeIdx = block.indexOf('applyBridge');
     const sweepIdx = block.indexOf('attributeUnclaimedBridgeLeads');
     expect(bridgeIdx).toBeGreaterThan(-1);
@@ -208,7 +208,7 @@ describe('scheduler wiring', () => {
   });
 
   test('fallback requires a COMPLETE healthy bridge pass — outage, row cap, or write failure blocks it', () => {
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 7000);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
     expect(block).toMatch(/bridgeBlockedReason = 'scan_failed'/);
     expect(block).toMatch(/bridgeBlockedReason = 'row_cap_hit'/);
     expect(block).toMatch(/bridgeBlockedReason = 'bridge_write_failed'/);

@@ -1519,10 +1519,106 @@ function isBridgeTargetNumber(phone) {
   } catch { return false; }
 }
 
+// ---------------------------------------------------------------------------
+// Persisted ambiguity records (owner ruling 2026-08-11, closing the GH-r24
+// P1 on PR #3303). The day's ambiguous candidate set used to be the ONLY
+// record of ambiguity, rebuilt each morning from the fixed 30-day scan —
+// the day a candidate aged past the window the exclusion evaporated and the
+// organic sweep stamped its lead with the irreversible organic label. These
+// three functions make the hold durable: record on every scan, resolve only
+// on POSITIVE evidence, and feed the organic exclusions from ALL open rows.
+// ---------------------------------------------------------------------------
+
+// Upsert the day's ambiguous candidate calls. A repeat refreshes
+// last_seen_at; a candidate that was previously RESOLVED re-opens — today's
+// scan saying "ambiguous" supersedes any older resolution.
+async function recordAmbiguousBridgeCalls(candidates = []) {
+  const byId = new Map();
+  for (const c of candidates) {
+    if (!c?.id) continue;
+    if (!byId.has(String(c.id))) {
+      byId.set(String(c.id), {
+        call_log_id: c.id,
+        twilio_call_sid: c.twilioCallSid || null,
+      });
+    }
+  }
+  const rows = [...byId.values()];
+  if (!rows.length) return 0;
+  await db('bridge_ambiguous_calls')
+    .insert(rows)
+    .onConflict('call_log_id')
+    .merge({ last_seen_at: db.fn.now(), resolved_at: null, resolve_reason: null });
+  return rows.length;
+}
+
+// Resolve open records on POSITIVE evidence only — never on absence from an
+// aged-out scan (that non-evidence is exactly the bug the table closes):
+//   'bridged'      — the call now carries google_ads_call_resource_name (a
+//                    durable paid claim on the call row itself); safe to
+//                    resolve even on a degraded scan day.
+//   'rescan_clear' — a TRUSTED scan (healthy, uncapped, writes landed) that
+//                    still COVERS the call's date no longer reports it
+//                    ambiguous. The caller passes the coverage boundary with
+//                    its own safety margin; calls older than it are never
+//                    rescan-cleared and wait for 'bridged' or hold forever —
+//                    the owner chose a permanent hold over a silent wrong
+//                    paid/organic label.
+async function resolveAmbiguousBridgeCalls({ ambiguousCallIds = [], scanWindowStart, rescanTrusted = false } = {}) {
+  const bridgedIds = (await db('bridge_ambiguous_calls as bac')
+    .join('call_log as cl', 'cl.id', 'bac.call_log_id')
+    .whereNull('bac.resolved_at')
+    .whereNotNull('cl.google_ads_call_resource_name')
+    .select('bac.call_log_id')).map((r) => r.call_log_id);
+  if (bridgedIds.length) {
+    await db('bridge_ambiguous_calls')
+      .whereIn('call_log_id', bridgedIds)
+      .whereNull('resolved_at')
+      .update({ resolved_at: db.fn.now(), resolve_reason: 'bridged' });
+  }
+  let rescanIds = [];
+  if (rescanTrusted && scanWindowStart) {
+    rescanIds = (await db('bridge_ambiguous_calls as bac')
+      .join('call_log as cl', 'cl.id', 'bac.call_log_id')
+      .whereNull('bac.resolved_at')
+      .where('cl.created_at', '>=', scanWindowStart)
+      .modify((qb) => {
+        if (ambiguousCallIds.length) qb.whereNotIn('bac.call_log_id', ambiguousCallIds);
+      })
+      .select('bac.call_log_id')).map((r) => r.call_log_id);
+    if (rescanIds.length) {
+      await db('bridge_ambiguous_calls')
+        .whereIn('call_log_id', rescanIds)
+        .whereNull('resolved_at')
+        .update({ resolved_at: db.fn.now(), resolve_reason: 'rescan_clear' });
+    }
+  }
+  if (bridgedIds.length || rescanIds.length) {
+    logger.info(`[bridge-ambiguity] resolved ${bridgedIds.length} bridged, ${rescanIds.length} rescan-cleared`);
+  }
+  return { bridged: bridgedIds.length, rescanCleared: rescanIds.length };
+}
+
+// ALL open records, shaped for attributeUnclaimedBridgeLeads' exclusion
+// parameters. Reading the table (not the day's scan) is the point: the hold
+// survives the scan window.
+async function openAmbiguousCallExclusions() {
+  const open = await db('bridge_ambiguous_calls')
+    .whereNull('resolved_at')
+    .select('call_log_id', 'twilio_call_sid');
+  return {
+    excludeCallIds: [...new Set(open.map((r) => String(r.call_log_id)))],
+    excludeCallSids: [...new Set(open.map((r) => r.twilio_call_sid).filter(Boolean))],
+  };
+}
+
 module.exports = {
   previewBridge,
   applyBridge,
   isBridgeTargetNumber,
+  recordAmbiguousBridgeCalls,
+  resolveAmbiguousBridgeCalls,
+  openAmbiguousCallExclusions,
   _private: {
     areaCode,
     attributeResolvedLead,

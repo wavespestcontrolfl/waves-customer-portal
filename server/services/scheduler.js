@@ -3887,7 +3887,8 @@ function initScheduledJobs() {
             // Both sides are bounded by design — warn if either hits the cap (older
             // calls would go unbridged and need pagination, a wider refactor that's
             // unwarranted today at ~0 Google-Ads-driven calls).
-            const r = await callBridge.applyBridge({ days: 30, limit: 500 });
+            const bridgeScanDays = 30;
+            const r = await callBridge.applyBridge({ days: bridgeScanDays, limit: 500 });
             const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
             if (capHit) {
               logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
@@ -3917,9 +3918,24 @@ function initScheduledJobs() {
                 ? m.ambiguousCandidates
                 : [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)]))
               .filter(Boolean);
-            const ambiguousExcludeSids = [...new Set(ambiguousCalls.map((c) => c.twilioCallSid).filter(Boolean))];
             const ambiguousExcludeCallIds = [...new Set(ambiguousCalls.map((c) => c.id).filter(Boolean))];
-            organicExclusions = { excludeCallSids: ambiguousExcludeSids, excludeCallIds: ambiguousExcludeCallIds };
+            // PERSISTED ambiguity (owner ruling 2026-08-11, GH-r24 P1): the
+            // day's set alone forgot any candidate that aged past the scan
+            // window, and the organic sweep has no upper bound — the lead
+            // then took the irreversible organic label with the ambiguity
+            // never resolved. Record today's candidates, resolve only on
+            // POSITIVE evidence, and feed the sweep from ALL open records.
+            // A failure in any of these throws to bridgePairError, which
+            // also skips the organic sweep — fail closed, never sweep with
+            // a partial exclusion set. rescan_clear needs a TRUSTED scan
+            // (no outage/cap/write failure) and only covers calls the scan
+            // window still reaches, minus a one-day boundary margin.
+            await callBridge.recordAmbiguousBridgeCalls(ambiguousCalls);
+            await callBridge.resolveAmbiguousBridgeCalls({
+              ambiguousCallIds: ambiguousExcludeCallIds,
+              scanWindowStart: new Date(Date.now() - (bridgeScanDays - 1) * 24 * 60 * 60 * 1000),
+              rescanTrusted: !r.scanFailed && !capHit && !writeFailed,
+            });
             if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
             else if (capHit) bridgeBlockedReason = 'row_cap_hit';
             else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
@@ -3940,6 +3956,13 @@ function initScheduledJobs() {
             // be claimed) opts in with BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED=true.
             bridgeBlockedReason = 'google_ads_unconfigured';
           }
+
+          // ALL OPEN persisted ambiguity holds, on EVERY sweep path — the
+          // unconfigured-with-opt-in branch runs no scan, but records from
+          // before a teardown must still hold their leads. A read failure
+          // throws to bridgePairError, which also skips the sweep: never
+          // sweep with a partial exclusion set.
+          organicExclusions = await require('./ads/google-call-bridge').openAmbiguousCallExclusions();
 
           // AFTER the bridge has had the day's claim: unclaimed bridge-target
           // leads older than the window become organic. Any doubt about the
