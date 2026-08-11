@@ -143,6 +143,33 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(companionConflicted.combos).toEqual([]);
   });
 
+  test('a conflicted termite-bait count declines the bait+bond combine — no count-less synthetic row (Codex r15 P1)', () => {
+    // The bait+bond route combines on cadence alone; with the conflicted
+    // count nulled (r12) the synthetic row would carry NO count and the
+    // termite seeding gate (exactly 4) would degrade the sold quarterly
+    // series to a parent-only appointment. Declined, both rows keep their
+    // pre-existing standalone semantics.
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4, visits: 2 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+    // A conflicted BOND companion declines the same way.
+    const bondConflicted = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr', visitsPerYear: 4, visits: 2 },
+    ]);
+    expect(bondConflicted.combos).toEqual([]);
+    expect(bondConflicted.remaining).toHaveLength(2);
+    // Clean counts still combine (control).
+    const clean = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(clean.combos).toHaveLength(1);
+  });
+
   test('conflicting pest counts on an accepted-frequency combo: combine stands, count never rides (Codex r12 P1)', () => {
     // Pest primaries ride the ACCEPTED plan cadence (stale-debris doctrine),
     // so a contested count set doesn't block the combo — but it must not be

@@ -427,6 +427,19 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const primary = remaining[primaryIdx];
     const companion = companionIdx !== -1 ? remaining[companionIdx] : companionFromSupplement;
     if (!companion) continue;
+    // Conflicted source counts decline the combine on LINE-RESOLVED routes
+    // (codex r15 P1): nulling the count below (r12) is enough for the lawn
+    // route (requireVisitsMatch refuses), but the bait+bond route combines
+    // on cadence alone and its synthetic row then carries NO count — the
+    // termite seeding gate requires exactly 4 visits, so a sold quarterly
+    // series would silently degrade to a parent-only appointment. Declined,
+    // the rows schedule standalone with their pre-existing per-line
+    // semantics. Accept-frequency pest routes keep combining: the accepted
+    // plan cadence is the truth there (stale-debris doctrine) and the pest
+    // seeding gate tolerates the missing count.
+    const acceptResolvedPrimary = route.primaryUsesAcceptFrequency && acceptPattern;
+    if (!acceptResolvedPrimary
+      && (visitCountFieldsConflict(primary) || visitCountFieldsConflict(companion))) continue;
     // Cadence resolution is role-aware:
     //  - PEST PRIMARY (primaryUsesAcceptFrequency): the ACCEPTED plan
     //    selection wins — it is the customer's FINAL visit-cadence choice,
