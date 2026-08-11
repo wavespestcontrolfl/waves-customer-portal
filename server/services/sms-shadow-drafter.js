@@ -942,6 +942,32 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       schedulingIntent,
     });
 
+    // Deterministic comms-lint verdict for this draft, computed once and
+    // used twice: recorded as flags on every row, and consulted before the
+    // autonomous rung below. These drafts are replies on an existing
+    // customer thread — the transactional class under the #3343 STOP-line
+    // ruling — so stopExpected is a known false, never a guess. The
+    // commercial exemption is deliberately NOT asserted here: it covers
+    // commercial PROPOSAL surfaces (AGENTS.md), and an SMS thread reply is
+    // never a proposal — a commercial account's per-visit contract wording
+    // demotes to the human card rather than riding the autonomous rung
+    // (owner may widen this; see PR #3348 discussion).
+    const commsLint = require('./comms-lint');
+    // Billing lane comes from the aggregator's authoritative field: monthly
+    // members legitimately hear their "/mo" dues, so the plan-total rule
+    // only arms when the lane POSITIVELY says not-monthly. An absent lane
+    // (caller predates the aggregator) is unknown — the rule skips.
+    const billingLane = context?.customer?.billingLane;
+    const lint = commsLint.lintComms(parsed.reply, {
+      channel: 'sms',
+      audience: 'customer',
+      stopExpected: false,
+      monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
+      // The plan-total rule exempts the annual-prepay lane (prepay messages
+      // legitimately state the yearly total already paid).
+      billingMode: billingLane?.mode,
+    });
+
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
     // with the decision insert inside publishSuggestion's locked
     // transaction. A crash between this insert and the publish leaves a
@@ -956,7 +982,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         intent: intentName,
         intent_confidence: intent?.confidence ?? null,
         context_summary: context.summary || null,
-        flags: JSON.stringify(context.flags || []),
+        // Account flags from context, plus comms-lint failures on the draft
+        // itself. Advisory on every human-reviewed surface (cohort readouts,
+        // the composer card); the autonomous rung below additionally requires
+        // a clean verdict before auto-sending.
+        flags: JSON.stringify([
+          ...(context.flags || []),
+          ...commsLint.toFlags(lint),
+        ]),
         status: SHADOW_STATUS,
         drafter: DRAFTER,
         model: draftModel,
@@ -1054,7 +1087,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
     if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount) {
-      if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+      if (deliveryMode === suggestMode.AUTO_SEND_MODE && lint.pass) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
           customer,
@@ -1104,23 +1137,62 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               confidence: intent?.confidence ?? null,
               model: draftModel,
               promptVersion: PROMPT_VERSION,
+              lintFailures: lint.failures,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
         }
-      } else if (deliveryMode === 'suggest') {
-        const decisionId = await suggestMode.publishSuggestion({
-          draftId: row.id,
-          customerId: customer.id,
-          smsLogId,
-          inboundMessage,
-          reply: parsed.reply,
-          intent: intentName,
-          confidence: intent?.confidence ?? null,
-          model: draftModel,
-          promptVersion: PROMPT_VERSION,
-        });
-        if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+      } else if (deliveryMode === 'suggest'
+          || (deliveryMode === suggestMode.AUTO_SEND_MODE && require('../config/feature-gates').isEnabled('smsSuggestMode'))) {
+        // suggest mode, or an auto-send-mode draft the deterministic lint
+        // harness flagged: a flagged draft never rides the autonomous rung —
+        // it fails closed to the human composer card (same autonomy boundary
+        // as the placeholder and ungrounded-amount withholds), where the
+        // recorded flags are visible to the reviewer. The demotion checks the
+        // suggest gate at publication time: with it off, the agent-draft
+        // route hides this workflow, and a published card nobody can see
+        // would pull the draft out of the judge pool for nothing.
+        let publishDemotedCard = true;
+        if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+          // Same race guard as the auto-send fallback above: an admin may
+          // have demoted the intent (or a gate flipped) while this draft
+          // generated — re-resolve before the lint demotion publishes a
+          // card the intent no longer wants. A now-shadow intent stays
+          // silent shadow (the judge pool keeps the draft).
+          const freshMode = await suggestMode.resolveDeliveryMode({
+            reply: parsed.reply,
+            customerId: customer?.id || null,
+            smsLogId: smsLogId || null,
+            intent: intentName,
+            schedulingIntent,
+          });
+          publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
+          if (publishDemotedCard) {
+            logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) — auto-send demoted to composer card (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+          } else {
+            logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) but intent re-resolved to ${freshMode} — draft kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+          }
+        }
+        if (publishDemotedCard) {
+          const decisionId = await suggestMode.publishSuggestion({
+            draftId: row.id,
+            customerId: customer.id,
+            smsLogId,
+            inboundMessage,
+            reply: parsed.reply,
+            intent: intentName,
+            confidence: intent?.confidence ?? null,
+            model: draftModel,
+            promptVersion: PROMPT_VERSION,
+            lintFailures: lint.failures,
+          });
+          if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+        }
+      } else if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+        // Lint-failed auto-send draft with the suggest gate OFF: stay
+        // shadow (judge pool keeps it) rather than publishing a card the
+        // composer would hide — fail closed, never into a void.
+        logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) and suggest gate is off — draft kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
       }
     }
 

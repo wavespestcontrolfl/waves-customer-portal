@@ -54,6 +54,19 @@ const prefsSchema = Joi.object({
   ).allow(null),
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
+  // Same seven keys the pills emit. A length-only check would persist
+  // "Monday" with a 200, and both the portal summary and mowingAlertText
+  // filter against the canonical keys — so the day would silently vanish
+  // from the customer's view AND the technician's alert.
+  mowingDays: Joi.array()
+    .items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'))
+    .unique()
+    .max(7),
+  // Controlled vocabulary, not free text: the column is varchar(30), so a
+  // longer value would turn a client mistake into a Postgres 22001 → 500.
+  // The four keys mirror the portal's Typical Time pills.
+  mowingTimeOfDay: Joi.string().trim().valid('', 'morning', 'midday', 'afternoon', 'varies').allow(null),
+  mowingNotes: longText,
   hoaName: shortText,
   hoaRestrictions: longText,
   hoaCompany: shortText,
@@ -76,6 +89,7 @@ const ALLOWED_FIELDS = [
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
   'irrigation_inches_per_week', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_issues',
+  'mowing_days', 'mowing_time_of_day', 'mowing_notes',
   'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
   'hoa_lawn_height', 'hoa_signage_rules', 'hoa_timing_restrictions',
   'hoa_inspection_period',
@@ -93,6 +107,8 @@ const CUSTOMER_EMAIL_FIELDS = {
   watering_days: 'Watering days',
   irrigation_system_type: 'Irrigation system type',
   rain_sensor: 'Rain sensor',
+  mowing_days: 'Mowing days',
+  mowing_time_of_day: 'Mowing time of day',
 };
 
 function displayPrefValue(value) {
@@ -167,6 +183,7 @@ router.get('/preferences', async (req, res, next) => {
           irrigationInchesPerWeek: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationIssues: '',
+          mowingDays: [], mowingTimeOfDay: '', mowingNotes: '',
           hoaName: '', hoaRestrictions: '', hoaCompany: '', hoaPhone: '', hoaEmail: '',
           hoaLawnHeight: '', hoaSignageRules: '', hoaTimingRestrictions: '',
           hoaInspectionPeriod: '',
@@ -179,7 +196,7 @@ router.get('/preferences', async (req, res, next) => {
     // Convert snake_case DB columns to camelCase for frontend
     const { id, customer_id, created_at, ...fields } = prefs;
     // Parse JSON fields
-    const JSON_COLS = ['watering_days', 'pets_structured', 'irrigation_system_type'];
+    const JSON_COLS = ['watering_days', 'pets_structured', 'irrigation_system_type', 'mowing_days'];
     for (const jc of JSON_COLS) {
       if (fields[jc] && typeof fields[jc] === 'string') {
         try {
@@ -228,7 +245,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     // Stringify JSON fields for DB storage
-    const JSON_FIELDS = ['watering_days', 'pets_structured', 'irrigation_system_type'];
+    const JSON_FIELDS = ['watering_days', 'pets_structured', 'irrigation_system_type', 'mowing_days'];
     for (const jf of JSON_FIELDS) {
       if (jf in updates && typeof updates[jf] !== 'string') {
         updates[jf] = JSON.stringify(updates[jf]);

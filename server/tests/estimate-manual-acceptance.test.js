@@ -76,6 +76,10 @@ function makeDb(estimate, claimedOverrides = null) {
       statusList: null,
       rawClause: null,
       where(clause) {
+        // Grouped predicates (function form — e.g. the engine-draft
+        // quarantine guard) are not tracked; the pins assert the object
+        // clause that names the row.
+        if (typeof clause === 'function') return this;
         this.clause = clause;
         return this;
       },
@@ -89,6 +93,9 @@ function makeDb(estimate, claimedOverrides = null) {
       },
       whereRaw(clause) {
         this.rawClause = clause;
+        return this;
+      },
+      forUpdate() {
         return this;
       },
       first: async () => {
@@ -133,6 +140,30 @@ function makeDb(estimate, claimedOverrides = null) {
 describe('estimate manual acceptance', () => {
   beforeEach(() => {
     AccountMembershipEmail.sendMembershipStarted.mockClear();
+  });
+
+  test('the call-side verdict is re-checked INSIDE the money-bearing transaction (PR #3304)', async () => {
+    // Engine-drafted estimate whose call row cannot be re-verified: the
+    // in-transaction guard fails closed with the same 409 the admin route
+    // uses. The route-level check never ran in this direct service call —
+    // proving the guard lives inside markEstimateManuallyAccepted itself,
+    // where a verdict landing after the route's pre-check is still caught.
+    const estimate = {
+      id: 'estimate-1',
+      status: 'viewed',
+      customer_id: null,
+      sent_at: '2026-05-10T12:00:00.000Z',
+      monthly_total: '125.00',
+      estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }),
+    };
+    const { database } = makeDb(estimate);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: 'estimate-1',
+      adminUserId: 'admin-1',
+      source: 'verbal_yes',
+      database,
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
 
   test('stamps accepted_at, clears lost metadata, and runs won hooks', async () => {

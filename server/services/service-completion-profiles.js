@@ -243,6 +243,35 @@ function serviceNameCandidates(serviceType) {
   return expanded;
 }
 
+// Reload the identity evidence a caller's projection omitted (codex #3334 r4
+// P1). Callers build their own `scheduled_services` projections all over the
+// codebase (pest-recap, one-time-exclusion, trace-eligibility, the dispatch
+// list views…), so making the safe path DEPEND on fields they may not have
+// selected silently downgrades them to label-only matching — the recap path can
+// even freeze a null key permanently. Migrating the three call sites named in
+// review would fix those three and leave the next one broken; reloading here
+// fixes every caller, present and future.
+//
+// `undefined` means NOT SELECTED. `null` means selected-and-empty, which is
+// real evidence of absence and must NOT trigger a reload.
+//
+// Called ONLY on the slow path — after service_id and exact-name matching have
+// both missed — so the hot path (dispatch list views resolving many visits)
+// pays nothing.
+async function reloadIdentityEvidence(scheduledService, knex) {
+  const needsSnapshot = scheduledService.service_key_snapshot === undefined;
+  const needsRecurring = scheduledService.is_recurring === undefined;
+  if (!scheduledService.id || (!needsSnapshot && !needsRecurring)) return scheduledService;
+  try {
+    const reloaded = await knex('scheduled_services')
+      .where({ id: scheduledService.id })
+      .first('service_key_snapshot', 'is_recurring');
+    return reloaded ? { ...scheduledService, ...reloaded } : scheduledService;
+  } catch (err) {
+    return scheduledService;
+  }
+}
+
 async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
   if (!scheduledService) return null;
   if (scheduledService.service_id) {
@@ -250,6 +279,20 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
       .where({ id: scheduledService.service_id })
       .first('service_key', 'name', 'category', 'billing_type');
     if (byId) return byId;
+  }
+
+  // DURABLE ROW EVIDENCE, ahead of any label matching (codex #3334 r2 P1).
+  // `service_key_snapshot` names the exact catalog key the row was stamped
+  // with, so it settles the identity outright — including the legitimate
+  // `lawn_care_one_time` / `mosquito_one_time` visits whose LABEL is the
+  // ambiguous abbreviation and which would otherwise fail closed below and
+  // lose their one-time invoice and typed form. Present on ~38% of visits.
+  const snapshotKey = String(scheduledService.service_key_snapshot || '').trim();
+  if (snapshotKey) {
+    const bySnapshot = await knex('services')
+      .where({ service_key: snapshotKey })
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (bySnapshot) return bySnapshot;
   }
 
   const serviceType = String(scheduledService.service_type || scheduledService.serviceType || '').trim();
@@ -263,11 +306,76 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
     if (exact) return exact;
   }
 
-  const shortName = await knex('services')
-    .whereRaw('lower(short_name) = lower(?)', [serviceType])
-    .first('service_key', 'name', 'category', 'billing_type')
-    .catch(() => null);
-  if (shortName) return shortName;
+  // SLOW PATH ONLY. service_id and the exact name have both missed, so this is
+  // the ambiguous-abbreviation population — the one that loses its identity
+  // without evidence. Reload what the caller's projection left out, then retry
+  // the snapshot with it. Costs one query, and only for rows that would
+  // otherwise fail closed.
+  const row = await reloadIdentityEvidence(scheduledService, knex);
+  const reloadedSnapshotKey = String(row.service_key_snapshot || '').trim();
+  if (reloadedSnapshotKey && reloadedSnapshotKey !== snapshotKey) {
+    const bySnapshot = await knex('services')
+      .where({ service_key: reloadedSnapshotKey })
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (bySnapshot) return bySnapshot;
+  }
+
+  // short_name is a DISPLAY abbreviation with no uniqueness constraint, and the
+  // live catalog really does share it across services that behave differently:
+  // "Lawn Care" is carried by FIVE active rows (lawn_care_quarterly / _recurring
+  // / _6week / _monthly — all recurring — plus lawn_care_one_time), and
+  // "Mosquito" by two (mosquito_monthly recurring + mosquito_one_time).
+  //
+  // An unordered `.first()` therefore picked NONDETERMINISTICALLY among them.
+  // It happens to return a recurring row today only because of physical heap
+  // order — which an ordinary admin edit in the Service Library rewrites. If
+  // lawn_care_one_time ever surfaced first, every visit labelled "Lawn Care"
+  // would resolve billing_type 'one_time' ⇒ typedOneTimeBilling TRUE ⇒
+  // shouldAutoInvoiceCompletion mints a completion invoice for a RECURRING lawn
+  // customer whose plan already covers the visit (and swaps the visit onto the
+  // typed one_time_lawn_treatment form and token_only portal visibility).
+  //
+  // So an ambiguous abbreviation resolves NOTHING. The caller falls back to the
+  // generic service-report profile, which is what an unmatched label already
+  // does — never a coin flip between a recurring and a one-time identity, where
+  // one side bills the customer. Same fail-closed rule the accept-path catalog
+  // lookup uses for duplicate engine keys (#3328 r3).
+  // try/catch rather than `.catch()` ON THE BUILDER: a rejected query and a
+  // builder that never returns a thenable are different failures, and only the
+  // first has a `.catch`. Guarding with Array.isArray keeps a non-array result
+  // on the fail-closed side instead of reading `.length` off whatever came back.
+  let shortNameMatches = [];
+  try {
+    // NO LIMIT (codex #3334 r3 P1): an unordered limit cannot prove it fetched
+    // the whole collision set, so narrowing could leave exactly one row and
+    // return it while another matching identity sat outside the window —
+    // resolving an identity that was never actually unique. The predicate is an
+    // equality match on one column of a ~100-row catalog, so the full set is
+    // both cheap and the only correct basis for a uniqueness decision.
+    shortNameMatches = await knex('services')
+      .whereRaw('lower(short_name) = lower(?)', [serviceType])
+      .select('service_key', 'name', 'category', 'billing_type');
+  } catch (err) {
+    shortNameMatches = [];
+  }
+  if (!Array.isArray(shortNameMatches)) shortNameMatches = [];
+  // One-directional narrowing (codex #3334 r2 P1). `is_recurring === true` is a
+  // POSITIVE assertion the recurring seeder always writes (222/222 lawn visits
+  // with a recurring_parent_id carry it), so it safely eliminates the one_time
+  // candidate — which is the row that would auto-invoice a plan-covered
+  // customer. The FALSE direction is deliberately NOT trusted: the column is
+  // nullable with DEFAULT false, so `false` is indistinguishable from "never
+  // set", and treating it as evidence of a one-time visit would re-open exactly
+  // the auto-invoice hazard this change exists to close. Narrowing only ever
+  // REMOVES candidates, so it can never invent an identity.
+  if (shortNameMatches.length > 1 && row.is_recurring === true) {
+    const recurringOnly = shortNameMatches.filter((r) => r.billing_type === 'recurring');
+    if (recurringOnly.length) shortNameMatches = recurringOnly;
+  }
+  if (shortNameMatches.length === 1) return shortNameMatches[0];
+  if (shortNameMatches.length > 1) {
+    logger.warn(`[completion-profiles] short name "${serviceType}" is shared by multiple catalog services — refusing to guess an identity (give the rows distinct short names)`);
+  }
   return null;
 }
 
@@ -296,9 +404,14 @@ async function resolveCompletionProfileForScheduledService(scheduledService = {}
 }
 
 async function resolveCompletionProfileForServiceId(serviceId, knex = db) {
+  // MUST carry the identity evidence the resolver reads (codex #3334 r3 P1):
+  // an explicit projection that omits service_key_snapshot / is_recurring
+  // silently downgrades every caller of this wrapper back to label-only
+  // matching, so a service_id-null row with an ambiguous label loses the typed
+  // completion + billing identity this change exists to preserve.
   const scheduledService = await knex('scheduled_services')
     .where({ id: serviceId })
-    .first('id', 'service_id', 'service_type');
+    .first('id', 'service_id', 'service_type', 'service_key_snapshot', 'is_recurring');
   if (!scheduledService) return null;
   return resolveCompletionProfileForScheduledService(scheduledService, knex);
 }

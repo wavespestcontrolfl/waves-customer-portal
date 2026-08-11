@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'lawn_member_upgrade', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -304,6 +304,47 @@ function lawnScenario() {
       },
       askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
     },
+  };
+}
+
+// Existing-member tier upgrade (owner decision 2026-08-10): a Bronze
+// quarterly-pest member adding lawn — combined Silver. Exercises
+// ExistingPlanUpgradeCard: the current pest plan's upcoming visits listed
+// with the contracted price struck through and the Silver figure beside it,
+// exactly the frozen publicMembershipView shape the server projects.
+function lawnMemberUpgradeScenario() {
+  const lawn = lawnScenario();
+  return {
+    ...lawn,
+    estimate: {
+      ...lawn.estimate,
+      customerFirstName: 'Riley',
+      customerName: 'Riley H.',
+      showOneTimeOption: false,
+      membership: {
+        isExistingCustomer: true,
+        firstName: 'Riley',
+        tier: 'silver',
+        tierLabel: 'Silver',
+        tierDiscountPct: 10,
+        discountAppliesTo: 'new_and_existing_services',
+        existingServiceKeys: ['pest_control'],
+        upgrade: { fromLabel: 'Bronze', toLabel: 'Silver', deltaPct: 10, addedServiceLabels: ['Lawn Care'] },
+        existingServices: [{
+          key: 'pest_control',
+          label: 'Pest Control',
+          currentPerVisit: 55,
+          newPerVisit: 49.5,
+          extraDiscountPct: 10,
+          perVisitSavings: 5.5,
+          remainingVisits: 2,
+          upcomingVisitDates: ['2026-10-28', '2027-01-27'],
+          prepaid: false,
+        }],
+        newServices: [{ key: 'lawn_care', label: 'Lawn Care', discountPct: 10, monthlySavings: 7.75, perApplicationSavings: 10.33 }],
+      },
+    },
+    pricing: { ...lawn.pricing, waveGuardTier: 'Silver' },
   };
 }
 
@@ -661,6 +702,7 @@ const PAYLOADS = {
   bundle: bundleScenario,
   bundle_referral: bundleReferralScenario,
   lawn: lawnScenario,
+  lawn_member_upgrade: lawnMemberUpgradeScenario,
   accepted: acceptedScenario,
   proposal: proposalScenario,
   proposal_terms: proposalTermsScenario,

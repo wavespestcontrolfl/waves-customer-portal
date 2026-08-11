@@ -3,6 +3,14 @@
 // scheduled estimated_price fallback) and the new-service per-application
 // savings figure shown on the public estimate.
 
+// Controllable gate mock: default-off keeps every pre-existing test on the
+// real test-env behavior (all gates dark); the extension suite flips ONLY
+// waveguardExtendExisting.
+let mockExtendExistingGate = false;
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (gate) => (gate === 'waveguardExtendExisting' ? mockExtendExistingGate : false),
+}));
+
 const {
   computeMembershipContext,
   loadCurrentServiceSpendContext,
@@ -19,11 +27,23 @@ function fakeDb({
   paidInvoices = [],
   prepaidTerm = null,
   invoiceQueryThrows = false,
+  addonRows = [],
+  addonQueryThrows = false,
+  mintedInvoiceLinks = [],
+  mintedProbeThrows = false,
 } = {}) {
   const db = (table) => {
+    // Per-call state: the extension's minted-invoice probe is the only
+    // invoices query keyed by scheduled_service_id — the last-paid lookup
+    // keys by customer/service_type and must keep returning paidInvoices.
+    let probesServiceIds = false;
     const builder = {
       where: () => builder,
-      whereIn: () => builder,
+      whereIn: (col) => {
+        if (col === 'scheduled_service_id') probesServiceIds = true;
+        return builder;
+      },
+      whereNot: () => builder,
       whereNotIn: () => builder,
       whereNotNull: () => builder,
       andWhere: () => builder,
@@ -46,8 +66,16 @@ function fakeDb({
       select: async () => {
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
+          if (probesServiceIds) {
+            if (mintedProbeThrows) throw new Error('relation does not exist');
+            return mintedInvoiceLinks.map((id) => ({ scheduled_service_id: id }));
+          }
           if (invoiceQueryThrows) throw new Error('relation does not exist');
           return paidInvoices;
+        }
+        if (table === 'scheduled_service_addons') {
+          if (addonQueryThrows) throw new Error('relation does not exist');
+          return addonRows;
         }
         return [];
       },
@@ -407,6 +435,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -440,6 +469,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: {
         lineItems: [{
           service: 'tree_shrub',
@@ -471,6 +501,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: { lineItems: [{ service: 'lawn_care', annualAfterDiscount: 840, monthlyAfterDiscount: 70, recurring: true, frequency: 6 }] },
     });
 
@@ -503,6 +534,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -523,6 +555,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -538,6 +571,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -550,6 +584,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -561,6 +596,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -576,6 +612,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -598,6 +635,7 @@ describe('computeMembershipContext', () => {
     // uniform smear advertised 12% on BOTH lines.
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: {
         result: {
           results: { lawn: [{ v: 12, recommended: true }], ts: [{ v: 6, selected: true }] },
@@ -645,6 +683,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -669,6 +708,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -693,6 +733,7 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -715,6 +756,7 @@ describe('computeMembershipContext', () => {
 
     const snapshot = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
@@ -779,9 +821,584 @@ describe('computeMembershipContext', () => {
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',
+      freezeExtensionPlan: true,
       estData: lawnEstimateData(),
     });
 
     expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
+  });
+});
+
+// Existing-service tier extension (owner decision 2026-08-10, dark behind
+// GATE_WAVEGUARD_EXTEND_EXISTING): a tier-raising estimate freezes the
+// customer's current qualifying services at the delta rate, and the public
+// projection deliberately carries the prices + visit dates the customer page
+// renders.
+describe('existing-service tier extension snapshot', () => {
+  afterEach(() => { mockExtendExistingGate = false; });
+
+  test('gate off: a tier-raising estimate freezes an EMPTY extension list', async () => {
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: Bronze→Silver lawn add-on lists existing pest at the delta rate with its upcoming visits', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    // Basis is the ROW scheduled price (120), NOT the last-paid invoice
+    // (117) — the accept-time frozen-price check verifies against the row,
+    // so an invoice-derived figure would park as drift on arrival (codex
+    // #3338 r13).
+    expect(ctx.existingServices).toEqual([expect.objectContaining({
+      key: 'pest_control',
+      label: 'Pest Control',
+      currentPerVisit: 120,
+      extraDiscountPct: 10,
+      perVisitSavings: 12,
+      newPerVisit: 108,
+      remainingVisits: 3,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
+      // Frozen appointment identities the accept-time apply pins to
+      // (codex #3338 r10) — staff-side only.
+      rowIds: ['s1', 's2', 's3'],
+      prepaid: false,
+    })]);
+    expect(ctx.discountAppliesTo).toBe('new_and_existing_services');
+  });
+
+  test('gate on: an annual-prepay family displays the PAID allocation as its basis (accept credits, never reprices)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+      })),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    // Basis is the PAID allocation (100), never the list row price (120):
+    // the accept-time credit rides the allocation, so a list-price
+    // strikethrough would advertise a larger figure than the ledger
+    // movement (codex #3338 r23 sibling).
+    expect(ctx.existingServices[0]).toMatchObject({
+      key: 'pest_control',
+      prepaid: true,
+      currentPerVisit: 100,
+      newPerVisit: 90,
+      perVisitSavings: 10,
+    });
+  });
+
+  test('gate on: mixed prepaid/pay-per-visit and uneven-allocation families stay on the review path', async () => {
+    mockExtendExistingGate = true;
+    // One figure cannot honestly cover a family whose applications are paid
+    // two different ways (or at two different allocations).
+    const mixed = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const mixedCtx = await computeMembershipContext(mixed, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(mixedCtx.existingServices).toEqual([]);
+    const uneven = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 100,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 'term-1', prepaid_amount: 95,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const unevenCtx = await computeMembershipContext(uneven, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(unevenCtx.existingServices).toEqual([]);
+  });
+
+  test('gate on: one-cent basis differences are different bases (exact cents)', async () => {
+    mockExtendExistingGate = true;
+    // Split-remainder prepaid term ($16.75 + $16.76): one shared frozen
+    // savings would be a cent off on the remainder application (codex
+    // #3338 r9) — not uniform, review path.
+    const remainder = fakeDb({
+      scheduledRows: [
+        {
+          id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 20, annual_prepay_term_id: 'term-1', prepaid_amount: 16.75,
+        },
+        {
+          id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 20, annual_prepay_term_id: 'term-1', prepaid_amount: 16.76,
+        },
+      ],
+      paidInvoices: [],
+    });
+    const remainderCtx = await computeMembershipContext(remainder, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(remainderCtx.existingServices).toEqual([]);
+    // Same rule on the pay-per-visit basis: a $120.01 sibling is NOT the
+    // $120 basis and stays off the frozen plan.
+    const centOff = fakeDb({
+      scheduledRows: [
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120.01 },
+      ],
+      paidInvoices: [],
+    });
+    const centCtx = await computeMembershipContext(centOff, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(centCtx.existingServices[0]).toMatchObject({ rowIds: ['s1'], remainingVisits: 1 });
+  });
+
+  test('gate on: the basis is the NEXT upcoming appointment price regardless of DB row order', async () => {
+    mockExtendExistingGate = true;
+    // Mixed-price family delivered in an order that puts the LATER $120
+    // cohort first: the basis must still be the earliest appointment's
+    // $135 (codex #3338 r10 — cohort selection must never follow DB row
+    // order, or the same unchanged estimate freezes a different plan per
+    // save).
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+        { id: 's3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120 },
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 135 },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices[0]).toMatchObject({
+      currentPerVisit: 135,
+      rowIds: ['s1'],
+      upcomingVisitDates: ['2099-01-05'],
+      remainingVisits: 1,
+    });
+  });
+
+  test('gate on: a visit with add-ons is excluded from the frozen plan; probe failure parks the family', async () => {
+    mockExtendExistingGate = true;
+    const withAddon = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      addonRows: [{ scheduled_service_id: 's2' }],
+    });
+    const ctx = await computeMembershipContext(withAddon, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    // s2 nets primary + add-ons into one estimated_price — discounting it
+    // would discount the non-qualifying add-ons too (codex #3338 r24). The
+    // clean siblings still freeze.
+    expect(ctx.existingServices[0]).toMatchObject({
+      rowIds: ['s1', 's3'],
+      upcomingVisitDates: ['2099-01-05', '2099-07-05'],
+      remainingVisits: 2,
+    });
+    const probeDown = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      addonQueryThrows: true,
+    });
+    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    // FAIL CLOSED: cannot verify add-ons → the family stays on the
+    // review-bell path rather than advertising a visit the apply may park.
+    expect(parked.existingServices).toEqual([]);
+  });
+
+  test('gate on: a visit with a pre-minted invoice is excluded from the frozen plan (accept would park it)', async () => {
+    mockExtendExistingGate = true;
+    // Charge Now / pre-completion mints exist at save time and are
+    // knowable — the card must not promise a visit the apply parks
+    // (codex #3338 r7).
+    const withMint = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      mintedInvoiceLinks: ['s1'],
+    });
+    const ctx = await computeMembershipContext(withMint, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(ctx.existingServices[0]).toMatchObject({
+      rowIds: ['s2', 's3'],
+      upcomingVisitDates: ['2099-04-05', '2099-07-05'],
+      remainingVisits: 2,
+    });
+    const probeDown = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+      mintedProbeThrows: true,
+    });
+    const parked = await computeMembershipContext(probeDown, { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(parked.existingServices).toEqual([]);
+  });
+
+  test('no property-scope opt-in (agent lanes): gate on still freezes NO extension plan', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    // IB estimate tools and the estimator engine pass no property scope —
+    // a secondary-property agent estimate must never freeze (or later
+    // reprice) another property's visits (codex #3338 r7). Tier/upgrade
+    // context stays intact; only the frozen plan is withheld.
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('primary-lane plan scoping: a series stamped at another property never freezes; tier context stays account-wide', async () => {
+    mockExtendExistingGate = true;
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const primaryKey = normalizedStampedStreet('123 Main St', null, 'Venice', '34285');
+    // Pest series stamped at the customer's SECONDARY property while the
+    // estimate quotes the primary street (codex #3338 r8): the primary
+    // lane's priors pricing is account-wide, so the tier context must keep
+    // matching it — but the frozen plan must not cover the other
+    // property's visits.
+    const database = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row,
+        service_address_line1: '999 Other Ave',
+        service_address_city: 'Venice',
+        service_address_zip: '34285',
+      })),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      extensionStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey },
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+    // Control: the same series stamped AT the quoted street freezes.
+    const atQuoted = fakeDb({
+      scheduledRows: futurePestRows().map((row) => ({
+        ...row,
+        service_address_line1: '123 Main St',
+        service_address_city: 'Venice',
+        service_address_zip: '34285',
+      })),
+      paidInvoices: [],
+    });
+    const scoped = await computeMembershipContext(atQuoted, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      extensionStreetScope: { estimateStreet: primaryKey, customerPrimaryStreet: primaryKey },
+    });
+    expect(scoped.existingServices).toHaveLength(1);
+    expect(scoped.existingServices[0].rowIds).toEqual(['s1', 's2', 's3']);
+  });
+
+  test('gate on: a family this estimate re-quotes is never listed as an extension too', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    // The estimate itself re-quotes pest AND adds lawn: combined Silver, but
+    // the pest family is a priced line of the estimate, not an extension.
+    const estData = {
+      result: {
+        results: { lawn: [{ v: 9, recommended: true }] },
+        recurring: {
+          discount: 0.10,
+          annualBeforeDiscount: 1400,
+          annualAfterDiscount: 1260,
+          services: [
+            { name: 'Pest Control', mo: 47 },
+            { name: 'Lawn Care', mo: 69.75 },
+          ],
+        },
+      },
+    };
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', freezeExtensionPlan: true, estData });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: an above-Bronze origin stays on the review path (delta math would not equal the tier rate)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      // Existing pest + lawn → current tier Silver (10% already contracted).
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+      ],
+      paidInvoices: [],
+    });
+    // Adding mosquito raises Silver → Gold, but the extension only freezes
+    // Bronze-origin upgrades (codex #3338 r3).
+    const estData = {
+      result: {
+        recurring: {
+          discount: 0.15,
+          annualBeforeDiscount: 500,
+          annualAfterDiscount: 425,
+          services: [{ name: 'Mosquito Treatment', mo: 41.67 }],
+        },
+      },
+    };
+    const ctx = await computeMembershipContext(database, { customerId: 'cust-1', freezeExtensionPlan: true, estData });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Silver', toLabel: 'Gold' });
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: a monthly-lane member stays on the review path (row repricing never touches monthly_rate)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      customer: {
+        id: 'cust-1', first_name: 'Don', active: true, waveguard_tier: 'Bronze',
+        pipeline_stage: 'active_customer', monthly_rate: 55, billing_mode: null,
+      },
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('gate on: callback visits never appear in the frozen appointment list', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'cb', service_type: 'pest_control', scheduled_date: '2099-02-14', estimated_price: 0, is_callback: true },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    // The accept-time reprice excludes callbacks, so the displayed list
+    // must too (codex #3338 r7).
+    expect(ctx.existingServices[0].upcomingVisitDates).toEqual(['2099-01-05', '2099-04-05', '2099-07-05']);
+  });
+
+  test('gate flipped off after freezing: the projection stops exposing the frozen extension', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(snapshot.existingServices).toHaveLength(1);
+    // Kill switch flips off with the frozen plan already saved: display
+    // must go dormant with the accept-side apply (codex #3338 r1) — and
+    // the SSR copy discriminator must fall back with it (codex #3338 r8),
+    // or the legacy upgrade blurb keeps promising existing-service
+    // coverage the accept side won't deliver.
+    mockExtendExistingGate = false;
+    const view = publicMembershipView(snapshot);
+    expect(view.existingServices).toEqual([]);
+    expect(view.discountAppliesTo).toBe('new_services_only');
+    // COMMITTED estimates follow the persisted OUTCOME, not the gate
+    // (codex #3338 r19): only an extension that actually APPLIED keeps its
+    // permanent record — an accept whose plan parked moved no money and
+    // must not read as repriced, and legacy accepted rows (no outcome)
+    // project nothing.
+    const appliedSnapshot = {
+      ...snapshot,
+      extensionOutcome: {
+        applied: true, repricedRowCount: 3, creditAmount: 0, appliedFamilies: ['pest_control'],
+      },
+    };
+    const committedApplied = publicMembershipView(appliedSnapshot, { committed: true });
+    expect(committedApplied.existingServices).toHaveLength(1);
+    expect(committedApplied.discountAppliesTo).toBe('new_and_existing_services');
+    const committedParked = publicMembershipView(
+      { ...snapshot, extensionOutcome: { applied: false, reviewFamilies: ['Pest Control'] } },
+      { committed: true },
+    );
+    expect(committedParked.existingServices).toEqual([]);
+    expect(committedParked.discountAppliesTo).toBe('new_services_only');
+    const committedLegacy = publicMembershipView(snapshot, { committed: true });
+    expect(committedLegacy.existingServices).toEqual([]);
+    // Partial application (codex #3338 r26): applied=true only says SOME
+    // money moved — the committed recap projects ONLY the families the
+    // apply honored in full, and an applied outcome carrying no
+    // appliedFamilies list projects nothing (fail closed; no legacy
+    // applied outcomes exist — the gate has never shipped on).
+    const twoFamilySnapshot = {
+      ...snapshot,
+      existingServices: [
+        ...snapshot.existingServices,
+        { ...snapshot.existingServices[0], key: 'mosquito', label: 'Mosquito Protection' },
+      ],
+    };
+    const committedPartial = publicMembershipView(
+      {
+        ...twoFamilySnapshot,
+        extensionOutcome: { applied: true, repricedRowCount: 3, appliedFamilies: ['pest_control'] },
+      },
+      { committed: true },
+    );
+    expect(committedPartial.existingServices).toHaveLength(1);
+    expect(committedPartial.existingServices[0].key).toBe('pest_control');
+    expect(committedPartial.discountAppliesTo).toBe('new_and_existing_services');
+    const committedNoFamilyList = publicMembershipView(
+      { ...snapshot, extensionOutcome: { applied: true, repricedRowCount: 3 } },
+      { committed: true },
+    );
+    expect(committedNoFamilyList.existingServices).toEqual([]);
+    expect(committedNoFamilyList.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('per-property scope: excluded existing rows price the estimate as standalone (grouped street unparsable)', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      excludeExistingRows: true,
+    });
+    // Mirrors the reprice branch that priced with no priors (codex #3338
+    // r22): the snapshot must not advertise another property's plans.
+    expect(ctx.isExistingCustomer).toBe(false);
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('per-property scope: a street scope matching no rows freezes no extension', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+      // Unstamped rows resolve via the customer's primary street; an empty
+      // primary street can never match the quoted street, so every account
+      // row is excluded from this property's snapshot.
+      streetScope: { estimateStreet: '999 elsewhere ave, venice, 34285', customerPrimaryStreet: '' },
+    });
+    expect(ctx.isExistingCustomer).toBe(false);
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('gate on: a mixed-price contract freezes only the appointments sharing the displayed basis', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 's1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 's2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+        // Drifted and unpriced siblings must not be LISTED as covered —
+        // accept would skip them (codex #3338 r19 sibling).
+        { id: 's3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 135 },
+        { id: 's4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: null },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.existingServices[0]).toMatchObject({
+      currentPerVisit: 120,
+      newPerVisit: 108,
+      remainingVisits: 2,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05'],
+      rowIds: ['s1', 's2'],
+    });
+  });
+
+  test('gate on: no tier change means no extension rows', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      // Existing pest + lawn already → Silver; adding the same families
+      // re-quotes, no upgrade.
+      scheduledRows: [
+        ...futurePestRows(),
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-02-01', estimated_price: 80 },
+      ],
+      paidInvoices: [],
+    });
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    expect(ctx.upgrade).toBeNull();
+    expect(ctx.existingServices).toEqual([]);
+  });
+
+  test('publicMembershipView deliberately projects the extension prices and dates — and nothing else new', async () => {
+    mockExtendExistingGate = true;
+    const database = fakeDb({
+      scheduledRows: futurePestRows(),
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      freezeExtensionPlan: true,
+      estData: lawnEstimateData(),
+    });
+    const view = publicMembershipView(snapshot);
+    expect(view.existingServices).toEqual([{
+      key: 'pest_control',
+      label: 'Pest Control',
+      currentPerVisit: 120,
+      newPerVisit: 108,
+      extraDiscountPct: 10,
+      perVisitSavings: 12,
+      remainingVisits: 3,
+      upcomingVisitDates: ['2099-01-05', '2099-04-05', '2099-07-05'],
+      prepaid: false,
+    }]);
+    // The staff account context stays server-side even with the extension on.
+    const json = JSON.stringify(view);
+    for (const staffMarker of [
+      'currentServices', 'currentSpendPerVisitTotal', 'serviceAddress', 'contracts',
+      'lastPaidAt', 'scheduledPerVisit', 'spendSource', 'nextScheduledDate',
+    ]) {
+      expect(json).not.toContain(staffMarker);
+    }
   });
 });

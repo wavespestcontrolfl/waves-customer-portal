@@ -18,6 +18,7 @@
  *     granularity,       // PREMISE | SUB_PREMISE | ROUTE | ... | null
  *     normalized: { street_line_1, city, state, postal_code } | null,
  *     hasInferred, hasReplaced, hasUnconfirmed,  // booleans
+ *     missingComponents,  // Google missingComponentTypes (e.g. ['subpremise']) | []
  *     providerResponseId,                         // for audit
  *     raw,               // trimmed provider payload (debug; not persisted whole)
  *   }
@@ -108,6 +109,11 @@ function deriveStatus(result, county) {
     hasInferred: !!verdict.hasInferredComponents,
     hasReplaced: !!verdict.hasReplacedComponents,
     hasUnconfirmed: !!verdict.hasUnconfirmedComponents,
+    // What Google says is MISSING from the input (verbatim componentTypes,
+    // e.g. ['subpremise'] for a condo building given without a unit). Persisted
+    // in ai_address_validation so triage can name the specific ask instead of
+    // a generic "could not be verified".
+    missingComponents: Array.isArray(address.missingComponentTypes) ? address.missingComponentTypes : [],
   };
 
   // Incompleteness first, so garbage that geocodes to some random out-of-area
@@ -137,12 +143,12 @@ function deriveStatus(result, county) {
 async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
   const lines = (addressLines || []).filter(Boolean);
   if (!ENABLED() || lines.length === 0) {
-    return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
+    return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
   }
   const key = GOOGLE_KEY();
   if (!key) {
     logger.warn('[address-validation] no Google API key configured');
-    return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
+    return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
   }
 
   try {
@@ -155,7 +161,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       logger.warn(`[address-validation] HTTP ${res.status}: ${body.slice(0, 200)}`);
-      return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
+      return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
     }
     const data = await res.json();
     const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
@@ -164,7 +170,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
     return out;
   } catch (err) {
     logger.error(`[address-validation] error: ${err.message}`);
-    return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
+    return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
   }
 }
 

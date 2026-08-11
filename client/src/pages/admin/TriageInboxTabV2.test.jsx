@@ -48,3 +48,35 @@ describe('ConfirmEvidence — secondary contact', () => {
     expect(container.firstChild).toBeNull();
   });
 });
+
+// missing_unit_number asks the office to collect a condo/townhome unit
+// number. Without the building it is about, the card is unactionable — the
+// server stamps it at filing time (buildTriageItem), so the card must show it.
+describe('ConfirmEvidence — unit-number ask', () => {
+  it('names the building the unit is needed for', () => {
+    render(<ConfirmEvidence payload={{
+      flag: 'missing_unit_number',
+      unit_ask_building: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' },
+    }} />);
+    const row = screen.getByText('Unit needed for:').parentElement;
+    expect(row).toHaveTextContent('100 Example Condo Ct, Bradenton, 34212');
+  });
+
+  it('omits absent place parts rather than rendering empty separators', () => {
+    render(<ConfirmEvidence payload={JSON.stringify({
+      flag: 'missing_unit_number',
+      unit_ask_building: { street_line_1: '100 Example Condo Ct', city: null, postal_code: null },
+    })} />);
+    const row = screen.getByText('Unit needed for:').parentElement;
+    expect(row).toHaveTextContent('100 Example Condo Ct');
+    expect(row).not.toHaveTextContent(',');
+  });
+
+  it('renders nothing when the stamp carries no street', () => {
+    const { container } = render(<ConfirmEvidence payload={{
+      flag: 'missing_unit_number',
+      unit_ask_building: { street_line_1: null, city: 'Bradenton', postal_code: '34212' },
+    }} />);
+    expect(container.firstChild).toBeNull();
+  });
+});

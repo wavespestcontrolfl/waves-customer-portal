@@ -98,6 +98,11 @@ import {
   cn,
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import {
+  MMS_TOTAL_BUDGET_BYTES,
+  fitImagesToBudget,
+  formatBytes,
+} from "../../utils/imageCompression";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -321,6 +326,11 @@ function TypeBadgeV2({ type }) {
 }
 
 function MessageMediaV2({ media = [], inverted = false }) {
+  // A signed media URL that fails to load (expired signature, offline) left a
+  // blank image box inside the bubble — on an outbound (dark) bubble that
+  // reads as a big empty black rectangle. Swap failed loads for a labeled
+  // chip that still links to the attachment.
+  const [failed, setFailed] = useState({});
   const items = Array.isArray(media) ? media.filter((m) => m?.url) : [];
   if (!items.length) return null;
   return (
@@ -340,12 +350,26 @@ function MessageMediaV2({ media = [], inverted = false }) {
           )}
         >
           {" "}
-          <img
-            src={item.url}
-            alt={item.fileName || `SMS attachment ${idx + 1}`}
-            className="h-28 w-full object-cover"
-            loading="lazy"
-          />{" "}
+          {failed[item.url] ? (
+            <span
+              className={cn(
+                "flex items-center justify-center h-12 px-2 text-14",
+                inverted ? "text-white/80" : "text-ink-secondary",
+              )}
+            >
+              {item.fileName || "Attachment"}
+            </span>
+          ) : (
+            <img
+              src={item.url}
+              alt={item.fileName || `SMS attachment ${idx + 1}`}
+              className="h-28 w-full object-cover"
+              loading="lazy"
+              onError={() =>
+                setFailed((f) => ({ ...f, [item.url]: true }))
+              }
+            />
+          )}{" "}
         </a>
       ))}
     </div>
@@ -547,7 +571,12 @@ function ConversationViewV2({
               >
                 {" "}
                 <div className="text-13 leading-normal whitespace-pre-wrap break-words">
-                  {m.body ||
+                  {/* a whitespace-only body (stray newlines) rendered as a
+                      giant empty bubble under whitespace-pre-wrap — blank it;
+                      bodies with content render verbatim */}
+                  {(typeof m.body === "string" && m.body.trim()
+                    ? m.body
+                    : "") ||
                     (Array.isArray(m.media) && m.media.length ? "Photo" : "")}
                 </div>{" "}
                 <MessageMediaV2 media={m.media} inverted={isOut} />{" "}
@@ -602,6 +631,31 @@ function ConversationViewV2({
 
 // ── SMS tab ───────────────────────────────────────────────────
 
+// Personalized compose prefill for the link-insert buttons. Only used when
+// the composer is EMPTY — an operator-typed draft gets the bare server
+// clause appended instead, so the greeting never lands mid-message. Returns
+// null when there is no first name to greet with (fall back to the clause).
+// The TEMPLATE copy stays plain ASCII on purpose — an em dash or curly
+// quote silently flips the SMS to UCS-2 and cuts each segment from 160 to
+// 70 chars. Dynamic values (name, service type) pass through untouched: a
+// customer named José still gets greeted correctly, and the operator sees
+// the resulting body (and char count) before sending.
+export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
+    serviceType ? ` ${serviceType}` : ""
+  } visit here: ${url}`;
+}
+
+export function buildReservicePrefill({ firstName, laneLabel, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves Pest Control. Book your free${
+    laneLabel ? ` ${laneLabel}` : ""
+  } re-service here: ${url}`;
+}
+
 function SmsTab() {
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -638,6 +692,10 @@ function SmsTab() {
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  // Purely a label distinction — `uploading` gates the controls for the whole
+  // compress-then-upload span. Downscaling several phone photos takes a beat,
+  // and "Uploading…" while the network is still idle reads as a stall.
+  const [compressing, setCompressing] = useState(false);
   // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
   // Scheduled rows land in sms_log with status='scheduled' and are picked up by
   // the /5min cron in server/services/scheduler.js.
@@ -1069,21 +1127,37 @@ function SmsTab() {
     }
     const queue = files.slice(0, remaining);
     // Twilio rejects an MMS whose body + all media exceeds 5MB total, so the
-    // per-file 5MB cap isn't enough once several images are attached — guard
-    // the cumulative size up front rather than letting the /sms send bounce.
-    const MAX_TOTAL_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+    // per-file 5MB cap isn't enough once several images are attached. Rather
+    // than refuse the batch, shrink it to fit: a batch that already fits
+    // uploads untouched, and one that doesn't sheds the least quality that
+    // gets it under budget. Compressing HERE — before the upload — means the
+    // multer per-file cap, the attachment token's bound size, and the
+    // send-time aggregate check all see the final bytes.
     const existingBytes = attachments.reduce((s, a) => s + (a.size || 0), 0);
-    const queueBytes = queue.reduce((s, f) => s + (f.size || 0), 0);
-    if (existingBytes + queueBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      alert(
-        "Attachments would exceed Twilio's 5MB total limit per message. Remove or compress images and try again.",
-      );
-      return;
-    }
     setUploading(true);
+    setCompressing(true);
     try {
+      const fit = await fitImagesToBudget(queue, {
+        availableBytes: MMS_TOTAL_BUDGET_BYTES - existingBytes,
+      });
+      if (!fit.ok) {
+        // Report the whole tray, not just this selection, and name the target
+        // we actually enforce — a 4.7MB uncompressible file is over our 4.5MB
+        // safety budget while still under Twilio's 5MB ceiling.
+        alert(
+          `Attachments would total ${
+            fit.bestBytesIsFloor ? "at least " : ""
+          }${formatBytes(
+            existingBytes + fit.bestBytes,
+          )} even after compression, over the ${formatBytes(
+            MMS_TOTAL_BUDGET_BYTES,
+          )} per-message budget. Remove an image and try again.`,
+        );
+        return;
+      }
+      setCompressing(false);
       const fd = new FormData();
-      for (const f of queue) fd.append("attachments", f);
+      for (const f of fit.files) fd.append("attachments", f);
       const token = localStorage.getItem("waves_admin_token");
       const r = await fetch(`${API_BASE}/admin/communications/attach`, {
         method: "POST",
@@ -1097,12 +1171,13 @@ function SmsTab() {
       const d = await r.json();
       const withPreview = d.attachments.map((a, idx) => ({
         ...a,
-        previewUrl: URL.createObjectURL(queue[idx]),
+        previewUrl: URL.createObjectURL(fit.files[idx]),
       }));
       setAttachments((prev) => [...prev, ...withPreview]);
     } catch (e) {
       alert(`Upload failed: ${e.message}`);
     } finally {
+      setCompressing(false);
       setUploading(false);
     }
   };
@@ -1232,6 +1307,24 @@ function SmsTab() {
       });
       if (rescheduleContextChanged()) return;
       const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
+      // Noon anchor keeps the Y-M-D string on its own calendar day in every
+      // US zone (same idiom as the server's reschedule confirmation copy).
+      const day = new Date(
+        `${d.appointment.scheduledDate}T12:00:00`,
+      ).toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      });
+      // Empty composer → prefill a full greeting message (recipient first
+      // name + the visit the link points to); anything already typed keeps
+      // the bare clause-append behavior.
+      const prefill = buildReschedulePrefill({
+        firstName: d.firstName,
+        day,
+        serviceType: d.appointment.serviceType,
+        url: d.url,
+      });
       // Replace-don't-stack: every lookup mints a FRESH short code, and the
       // strip-on-recipient-change effect only knows the one tracked URL — a
       // second click stacking a second clause would leave the first link
@@ -1249,21 +1342,14 @@ function SmsTab() {
               .replace(/\n{3,}/g, "\n\n")
               .trim()
           : b;
-        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
       });
       setInsertedResched({
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
-      });
-      // Noon anchor keeps the Y-M-D string on its own calendar day in every
-      // US zone (same idiom as the server's reschedule confirmation copy).
-      const day = new Date(
-        `${d.appointment.scheduledDate}T12:00:00`,
-      ).toLocaleDateString("en-US", {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
       });
       setSendResult({
         ok: true,
@@ -1355,6 +1441,19 @@ function SmsTab() {
       });
       if (reserviceContextChanged()) return;
       const clause = (d.line || "").trim() || `Book your free re-service: ${d.url}`;
+      const laneLabel =
+        Array.isArray(d.lanes) && d.lanes.length
+          ? d.lanes
+              .map((l) => (l === "pest" ? "pest" : l === "lawn" ? "lawn" : l))
+              .join(" + ")
+          : null;
+      // Empty composer → full greeting message; typed draft → clause append
+      // (same contract as the reschedule insert).
+      const prefill = buildReservicePrefill({
+        firstName: d.firstName,
+        laneLabel,
+        url: d.url,
+      });
       // Replace-don't-stack, same as the reschedule insert: drop any line
       // carrying the previously tracked URL before appending the fresh one.
       const prevUrl = insertedReservice?.url || null;
@@ -1367,19 +1466,15 @@ function SmsTab() {
               .replace(/\n{3,}/g, "\n\n")
               .trim()
           : b;
-        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
       });
       setInsertedReservice({
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
       });
-      const laneLabel =
-        Array.isArray(d.lanes) && d.lanes.length
-          ? d.lanes
-              .map((l) => (l === "pest" ? "pest" : l === "lawn" ? "lawn" : l))
-              .join(" + ")
-          : null;
       setSendResult({
         ok: true,
         text: `Re-service link added${laneLabel ? ` — covers the ${laneLabel} plan` : ""}.`,
@@ -1981,6 +2076,18 @@ function SmsTab() {
                 {agentDraft.suggestedMessage}
               </div>
             )}
+            {agentDraft?.lintFailures?.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11">
+                <div className="font-medium text-zinc-900">
+                  Failed comms-lint — review before sending
+                </div>
+                {agentDraft.lintFailures.map((f) => (
+                  <div key={f.rule} className="text-ink-secondary">
+                    {f.reason}
+                  </div>
+                ))}
+              </div>
+            )}
             {agentDraft?.inboundMessage && (
               <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11 text-ink-tertiary line-clamp-2">
                 Trigger: {agentDraft.inboundMessage}
@@ -2081,7 +2188,11 @@ function SmsTab() {
         <div className="flex items-center justify-between text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {" "}
           <span>
-            {attachments.length > 0 ? `${attachments.length} attached` : ""}
+            {attachments.length > 0
+              ? `${attachments.length} attached · ${formatBytes(
+                  attachments.reduce((s, a) => s + (a.size || 0), 0),
+                )}`
+              : ""}
           </span>{" "}
           <span>{rewritingSms ? "Rewriting…" : `${msgBody.length} chars`}</span>{" "}
         </div>
@@ -2216,6 +2327,8 @@ function SmsTab() {
                 : "Scheduling…"
               : rewritingSms
                 ? "Rewriting…"
+              : compressing
+                ? "Compressing…"
               : uploading
                 ? "Uploading…"
                 : sendTiming === "now"

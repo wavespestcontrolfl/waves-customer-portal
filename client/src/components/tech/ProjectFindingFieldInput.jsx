@@ -710,9 +710,6 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {subFields.map((subField) => {
-                if (subField.showWhen && String(row[subField.showWhen.field] || '') !== subField.showWhen.value) {
-                  return null;
-                }
                 return (
                   <div key={subField.key}>
                     <label

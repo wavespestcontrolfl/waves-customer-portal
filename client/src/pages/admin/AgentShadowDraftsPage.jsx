@@ -139,6 +139,12 @@ function DraftCard({ draft }) {
       </div>
 
       {judgment?.scores && <ScorePills scores={judgment.scores} />}
+      {draft.lintFlags?.length > 0 && (
+        <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4 }}>
+          <strong style={{ color: D.zinc }}>Comms-lint:</strong>{" "}
+          {draft.lintFlags.map((f) => f.detail).join(" · ")}
+        </div>
+      )}
       {judgment?.notes && (
         <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4 }}>
           <strong style={{ color: D.zinc }}>Judge:</strong> {judgment.notes}

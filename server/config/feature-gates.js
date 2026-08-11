@@ -150,6 +150,17 @@ const gates = {
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
 
+  // Setting a recurring plan's LENGTH from Edit appointment. The count is not
+  // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
+  // live rows — so lowering it CANCELS real future visits, which is why it
+  // ships dark. Gate off: /series-summary answers canSetCount:false, the modal
+  // hides "End repeating" and "Count" on a series template exactly as before,
+  // and update-details refuses a recurringPlannedCount outright rather than
+  // silently ignoring one (an ignored count reads to the office as a plan they
+  // capped). Kill switch: unset or any non-'true' value; visits already added
+  // or cancelled are not reversed when it flips.
+  editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
@@ -1287,6 +1298,25 @@ const gates = {
   // completion. Kill switch: unset or any non-'true' value — completions
   // behave byte-identically to today.
   completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
+
+  // WaveGuard tier extension to existing services (owner decision
+  // 2026-08-10, reversing the 2026-08-05 review-bell-only ruling): a
+  // tier-RAISING estimate for a linked member lists their current
+  // qualifying services at the combined tier's extra percentage points off
+  // the contracted per-visit price, and accepting applies exactly that
+  // frozen plan — upcoming visit rows repriced, monthly-lane slices
+  // adjusted via the plan-rate ledger where attributable, annual-prepaid
+  // terms credited the difference instead of being repriced. The gate is
+  // checked at THREE points that silence together (codex #3338 r1):
+  // snapshot population (no new estimate advertises the extension), the
+  // public projection (a plan frozen while the gate was on stops
+  // DISPLAYING the moment it flips off), and the converter apply
+  // (inspectionCredit's dormant-while-off pattern) — so display and
+  // billing can never disagree across a flip in either direction. Money
+  // surface — fail-closed ==='true' in EVERY environment. Kill switch:
+  // unset or any non-'true' value — estimates and accepts revert to the
+  // 2026-08-05 review-bell behavior.
+  waveguardExtendExisting: process.env.GATE_WAVEGUARD_EXTEND_EXISTING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

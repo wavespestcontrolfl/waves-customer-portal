@@ -8,7 +8,10 @@
 const db = require('../models/db');
 const { REENGAGEMENT_TAG } = require('./newsletter-sunset');
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Canonical definition moved to the dependency-free util (pre-push P1 PR
+// #3303 r20) so the attribution linkage mirror can share it; re-exported
+// below so this module's contract is unchanged.
+const { EMAIL_RE } = require('../utils/workable-lead-signal');
 
 // Double-opt-in confirmation link lifetime. After this, the link no longer
 // confirms (lookupByToken returns 'expired') — a months-old link in an inbox

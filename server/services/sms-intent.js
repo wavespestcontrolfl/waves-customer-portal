@@ -42,7 +42,19 @@ const ORDINAL_DATE_RE = /\b(?:the\s+)?\d{1,2}(?:st|nd|rd|th)\b/i;
 // Bare time of day: "3pm", "at 3", "10:30am", "noon", "morning"
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b|\b(?:noon|midnight|morning|afternoon|evening)\b/i;
 
-const SMS_REACTION_TARGET_RE = '(?:[\\u201c"].+[\\u201d"]|an?\\s+(?:image|photo|video|audio message|attachment|message))';
+// The quoted body is a negated class, NOT `.+`, for two reasons. (1) `.` never
+// matches \n, and a tapback quotes the original message VERBATIM — every
+// appointment template is multi-line ("…4:00 PM.\n\nReschedule here: <url>"),
+// so `.+` could not span the quote, the reaction read as ordinary prose, and
+// its quoted "Reschedule here:" line tripped the reschedule detector into
+// belling the owner about a visit nobody asked to move (2026-08-11).
+// (2) Stopping at the first closing delimiter keeps a greedy match from
+// swallowing a real ask that FOLLOWS the quote and happens to end in one:
+// `Liked “…” Actually, can we reschedule to “Friday”` must stay an ask, not
+// a reaction. Both failure directions are covered in sms-intent.test.js.
+// Fails safe: a reaction quoting a body that itself contains a quote reads as
+// a real message, which surfaces it to the owner rather than silencing it.
+const SMS_REACTION_TARGET_RE = '(?:[\\u201c"][^\\u201d"]+[\\u201d"]|an?\\s+(?:image|photo|video|audio message|attachment|message))';
 const SMS_REACTION_RE = new RegExp(`^(liked|loved|disliked|laughed at|emphasized|questioned)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
 const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|heart|dislike|laugh|emphasis|question mark)\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
 
@@ -70,6 +82,10 @@ function hasSchedulingIntent(body) {
   return false;
 }
 
+// Multi-line quoted bodies are handled by the negated class in
+// SMS_REACTION_TARGET_RE, not by normalizing whitespace here — collapsing
+// first would let the match run past the quote's own closing delimiter and
+// swallow a real ask that follows it. See that comment for both cases.
 function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
   const text = body.trim();

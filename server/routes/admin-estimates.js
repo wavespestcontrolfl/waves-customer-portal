@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -40,6 +41,9 @@ const {
   estimateReviseBlock,
   estimateViewUrl,
   reviseAdminEstimate,
+  staleCallLinkageReason,
+  completePendingInvalidation,
+  takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
@@ -485,7 +489,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { estimate, reused } = await createOrReuseAdminEstimate({
+    const { estimate, reused, memberLinkageWarning } = await createOrReuseAdminEstimate({
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
@@ -501,6 +505,15 @@ router.post('/', async (req, res, next) => {
       onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
       pricingAuthority: estimate.pricing_authority || null,
       pricingDrift: estimate.pricing_drift || null,
+      // Unlinked-member guard (2026-08-10): the typed address matches an
+      // active member but no customer was linked, so member pricing was not
+      // applied — the builder surfaces this beside the saved totals.
+      // ADMIN ONLY (codex #3338 r23, same rule as the edit-source customer
+      // block below): the reverse address lookup is unscoped, so returning
+      // the matched customer's identity/tier to a technician token would
+      // let an arbitrary-address save enumerate customers outside the
+      // assignment gate. Technicians save fine; they just get no warning.
+      memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -520,7 +533,7 @@ router.put('/:id', async (req, res, next) => {
     // the builder can confirm a server reprice with the operator BEFORE the
     // edit publishes to the customer's live link.
     const dryRun = req.body?.dryRun === true;
-    const { estimate } = await reviseAdminEstimate({
+    const { estimate, memberLinkageWarning } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
@@ -541,6 +554,9 @@ router.put('/:id', async (req, res, next) => {
       onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
       pricingAuthority: estimate.pricing_authority || null,
       pricingDrift: estimate.pricing_drift || null,
+      // Unlinked-member guard (2026-08-10) — same contract and ADMIN-ONLY
+      // scope as POST / (codex #3338 r23).
+      memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -691,6 +707,10 @@ router.post('/:id/send', async (req, res, next) => {
       const scheduledClaim = await db('estimates')
         .where({ id: estimate.id })
         .whereNull('price_locked_at')
+        // Archived rows can never re-enter the send pipeline (codex P0,
+        // PR #3304): a stale scheduling request racing an invalidation
+        // must not restore status='scheduled' on the archived draft.
+        .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
         .update({
           status: 'scheduled',
@@ -725,6 +745,11 @@ router.post('/:id/send', async (req, res, next) => {
       const claimed = await db('estimates')
         .where({ id: estimate.id })
         .whereNull('price_locked_at')
+        // An ARCHIVED row is never claimable for send (codex P0, PR
+        // #3304): linkage invalidation archives stale wrong-lead drafts
+        // atomically, and a send that read the row earlier must not
+        // deliver the old recipient's content after that commit.
+        .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -818,6 +843,8 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       const anchorClaimed = await trx('estimates')
         .where({ id: estimate.id, status: estimate.status })
         .whereNull('price_locked_at')
+        // Same archive guard as the standalone claim (codex P0, PR #3304).
+        .whereNull('archived_at')
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {
@@ -906,7 +933,99 @@ async function releaseGroupSiblingClaims(claimedSiblings = []) {
   }
 }
 
+// Claim release + deferred-invalidation finalizer (see the delivery-claim
+// protocol note in admin-estimate-persistence.js). Token-fenced: only THIS
+// send's claim is cleared, so a rare back-to-back send on the same row never
+// loses its own fresh claim to a predecessor's cleanup. If the reconciler
+// recorded a PENDING invalidation while this send's claim was live (codex
+// P0 r22 — deferrals must never be lost), the release COMPLETES it here:
+// full marker, linkage keys removed, old-lead unlink, row archived. Failure
+// is non-fatal — an uncleared claim ages out by TTL, the pending marker
+// already blocks any resend, and the next reconcile (claim now stale)
+// applies the full invalidation itself.
+async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
+  if (!estimateId || !deliveryClaimToken) return;
+  try {
+    await db.transaction(async (trx) => {
+      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('id', 'status', 'archived_at', 'estimate_data');
+      if (!row) return;
+      let data;
+      try {
+        data = typeof row.estimate_data === 'string'
+          ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+      } catch { return; }
+      if (!data || typeof data !== 'object') return;
+      const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : null;
+      if (!eng || eng.delivering_token !== deliveryClaimToken) return;
+      delete eng.delivering_at;
+      delete eng.delivering_token;
+      const pending = takePendingInvalidation(data);
+      if (pending && !eng.linkage_invalidated_at) {
+        // ONE shared transition (admin-estimate-persistence): the full
+        // marker lands, linkage keys go, the old lead unlinks, and the row
+        // archives back to an inert draft — EXCEPT a money-bearing
+        // terminal, which keeps status, archive state, and money fields
+        // (codex P0 r23/r26: an accept can race the pending marker through
+        // the closing public gate; conversion is the operator's to unwind,
+        // but the permanent public token must still die).
+        const { terminal, status, obsolete, deferred } = await completePendingInvalidation(trx, estimateId, { row, data, pending });
+        if (deferred) {
+          logger.info(`[admin-estimates] deferred a pending invalidation on estimate ${estimateId} — a newer processing generation is mid-flight; the wedged-invalidation sweep re-attempts once the call settles`);
+        } else if (obsolete) {
+          logger.info(`[admin-estimates] discarded an OBSOLETE pending invalidation on estimate ${estimateId} — a later retry restored the recorded linkage`);
+        } else if (terminal) {
+          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${status}' — marker-only invalidation applied (status and money preserved), needs operator review`);
+        } else {
+          logger.info(`[admin-estimates] completed deferred invalidation of estimate ${estimateId} at delivery-claim release (${pending.from || pending.conflict || 'unlink'} → ${pending.to || 'none'})`);
+        }
+        return;
+      }
+      await trx('estimates').where({ id: estimateId })
+        .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    });
+  } catch (e) {
+    logger.warn(`[admin-estimates] delivery-claim clear failed for estimate ${estimateId}: ${e.message}`);
+  }
+}
+
+// Last-instant re-check before each provider handoff (codex P0 r23, P1 GH
+// r5): the verdict lock released moments ago, and BOTH an estimate marker
+// AND a call-side correction can commit in between — a retry can stamp a
+// new lead while its detached estimator run hasn't recorded the pending
+// invalidation yet, leaving a real unmarked window that only the call row
+// shows. So the linkage revalidation is repeated here, not just the marker
+// read. Nothing can make a provider call atomic with a DB commit, but this
+// shrinks the window to milliseconds — and the public routes fail closed
+// on the markers, so a message that still slips out carries a link that
+// serves nothing. DB failure fails CLOSED (the leg is retryable);
+// unparseable estimate_data proceeds, matching the verdict read.
+async function estimateInvalidatedJustBeforeHandoff(estimateId) {
+  const row = await db('estimates').where({ id: estimateId }).first('archived_at', 'estimate_data');
+  if (!row) return true;
+  if (row.archived_at) return true;
+  let data;
+  try {
+    data = typeof row.estimate_data === 'string'
+      ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+  } catch { return false; }
+  const eng = data?.estimatorEngine;
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  return !!(await staleCallLinkageReason(db, data));
+}
+
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
+  // The claim is stamped inside the verdict transaction (see below) and
+  // MUST be released on every exit — success, partial failure, or throw —
+  // or legitimate linkage corrections stay blocked until the TTL expires.
+  const deliveryClaimToken = crypto.randomUUID();
+  try {
+    return await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
+  } finally {
+    await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
+  }
+}
+
+async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
     err.statusCode = 400;
@@ -934,6 +1053,70 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     // status read is never proof (codex #3248 r6).
     if (options.claimState && (groupClaim.anchorClaimedInLock || options.callerPreClaimed === true)) {
       options.claimState.anchorClaimed = true;
+    }
+  }
+
+  // FINAL pre-delivery verdict re-read (codex P0, PR #3304): a linkage
+  // invalidation can archive the row after this send claimed it — the
+  // in-memory estimate still carries the FORMER lead's recipient and
+  // content, and delivering it would expose another customer's PII. A row
+  // archived (or marked invalidated) since the claim releases back to
+  // send_failed and aborts before any provider call.
+  {
+    // FOR UPDATE inside a short transaction (codex P0, PR #3304 r19/r20):
+    // the same locked transaction that reads the verdict also STAMPS the
+    // delivery claim (estimatorEngine.delivering_at + delivering_token),
+    // making verdict-and-claim atomic. The reconciler and the identity
+    // quarantine refuse to commit an invalidation while the claim is fresh
+    // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
+    // can slip in between this lock releasing and the provider handoff —
+    // the lock itself is never held across provider calls.
+    const invalidatedNow = await db.transaction(async (trx) => {
+      const verdictRow = await trx('estimates')
+        .where({ id: estimate.id })
+        .forUpdate()
+        .first('archived_at', 'estimate_data');
+      if (!verdictRow) return 'invalidated_before_delivery';
+      if (verdictRow.archived_at) return 'invalidated_before_delivery';
+      let data;
+      try {
+        data = typeof verdictRow.estimate_data === 'string'
+          ? JSON.parse(verdictRow.estimate_data) : (verdictRow.estimate_data || {});
+      } catch { data = null; }
+      if (data?.estimatorEngine?.linkage_invalidated_at) return 'invalidated_before_delivery';
+      // A PENDING invalidation (recorded by the reconciler while an
+      // earlier send's claim was live, codex P0 r22) is as final as the
+      // full marker for send purposes — the archive just hasn't landed
+      // yet. Never re-send, and never stamp a new claim over it.
+      if (data?.estimatorEngine?.invalidation_pending_at) return 'invalidated_before_delivery';
+      // LIVE call-linkage revalidation for engine-drafted rows (codex P0,
+      // PR #3304 r21): the call processor can commit a corrected stamp
+      // BEFORE its reconcile archives this draft — the marker check alone
+      // misses that window, and stamping the claim below would then defer
+      // the very reconcile meant to stop this send.
+      const staleLinkage = await staleCallLinkageReason(trx, data);
+      if (staleLinkage) return staleLinkage;
+      // Unparseable estimate_data: verdict passes (matches the prior
+      // read-only behavior) but no claim is stamped — a blind rewrite
+      // would clobber whatever is in the column.
+      if (data && typeof data === 'object') {
+        data.estimatorEngine = {
+          ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+          delivering_at: new Date().toISOString(),
+          delivering_token: deliveryClaimToken,
+        };
+        await trx('estimates').where({ id: estimate.id })
+          .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+      }
+      return null;
+    });
+    if (invalidatedNow) {
+      await db('estimates')
+        .where({ id: estimate.id, status: 'sending' })
+        .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
+      const err = new Error('This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
+      err.statusCode = 409;
+      throw err;
     }
   }
 
@@ -1007,6 +1190,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             entity_id: estimate.id,
           });
           if (!smsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+            throw new Error('invalidated_before_delivery');
+          }
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
@@ -1108,6 +1294,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             const fm = parseFloat(freshEstimate.monthly_total || 0);
             const fa = parseFloat(freshEstimate.annual_total || 0);
             freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
+          }
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+            throw new Error('invalidated_before_delivery');
           }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
@@ -2231,6 +2420,22 @@ router.put('/:id/proposal', async (req, res, next) => {
     const updateQuery = db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
+      // An ARCHIVED row is not editable (codex P1, PR #3304): a linkage
+      // invalidation archiving the draft between this route's pre-read
+      // and the write must win — the stale whole-blob rewrite would strip
+      // linkage_invalidated_at and revive the old linkage data.
+      .whereNull('archived_at')
+      // …and neither a MARKER nor a live delivery CLAIM may be present
+      // (codex P0, PR #3304 GH r8c): sendEstimateNow flips status back to
+      // 'sent' BEFORE its finally block clears delivering_token, so a
+      // proposal save that began earlier can land in that window and
+      // overwrite a concurrently recorded invalidation_pending_* marker
+      // and the claim itself — after which claim cleanup finds no matching
+      // token and wrong-lead content stays public and sendable. The
+      // status-only exclusion could not see that window.
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard
@@ -2465,11 +2670,32 @@ router.post('/:id/unarchive', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // A draft ARCHIVED by linkage invalidation is permanently
+    // non-revivable (codex P0, PR #3304): its composed content —
+    // recipient, address, pricing — belongs to the FORMER lead of a
+    // repointed/unlinked call, and unarchiving would restore public-token
+    // access and make the send claim succeed against the wrong customer.
+    // The engine already rebuilt a corrected draft; this one is history.
+    // Checked BEFORE the idempotent return (an invalidated-but-live row is
+    // never blessed) and enforced ATOMICALLY in the UPDATE's own predicate
+    // — a concurrent invalidation between read and write zero-rows into
+    // the same 409 (codex P0 r16).
+    const invalidatedMessage = 'This draft was invalidated by a call-linkage correction — its content belongs to a different lead. A corrected draft was rebuilt; this one cannot be unarchived.';
+    const invalidatedAt = (() => {
+      try {
+        const data = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+        return data?.estimatorEngine?.linkage_invalidated_at || null;
+      } catch { return null; }
+    })();
+    if (invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
     const [updated] = await db('estimates')
       .where({ id: req.params.id })
+      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .update({ archived_at: null, updated_at: db.fn.now() })
       .returning('*');
+    if (!updated) return res.status(409).json({ error: invalidatedMessage });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -2723,6 +2949,27 @@ router.post('/:id/extend', async (req, res, next) => {
 // stamped for funnel reporting and acceptance side effects run once.
 router.post('/:id/mark-accepted', async (req, res, next) => {
   try {
+    // The DURABLE call-side verdict blocks a MANUAL acceptance too (codex
+    // P0, PR #3304 GH r10b): when estimate-side invalidation failed — the
+    // exact case the queued marker covers — the public routes and the
+    // delivery paths already refuse, but recording a verbal yes here
+    // would still convert the customer and mint billing off a
+    // wrong-identity or rejected-call estimate.
+    {
+      const row = await db('estimates').where({ id: req.params.id }).first('estimate_data');
+      let data = row?.estimate_data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch { data = null; }
+      }
+      if (data && typeof data === 'object') {
+        const blocked = await callSideBlockForEstimateData(db, data);
+        if (blocked) {
+          return res.status(409).json({
+            error: 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.',
+          });
+        }
+      }
+    }
     const result = await markEstimateManuallyAccepted({
       estimateId: req.params.id,
       adminUserId: req.technicianId,

@@ -149,11 +149,10 @@ function dateOnlyForApi(value) {
   return String(value).split('T')[0].slice(0, 10);
 }
 
-const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
-
-function membershipTierKey(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
+// Membership-state predicate lives in services/membership-state.js (one
+// copy — the lawn-email gap check consults the same rule these lifecycle
+// emails key off).
+const { NON_MEMBERSHIP_TIER_KEYS, membershipTierKey, hasMembership } = require('../services/membership-state');
 
 function comparableMembershipTier(value) {
   const tierKey = membershipTierKey(value);
@@ -163,14 +162,6 @@ function comparableMembershipTier(value) {
 function comparableMonthlyRate(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
-}
-
-function hasMembership(customer = {}) {
-  const rawTier = customer.waveguard_tier ?? customer.tier;
-  const tierKey = membershipTierKey(rawTier);
-  if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return false;
-  if (tierKey) return true;
-  return Number(customer.monthly_rate ?? customer.monthlyRate ?? 0) > 0;
 }
 
 function membershipDetailsChanged(before = {}, after = {}) {

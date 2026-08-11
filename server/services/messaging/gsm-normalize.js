@@ -112,8 +112,25 @@ function normalizeGsmPunctuation(body) {
   return out;
 }
 
+/**
+ * First character this module classifies as typographic/non-GSM punctuation
+ * (including the ellipsis), or null. THE detection surface for lint layers
+ * (comms-lint) — they must share this classification, never keep a parallel
+ * character list that drifts from REPLACEMENTS.
+ */
+function findTypographicChar(text) {
+  if (typeof text !== 'string' || text === '') return null;
+  NORMALIZE_RE.lastIndex = 0;
+  ELLIPSIS_RE.lastIndex = 0;
+  const m = NORMALIZE_RE.exec(text) || ELLIPSIS_RE.exec(text);
+  NORMALIZE_RE.lastIndex = 0;
+  ELLIPSIS_RE.lastIndex = 0;
+  return m ? m[0] : null;
+}
+
 module.exports = {
   normalizeGsmPunctuation,
+  findTypographicChar,
   // Exposed for tests
   _internals: { REPLACEMENTS, NORMALIZE_RE },
 };

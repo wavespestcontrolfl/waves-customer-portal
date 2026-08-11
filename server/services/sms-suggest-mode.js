@@ -481,7 +481,7 @@ async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -567,7 +567,15 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
           confidence_label: numericConfidence === null
             ? null
             : numericConfidence >= 0.85 ? 'high' : numericConfidence >= 0.6 ? 'medium' : 'low',
-          input_snapshot: JSON.stringify({ sms: { body: inboundMessage }, draft_id: draftId }),
+          // comms_lint rides the snapshot so the composer card can show the
+          // reviewer WHY a draft was flagged (and, for auto-send intents,
+          // why it was demoted to a card) — a flagged draft must never look
+          // like a clean one behind an actionable Use Draft button.
+          input_snapshot: JSON.stringify({
+            sms: { body: inboundMessage },
+            draft_id: draftId,
+            ...(Array.isArray(lintFailures) && lintFailures.length ? { comms_lint: lintFailures } : {}),
+          }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',
           model: model || null,

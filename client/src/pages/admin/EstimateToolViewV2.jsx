@@ -2657,6 +2657,11 @@ export default function EstimateToolViewV2({
   // Set when the server-authoritative price (Decision #2) differs from the
   // client preview at save time, so the operator isn't left quoting a stale number.
   const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
+  // Server-detected unlinked-member save (2026-08-10): the typed address
+  // matches an active member but no customer was linked, so the combined
+  // WaveGuard tier was NOT applied — surfaced beside the saved totals so the
+  // operator links and re-saves before sending.
+  const [memberLinkageWarning, setMemberLinkageWarning] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -4586,11 +4591,13 @@ export default function EstimateToolViewV2({
       // won't honor.
       const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
+      setMemberLinkageWarning(d.memberLinkageWarning || null);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
-      // recomputeNotice rides along so saveAndSend can gate the send on it —
-      // the banner state set above renders too late to stop an in-flight send.
-      return { id, viewUrl, recomputeNotice };
+      // recomputeNotice + memberLinkageWarning ride along so saveAndSend can
+      // gate the send on them — the banner state set above renders too late
+      // to stop an in-flight send (codex #3338 r6).
+      return { id, viewUrl, recomputeNotice, memberLinkageWarning: d.memberLinkageWarning || null };
     } catch (e) {
       alert(e.message);
       return null;
@@ -4864,7 +4871,7 @@ export default function EstimateToolViewV2({
     const saved = savedId
       ? // Already-saved path: any drift was surfaced by that earlier save and
         // still lives in the banner state — gate on it the same way.
-        { id: savedId, viewUrl: savedViewUrl, recomputeNotice: priceRecomputeNotice }
+        { id: savedId, viewUrl: savedViewUrl, recomputeNotice: priceRecomputeNotice, memberLinkageWarning }
       : await doSave();
     if (!saved?.id) return;
     // Server-authoritative repricing (Decision #2) can move the number at save
@@ -4875,6 +4882,17 @@ export default function EstimateToolViewV2({
       const proceed = window.confirm(
         `The server recomputed the final price on save: ${describeRecomputeNotice(saved.recomputeNotice)}.\n\n` +
           "This recomputed price is what the customer will see. Send it?",
+      );
+      if (!proceed) return;
+    }
+    // Unlinked-member guard (codex #3338 r6): on a one-click Save & Send the
+    // warning banner renders after the send would already be gone — gate
+    // here, same trust pattern as the reprice confirm above. Cancel keeps
+    // the saved draft so the operator can link the customer and re-save.
+    if (saved.memberLinkageWarning) {
+      const proceed = window.confirm(
+        `${saved.memberLinkageWarning.message}\n\n` +
+          "Send anyway at non-member pricing?",
       );
       if (!proceed) return;
     }
@@ -8078,6 +8096,12 @@ export default function EstimateToolViewV2({
               </Button>
             )}
 
+            {memberLinkageWarning && (
+              <div className="text-14 text-ink bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-3 mt-2">
+                <span className="font-medium">Member pricing not applied.</span>{" "}
+                {memberLinkageWarning.message}
+              </div>
+            )}
             {priceRecomputeNotice && (
               <div className="text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 mt-2">
                 Final price recomputed on save (server-authoritative):

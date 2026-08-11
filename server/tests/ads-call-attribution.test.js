@@ -2,20 +2,41 @@
 // the PPC funnel (ad_service_attribution), keyed by lead_id.
 
 let firstByTable = {};
+let firstQueueByTable = {};
+let listQueueByTable = {};
 const insertCalls = [];
 const updateCalls = [];
+const deleteCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
-  ['where', 'whereNot', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
-  b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
+  ['where', 'whereIn', 'whereNot', 'whereRaw', 'whereNull', 'whereNotExists', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
+  // Real knex .modify invokes the callback with the builder.
+  b.modify = jest.fn((fn) => { fn(b); return b; });
+  // Ordered .first reads consume a per-table queue when one is set (the
+  // successor scan's arms hit the same table several times with different
+  // results); the static firstByTable stays the fallback.
+  b.first = jest.fn(() => {
+    const q = firstQueueByTable[table];
+    if (q && q.length) return Promise.resolve(q.shift());
+    return Promise.resolve(firstByTable[table]);
+  });
+  b.del = jest.fn(() => { deleteCalls.push({ table }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
-  // Makes an awaited insert(...).onConflict(...).ignore() chain resolve.
-  b.then = (res, rej) => Promise.resolve([1]).then(res, rej);
+  // Awaited list queries consume a per-table queue when one is set (the
+  // backfill's sid/stamp candidate reads); an awaited
+  // insert(...).onConflict(...).ignore() chain still resolves [1].
+  b.then = (res, rej) => {
+    const q = listQueueByTable[table];
+    const val = (q && q.length) ? q.shift() : [1];
+    return Promise.resolve(val).then(res, rej);
+  };
   return b;
 });
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
+mockDb.raw = jest.fn((sql) => `raw(${sql})`);
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -30,8 +51,11 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 beforeEach(() => {
   jest.clearAllMocks();
   firstByTable = {};
+  firstQueueByTable = {};
+  listQueueByTable = {};
   insertCalls.length = 0;
   updateCalls.length = 0;
+  deleteCalls.length = 0;
 });
 
 describe('shared service-line inference (utils/service-line-infer)', () => {
@@ -185,6 +209,7 @@ describe('recordCallPpcAttribution', () => {
       customer_id: 'C1',
       lead_id: 'L1',
       service_line: 'mosquito',
+      source_call_id: null,
       specific_service: 'mosquito_program',
       service_bucket: 'recurring',
       lead_date: '2026-03-15',
@@ -302,7 +327,7 @@ describe('recordCallPpcAttribution', () => {
   });
 
   test('does not overwrite an already-set campaign with a different one (first-touch wins)', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-y', lead_source: 'google_ads', campaign_id: 'local-existing', lead_source_detail: 'Old Campaign', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
+    firstByTable.ad_service_attribution = { id: 'row-y', lead_source: 'google_ads', customer_id: 'C1', campaign_id: 'local-existing', lead_source_detail: 'Old Campaign', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
@@ -379,7 +404,7 @@ describe('recordCallPpcAttribution', () => {
   });
 
   test('does not touch an existing lead row that already has its campaign', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-2', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
+    firstByTable.ad_service_attribution = { id: 'row-2', customer_id: 'C1', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
@@ -389,5 +414,851 @@ describe('recordCallPpcAttribution', () => {
     expect(res).toEqual({ recorded: false, reason: 'already_recorded' });
     expect(updateCalls).toHaveLength(0);
     expect(insertCalls).toHaveLength(0);
+  });
+});
+
+describe("call provenance protects another call's row (PR #3303)", () => {
+  test('a different call never patches a provenanced row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'row-p', lead_source: 'google_ads', customer_id: null,
+      campaign_id: null, lead_source_detail: 'inbound call', source_call_id: 'call-A',
+    };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874',
+      leadSourceDetail: 'New Campaign', sourceCallId: 'call-B',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'other_call' });
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test('a lead-centric backfill (no call identity) still repairs the row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'row-p', lead_source: 'google_ads', customer_id: null,
+      campaign_id: null, lead_source_detail: 'inbound call', source_call_id: 'call-A',
+    };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874', leadSourceDetail: 'New Campaign',
+    });
+
+    expect(res).toMatchObject({ recorded: true, updated: true });
+    expect(updateCalls[0].row).toMatchObject({ customer_id: 'C1', campaign_id: 'local-9' });
+  });
+});
+
+describe('backfillCallLeadAttribution — provenance resolved and written under ONE lock (PR #3303 r5)', () => {
+  const LEAD = {
+    id: 'lead-1',
+    customer_id: 'cust-1',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: null,
+  };
+  const SOURCE = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+
+  test('a single sid-linked call verified settled UNDER LOCK becomes provenance; the funnel write rides the same transaction', async () => {
+    firstByTable.leads = { ...LEAD, twilio_call_sid: 'CAx' };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 'call-1' }]];
+    firstByTable.call_log = { id: 'call-1', processing_token: null, processing_status: 'processed', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    const insert = insertCalls.find((c) => c.table === 'ad_service_attribution');
+    expect(insert.row.source_call_id).toBe('call-1');
+  });
+
+  test('a sid candidate whose LOCKED re-read shows an in-flight reprocess refuses — the retired row never resurrects', async () => {
+    firstByTable.leads = { ...LEAD, twilio_call_sid: 'CAx' };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 'call-1' }]];
+    firstByTable.call_log = { id: 'call-1', processing_token: 'tok-live', processing_status: 'processing', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_rejected' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('TWO settled stamped calls leave provenance NULL — never newest-wins (codex P1 r5)', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }, { id: 's2' }]];
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    const insert = insertCalls.find((c) => c.table === 'ad_service_attribution');
+    expect(insert.row.source_call_id).toBeNull();
+  });
+
+  test('exactly ONE settled stamped call becomes provenance after its locked re-check', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    // The locked re-read must still show the stamp naming THIS lead — a
+    // repoint that landed while we waited refuses (see the r8 suite).
+    firstByTable.call_log = {
+      id: 's1', processing_token: null, processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-1' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('s1');
+  });
+
+  test('a stamped candidate that turns in-flight under the lock refuses with call_unsettled (retryable, no NULL-provenance row)', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    firstByTable.call_log = { id: 's1', processing_token: 'tok-live', processing_status: 'processing', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_unsettled' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
+describe('resolveSourceCallProvenanceLocked — settled dissenting stamp (GH P1 r6)', () => {
+  const LEAD2 = {
+    id: 'lead-old',
+    customer_id: 'cust-1',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: 'CAy',
+  };
+
+  test('a sid candidate whose SETTLED stamp points at a DIFFERENT lead refuses — the repoint is authoritative', async () => {
+    firstByTable.leads = { ...LEAD2 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-new' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a sid candidate whose settled stamp AGREES with the lead still becomes provenance', async () => {
+    firstByTable.leads = { ...LEAD2 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-old' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('call-9');
+  });
+});
+
+describe('resolveSourceCallProvenanceLocked — anonymous stamp-less repoint (codex P1, PR #3303 r16)', () => {
+  test("a stamp-less CUSTOMER-LESS sid candidate whose provenanced row sits on ANOTHER lead refuses — 'call_repointed'", async () => {
+    // The owner-conflict test is unreachable when call_log.customer_id is
+    // NULL (anonymous caller) — but the funnel row on the new lead records
+    // the repoint; claiming the sid candidate would transfer it back.
+    firstByTable.leads = {
+      id: 'lead-old',
+      customer_id: 'cust-1',
+      lead_source_id: 'src-1',
+      service_interest: 'pest control',
+      created_at: '2026-08-01T12:00:00.000Z',
+      twilio_call_sid: 'CAy',
+    };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: '{}', // stamp-less: the phone-matched repoint writes no stamp
+      customer_id: null, // anonymous — no owner to conflict with
+    };
+    firstByTable.ad_service_attribution = { id: 'row-1', lead_id: 'lead-new' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test("an ORPHANED provenanced row (lead hard-deleted, lead_id NULL) is NOT a repoint — claim-time backfill reaches the orphan transfer (codex P1 r32)", async () => {
+    // ad_service_attribution.lead_id is ON DELETE SET NULL. String(null)
+    // read the orphan as residing on a different lead and refused
+    // 'call_repointed', so the sid-linked replacement lead could never
+    // recover the row through reconcileMovedCallAttributionRow's orphan
+    // arm — it stayed blocking the partial-UNIQUE slot forever.
+    firstByTable.leads = {
+      id: 'lead-old',
+      customer_id: 'cust-1',
+      lead_source_id: 'src-1',
+      service_interest: 'pest control',
+      created_at: '2026-08-01T12:00:00.000Z',
+      twilio_call_sid: 'CAy',
+    };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: '{}', // stamp-less
+      customer_id: null, // anonymous
+    };
+    const orphan = { id: 'row-1', lead_id: null };
+    firstQueueByTable.ad_service_attribution = [
+      orphan, // resolveSourceCallProvenanceLocked's provenance read
+      orphan, // recordCallPpcAttribution's provenance recovery read
+      { id: 'row-1' }, // reconcile: source row locked by (source_call_id, lead IS NULL)
+      undefined, // reconcile: no conflicting row on the target lead
+      { // record's dedup lookup: the row NOW TRANSFERRED onto this lead
+        id: 'row-1',
+        lead_id: 'lead-old',
+        source_call_id: 'call-9',
+        lead_source: 'google_ads',
+        lead_source_detail: null,
+        customer_id: 'cust-1',
+      },
+    ];
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res.reason).not.toBe('call_repointed');
+    expect(res.recorded).toBe(true);
+    // The orphan was TRANSFERRED (updated onto the live lead), never re-inserted.
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+    const transfer = updateCalls.find((u) => u.table === 'ad_service_attribution' && u.row.lead_id === 'lead-old');
+    expect(transfer).toBeTruthy();
+    expect(transfer.row.customer_id).toBe('cust-1');
+  });
+});
+
+describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock (codex P1, PR #3303 r8)', () => {
+  const LEAD3 = {
+    id: 'lead-1',
+    customer_id: 'cust-1',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: null,
+  };
+
+  test('a stamp candidate REPOINTED to another lead before the lock refuses', async () => {
+    firstByTable.leads = { ...LEAD3 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    // Settled and attributable — but the stamp now names a different lead.
+    firstByTable.call_log = {
+      id: 's1',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-other' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a stamp candidate still naming this lead under the lock becomes provenance', async () => {
+    firstByTable.leads = { ...LEAD3 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    firstByTable.call_log = {
+      id: 's1',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-1' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('s1');
+  });
+});
+
+describe('retire REASSIGNS provenance to a surviving successor (codex P1 r17 + pre-push P0 r19)', () => {
+  // The retire reads the row before deciding delete-vs-demote (codex P0
+  // r24); a bare history-free row is the delete case these tests model.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-x', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  // The retire reads the row before deciding delete-vs-demote (codex P0
+  // r24); a bare history-free row is the delete case these tests model.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-x', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  test('retireCallAttributionRow moves the row to the newest settled successor — history intact, dimensions refreshed', async () => {
+    // With multiple calls reusing one lead, the row owner's rejection
+    // deleted the lead's booked/completed history even though a later
+    // valid call still supported it. The row now survives IN PLACE with
+    // every accumulated funnel field; the evidence pointer moves and the
+    // attribution DIMENSIONS refresh from the successor's channel
+    // (pre-push P1 r19) — a cross-channel successor clears campaign_id
+    // so the bridge/backfill can re-supply it.
+    firstByTable.call_log = { id: 'call-successor', to_phone: '+19415551234', created_at: '2026-08-09T12:00:00Z' };
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+    firstByTable.ad_service_attribution = { lead_source: 'google_ads', campaign_id: 'camp-1' };
+    firstByTable.leads = { service_interest: 'Lawn Care' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
+    expect(reassigned.row).toMatchObject({
+      lead_source: 'waves_website', // the successor's dialed number's channel
+      is_paid: false,
+      lead_source_detail: 'Sarasota city page',
+      campaign_id: null, // never the rejected call's stale campaign
+      service_line: 'lawn', // the lead's LIVE service interest
+    });
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a bridge-CONFIRMED successor refreshes to google_ads with its OWN campaign — never number-inferred organic (pre-push P1 r20)', async () => {
+    // The bridge's shared main-line number's lead_sources row is NOT
+    // google_ads — number-only inference would flip a confirmed-paid call
+    // to organic.
+    firstByTable.call_log = {
+      id: 'call-successor',
+      to_phone: '+19415550000', // the shared main line — must NOT drive the decision
+      created_at: '2026-08-09T12:00:00Z',
+      google_ads_call_resource_name: 'customers/1/callView/2',
+      metadata: { google_ads_call_bridge: { campaignId: '22594274874', campaignName: 'Brand Campaign' } },
+    };
+    firstByTable.ad_campaigns = { id: 'camp-local' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
+    expect(reassigned.row).toMatchObject({
+      lead_source: 'google_ads',
+      is_paid: true,
+      campaign_id: 'camp-local', // the successor's bridge-stamped campaign
+      lead_source_detail: 'Brand Campaign',
+    });
+  });
+
+  test('retireAllCallAttributionRows deletes NULL-lead rows directly — no String(null) UUID query (pre-push P1 r19)', async () => {
+    listQueueByTable.ad_service_attribution = [[{ lead_id: null }]];
+
+    const n = await CallAttribution.retireAllCallAttributionRows(mockDb, 'call-rejected');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('no settled successor → the row is deleted (the call supports no lead, nothing survives it)', async () => {
+    firstByTable.call_log = undefined;
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
+describe('phone successor arm requires durable lead evidence (codex P1 r18)', () => {
+  // The lead is phone-linked only: no sid, unshared number, owned customer.
+  const PHONE_LEAD = { twilio_call_sid: null, phone: '+19415551234', customer_id: 'cust-1' };
+  // Workable by default (pre-push P1 r20): customer-less successors now
+  // re-judge hasWorkableLeadSignal, so linked-call fixtures carry concrete
+  // service intent + reachability (synthetic identity per PII rule).
+  const evidence = (extra) => JSON.stringify({
+    call_type: 'new_inquiry',
+    is_lead: true,
+    matched_service: 'pest control',
+    email: 'psample00005@example.com',
+    ...extra,
+  });
+
+  // Same as above: these assert the DELETE branch, so the row must exist.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-y', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  // Same as above: these assert the DELETE branch, so the row must exist.
+  beforeEach(() => {
+    firstByTable.ad_service_attribution = { id: 'asa-y', funnel_stage: 'lead', booked_amount: null, completed_revenue: null };
+  });
+
+  test("a settled billing call from the lead's number can NOT inherit — the row deletes", async () => {
+    // An ordinary support/billing call finishes 'processed' with no
+    // no_attribution marker, but the processor never linked it to any lead
+    // (shouldCreateLead was false) — reassigning booked/completed revenue
+    // onto it moved funnel history to a call that owns none.
+    firstQueueByTable.call_log = [undefined]; // stamp arm misses
+    firstQueueByTable.leads = [PHONE_LEAD, undefined]; // lead read; number not shared
+    listQueueByTable.call_log = [[{
+      id: 'call-billing',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: JSON.stringify({ call_type: 'billing' }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('absent ai_extraction proves nothing — fail closed, the row deletes', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[
+      { id: 'call-legacy', created_at: '2026-08-09T12:00:00Z', ai_extraction: null },
+      { id: 'call-garbage', created_at: '2026-08-08T12:00:00Z', ai_extraction: '{not json' },
+    ]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a lead-evidence call inherits — evidence re-judged from the LOCKED re-read', async () => {
+    const successor = {
+      id: 'call-successor',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor]; // stamp arm miss; FOR UPDATE re-select hit
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-successor');
+    expect(reassigned).toBeTruthy();
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a newer evidence-less call does not shadow an older valid successor', async () => {
+    const older = {
+      id: 'call-older-valid',
+      to_phone: '+19415550001',
+      created_at: '2026-08-08T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, older];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[
+      { id: 'call-newer-billing', created_at: '2026-08-09T12:00:00Z', ai_extraction: JSON.stringify({ call_type: 'billing' }) },
+      older,
+    ]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    const reassigned = updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-older-valid');
+    expect(reassigned).toBeTruthy();
+  });
+
+  test('evidence that DEGRADED between the scan and the lock is re-judged and refused', async () => {
+    // A full force-reprocess cycle (claim → re-extract → settle) can land
+    // between the unlocked candidate scan and the FOR UPDATE re-select —
+    // the locked row's extraction is the authority.
+    const scanned = {
+      id: 'call-flipped',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, { ...scanned, ai_extraction: JSON.stringify({ call_type: 'wrong_number' }) }];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[scanned]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test("an ESTABLISHED customer's lead-shaped call can NOT inherit — the processor's customer gate never linked it (codex P1 r19)", async () => {
+    // new_inquiry content passes the veto, but shouldCreateLead also
+    // requires shouldCreateCallLeadForCustomer for customer-attached
+    // calls — an active_customer's call created/reused no lead.
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'active_customer' };
+    listQueueByTable.call_log = [[{
+      id: 'call-established',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence(),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a MID-PIPELINE customer-attached call passes the linkage mirror and inherits (codex P1 r19)', async () => {
+    const successor = {
+      id: 'call-pipeline',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'estimate_sent' };
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-pipeline')).toBeTruthy();
+  });
+
+  test('a customer CREATED BY the candidate call passes via the durable created_customer_id stamp — no stage read (codex P1 r19)', async () => {
+    const successor = {
+      id: 'call-creator',
+      to_phone: '+19415550001',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: { created_customer_id: 'cust-1' },
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'active_customer' }; // would refuse if consulted
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-creator')).toBeTruthy();
+  });
+
+  test('a customer-attached VOICEMAIL never inherits — the processor voicemail-vetoes that linkage path (codex P1 r19)', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    firstByTable.customers = { pipeline_stage: 'estimate_sent' }; // stage alone would pass
+    listQueueByTable.call_log = [[{
+      id: 'call-voicemail',
+      created_at: '2026-08-09T12:00:00Z',
+      customer_id: 'cust-1',
+      metadata: {},
+      ai_extraction: evidence({ is_voicemail: true }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less call with service intent but NO reachability can NOT inherit — hasWorkableLeadSignal never linked it (pre-push P1 r20)', async () => {
+    // A caller leg is present, so the gate's phone branch applies: intent
+    // alone without email/address (and not a voicemail) never minted a
+    // workable unnamed lead.
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[{
+      id: 'call-intent-only',
+      created_at: '2026-08-09T12:00:00Z',
+      from_phone: '+12025550101',
+      metadata: {},
+      ai_extraction: evidence({ email: undefined }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less parseable-but-EMPTY extraction can NOT inherit — no service intent (pre-push P1 r20)', async () => {
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[{
+      id: 'call-empty-extraction',
+      created_at: '2026-08-09T12:00:00Z',
+      from_phone: '+12025550101',
+      metadata: {},
+      ai_extraction: JSON.stringify({ call_type: 'new_inquiry', is_lead: true }),
+    }]];
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a customer-less VOICEMAIL with intent and a caller leg inherits — voicemail satisfies the reachback arm, mirroring the processor (pre-push P1 r20)', async () => {
+    const successor = {
+      id: 'call-vm-lead',
+      to_phone: '+19415550001',
+      from_phone: '+12025550101',
+      created_at: '2026-08-09T12:00:00Z',
+      metadata: {},
+      ai_extraction: evidence({ email: undefined, is_voicemail: true }),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-vm-lead')).toBeTruthy();
+  });
+
+  test('the scan PAGES past ten rejected candidates to an older valid successor (codex P1 r19)', async () => {
+    const routine = (i) => ({
+      id: `call-routine-${i}`,
+      created_at: `2026-08-09T12:00:${String(59 - i).padStart(2, '0')}Z`,
+      ai_extraction: JSON.stringify({ call_type: 'billing' }),
+    });
+    const older = {
+      id: 'call-page-two-valid',
+      to_phone: '+19415550001',
+      created_at: '2026-08-01T12:00:00Z',
+      ai_extraction: evidence(),
+    };
+    firstQueueByTable.call_log = [undefined, older]; // stamp arm miss; FOR UPDATE re-select hit
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [
+      Array.from({ length: 10 }, (_, i) => routine(i)), // full first page, all fail the gate
+      [older], // second page
+    ];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-page-two-valid')).toBeTruthy();
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('the phone arm excludes outbound calls and sid-dissenting calls in SQL (durable columns)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const arm = src.split('const phoneArm = ()')[1].split('let cursor')[0];
+    // The office dialing the number back never creates or reuses a lead.
+    expect(arm).toMatch(/NOT LIKE 'outbound%'/);
+    // A call whose sid is a DIFFERENT live lead's originating sid is that
+    // lead's call — sid dissent mirrors the settled-stamp precedence.
+    expect(arm).toMatch(/lo\.twilio_call_sid = call_log\.twilio_call_sid/);
+    expect(arm).toMatch(/whereNot\('lo\.id', leadId\)/);
+    expect(arm).toMatch(/whereNull\('lo\.deleted_at'\)/);
+  });
+});
+
+describe('callCarriesDurableLeadEvidence (codex P1 r18)', () => {
+  const { callCarriesDurableLeadEvidence } = CallAttribution._private;
+
+  test('accepts a durable lead-flavored extraction (string or object)', () => {
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ call_type: 'new_inquiry' }))).toBe(true);
+    expect(callCarriesDurableLeadEvidence({ is_lead: true })).toBe(true);
+    // Omitted signals mirror isNonLeadCallContent's legacy behavior: the
+    // veto only fires on an explicit non-lead classification.
+    expect(callCarriesDurableLeadEvidence('{}')).toBe(true);
+  });
+
+  test('fails CLOSED on absent or unparseable extraction', () => {
+    expect(callCarriesDurableLeadEvidence(null)).toBe(false);
+    expect(callCarriesDurableLeadEvidence(undefined)).toBe(false);
+    expect(callCarriesDurableLeadEvidence('')).toBe(false);
+    expect(callCarriesDurableLeadEvidence('{broken')).toBe(false);
+    expect(callCarriesDurableLeadEvidence('"a string"')).toBe(false);
+  });
+
+  test('refuses every explicit non-lead classification the processor vetoes on', () => {
+    for (const t of ['existing_customer_scheduling', 'existing_customer_service', 'complaint', 'billing', 'wrong_number']) {
+      expect(callCarriesDurableLeadEvidence(JSON.stringify({ call_type: t }))).toBe(false);
+    }
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ is_lead: false }))).toBe(false);
+    expect(callCarriesDurableLeadEvidence(JSON.stringify({ is_spam: true }))).toBe(false);
+  });
+});
+
+// ad_service_attribution.lead_id is ON DELETE SET NULL, so a hard-deleted
+// lead orphans this call's row while it still occupies the partial
+// UNIQUE(source_call_id) slot (pre-push P1 r22).
+describe('orphaned provenance (NULL lead_id) in reconcileMovedCallAttributionRow', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+  const fn = src.split('async function reconcileMovedCallAttributionRow')[1].split('\nasync function ')[0];
+
+  test('a null fromLeadId is no longer refused outright', () => {
+    expect(fn).toMatch(/if \(!callLogId\) return 'none';/);
+    expect(fn).not.toMatch(/if \(!callLogId \|\| !fromLeadId\) return 'none';/);
+    expect(fn).toMatch(/const orphanSource = fromLeadId == null;/);
+  });
+
+  test('the orphan arm matches IS NULL, never the uuid-vs-string trap', () => {
+    expect(fn).toMatch(/if \(orphanSource\) qb\.whereNull\('lead_id'\);/);
+    expect(fn).not.toMatch(/lead_id: String\(fromLeadId\)/);
+  });
+
+  test('the conditioned move re-applies the SAME identity predicate it locked', () => {
+    const moveStmt = fn.split('.update({ lead_id: toLeadId')[0].slice(-260);
+    expect(moveStmt).toMatch(/\.modify\(applySourceIdentity\)/);
+  });
+
+  test('an orphan that cannot transfer is RETIRED history-preservingly, never left holding the slot (codex P0 r25)', () => {
+    // Both terminal arms (target-slot conflict, and no target at all) go
+    // through the shared primitive, which demotes a history-bearing row to
+    // legacy and deletes only a bare one — the blanket delete took
+    // booked/completed revenue with it when the lead was hard-deleted.
+    const retires = fn.match(/retireRowPreservingHistory\(dbc, oldRow\.id\)/g) || [];
+    expect(retires).toHaveLength(2);
+    expect(fn).not.toMatch(/whereNull\('lead_id'\)\.del\(\)/);
+  });
+});
+
+// codex P0 r24 — the successor gates read MUTABLE state (the phone arm
+// re-judges the customer's CURRENT pipeline_stage), so "no successor" is
+// not proof the lead has none. Deleting is the irreversible direction.
+describe('retire NEVER deletes accumulated funnel history', () => {
+  const PHONE_LEAD = { id: 'lead-1', phone: '+19415550001', customer_id: null };
+
+  beforeEach(() => {
+    firstQueueByTable.call_log = [undefined]; // stamp arm misses
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[]]; // no successor survives the gates
+  });
+
+  test('a booked/completed row is DEMOTED to legacy (source_call_id NULL), not deleted', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-1', funnel_stage: 'completed', booked_amount: '450.00', completed_revenue: '450.00',
+    };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+    const demote = updateCalls.find((u) => u.table === 'ad_service_attribution');
+    expect(demote.row).toMatchObject({ source_call_id: null });
+  });
+
+  test('revenue alone (still stage lead) is enough to preserve the row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-2', funnel_stage: 'lead', booked_amount: '0', completed_revenue: '125.50',
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution').row)
+      .toMatchObject({ source_call_id: null });
+  });
+
+  test('a bare history-free row still DELETES — the definitive unlink', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'asa-3', funnel_stage: 'lead', booked_amount: null, completed_revenue: null,
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
+// codex P1 r29 — allocator-derived spend is NOT customer funnel history.
+describe('ad_cost never counts as funnel history', () => {
+  test('the metric list excludes ad_cost but keeps earned money and a real estimate', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const list = src.split('const FUNNEL_METRIC_COLS = [')[1].split('];')[0];
+    // ad_cost is repopulated for every paid lead at stage 'lead', so a
+    // rejected row would survive as legacy in the spend totals forever.
+    expect(list).not.toMatch(/'ad_cost'/);
+    expect(list).toMatch(/'estimate_amount'/);
+    expect(list).toMatch(/'booked_amount'/);
+    expect(list).toMatch(/'completed_revenue'/);
+  });
+
+  test('a rejected paid lead carrying ONLY allocated ad_cost still deletes', async () => {
+    const PHONE_LEAD = { id: 'lead-1', phone: '+19415550001', customer_id: null };
+    firstQueueByTable.call_log = [undefined];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[]]; // no successor
+    firstByTable.ad_service_attribution = {
+      id: 'asa-cost', funnel_stage: 'lead', ad_cost: '12.40',
+      estimate_amount: null, booked_amount: null, completed_revenue: null,
+    };
+
+    await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(deleteCalls.filter((d) => d.table === 'ad_service_attribution')).toHaveLength(1);
+    expect(updateCalls.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+});
+
+// codex P0 r30 — the history judgement and the delete must see the SAME row.
+describe('retirement locks the row before judging it', () => {
+  test('EVERY history read takes FOR UPDATE immediately before it', () => {
+    // Unlocked, lead-funnel-bridge / ad-attribution-sync can land booked or
+    // completed revenue between the read and the delete.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const reads = src.match(/\.first\(\.\.\.HISTORY_ROW_COLS\)/g) || [];
+    expect(reads.length).toBe(2); // the lead-scoped retire and the orphan helper
+    const locked = src.match(/\.forUpdate\(\)\s*\n\s*\.first\(\.\.\.HISTORY_ROW_COLS\)/g) || [];
+    expect(locked.length).toBe(reads.length);
   });
 });

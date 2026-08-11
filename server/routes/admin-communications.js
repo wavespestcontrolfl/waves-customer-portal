@@ -914,6 +914,10 @@ router.get('/agent-draft', async (req, res, next) => {
         reasoningSummary: row.reasoning_summary || null,
         scenarioLabel: input?.reply_training_hint?.scenarioLabel || null,
         inboundMessage: input?.sms?.body || null,
+        // Deterministic comms-lint failures recorded at publish time — the
+        // card must show WHY a draft was flagged (it may have been demoted
+        // from auto-send), never present it as clean.
+        lintFailures: Array.isArray(input?.comms_lint) ? input.comms_lint : [],
         createdAt: row.created_at,
       },
     });
@@ -1161,6 +1165,35 @@ async function customerIdsForAccount(accountKey) {
   return rows.map((r) => r.id);
 }
 
+// The greeting name for the composer prefill: the first name the given rows
+// AGREE on (trimmed, case-insensitive; blank rows don't break agreement), or
+// null when they name different people. A "first row" pick would be
+// arbitrary and could greet the wrong household member on a shared number.
+function agreedFirstName(rows) {
+  const named = rows.map((r) => String(r.first_name || '').trim()).filter(Boolean);
+  return named.length && new Set(named.map((n) => n.toLowerCase())).size === 1
+    ? named[0]
+    : null;
+}
+
+// The agreement set for the greeting: live rows that BOTH match the phone's
+// exact last-10 digits AND belong to the resolved account (customerIds).
+// The composer's customerId is NOT proof of an explicit operator pick
+// (opening a thread auto-selects whichever row the latest message happened
+// to carry — codex P2 #3340), so BOTH resolution paths clear name agreement
+// across the number. The account scope matters on the customerId path:
+// phone-only resolution 409s on a cross-account number, but customerId
+// deliberately proceeds as the operator's disambiguation — a stranger's row
+// sharing a reused number must never supply the greeting (codex P1 r2).
+async function firstNameForPhone(last10, customerIds) {
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .whereIn('id', customerIds)
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('first_name');
+  return agreedFirstName(rows);
+}
+
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
@@ -1226,6 +1259,13 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
 
+    // The greeting name for the prefill: agreement across this ACCOUNT's
+    // rows on this NUMBER, on both resolution paths — see firstNameForPhone.
+    // Never the visit owner's row: on a multi-property account a sibling row
+    // may own the visit under a different contact name, but the text still
+    // goes to the phone's owner.
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
+
     // Candidate visits, soonest first. ET day frame: scheduled_date is a
     // DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
     // (same comparison reschedule-public makes). The status gate mirrors
@@ -1278,6 +1318,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     res.json({
       url,
       line,
+      firstName: recipientFirstName,
       appointment: {
         id: svc.id,
         scheduledDate: scheduledDateStr(svc.scheduled_date),
@@ -1348,6 +1389,12 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
 
+    // Greeting name = agreement across this ACCOUNT's rows on this NUMBER,
+    // on both resolution paths (see firstNameForPhone) — whichever sibling
+    // row ends up owning the eligible lane, the text goes to the phone's
+    // owner.
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
+
     // The operator-selected row is checked FIRST — the /reservice page
     // builds availability around the token row's ADDRESS, so on a
     // multi-property account the sibling scan below must never shadow the
@@ -1382,7 +1429,7 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     const { url, line } = await buildReserviceLink(eligible.id);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
-    res.json({ url, line, customerId: eligible.id, lanes });
+    res.json({ url, line, customerId: eligible.id, lanes, firstName: recipientFirstName });
   } catch (err) {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });

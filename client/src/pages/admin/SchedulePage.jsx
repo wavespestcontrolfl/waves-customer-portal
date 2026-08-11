@@ -1297,6 +1297,51 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [recurringOngoing, setRecurringOngoing] = useState(
     service.recurringOngoing ?? service.recurring_ongoing ?? true,
   );
+  // How many visits this plan actually has ahead of it. Fetched on open for a
+  // series so the Count field starts from the truth instead of a placeholder —
+  // a wrong seed here doesn't merely display wrong, it is what the save would
+  // resize the plan to. Until it resolves the field stays disabled, and if it
+  // fails the operator can still type a length by hand (which is an explicit
+  // instruction, unlike a stale default).
+  const [seriesSummary, setSeriesSummary] = useState(null);
+  const [seriesSummaryState, setSeriesSummaryState] = useState(
+    serviceIsRecurringTemplate ? "loading" : "idle",
+  );
+  const recurringCountTouched = useRef(false);
+  const recurringOngoingTouched = useRef(false);
+  useEffect(() => {
+    // Template only: the panel is hidden on a child visit, so there is no
+    // length to seed and no reason to spend the request.
+    if (!service?.id || !serviceIsRecurringTemplate) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/${service.id}/series-summary`)
+      .then((data) => {
+        if (cancelled) return;
+        if (!data?.series) {
+          setSeriesSummaryState("idle");
+          return;
+        }
+        setSeriesSummary(data);
+        setSeriesSummaryState("loaded");
+        // Never clobber a number the operator already typed while this was
+        // in flight.
+        if (!recurringCountTouched.current && data.upcomingCount > 0) {
+          setRecurringCount(data.upcomingCount);
+        }
+        // Adopt the summary's ongoing value too (Codex #3337 r7 P1). The
+        // `service` prop comes from a calendar load that may predate another
+        // operator's change; leaving the control on that stale value while
+        // sending this fresh one as the baseline is worse than not checking at
+        // all — the two agree with the database and the server reads the stale
+        // flag as a deliberate transition. Control and baseline must come from
+        // the same snapshot.
+        if (!recurringOngoingTouched.current && typeof data.ongoing === "boolean") {
+          setRecurringOngoing(data.ongoing);
+        }
+      })
+      .catch(() => { if (!cancelled) setSeriesSummaryState("error"); });
+    return () => { cancelled = true; };
+  }, [service?.id, serviceIsRecurringTemplate]);
   const [recurringNth, setRecurringNth] = useState(
     service.recurringNth ?? service.recurring_nth ?? 3,
   );
@@ -1578,6 +1623,57 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setServiceLines((lines) => lines.filter((l) => l._key !== key));
   const recurringControlsActive = isRecurring || serviceIsRecurringTemplate;
 
+  // Plan length on a series that already exists. The save sends a length only
+  // when the number is trustworthy — either the live plan came back from the
+  // server (so an untouched field still reads the truth) or the operator typed
+  // one. Without that gate a failed summary fetch would let the field's
+  // placeholder resize a real plan.
+  //
+  // Dark by default (GATE_EDIT_APPT_VISIT_COUNT): with the gate off the
+  // server answers canSetCount:false and a series template shows exactly the
+  // panel it showed before this lane existed. Fail closed — an unreadable
+  // summary means we don't know the gate state, so the controls stay hidden.
+  const planLengthControlsAvailable =
+    !serviceIsRecurringTemplate || seriesSummary?.canSetCount === true;
+  const countFieldLoading =
+    serviceIsRecurringTemplate && seriesSummaryState === "loading";
+  // A length is submitted ONLY after the operator explicitly changes it
+  // (Codex #3337 r3 P1). Resubmitting a seeded value looked harmless — the
+  // server no-ops when it matches — but the seed is a snapshot from the
+  // modal's GET: if a visit completes or is cancelled while the modal sits
+  // open, an untouched save of some unrelated field would ask the server to
+  // "restore" the plan to a length nobody chose, booking a replacement visit.
+  // The save also sends the seeded baseline so the server can refuse outright
+  // when the live plan moved underneath it.
+  const canSetPlanLength =
+    serviceIsRecurringTemplate &&
+    seriesSummary?.canSetCount === true &&
+    recurringCountTouched.current &&
+    seriesSummary?.upcomingCount != null;
+  const countHint = (() => {
+    if (!serviceIsRecurringTemplate) return null;
+    if (seriesSummaryState === "loading") return "Reading the current plan…";
+    if (seriesSummaryState === "error") {
+      return "Couldn’t read the current plan — type a number to set it.";
+    }
+    if (seriesSummary?.upcomingCount == null) return null;
+    // Exhausted plan: nothing is submitted until the operator types a number,
+    // so say that rather than describing a diff against zero.
+    if (seriesSummary.upcomingCount === 0 && !recurringCountTouched.current) {
+      return "This plan has no visits left — type a number to schedule more.";
+    }
+    const delta = recurringCount - seriesSummary.upcomingCount;
+    if (delta === 0) {
+      // Nothing is sent unless the number is changed, so an untouched field
+      // is genuinely a no-op rather than a value being re-submitted.
+      return `${seriesSummary.upcomingCount} visit${seriesSummary.upcomingCount === 1 ? "" : "s"} scheduled — no change to the plan length.`;
+    }
+    if (delta > 0) {
+      return `Adds ${delta} visit${delta === 1 ? "" : "s"} after the last one booked.`;
+    }
+    return `Cancels the ${-delta} furthest-out visit${delta === -1 ? "" : "s"}.`;
+  })();
+
   const recurringPreview = () => {
     if (!recurringControlsActive || !form.scheduledDate) return null;
     const opts = {
@@ -1776,7 +1872,31 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               ? 4
               : recurringCount
             : undefined,
+          // Plan length for a series that already runs — the server reconciles
+          // the visits on the calendar to this number (adding from the tail,
+          // or cancelling the furthest-out). Sent only for a finite plan whose
+          // current length we could actually read; "Never" and the
+          // make-this-recurring path both leave it off so the length is
+          // untouched (the latter is seeded by recurringCount above).
+          recurringPlannedCount:
+            canSetPlanLength && !recurringOngoing ? recurringCount : undefined,
+          // The plan length the modal READ on open — the server refuses the
+          // resize if the live count has moved since, rather than computing
+          // against a stale picture.
+          recurringPlannedCountBaseline:
+            canSetPlanLength && !recurringOngoing ? seriesSummary.upcomingCount : undefined,
           recurringOngoing: recurringControlsActive ? recurringOngoing : undefined,
+          // The ongoing flag the modal READ on open. Another operator can flip
+          // this plan to fixed while the modal sits there, and an untouched
+          // save would then post a stale `true` that the server reads as a
+          // genuine fixed→ongoing transition — flipping the plan back and
+          // topping it up, recreating visits the other operator just trimmed
+          // (Codex #3337 r5 P1). Same optimistic-concurrency contract as the
+          // count baseline.
+          recurringOngoingBaseline:
+            serviceIsRecurringTemplate && seriesSummary?.ongoing != null
+              ? seriesSummary.ongoing
+              : undefined,
           recurringNth:
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringNth
@@ -1811,6 +1931,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (notifyOnMove && result?.notificationSent === false) {
         alert(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
+        );
+      }
+      // Resizing a plan moves visits the operator can't see from this modal —
+      // say what happened rather than closing on a silent change. The count
+      // itself may fall short of the target when the cadence has nowhere left
+      // to place a visit, so report the real outcome, not the request.
+      // `shortfall` is in the condition, not just the message: a top-up that
+      // places NOTHING reports 0 added and 0 cancelled, and without it the
+      // modal closed silently as though the requested length had been reached
+      // (Codex #3337 r6 P1).
+      if (result?.visitCount
+        && (result.visitCount.added || result.visitCount.cancelled || result.visitCount.shortfall)) {
+        const { added, cancelled, target, achieved, shortfall } = result.visitCount;
+        const now = achieved != null ? achieved : target;
+        const moves = [
+          added ? `${added} visit${added === 1 ? "" : "s"} added` : null,
+          cancelled ? `${cancelled} visit${cancelled === 1 ? "" : "s"} cancelled` : null,
+        ].filter(Boolean);
+        if (moves.length === 0) moves.push("nothing could be scheduled");
+        // Report what the plan HAS, not what was asked for — the server can
+        // place fewer than requested when the cadence runs out of open dates,
+        // and silently claiming the target hides missing service.
+        alert(
+          shortfall
+            ? `Plan now has ${now} visit${now === 1 ? "" : "s"}, not the ${target} requested — ${moves.join(", ")}. The cadence had no open date for the remaining ${shortfall}; add ${shortfall === 1 ? "it" : "them"} by hand. The customer was not notified.`
+            : `Plan now has ${now} visit${now === 1 ? "" : "s"} — ${moves.join(", ")}. The customer was not notified.`,
         );
       }
       // Details are saved — now the duration correction, so its server-side
@@ -3349,39 +3495,70 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         ))}
                       </select>{" "}
                     </div>{" "}
-                    {!serviceIsRecurringTemplate && (
-                      <div>
+                    {planLengthControlsAvailable && (
+                    <div>
+                      {" "}
+                      <label style={labelStyle}>End repeating</label>{" "}
+                      <select
+                        value={recurringOngoing ? "never" : "count"}
+                        onChange={(e) => {
+                          const never = e.target.value === "never";
+                          // Choosing "After count" IS choosing a plan length —
+                          // the displayed number becomes the operator's intent
+                          // even if they never touch the input (Codex #3337 r4
+                          // P1). Without this the save flipped the plan to
+                          // fixed and sent no length, freezing it at whatever
+                          // the live count happened to be.
+                          if (!never) recurringCountTouched.current = true;
+                          recurringOngoingTouched.current = true;
+                          setRecurringOngoing(never);
+                        }}
+                        className="font-medium"
+                        style={inputStyle}
+                      >
                         {" "}
-                        <label style={labelStyle}>End repeating</label>{" "}
-                        <select
-                          value={recurringOngoing ? "never" : "count"}
-                          onChange={(e) =>
-                            setRecurringOngoing(e.target.value === "never")
-                          }
-                          className="font-medium"
-                          style={inputStyle}
-                        >
-                          {" "}
-                          <option value="never">Never</option>{" "}
-                          <option value="count">After count</option>{" "}
-                        </select>{" "}
-                      </div>
+                        <option value="never">Never</option>{" "}
+                        <option value="count">After count</option>{" "}
+                      </select>{" "}
+                    </div>
                     )}
-                    {!serviceIsRecurringTemplate && !recurringOngoing && (
+                    {planLengthControlsAvailable && !recurringOngoing && (
                       <div>
                         {" "}
-                        <label style={labelStyle}>Count</label>{" "}
+                        <label style={labelStyle}>
+                          {serviceIsRecurringTemplate
+                            ? "Visits left (this one included)"
+                            : "Count"}
+                        </label>{" "}
                         <input
                           type="number"
-                          min={2}
+                          min={serviceIsRecurringTemplate ? 1 : 2}
                           max={24}
                           value={recurringCount}
-                          onChange={(e) =>
-                            setRecurringCount(parseInt(e.target.value) || 4)
-                          }
+                          disabled={countFieldLoading}
+                          onChange={(e) => {
+                            recurringCountTouched.current = true;
+                            setRecurringCount(parseInt(e.target.value) || 4);
+                          }}
                           className="font-medium"
-                          style={inputStyle}
+                          style={{
+                            ...inputStyle,
+                            ...(countFieldLoading
+                              ? { opacity: 0.6, cursor: "wait" }
+                              : {}),
+                          }}
                         />{" "}
+                        {countHint && (
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: D.muted,
+                              marginTop: 5,
+                            }}
+                          >
+                            {countHint}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3398,7 +3575,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       {" "}
                       <div>
                         {" "}
-                        <label style={labelStyle}>Repeat every</label>{" "}
+                        <label style={labelStyle}>Nth</label>{" "}
                         <select
                           value={recurringNth}
                           onChange={(e) =>
@@ -3416,7 +3593,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       </div>{" "}
                       <div>
                         {" "}
-                        <label style={labelStyle}>Day of month</label>{" "}
+                        <label style={labelStyle}>Weekday</label>{" "}
                         <select
                           value={recurringWeekday}
                           onChange={(e) =>
@@ -3446,7 +3623,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     >
                       {" "}
                       <div>
-                        <label style={labelStyle}>Frequency</label>{" "}
+                        <label style={labelStyle}>Days between visits</label>{" "}
                         <input
                           type="number"
                           min={1}
@@ -3521,12 +3698,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         <span style={{ padding: "3px 7px" }}>
                           then auto-extends
                         </span>
+                      ) : recurringCount > 6 ? (
+                        <span style={{ padding: "3px 7px" }}>
+                          +{recurringCount - 6} more
+                        </span>
                       ) : (
-                        recurringCount > 6 && (
-                          <span style={{ padding: "3px 7px" }}>
-                            +{recurringCount - 6} more
-                          </span>
-                        )
+                        // A finite plan ends — say so, rather than leaving the
+                        // chips looking like the front of an open cadence.
+                        <span style={{ padding: "3px 7px" }}>
+                          then the plan ends
+                        </span>
                       )}
                     </div>
                   )}

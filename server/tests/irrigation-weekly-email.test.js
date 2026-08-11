@@ -16,6 +16,7 @@ jest.mock('../models/db', () => {
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
+  activeSuppressionsFor: jest.fn(async () => []),
 }));
 jest.mock('../services/service-report/application-conditions', () => ({
   fetchServiceWeekWeather: jest.fn(async () => ({ rainInches: null, et0Inches: null, dailyRain: null })),
@@ -80,9 +81,9 @@ describe('buildWeeklyEmailDecision', () => {
       grass_label: 'St. Augustine',
       rain_last_week: '2.1',
       irrigation_inches: '1',
-      total_inches: '3', // roundQuarter(2.1 + 1) = 3.0
+      total_inches: '3.1', // printed components add exactly: 2.1 + 1
       target_inches: '1.25', // ET₀ 1.6 × Kc 0.8, peak season
-      difference_inches: '1.75', // roundQuarter(3 − 1.25)
+      difference_inches: '1.85', // printed total − printed target: 3.1 − 1.25
     });
     expect(decision.payload.customer_portal_url).toContain('tab=property');
   });
@@ -399,7 +400,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(call.recipientId).toBe('cust-1');
     expect(call.suppressionGroupKey).toBe('service_operational');
     expect(call.idempotencyKey).toMatch(new RegExp(`^irrigation\\.weekly:cust-1:${WEEK_ENDING}:[0-9a-f]{16}$`));
-    expect(call.payload.total_inches).toBe('3');
+    expect(call.payload.total_inches).toBe('3.1');
     // Raw SendGrid bodies can echo the address — the transport log must be
     // suppressed; this sweep logs its own sanitized reason.
     expect(call.suppressProviderErrorLog).toBe(true);
@@ -715,6 +716,97 @@ describe('findLawnEmailAudienceGaps', () => {
       member({ id: 'z', email_pref_ok: false, email: null, latitude: null }),
     ]);
     expect(await findLawnEmailAudienceGaps()).toEqual([]);
+  });
+
+  describe('findUnstampedRecurringLawnMembers (membership-evidence leg, owner ruling 2026-08-10)', () => {
+    const { findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
+
+    const unstamped = (over = {}) => ({
+      id: 'cust-7', first_name: 'Stu', last_name: 'Sample',
+      email: 'stu@example.com', latitude: 27.3, longitude: -82.5,
+      // Authoritative membership state (hasMembership): paid monthly plan.
+      waveguard_tier: null, monthly_rate: 45, waveguard_tier_source: null, billing_mode: 'monthly',
+      email_pref_ok: true, tips_pref_ok: true,
+      ...over,
+    });
+
+    test('an enrolled member with unstamped lawn visits maps to a stamp-the-series gap', async () => {
+      // The QUERY excludes evidence-positive customers (whereNot on the shared
+      // predicate) — rows resolving here are already the blind-spot class.
+      mockBookRows([unstamped()]);
+      expect(await findUnstampedRecurringLawnMembers()).toEqual([
+        { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'], triggerVisitId: null },
+      ]);
+    });
+
+    test("a pure BOUNCE suppression rides the card; any consent suppression never pages, even beside a bounce (codex r2+r3 P2)", async () => {
+      // Evaluated with the sender's own gate (activeSuppressionsFor —
+      // plural: several rows can be active at once, and an arbitrary first
+      // match let a bounce mask a coexisting opt-out). A pure bounce is a
+      // fixable deliverability failure; any consent row (do_not_email /
+      // spam / unsubscribe) wins — same never-pageable rule as prefs
+      // opt-outs.
+      EmailTemplateLibrary.activeSuppressionsFor
+        .mockResolvedValueOnce([{ suppression_type: 'bounce' }])
+        .mockResolvedValueOnce([{ suppression_type: 'bounce' }, { suppression_type: 'do_not_email' }])
+        .mockResolvedValueOnce([{ suppression_type: 'unsubscribe', group_key: 'service_operational' }]);
+      mockBookRows([unstamped({ id: 'a' }), unstamped({ id: 'b' }), unstamped({ id: 'c' })]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => [g.customerId, ...g.fixable])).toEqual([
+        ['a', 'no_recurring_marked_lawn_visit', 'bounced_email'],
+      ]);
+      expect(EmailTemplateLibrary.activeSuppressionsFor).toHaveBeenCalledWith(
+        { suppression_group_key: 'service_operational' }, 'stu@example.com', 'service_operational',
+      );
+    });
+
+    test('membership is judged by AUTHORITATIVE customer state, not email history (pre-push P1 chain)', async () => {
+      // Email rows are delivery artifacts — a no-email member (exactly this
+      // leg's target class) never accumulates them, cancellation leaves
+      // started rows behind, reactivation emits a different key. The shared
+      // hasMembership predicate on the row is current-state truth: cleared
+      // tier + zero rate = cancelled = no page; auto-derived label-only
+      // rows (tier from source 'auto', no paid rate) never count.
+      mockBookRows([
+        unstamped({ id: 'member' }),
+        unstamped({ id: 'cancelled', waveguard_tier: null, monthly_rate: 0 }),
+        unstamped({ id: 'label-only', waveguard_tier: 'Bronze', monthly_rate: 0, waveguard_tier_source: 'auto', billing_mode: 'per_visit' }),
+        // Explicit one_time lane = no recurring relationship, whatever
+        // tier/rate values linger (codex r5 P2, same lane gate
+        // sendMembershipStarted suppresses on).
+        unstamped({ id: 'one-time', waveguard_tier: 'Bronze', monthly_rate: 45, billing_mode: 'one_time' }),
+      ]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => g.customerId)).toEqual(['member']);
+    });
+
+    test('the gap carries the triggering visit id so a later regression re-pages (codex r3 P2)', async () => {
+      mockBookRows([unstamped({ trigger_visit_id: 'visit-42' })]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps[0].triggerVisitId).toBe('visit-42');
+    });
+
+    test("send prerequisites ride the SAME card — stamping alone can't deliver to a bad email/coords (codex r1 P2)", async () => {
+      mockBookRows([
+        unstamped({ id: 'a', email: null }),
+        unstamped({ id: 'b', email: 'not-an-email', latitude: 'garbage' }),
+        unstamped({ id: 'c', latitude: 0, longitude: 0 }),
+      ]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => [g.customerId, ...g.fixable])).toEqual([
+        ['a', 'no_recurring_marked_lawn_visit', 'no_email'],
+        ['b', 'no_recurring_marked_lawn_visit', 'unusable_email', 'no_coordinates'],
+        ['c', 'no_recurring_marked_lawn_visit', 'placeholder_coordinates'],
+      ]);
+    });
+
+    test('opted-out members never page — same rule as the evidence legs', async () => {
+      mockBookRows([
+        unstamped({ tips_pref_ok: false }),
+        unstamped({ id: 'z', email_pref_ok: false }),
+      ]);
+      expect(await findUnstampedRecurringLawnMembers()).toEqual([]);
+    });
   });
 
   test('churned customers (trailing-only evidence, non-customer stage) are a legitimate drop', async () => {

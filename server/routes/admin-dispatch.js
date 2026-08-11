@@ -14,6 +14,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { mowingAlertText } = require('../utils/mowing-schedule');
 const { loadLastServices } = require('../utils/last-line-service');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
@@ -2352,6 +2353,10 @@ router.get('/:date?', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
       if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
       if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
+      // Mowing schedule — a cut right before/after an application undoes it,
+      // so the tech needs to know when the mower comes through.
+      const mowingAlert = mowingAlertText(prefs);
+      if (mowingAlert) alerts.push(mowingAlert);
       // Ops sessions write scheduling-audit trails into notes; those are
       // internal and never belong on the tech-facing alerts block.
       const displayNotes = stripSchedulerAuditText(s.notes);
@@ -3436,89 +3441,23 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 
-      // One-time card-on-file holds: this branch returns before the
-      // single-cancel hold block below, so settle every cancelled target's
-      // hold here — an in-window cancel charges the disclosed late-cancel
-      // fee unless waiveCardHoldFee (admin-only, same gate as the single
-      // path) releases it free; no-op for visits without a hold. Dark until
-      // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
-      // Tracks the target actually being processed so a mid-loop throw
-      // alerts on the RIGHT visit (Codex #3153 r23 P2).
-      // Fee handling is isolated PER TARGET (Codex #3153 r25 P1): the
-      // cancels are already committed, so a thrown fee step on one target
-      // must alert that visit and CONTINUE — aborting the loop would leave
-      // every later already-cancelled target with neither a terminal fee
-      // stamp nor an alert, and the series retry (409: nothing cancellable)
-      // would never revisit them.
+      // Post-commit cancellation follow-through — card fee rails (estimate
+      // hold, falling back to the /secure appointment-card agreement), the
+      // invoice void that restores applied credit and the deposit ledger, and
+      // the tracker cancel. Extracted to services/visit-cancellation-
+      // followthrough.js so the Edit-appointment plan-length trim runs the
+      // SAME obligations instead of reimplementing a subset (Codex #3337 r4):
+      // behavior here is unchanged, including the admin-only waive gate, the
+      // per-target isolation, and the ordering.
       {
-        const CardHolds = require('../services/estimate-card-holds');
-        const ApptCardRequests = require('../services/appointment-card-request');
-        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
-        for (const target of targets) {
-          try {
-            const holdResult = await CardHolds.handleCardHoldCancellation({
-              scheduledServiceId: target.id,
-              waiveFee,
-            });
-            // Appointment-card fee rail fallback: visits with no hold row may
-            // still carry the /secure lane's agreed fee (mutually exclusive
-            // lanes — the rail itself re-checks). Same waive flag.
-            if (holdResult?.reason === 'no_hold') {
-              const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
-                scheduledServiceId: target.id,
-                waiveFee,
-              });
-              // Unresolved (non-released) fee outcomes must reach the office
-              // (Codex #3153 r16 P1) — never a silent successful cancel.
-              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
-            }
-          } catch (e) {
-            // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-            logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${target.id}): ${e.message}`);
-            try {
-              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: { released: false, reason: 'fee_step_error' } });
-            } catch (alertErr) {
-              logger.error(`[admin-dispatch] series cancellation fee alert failed (target ${target.id}): ${alertErr.message}`);
-            }
-          }
-        }
-      }
-
-      // Void any still-open invoices pre-minted for the cancelled visits so
-      // dunning doesn't chase cancelled jobs. The helper enforces the
-      // money-state rules (skips applied payments / live PaymentIntents) and
-      // is best-effort — it never throws.
-      try {
-        const InvoiceService = require('../services/invoice');
-        for (const target of targets) {
-          await InvoiceService.voidOpenInvoicesForCancelledService(target.id);
-        }
-      } catch (e) { logger.error(`[admin-dispatch] series cancellation invoice void sweep failed: ${e.message}`); }
-      // Inspection credit reversal runs INSIDE voidOpenInvoicesForCancelledService
-      // (after the voids, which restore any applied credit) — one hook every
-      // cancellation path shares, so no cancel surface can forget it.
-
-      for (const target of targets) {
-        try {
-          const result = await trackTransitions.cancel(target.id, {
-            reason: notes || null,
-            actorId: req.technicianId,
-          });
-          await recordTrackTransitionResultFailure({
-            jobId: target.id,
-            action: 'cancel',
-            actorId: req.technicianId,
-            result,
-          });
-        } catch (e) {
-          logger.error(`[admin-dispatch] series cancel track transition failed for ${target.id}: ${e.message}`);
-          await recordTrackTransitionFailure({
-            jobId: target.id,
-            action: 'cancel',
-            actorId: req.technicianId,
-            error: e,
-          });
-        }
+        const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+        await runVisitCancellationFollowThrough({
+          targetIds: targets.map((target) => target.id),
+          actorId: req.technicianId,
+          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+          reason: notes || null,
+          source: 'admin-dispatch',
+        });
       }
 
       await db('activity_log').insert({
