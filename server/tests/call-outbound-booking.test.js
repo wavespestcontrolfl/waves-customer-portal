@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/dispatch-alerts', () => ({ autoResolveOverdueAlertsForJob: jest.fn(async () => {}) }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(async () => ({})) }));
 jest.mock('../services/call-recording-processor', () => ({ convertCallLeadOnPhoneBooking: jest.fn(async () => true) }));
+jest.mock('../services/appointment-card-request', () => ({ requestCardForAppointment: jest.fn(async () => ({ requested: false })) }));
 
 const { buildTriageItem } = require('../services/call-routing-gates');
 const {
@@ -21,6 +22,7 @@ const { transitionJobStatus } = require('../services/job-status');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
+const { requestCardForAppointment } = require('../services/appointment-card-request');
 
 describe('outbound review booking — shared source-action markers', () => {
   test('the outbound-review marker is a distinct, stable string that fits source_action', () => {
@@ -193,6 +195,19 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       leadId: 'lead-1',
       keepOpenForQuote: false,
     }));
+  });
+
+  test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
+    // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
+    // card in person, so the funnel leg is skipped on the tech-track path —
+    // and ONLY there; the office confirm paths keep the full funnel.
+    const db = confirmHookDb({ fallbackLeads: [] });
+    await runOutboundReviewConfirmHook(db, svc, 'test', { skipCardRequest: true });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(requestCardForAppointment).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledServiceId: 'svc1', trigger: 'outbound_review_confirm' }),
+    );
   });
 
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {

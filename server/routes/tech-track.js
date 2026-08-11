@@ -65,23 +65,18 @@ const { runOutboundReviewConfirmHook } = require('../services/outbound-review-co
 //   3. advance  — row-locked trx: recheck ownership + future-date, then the
 //                 status CAS to en_route / on_site.
 //
-// Every phase serializes on a per-service advisory lock (Codex P1 round 3):
-// without it, a second tap that lands mid-hook reads 'confirmed', advances
-// immediately, and the first tap's card-on-file leg then sees a past-
-// confirmed status and skips permanently. The fence queues any concurrent
-// advance behind the running hook. Lock ordering is always advisory → row
-// (a row-lock-first path could deadlock against a fence holder).
-async function lockDispatchFence(trx, serviceId) {
-  await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
-    `outbound-review-dispatch:${serviceId}`,
-  ]);
-}
+// The card-on-file leg is SKIPPED on this path (owner decision 2026-08-11,
+// Codex rounds 1/3/4 on PR #3356): the funnel's pending/confirmed
+// eligibility window can't survive a confirm that immediately advances, and
+// the tech is driving to meet the customer anyway — card collected in
+// person. Office-confirmed bookings keep the full funnel. The remaining
+// hook legs (reminders, lead, triage, inspection credit) are status-
+// insensitive and idempotent, so no cross-request fence is needed.
 
-// Phases 1 + 2. Throws TECH_OWNERSHIP_LOST / REVIEW_STATE_CHANGED (the
-// routes translate to 403 / 409).
+// Phases 1 + 2. Throws TECH_OWNERSHIP_LOST / FUTURE_SCHEDULED_DATE /
+// REVIEW_STATE_CHANGED (the routes translate to 403 / 409).
 async function autoConfirmOutboundReviewBooking(req, svc) {
   await db.transaction(async (trx) => {
-    await lockDispatchFence(trx, svc.id);
     // Recheck INSIDE the trx, row-locked: the pre-trx ownership check alone
     // leaves a window where dispatch reassigns the visit (same race admin-
     // schedule's status route locks against), and the office can resolve
@@ -133,13 +128,42 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       'source_call_log_id', 'is_callback', 'estimated_price',
     );
 
-  // The hook itself is best-effort and catches per-leg internally; the
-  // wrapper trx exists only to hold the fence so concurrent advances queue
-  // until the side effects (card leg included) have run.
-  await db.transaction(async (trx) => {
-    await lockDispatchFence(trx, svc.id);
-    await runOutboundReviewConfirmHook(db, hookRow || svc, 'tech-track');
-  });
+  // Best-effort, catches per-leg internally. skipCardRequest — see the
+  // header comment above.
+  await runOutboundReviewConfirmHook(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
+
+  // Post-hook reminder sync (Codex P1 round 4): a reschedule can commit
+  // between the hookRow snapshot and registerAppointment's insert — that
+  // reschedule path saw no reminder row to move, so the just-armed row
+  // would keep the stale clock. Re-read the schedule and, if it moved,
+  // silently sync the reminder row to the current slot (sendNotification:
+  // false — the reschedule path owns any customer notice; expectSchedule
+  // makes the sync atomically miss if yet another move lands, since that
+  // newer move now finds the row and syncs it itself).
+  try {
+    const post = await db('scheduled_services')
+      .where({ id: svc.id })
+      .first('scheduled_date', 'window_start');
+    const dateOnly = (v) => (v instanceof Date ? v.toISOString().split('T')[0] : String(v || '').split('T')[0]);
+    const hookDate = hookRow ? dateOnly(hookRow.scheduled_date) : null;
+    const moved = post && hookRow
+      && (dateOnly(post.scheduled_date) !== hookDate
+        || String(post.window_start || '') !== String(hookRow.window_start || ''));
+    if (moved) {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.handleReschedule(
+        svc.id,
+        `${dateOnly(post.scheduled_date)}T${post.window_start || '09:00'}`,
+        {
+          sendNotification: false,
+          expectSchedule: { date: dateOnly(post.scheduled_date), windowStart: post.window_start },
+        },
+      );
+      logger.info(`[tech-track] Synced reminder clock for ${svc.id} — schedule moved during confirm hook`);
+    }
+  } catch (e) {
+    logger.error(`[tech-track] post-hook reminder sync failed for ${svc.id}: ${e.message}`);
+  }
 }
 
 // Phase-3 entry guard. The status CAS alone is NOT enough (Codex P1
@@ -148,7 +172,6 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
 // and either stale advance would text the customer a tracking notice.
 // Throws TECH_OWNERSHIP_LOST / FUTURE_SCHEDULED_DATE.
 async function guardAdvance(trx, req, svc) {
-  await lockDispatchFence(trx, svc.id);
   const fresh = await trx('scheduled_services')
     .where({ id: svc.id })
     .forUpdate()
