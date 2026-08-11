@@ -277,8 +277,15 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   // recurring list kept its one-time catalog match (r17) but then
   // prefilled cadence 'quarterly' here, and the modal trusts the server
   // cadence ahead of billingType — saving would create a quarterly series
-  // linked to the one-time service. Vocabulary mirrors the converter's
-  // explicitlyOneTimeCadence.
+  // linked to the one-time service. The SHARED vocabulary
+  // (explicitlyOneTimeCadence) covers every cadence-field spelling
+  // (frequencyKey, recurring_pattern, planFrequency, …); the local token
+  // check additionally covers this reader's own `freq` alias, which the
+  // converter vocabulary does not carry.
+  try {
+    const { explicitlyOneTimeCadence } = require('../services/estimate-converter');
+    if (explicitlyOneTimeCadence(line || {})) return 'one_time';
+  } catch { /* fall through to the local token check */ }
   if (['onetime', 'once', 'single'].includes(frequencyKey)) return 'one_time';
   if (frequencyKey.includes('every6week')) return 'every_6_weeks';
   if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';

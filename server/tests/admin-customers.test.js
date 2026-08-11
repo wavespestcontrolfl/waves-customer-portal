@@ -449,6 +449,12 @@ describe('admin customers route helpers', () => {
     // modal would create a quarterly series linked to the one-time row.
     expect(cadenceFromEstimateLine({ frequency: 'one_time' }, 'quarterly')).toBe('one_time');
     expect(cadenceFromEstimateLine({ frequency: 'One Time' }, 'quarterly')).toBe('one_time');
+    // Every shared cadence-field spelling counts (codex r18 P1 follow-up):
+    // { frequencyKey: 'one_time' } etc. must not fall to the quarterly
+    // fallback while the catalog match stays one-time.
+    expect(cadenceFromEstimateLine({ frequencyKey: 'one_time' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ recurring_pattern: 'once' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ freq: 'one-time' }, 'quarterly')).toBe('one_time');
     expect(cadenceFromEstimateLine({ frequency: 'Bi-Monthly' }, 'quarterly')).toBe('bimonthly');
     expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
     expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
