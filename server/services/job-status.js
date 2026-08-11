@@ -345,25 +345,36 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
         && legacyRow.status === 'pending'
         && !legacyRow.customer_confirmed;
-      // COMPLETION is the billing moment: the inspection-credit booking
-      // evidence must commit WITH this transition (same #3178 r33 rule as
-      // the office-confirm branch below) — the detached activation hook
-      // races the completion route's invoice legs, and an event that only
-      // lands later leaves the invoice collecting gross over a promised
-      // credit (Codex #3361 r13 P1). The hook's own marker call stays the
-      // idempotent belt, and its fast-redeem now fires whenever the event
-      // exists, so the credit is on the account by the send-time
-      // auto-apply. Best-effort: an evidence hiccup never blocks the
-      // completion.
+      // COMPLETION is the billing moment: the completion route mints the
+      // invoice and auto-applies the available balance in its own
+      // continuation, which runs BEFORE the detached post-commit activation
+      // — so both the booking evidence AND the redemption must be durable
+      // before this transition returns (Codex #3361 r13/r14 P1). They are
+      // written on the GLOBAL connection, not the trx, deliberately: the
+      // redeemer only mints FROM committed events, so an in-trx event would
+      // be invisible to it. Pre-commit global writes are safe here — a
+      // rolled-back transition leaves an evidence row for a real booking
+      // (harmless, idempotent) and a minted credit whose every exit is
+      // already compensated (the cancel/skip money seam reverses it; a
+      // completion retry is a claim-guarded no-op). Neither table is
+      // touched by this trx, so no self-deadlock. Best-effort: a credit
+      // hiccup never blocks the completion; the hourly sweep stays the
+      // durable guarantee.
       if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
         try {
-          await require('./inspection-credit').markBookingForInspectionCredit(t, {
+          const inspectionCredit = require('./inspection-credit');
+          await inspectionCredit.markBookingForInspectionCredit(db, {
             customerId: legacyRow.customer_id,
             scheduledServiceId: jobId,
             source: 'phone_call',
           });
+          await inspectionCredit.redeemInspectionCreditForBooking({
+            customerId: legacyRow.customer_id,
+            scheduledServiceId: jobId,
+            createdBy: 'system:inspection_credit_legacy_completion',
+          });
         } catch (evidenceErr) {
-          logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
+          logger.warn(`[job-status] legacy completion credit evidence/redemption failed for ${jobId}: ${evidenceErr.message}`);
         }
       }
     }
