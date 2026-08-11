@@ -38,8 +38,16 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
  *                      scheduled_date, window_start, service_type,
  *                      source_call_log_id)
  * @param {string} [routeTag] label for log lines ('admin-schedule' / 'admin-dispatch')
+ * @param {object} [opts]
+ * @param {boolean} [opts.suppressCardAskWithoutClearance] lazy-activation
+ *   callers set this: a silent move/replay is not a customer trust point,
+ *   so without durable call-level SMS clearance (call_sms_cleared_at) the
+ *   card leg runs the funnel in its non-messaging mode (Codex #3361 r4
+ *   P1). Office-confirm callers omit it and keep the Codex #2771 r2
+ *   contract — the office just re-confirmed with the customer, and the
+ *   funnel's canonical send still enforces stored consent + suppression.
  */
-async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review') {
+async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review', opts = {}) {
   // Reported to callers that use the stamp-on-success activation pattern
   // (activateLegacyOutboundReviewRowIfNeeded): true only when every CORE
   // leg (reminders, lead conversion, triage resolve) ran without error.
@@ -200,7 +208,20 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // + the template flip.
   try {
     const { requestCardForAppointment } = require('./appointment-card-request');
-    await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm' });
+    let cardCallOpts = {};
+    if (opts.suppressCardAskWithoutClearance) {
+      // Only a durable call-level clearance stamp lets the lazy path send;
+      // otherwise non-messaging mode (auto-secure still runs, the
+      // pre-visit sweep owns any later ask). Fail closed on a read error.
+      const clearance = await db('scheduled_services')
+        .where({ id: svc.id })
+        .first('call_sms_cleared_at', 'call_sms_cleared_recipient')
+        .catch(() => null);
+      cardCallOpts = clearance && clearance.call_sms_cleared_at
+        ? { recipientPhone: clearance.call_sms_cleared_recipient || null }
+        : { delivery: 'none' };
+    }
+    await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm', ...cardCallOpts });
   } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
 
   return coreLegsOk;
@@ -232,10 +253,13 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     if (!row || row.source_action !== CALL_OUTBOUND_REVIEW_SOURCE_ACTION || row.customer_confirmed) {
       return false;
     }
-    // Terminal rows are not activated — a cancelled/skipped legacy review
-    // booking was a rejection, and completing/no-showing already routed
-    // through transitionJobStatus's own activation.
-    if (['cancelled', 'skipped', 'completed', 'no_show'].includes(String(row.status || ''))) {
+    // Rejected rows are not activated — a cancelled/skipped legacy review
+    // booking was the office declining it. Completed/no_show rows DO
+    // activate: transitionJobStatus defers its own activation to this
+    // helper post-commit, so by the time it runs the row already carries
+    // the terminal status — and the lead conversion / card resolution /
+    // credit evidence are exactly what a worked visit still owes.
+    if (['cancelled', 'skipped'].includes(String(row.status || ''))) {
       return false;
     }
     // Hook FIRST, stamp on success: the customer_confirmed stamp is the
@@ -245,7 +269,9 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // is ownership-guarded, the card resolve no-ops), so both a retry
     // after partial completion and a concurrent double-run are safe; the
     // guarded UPDATE below still keeps the stamp itself at-most-once.
-    const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag);
+    const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag, {
+      suppressCardAskWithoutClearance: true,
+    });
     if (!coreLegsOk) {
       logger.warn(`[${routeTag}] legacy outbound activation for ${serviceId}: a core hook leg failed — leaving unstamped so the next touch retries`);
       return false;

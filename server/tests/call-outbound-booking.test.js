@@ -79,10 +79,11 @@ describe('outbound review booking — originating lead carried on the card', () 
 describe('transitionJobStatus — legacy pending review rows activate lazily', () => {
   test('pending outbound-review row → en_route stamps customer_confirmed and runs the confirm hook post-commit', async () => {
     // Rows created PENDING before the review-hold removal must not go
-    // operational half-armed (Codex #3361 P0): the shared writer stamps
-    // customer_confirmed in the transition trx and fires the confirm side
-    // effects (reminder arming asserted here as the observable leg) after
-    // commit.
+    // operational half-armed (Codex #3361 P0): the shared writer DETECTS
+    // the legacy row in the transition trx and delegates activation to the
+    // hook-first helper post-commit (Codex r4 P1 — stamp only after the
+    // core legs succeed, so failures stay retryable). Reminder arming and
+    // the customer_confirmed stamp are asserted as the observable legs.
     const legacyRow = {
       id: 'svc1',
       source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
@@ -99,8 +100,9 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
     const updates = [];
     const makeChain = (table) => {
       const q = {};
-      ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'whereRaw',
+      ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'whereRaw',
         'leftJoin', 'orderBy', 'limit', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.select = jest.fn(async () => []);
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return { ...legacyRow };
         if (table === 'scheduled_services as s') {
@@ -122,6 +124,13 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
     trx.fn = { now: () => new Date() };
     trx.raw = jest.fn(() => ({}));
     trx.executionPromise = Promise.resolve();
+    // The post-commit activation runs on the module-level db handle (not
+    // the trx) — give it the same table-aware chain.
+    const db = require('../models/db');
+    db.mockImplementation((table) => makeChain(table));
+    db.transaction = async (cb) => cb(db);
+    db.fn = { now: () => new Date() };
+    db.raw = jest.fn(() => ({}));
 
     await transitionJobStatus({
       jobId: 'svc1', fromStatus: 'pending', toStatus: 'en_route', transitionedBy: 'tech1', trx,

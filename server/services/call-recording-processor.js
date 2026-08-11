@@ -10436,8 +10436,14 @@ const CallRecordingProcessor = {
     // removed). It requires a REAL resolved service (a catalog row, or ok on a
     // non-generic service): the Waves-Assessment generic fallback is
     // inbound-only (see above), so an unclear/generic outbound call stays
-    // unbooked for the office.
-    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    // unbooked for the office. It ALSO requires V2 routing to actually run in
+    // ENFORCE mode: outside enforce the confidence / address-validation /
+    // HOA-commercial gates never evaluate and v2RoutingBlocked stays false,
+    // so a call those gates would have vetoed books live — containment the
+    // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
+    // routing keeps the pre-gate behavior: outbound bookings stay manual.
+    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
+      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied, and the removed review hold used to
     // be the backstop that kept a shadow/legacy-mode outbound booking from
@@ -11633,6 +11639,19 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              if (scheduleWasReused) {
+                // The reused row can be a LEGACY outbound-review booking
+                // (created pending before the 2026-08-11 hold removal): the
+                // reuse branches convert its lead and the replay repair arms
+                // reminders, but nothing stamped customer_confirmed — leaving
+                // the row hidden from customer self-service with its review
+                // card open even though customer-facing side effects armed
+                // (Codex #3361 r4 P0). The shared helper activates it
+                // (hook-first, stamp-on-success); one indexed read and a
+                // no-op for every other reused row.
+                await require('./outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
+              }
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it

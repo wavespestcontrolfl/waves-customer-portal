@@ -317,9 +317,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   let cancelNoticeLateClaim = false;
   let cancelNoticeCallerClaim = false;
   let cancelNoticeOutboxTs = null;
-  // Set inside doWrites when this transition lazily activated a legacy
-  // outbound-review row; read by the post-commit hook runner.
-  let legacyOutboundActivationRow = null;
+  // Set inside doWrites when this transition touches a legacy
+  // outbound-review row; read by the post-commit activation runner.
+  let legacyOutboundActivationNeeded = false;
 
   async function doWrites(t) {
     // Legacy outbound-review rows (created PENDING before the 2026-08-11
@@ -328,41 +328,23 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // reminders, converted the originating lead, and resolved the review
     // card — with the guard gone, a straight pending → en_route/completed
     // flip would silently skip all of it and strand the row half-armed
-    // (Codex #3361 P0). customer_confirmed is stamped in THIS trx; the
-    // confirm side effects run post-commit. The dispatch/schedule confirm
-    // routes stamp customer_confirmed themselves before calling this
-    // writer (same trx), so those paths skip here and keep their own hook
-    // call — no double run. Cancel/skip stay pure rejections.
+    // (Codex #3361 P0). Detection only happens here; the activation itself
+    // runs POST-COMMIT via the shared hook-first helper, which stamps
+    // customer_confirmed only after the core legs succeed — so a transient
+    // leg failure (or a crash after commit) leaves the row unstamped and
+    // the next touch retries (Codex #3361 r4 P1). The dispatch/schedule
+    // confirm routes stamp customer_confirmed themselves before calling
+    // this writer (same trx), so those paths skip here and keep their own
+    // hook call — no double run. Cancel/skip stay pure rejections.
     if (!['cancelled', 'skipped'].includes(String(toStatus || '')) && String(fromStatus) === 'pending') {
       const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
-        .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
-          'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
-          'is_callback', 'estimated_price');
-      if (legacyRow
+        .first('source_action', 'status', 'customer_confirmed');
+      legacyOutboundActivationNeeded = !!legacyRow
         && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
         && legacyRow.status === 'pending'
-        && !legacyRow.customer_confirmed) {
-        await t('scheduled_services')
-          .where({ id: jobId })
-          .update({ customer_confirmed: true, confirmed_at: new Date() });
-        // Booking evidence commits WITH the activation, same rule as the
-        // office-confirm branch below (Codex #3178 r33) — best-effort,
-        // the hook's idempotent marker call is the belt.
-        try {
-          if (legacyRow.customer_id) {
-            await require('./inspection-credit').markBookingForInspectionCredit(t, {
-              customerId: legacyRow.customer_id,
-              scheduledServiceId: jobId,
-              source: 'phone_call',
-            });
-          }
-        } catch (evidenceErr) {
-          logger.warn(`[job-status] legacy outbound activation credit evidence failed for ${jobId}: ${evidenceErr.message}`);
-        }
-        legacyOutboundActivationRow = legacyRow;
-      }
+        && !legacyRow.customer_confirmed;
     }
 
     // Atomic guard: only update if the row is currently in fromStatus.
@@ -773,20 +755,19 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   }
 
   function processLegacyOutboundActivation() {
-    // Post-commit, fire-and-forget: the transition already committed, and
-    // every hook leg is internally best-effort (log + continue) — a failed
-    // side effect must never unwind the status flip. Idempotent legs
-    // (reminder registration dedupes, lead conversion is ownership-
-    // guarded, the card update no-ops when already resolved), so a
-    // reprocessed transition re-runs safely.
-    if (!legacyOutboundActivationRow) return;
-    const activated = legacyOutboundActivationRow;
+    // Post-commit, fire-and-forget: the transition already committed, and a
+    // failed side effect must never unwind the status flip. The shared
+    // helper is hook-first / stamp-on-success (Codex #3361 r4 P1): a crash
+    // or transient core-leg failure here leaves customer_confirmed unset,
+    // so ANY later touch of the row — another transition, a reschedule, a
+    // pipeline reuse — retries the idempotent legs until they complete.
+    if (!legacyOutboundActivationNeeded) return;
     void (async () => {
       try {
-        const { runOutboundReviewConfirmHook } = require('./outbound-review-confirm');
-        await runOutboundReviewConfirmHook(db, activated, 'job-status-legacy-activation');
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, jobId, 'job-status-legacy-activation');
       } catch (e) {
-        logger.warn(`[job-status] legacy outbound activation hook failed for ${activated.id}: ${e.message}`);
+        logger.warn(`[job-status] legacy outbound activation failed for ${jobId}: ${e.message}`);
       }
     })();
   }
