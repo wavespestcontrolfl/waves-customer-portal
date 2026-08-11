@@ -137,7 +137,11 @@ describe('admin billing-recovery routes', () => {
       });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ useScheduledReplay: true, dueDate: '2026-04-14' }));
+      // The route holds the schedule.invoice.mint advisory lock, so its
+      // transaction MUST be threaded through (codex #3344 r6 P1) — an
+      // un-threaded replay mint requests the same lock on a second
+      // connection and self-deadlocks until timeout.
+      expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ useScheduledReplay: true, dueDate: '2026-04-14', database: expect.anything() }));
       expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({
         scheduled_service_id: 'ss-1', disposition: 'billed', invoice_id: 'inv-1', actor_user_id: 'admin-1',
       }));

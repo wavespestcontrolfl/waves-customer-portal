@@ -477,17 +477,15 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       }
 
       // Canonical completion path (replays scheduled-service line items + discounts).
-      // NOTE: createFromService writes via the global db connection and takes no
-      // trx, so the draft invoice commits independently of this transaction —
-      // true invoice⇄disposition atomicity would require threading a trx through
-      // the shared InvoiceService (used by the completion path), which is out of
-      // scope here. The advisory lock + the existing-invoice/disposition rechecks
-      // above prevent the dangerous outcomes (double invoice, double disposition).
-      // Residual failure mode is benign: if the disposition insert below throws,
-      // the draft invoice is orphaned (recoverable/voidable) and the existing-
-      // invoice recheck excludes the visit from future leaks on retry — never a
-      // double-charge.
+      // THIS transaction is threaded through (codex #3344 r6 P1): we hold
+      // the schedule.invoice.mint advisory lock above, and an un-threaded
+      // createFromService would open a SEPARATE connection and request the
+      // same lock — a self-deadlock that blocked /bill until timeout.
+      // Same-session re-acquisition is a no-op, the replay mint runs under
+      // a savepoint on this trx, and invoice⇄disposition now commit
+      // atomically as a bonus.
       const created = await InvoiceService.createFromService(visit.service_record_id, {
+        database: trx,
         amount: price,
         description: visit.service_type,
         taxRate: visit.property_type === 'commercial' ? 0.07 : 0,

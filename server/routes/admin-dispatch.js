@@ -8923,6 +8923,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               throw mintErr;
             }
           }
+          // createFromService can ADOPT an invoice another mint committed
+          // first (codex r6 round) — fold that into the same
+          // adopted-concurrent handling as the serialized helper's
+          // `reused` flag: setup-fee claim restore, service-record
+          // back-link, and already-paid messaging all key off it.
+          if (invoice?.adopted_existing_invoice) adoptedConcurrentInvoice = true;
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on

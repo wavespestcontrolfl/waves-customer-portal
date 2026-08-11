@@ -1607,12 +1607,25 @@ const InvoiceService = {
       // intact, individually sendable). Attachment happens only at create,
       // so a reviewer who wants it consolidated voids + re-creates it.
       skipAccrual = false,
+      // Caller's open transaction (codex r6 P1): a caller that already
+      // holds the schedule.invoice.mint advisory lock (billing recovery)
+      // MUST thread its transaction here — the replay mint otherwise opens
+      // a SEPARATE connection and requests the same lock, deadlocking on
+      // the caller until timeout (advisory locks are only re-entrant
+      // within one session). Threaded transactions run the mint under a
+      // SAVEPOINT, so deposit-machinery failures stay isolated from the
+      // caller's transaction, and the invoice commits atomically with the
+      // caller's own writes.
+      database = null,
     },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
       .first();
     if (!sr) throw new Error("Service record not found");
+    const runMintTransaction = (fn) => (
+      database && database.isTransaction ? database.transaction(fn) : db.transaction(fn)
+    );
 
     const hasExplicitAmount =
       amount !== undefined && amount !== null && Number(amount) > 0;
@@ -1750,7 +1763,11 @@ const InvoiceService = {
         .whereNotIn("status", ["refunded", "canceled", "cancelled"])
         .orderBy("created_at", "desc")
         .first();
-      return replayed || null;
+      // Adoption metadata (codex r6 P1): callers must be able to tell an
+      // adopted concurrent invoice from one this call created — dispatch
+      // keys its back-link, setup-fee restore, and already-paid messaging
+      // off it. Transient JS property, never persisted.
+      return replayed ? { ...replayed, adopted_existing_invoice: true } : null;
     };
 
     let sourceEstimateId = null;
@@ -1781,7 +1798,7 @@ const InvoiceService = {
         const requested = depositCredit ? depositCredit.amount : 0;
         if (!(requested > 0)) break;
         try {
-          return await db.transaction(async (trx) => {
+          return await runMintTransaction(async (trx) => {
             // An adopted invoice already ran its own deposit/credit flow —
             // return it untouched; the roll-forward belongs to the mint
             // that actually created the invoice.
@@ -1837,13 +1854,16 @@ const InvoiceService = {
     }
 
     if (replayFromScheduled) {
-      return db.transaction(async (trx) => {
+      return runMintTransaction(async (trx) => {
         const adopted = await adoptUnderMintLock(trx);
         if (adopted) return adopted;
         return this.create({ ...(await buildParams(trx)), database: trx });
       });
     }
-    return this.create(await buildParams(null));
+    return this.create({
+      ...(await buildParams(null)),
+      ...(database ? { database } : {}),
+    });
   },
 
   /**

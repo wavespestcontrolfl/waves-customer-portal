@@ -620,7 +620,53 @@ describe('invoice tier discounts', () => {
     });
 
     expect(invoice.id).toBe('inv-existing');
+    // Callers tell adoption apart from creation by this transient flag
+    // (codex r6 P1) — dispatch keys back-link/setup-fee/messaging off it.
+    expect(invoice.adopted_existing_invoice).toBe(true);
     expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['schedule.invoice.mint', 'scheduled-1'],
+    );
+  });
+
+  // Threaded caller transaction (codex #3344 r6 P1): a caller already
+  // holding the schedule.invoice.mint advisory lock (billing recovery)
+  // passes its trx — the replay mint must run as a SAVEPOINT on that
+  // session (same-session lock re-acquisition is a no-op) instead of
+  // opening a second connection that deadlocks on the caller's own lock.
+  test('createFromService runs the replay mint on a threaded caller transaction', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+    });
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = jest.fn().mockResolvedValue({ rows: [] });
+    callerTrx.transaction = jest.fn(async (fn) => fn(callerTrx));
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+      database: callerTrx,
+    });
+
+    expect(invoice.id).toBe('invoice-1');
+    expect(callerTrx.transaction).toHaveBeenCalled();
+    expect(callerTrx.raw).toHaveBeenCalledWith(
       expect.stringContaining('pg_advisory_xact_lock'),
       ['schedule.invoice.mint', 'scheduled-1'],
     );

@@ -2761,7 +2761,9 @@ describe('completion route wiring (source contracts)', () => {
 
     // createFromService threads the option through to create() untouched.
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
-    expect(invoiceSource).toMatch(/skipAccrual = false,\s*\n\s*\},\s*\n\s*\) \{/);
+    // (the destructure may carry later options after it — e.g. the codex r6
+    // threaded-transaction `database` param)
+    expect(invoiceSource).toMatch(/skipAccrual = false,[\s\S]{0,800}\},\s*\n\s*\) \{/);
     expect(invoiceSource).toMatch(/trustedStoredDiscountSources: scheduledInvoice\s*\n\s*\? \["scheduled_service"\]\s*\n\s*: \[\],\s*\n\s*skipAccrual,\s*\n\s*\};/);
     // And create() honors it at BOTH accrual sites: the NET-terms preflight
     // transaction wrap and the statement get-or-create/attach itself.
