@@ -286,10 +286,14 @@ async function markEnRoute(serviceId, opts = {}) {
       .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
     if (healed > 0) {
       logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
-      return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
+    } else {
+      logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; re-entering on fresh state`);
     }
-    // Lost a race to a concurrent transition — fall through and let the
-    // idempotent branch report whatever state won.
+    // Either way the in-memory snapshot is no longer the row: re-enter on a
+    // fresh read with the heal disabled. Falling through on the stale
+    // snapshot could report a concurrently-completed row as on_property,
+    // re-pin tech_status, or emit an obsolete customer refresh.
+    return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
