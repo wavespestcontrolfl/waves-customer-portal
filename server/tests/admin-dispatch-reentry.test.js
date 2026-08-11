@@ -64,7 +64,7 @@ const fs = require('fs');
 const path = require('path');
 
 const router = require('../routes/admin-dispatch');
-const { reentryEditPlan, completionReentryPlan, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
+const { reentryEditPlan, completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
 const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
@@ -208,6 +208,58 @@ describe('completion-time tech override — advisory semantics', () => {
     // The override block must keep Math.max(techExterior, productReentryMin)
     // — a stepper can undercut the line default but never the label.
     expect(source).toMatch(/exterior_reentry_min:\s*Math\.max\(techExterior,\s*productReentryMin\s*\|\|\s*0\)/);
+  });
+
+  test('an UNVERIFIABLE label floor drops a lowering exterior override (codex P1 #3360)', () => {
+    // When productReentryFloor reports verified:false, a below-default
+    // exterior override must be discarded (default stands, unmarked) —
+    // never applied against a floor of 0.
+    expect(source).toMatch(/!productReentry\.verified\s*&&\s*techExterior\s*<\s*computedExteriorMin/);
+    expect(source).toMatch(/re-entry exterior override dropped — product REI floor unverifiable/);
+  });
+});
+
+describe('productReentryFloor — label-REI resolution with verification', () => {
+  const stubKnex = ({ rows, fail = false } = {}) => ({
+    transaction: async (fn) => {
+      if (fail) throw new Error('catalog unavailable');
+      return fn(() => ({ whereIn: () => ({ select: async () => rows }) }));
+    },
+  });
+
+  test('no submitted products → no floor, trivially verified', async () => {
+    expect(await productReentryFloor(stubKnex(), [])).toEqual({ minutes: null, verified: true });
+    expect(await productReentryFloor(stubKnex(), [{ rate: 1 }])).toEqual({ minutes: null, verified: true });
+  });
+
+  test('every product resolved → max REI in minutes, verified', async () => {
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: 4 }, { id: 'b', rei_hours: 0.5 }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }, { productId: 'b' }]))
+      .toEqual({ minutes: 240, verified: true });
+  });
+
+  test('a resolved product with no label REI reads as a 0-hr (until-dry) floor, verified', async () => {
+    // Pre-existing contract: Number(null) → 0 minutes, which the caller
+    // then keeps no lower than the line default via Math.max — an
+    // until-dry product still shows a sensible dry-down window.
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: null }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }]))
+      .toEqual({ minutes: 0, verified: true });
+  });
+
+  test('a missing catalog row (deleted product / deploy skew) → unverified', async () => {
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: 1 }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }, { productId: 'gone' }]))
+      .toEqual({ minutes: 60, verified: false });
+  });
+
+  test('a failed lookup degrades to unverified without throwing (savepoint-isolated)', async () => {
+    expect(await productReentryFloor(stubKnex({ fail: true }), [{ productId: 'a' }]))
+      .toEqual({ minutes: null, verified: false });
+  });
+
+  test('the lookup runs in a savepoint, not bare on the caller trx (waves-db §5b)', () => {
+    expect(source).toMatch(/rows = await knex\.transaction\(async \(sp\) => sp\('products_catalog'\)/);
   });
 });
 
