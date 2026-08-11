@@ -1624,7 +1624,10 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // order deadlocks), and only a COMPLETED visit can own the record (an
     // open visit sharing the tuple must not steal a completed visit's
     // report).
-    expect(adminScheduleSource).toMatch(/const preTupleRow = await trx\('scheduled_services'\)\.where\(\{ id: req\.params\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    // The row is hoisted (`let preTupleRow`) since the stale-lifecycle
+    // rewind on date moves reuses the same locked read — the FOR UPDATE
+    // lock-order contract is unchanged.
+    expect(adminScheduleSource).toMatch(/preTupleRow = await trx\('scheduled_services'\)\.where\(\{ id: req\.params\.id \}\)\.forUpdate\(\)\.first\(\);/);
     expect(adminScheduleSource).toMatch(/if \(preTupleRow && preTupleRow\.status === 'completed' && srCols\.scheduled_service_id\) \{/);
   });
 
