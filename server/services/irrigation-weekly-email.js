@@ -978,29 +978,52 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
     );
-  return rows
-    // Intentional opt-out: never pageable, same rule as the evidence legs.
-    .filter((r) => r.email_pref_ok && r.tips_pref_ok)
-    .map((r) => {
-      // Same prerequisite validators as findLawnEmailAudienceGaps (codex
-      // #3341 r1 P2): stamping the series makes the customer evidence-
-      // positive, but the SENDER still skips an unusable email or bad
-      // coordinates — one card must list everything standing between the
-      // customer and Monday, or the operator fixes half and gets paged
-      // again by the evidence leg on a later run.
-      const fixable = ['no_recurring_marked_lawn_visit'];
-      if (!isEmailLike(r.email)) fixable.push(r.email ? 'unusable_email' : 'no_email');
-      const lat = numberOrNull(r.latitude);
-      const lng = numberOrNull(r.longitude);
-      if (lat == null || lng == null) fixable.push('no_coordinates');
-      else if (lat === 0 && lng === 0) fixable.push('placeholder_coordinates');
-      return {
-        customerId: r.id,
-        name: [r.first_name, r.last_name].filter(Boolean).join(' '),
-        kind: 'unstamped_member',
-        fixable,
-      };
+  const gaps = [];
+  // Intentional opt-out: never pageable, same rule as the evidence legs.
+  for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok)) {
+    // Same prerequisite validators as findLawnEmailAudienceGaps (codex
+    // #3341 r1 P2): stamping the series makes the customer evidence-
+    // positive, but the SENDER still skips an unusable email or bad
+    // coordinates — one card must list everything standing between the
+    // customer and Monday, or the operator fixes half and gets paged
+    // again by the evidence leg on a later run.
+    const fixable = ['no_recurring_marked_lawn_visit'];
+    if (!isEmailLike(r.email)) {
+      fixable.push(r.email ? 'unusable_email' : 'no_email');
+    } else {
+      // An active suppression blocks sendTemplate even after stamping
+      // (codex #3341 r2 P2) — evaluated with the sender's OWN gate
+      // (activeSuppressionFor) on this sweep's stream, never a copy of its
+      // rules. A bounce is a fixable deliverability failure (the
+      // bounce-rescue lane exists to repair addresses), so it rides the
+      // card; every other suppression type (do_not_email, spam_complaint,
+      // unsubscribes incl. group-scoped) is the customer's own choice —
+      // never pageable, same rule as the prefs opt-outs above. The
+      // evidence legs don't need this: their customers reach the sender,
+      // whose blocked operational sends already alert
+      // (alertBlockedOperationalSend); this class never reaches the
+      // sender, so this card is their only signal.
+      const suppression = await EmailTemplateLibrary.activeSuppressionFor(
+        { suppression_group_key: SUPPRESSION_GROUP }, r.email, SUPPRESSION_GROUP,
+      );
+      if (suppression) {
+        const type = String(suppression.suppression_type || '').toLowerCase();
+        if (type !== 'bounce') continue;
+        fixable.push('bounced_email');
+      }
+    }
+    const lat = numberOrNull(r.latitude);
+    const lng = numberOrNull(r.longitude);
+    if (lat == null || lng == null) fixable.push('no_coordinates');
+    else if (lat === 0 && lng === 0) fixable.push('placeholder_coordinates');
+    gaps.push({
+      customerId: r.id,
+      name: [r.first_name, r.last_name].filter(Boolean).join(' '),
+      kind: 'unstamped_member',
+      fixable,
     });
+  }
+  return gaps;
 }
 
 module.exports = {
