@@ -1659,6 +1659,11 @@ const InvoiceService = {
             );
             e.status = 409;
             e.code = "SCHEDULED_PRICE_MOVED";
+            // The price the lock proved current (codex #3344 r5): the
+            // dispatch REQUIRED-mint catch refreshes its frozen mint cents
+            // from this so the released resume bills the moved price
+            // instead of replaying the stale freeze.
+            e.currentEstimatedPriceCents = cents(lockedRow.estimated_price);
             throw e;
           }
         }

@@ -207,7 +207,14 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
       await expect(
         mintScheduledServiceInvoiceWithDeposit({ svc: pricedSvc, buildCreateParams }),
-      ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_PRICE_MOVED' });
+      ).rejects.toMatchObject({
+        status: 409,
+        code: 'SCHEDULED_PRICE_MOVED',
+        // The locked current price rides the error (codex #3344 r5): the
+        // dispatch REQUIRED-mint catch restamps its frozen mint cents from
+        // it so the released resume bills the moved price.
+        currentEstimatedPriceCents: 10000,
+      });
       expect(mockCreate).not.toHaveBeenCalled();
       expect(mockConsume).not.toHaveBeenCalled();
     });

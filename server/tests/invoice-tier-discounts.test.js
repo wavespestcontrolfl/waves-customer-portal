@@ -573,7 +573,14 @@ describe('invoice tier discounts', () => {
       description: 'Adjusted visit',
       useScheduledReplay: true,
       scheduledPriceBasis: 90,
-    })).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_PRICE_MOVED' });
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'SCHEDULED_PRICE_MOVED',
+      // The locked current price rides the error (codex #3344 r5): the
+      // dispatch REQUIRED-mint catch restamps its frozen mint cents from it
+      // so the released resume bills the moved price.
+      currentEstimatedPriceCents: 8100,
+    });
   });
 
   test('createFromService with a matching scheduledPriceBasis mints normally', async () => {

@@ -2768,9 +2768,23 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       // payment was just restored. Lock the anchor row and re-read inside
       // the same transaction the reversal runs in; the repayment's own
       // invoice UPDATE serializes on the row lock, so whichever commits
-      // first, the other sees its final state. Lock order invoice →
-      // customer matches applyAccountCreditToInvoice.
+      // first, the other sees its final state.
+      //
+      // Customer BEFORE anchor (codex #3344 r5 P2): the extension accept
+      // path holds the customer FOR UPDATE and its ledger insert then takes
+      // KEY SHARE on this same prepay invoice via the invoice_id FK —
+      // anchor-first here would form the invoice→customer vs
+      // customer→invoice cycle Postgres resolves by aborting one side.
+      // Hoist the customer FOR UPDATE (the exact lock
+      // reverseWaveguardExtensionCredits takes anyway — re-locking in-txn
+      // is free) so every extension-credit writer agrees on customer →
+      // invoice, matching the mint paths' customer-first order.
       const clawIfStillRefunded = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: grant.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
         const lockedAnchor = await t('invoices')
           .where({ id: grant.invoice_id })
           .forUpdate()
@@ -2790,6 +2804,80 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);
+  }
+  // WaveGuard extension-credit RESTORE recovery pass (codex #3344 r5 P1):
+  // the dated loop above restores only covered-TODAY terms, so a refunded
+  // anchor REPAID after term_end (late lost-dispute repayment) whose inline
+  // restore was lost never re-enters — the expired-window marker pass only
+  // runs the dispute recovery, and the inline restore swallows its own
+  // errors, so that follow-up can clear the marker with the credit still
+  // reversal-last. Mirror of the clawback pass, keyed on the REVERSAL
+  // class: each reversal's invoice_id anchors the term's prepay invoice; a
+  // paid-again anchor whose term shows valid paid backing
+  // (coveredTermsAsOf(null) — decided-repaid restores are deliberately NOT
+  // window-gated) means the restore is owed. The restore itself is
+  // last-event-idempotent, so overlap with an inline restore racing this
+  // sweep is a no-op, and the class is as tiny as the grant class.
+  try {
+    const { WAVEGUARD_EXTENSION_REVERSAL_BY } = require('./customer-credit');
+    const datedLoopTermIds = new Set(terms.map((term) => String(term.id)));
+    const reversalRows = await conn('customer_credit_ledger')
+      .where({ created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+      .whereNotNull('invoice_id')
+      .select('customer_id', 'note', 'invoice_id');
+    const seenRestoreTerms = new Set();
+    for (const reversal of reversalRows) {
+      const termMatch = String(reversal.note || '').match(/\(term ([^,)]+),/i);
+      const termId = termMatch ? termMatch[1] : null;
+      if (!termId || seenRestoreTerms.has(termId)) continue;
+      seenRestoreTerms.add(termId);
+      // The dated loop already ran the restore for covered-today terms —
+      // this pass owns only the terms outside today's window.
+      if (datedLoopTermIds.has(String(termId))) continue;
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // refunded — nothing to restore) out of the locked path entirely.
+      const anchorInvoice = await conn('invoices')
+        .where({ id: reversal.invoice_id })
+        .first('id', 'status', 'paid_at');
+      if (!anchorInvoice) continue;
+      const anchorPaid = String(anchorInvoice.status || '').toLowerCase() === 'paid'
+        || anchorInvoice.paid_at != null;
+      if (!anchorPaid) continue;
+      // Same lock discipline as the clawback pass: customer FOR UPDATE
+      // first (the grant path's order — see the r5 P2 note above), then the
+      // anchor row so a racing refund's invoice UPDATE serializes, then the
+      // paid-backing recheck through coveredTermsAsOf on this transaction —
+      // whichever side commits first, the other sees its final state.
+      const restoreIfStillPaidBacked = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: reversal.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
+        const lockedAnchor = await t('invoices')
+          .where({ id: reversal.invoice_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedAnchor) return 0;
+        // Paid backing is the term-level authority, not the bare anchor
+        // status: coveredTermsAsOf(null) revalidates the prepay invoice AND
+        // the refunded-payment exclusion, and its windowless form is exactly
+        // the decided-repaid shape the restore rules cover. A term still
+        // stuck cancelled-unrevived (lost repayment sync) is out of scope
+        // here by design — the revival recoveries own it, and once revived
+        // it becomes paid-backed and this pass catches it next sweep.
+        const term = await coveredTermsAsOf(t, null)
+          .where('t.id', termId)
+          .first('t.id', 't.customer_id');
+        if (!term) return 0;
+        return restoreWaveguardExtensionCredits(term, t);
+      };
+      summary.credited += conn === db
+        ? await db.transaction(restoreIfStillPaidBacked)
+        : await restoreIfStillPaidBacked(conn);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
   }
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);

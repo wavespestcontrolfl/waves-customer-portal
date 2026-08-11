@@ -1965,6 +1965,32 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
   describe('route wiring (source contracts)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
+    test('a SCHEDULED_PRICE_MOVED refusal restamps the frozen mint cents from the locked price BEFORE releasing for resume (codex #3344 r5 P1)', () => {
+      // The refusal's release promises a resume that mints the FROZEN cents
+      // with replay disabled and price movement allowed — without the
+      // restamp, the stale-price 409 the guard just raised would be
+      // replayed AS the stale price. The refresh is gated on the exact
+      // error code plus positive integer cents (a zero/absent price never
+      // overwrites committed money), merges atomically through
+      // mergeRecordNotesKeys, and sits inside the required-mint catch
+      // above the release call.
+      const refreshMatch = source.match(
+        /if \(invErr\?\.code === 'SCHEDULED_PRICE_MOVED'\s*\n\s*&& Number\.isInteger\(invErr\.currentEstimatedPriceCents\)\s*\n\s*&& invErr\.currentEstimatedPriceCents > 0\) \{[\s\S]{0,700}mergeRecordNotesKeys\(record\.id, \{\s*\n\s*backfillMintAmountCents: invErr\.currentEstimatedPriceCents,\s*\n\s*\}\);/,
+      );
+      expect(refreshMatch).not.toBeNull();
+      const refreshAt = source.indexOf("if (invErr?.code === 'SCHEDULED_PRICE_MOVED'");
+      const requiredCatchAt = source.indexOf('if (backfillReviewMintRequired && !invoice?.id) {');
+      const releaseAt = source.indexOf('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+      expect(requiredCatchAt).toBeGreaterThan(-1);
+      expect(refreshAt).toBeGreaterThan(requiredCatchAt);
+      expect(releaseAt).toBeGreaterThan(refreshAt);
+      // Both throw sites attach the locked price the restamp consumes.
+      const mintHelperSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
+      const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+      expect(mintHelperSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedSvc\.estimated_price\);/);
+      expect(invoiceSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedRow\.estimated_price\);/);
+    });
+
     test('the posture derives ONCE at commit from the same input sources as the mint decision, and is FROZEN in the record transaction (fix round 8; broadened round 9)', () => {
       // Commit-time derivation: the BROADENED expected-mint posture, fed the
       // same hoisted derivations and row columns the shouldInvoice call
@@ -2691,7 +2717,7 @@ describe('completion route wiring (source contracts)', () => {
 
   test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
     // The route passes the opt-out on the completion mint…
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4200}skipDepositCredit: isBackfillCompletion,/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4500}skipDepositCredit: isBackfillCompletion,/);
     // …and logs the unapplied balance for review, like the prepaid skip.
     expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
     // The service honors the opt-out BEFORE any ledger read: the
@@ -2707,7 +2733,7 @@ describe('completion route wiring (source contracts)', () => {
   test('the backfill mint opts out of payer-statement accrual and leaves the reviewer a breadcrumb (fix round 5)', () => {
     // The route passes BOTH opt-outs on the completion mint — the same
     // options object, so the accrual skip rides the deposit skip's gate.
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4200}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,4500}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
     // …and logs the skipped accrual for the reviewer — only when an accrual
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:

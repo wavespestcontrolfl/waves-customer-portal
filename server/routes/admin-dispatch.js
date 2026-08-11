@@ -8782,7 +8782,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
           // Live replay mints prove the row price hasn't moved since this
           // completion derived its amount (codex #3344 r2) — a WaveGuard
-          // reprice landing mid-completion 409s and the retry bills fresh.
+          // reprice landing mid-completion 409s and the retry bills fresh
+          // (for the required lane, via the release catch restamping the
+          // frozen cents from the 409's locked price — codex r5 P1).
           // Frozen-money lanes bypass replay entirely and keep their
           // provable frozen figure.
           scheduledPriceBasis: svc.estimated_price,
@@ -8872,7 +8874,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // A REQUIRED resume mints the FROZEN amount — the money truth
             // this block documents above — so the helper's stale-price 409
             // must not block it. First runs bill live values and keep the
-            // guard: a mid-flight reprice 409s and the retry bills fresh.
+            // guard: a mid-flight reprice 409s, the release catch restamps
+            // the frozen cents from the 409's locked price (codex r5 P1),
+            // and the resume's frozen mint IS the moved price.
             allowPriceMovement: !useReplayLines,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
@@ -9010,6 +9014,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // recomputation from the by-now-mutable billing profile.
         if (backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
+          // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
+          // the resume this release promises mints the frozen cents with
+          // replay disabled and price movement allowed — without this, the
+          // stale-price 409 the guard just raised would be replayed as the
+          // stale price itself. The required live lane's amount IS
+          // estimated_price (typed one-time requires hasVisitPrice, so
+          // completionInvoiceAmount returns it), and the attached cents were
+          // read under the mint's own row lock — the moved price is the new
+          // money truth, so restamp it as the frozen figure. Best-effort:
+          // a failed merge keeps the old freeze (the committed money) rather
+          // than blocking the release; zero/absent cents never restamp — a
+          // frozen figure must stay a positive committed price.
+          if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && Number.isInteger(invErr.currentEstimatedPriceCents)
+            && invErr.currentEstimatedPriceCents > 0) {
+            try {
+              await mergeRecordNotesKeys(record.id, {
+                backfillMintAmountCents: invErr.currentEstimatedPriceCents,
+              });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentEstimatedPriceCents}c for ${svc.id} after mid-mint reprice — the resume bills the moved price`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen mint refresh FAILED for ${svc.id} — the resume will mint the pre-reprice freeze: ${refreshErr.message}`);
+            }
+          }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
             // The conditional flip found the attempt not in

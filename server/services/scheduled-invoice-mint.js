@@ -121,6 +121,13 @@ async function mintScheduledServiceInvoiceWithDeposit({
           const e = new Error('Scheduled service was repriced while minting — retry to bill the current price');
           e.status = 409;
           e.code = 'SCHEDULED_PRICE_MOVED';
+          // The estimated_price the lock proved current (codex #3344 r5):
+          // the dispatch REQUIRED-mint catch refreshes its frozen mint
+          // cents from this — completionInvoiceAmount derives the required
+          // lane's amount from estimated_price, so the released resume then
+          // bills the moved price instead of replaying the stale freeze.
+          const cents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
+          e.currentEstimatedPriceCents = cents(lockedSvc.estimated_price);
           throw e;
         }
         const depositCredit = withDeposit
