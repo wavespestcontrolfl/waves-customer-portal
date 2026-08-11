@@ -613,6 +613,14 @@ describe('the series creators consume the guard (source guards)', () => {
     expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(2);
     expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
     expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
+    // Invalid-but-recurring palm lines never proceed as name-only rows
+    // (codex r18 pre-push P0): the auto-schedule loop skips them to manual
+    // scheduling, and the reserved path — where a parent already exists —
+    // refuses the acceptance outright.
+    expect(converterSrc).toContain('function palmRecurringEvidence');
+    expect(converterSrc).toContain('&& palmRecurringEvidence(svc)) {');
+    expect(converterSrc).toContain('throw palmRecurringLineInvalidError();');
+    expect(converterSrc).toContain('function palmRecurringLineInvalidError()');
   });
 
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {

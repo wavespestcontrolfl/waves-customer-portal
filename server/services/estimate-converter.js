@@ -2597,6 +2597,38 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
 // against the billed recurring plan. Same operational-422 shape as the
 // ANNUAL_PREPAY_* refusals; the caller's transaction rolls the whole
 // acceptance back.
+// Recurring EVIDENCE on a palm line (codex r18 pre-push P0; mirrors the
+// admin-customers matching rule): a palm line whose data says "recurring"
+// but which resolved NO valid semiannual program must never proceed as a
+// name-only 'Palm Injection' row — that label completion-resolves the
+// ONE-TIME profile and bills recurring-plan work with one-time posture.
+// Definitively one-time lines (1 visit, cadence-less+count-less, explicit
+// one-time spellings) carry no evidence and keep their one-time lane.
+// COMMERCIAL palm is deliberately excluded: commercial recurring keeps
+// its owner-designed office lane (r6 bell), like every commercial family.
+function palmRecurringEvidence(svc = {}, parentRow = {}) {
+  if (isCommercialRecurringLine(svc, parentRow)) return false;
+  const visits = visitsPerYearForRecurringService(svc);
+  return visitCountFieldsConflict(svc)
+    || visitCountFieldsInvalid(svc)
+    || (visits != null && visits > 1)
+    || (!!explicitCadenceFieldForService(svc) && !explicitlyOneTimeCadence(svc));
+}
+
+// Reserved-path refusal for the same case (same contract as the
+// off-season and catalog-missing refusals): the reserved parent already
+// exists, so skip+bell would leave a completable one-time-posture visit.
+function palmRecurringLineInvalidError() {
+  const err = new Error(
+    'This palm line carries contradictory recurring data (cadence and visit count disagree), so it cannot be scheduled or billed correctly — correct the estimate line and retry, or convert manually.'
+  );
+  err.code = 'PALM_RECURRING_LINE_INVALID';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  return err;
+}
+
 function palmCatalogMissingError() {
   const err = new Error(
     'The recurring palm catalog row (palm_injection_semiannual) is unavailable, so this palm program cannot be scheduled or billed correctly — restore the catalog row (migration 20260811000010) and retry, or convert manually.'
@@ -2608,14 +2640,15 @@ function palmCatalogMissingError() {
   return err;
 }
 
-function notifyPalmCatalogMissing(estimateId, customerId, context) {
-  logger.error(`[estimate-converter] palm_injection_semiannual catalog row unavailable — ${context} for estimate ${estimateId} routed to manual scheduling (fail closed)`);
+function notifyPalmCatalogMissing(estimateId, customerId, context, bodyOverride) {
+  logger.error(`[estimate-converter] palm scheduling failed closed — ${context} for estimate ${estimateId} routed to manual scheduling`);
   try {
     const NotificationService = require('./notification-service');
     void NotificationService.notifyAdmin(
       'estimate_converted',
       'Palm program needs manual scheduling',
-      `Accepted estimate #${estimateId} sold a semiannual palm program, but the recurring palm catalog row (palm_injection_semiannual) is unavailable — no palm series was auto-scheduled. Restore the catalog row (migration 20260811000010), then schedule the program manually.`,
+      bodyOverride
+        || `Accepted estimate #${estimateId} sold a semiannual palm program, but the recurring palm catalog row (palm_injection_semiannual) is unavailable — no palm series was auto-scheduled. Restore the catalog row (migration 20260811000010), then schedule the program manually.`,
       { icon: '\u{1F334}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
     ).catch((err) => logger.warn(`[estimate-converter] palm catalog-missing notify failed: ${err.message}`));
   } catch (err) {
@@ -4056,6 +4089,19 @@ const EstimateConverter = {
             throw err;
           }
         }
+        // A reserved PALM accept whose line carries recurring EVIDENCE but
+        // resolved NO seeding pattern (contradictory/conflicting/invalid
+        // data — declined by design) must not complete (codex r18 pre-push
+        // P0): the `if (reservedSeedingPattern)` block below would be
+        // skipped entirely, leaving the reserved parent name-only or on a
+        // stale one-time id to complete with one-time billing posture.
+        // Same refusal contract as the off-season check above — OUTSIDE
+        // the fail-soft seeding try, so the acceptance rolls back.
+        if (!reservedSeedingPattern
+          && seedingFamilyKey(reservedGuardSvc || {}, reservedStart) === 'palm_injection'
+          && palmRecurringEvidence(reservedGuardSvc || {}, reservedStart)) {
+          throw palmRecurringLineInvalidError();
+        }
         try {
           const seedSvc = reservedGuardSvc;
           // Duplicate-series guard on the RESERVED-slot path (P0): this
@@ -4244,6 +4290,20 @@ const EstimateConverter = {
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
+        // A palm unit with recurring EVIDENCE that did NOT resolve the
+        // semiannual catalog identity (contradictory/conflicting/invalid
+        // data declines seeding by design, leaving catalogServiceKey null)
+        // must not insert a name-only parent (codex r18 pre-push P0) —
+        // skip to manual scheduling with the bell. Definitively one-time
+        // palm lines carry no evidence and proceed as before; commercial
+        // keeps its own bell lane (see palmRecurringEvidence).
+        if (unit.catalogServiceKey !== 'palm_injection_semiannual'
+          && seedingFamilyKey(svc) === 'palm_injection'
+          && palmRecurringEvidence(svc)) {
+          notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit (invalid recurring data)',
+            `Accepted estimate #${estimateId} has a palm line with contradictory recurring data (cadence and visit count disagree), so it was not auto-scheduled — review the line and schedule the palm program manually.`);
+          continue;
+        }
         const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
           service: svc,
           // Same explicit-visits override as the seeding path: a termite row
