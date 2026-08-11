@@ -199,10 +199,14 @@ exports.up = async function up(knex) {
   // recurring/semiannual row is healed; anything else fails closed with
   // a loud warn for the operator. Rows this migration inserted always
   // satisfy this (SERVICE literal above).
-  const rowFrequency = String(service.frequency || '').toLowerCase();
+  // EXACT metadata required (codex r18 pre-push P0, second pass): blank
+  // frequency / null visit count are not "close enough" — once healed,
+  // a bare semiannual selection derives its prefill cadence from THIS
+  // row's frequency, and a blank one falls back to quarterly (four
+  // billable applications on a two-application program).
   const rowIsRecurringSemiannual = service.billing_type === 'recurring'
-    && (rowFrequency === '' || rowFrequency === 'semiannual')
-    && (service.visits_per_year == null || Number(service.visits_per_year) === 2);
+    && String(service.frequency || '').toLowerCase() === 'semiannual'
+    && Number(service.visits_per_year) === 2;
   if (!rowIsRecurringSemiannual) {
     console.warn(`[palm-semiannual] ${SERVICE.service_key}: pre-existing row is not a verified recurring/semiannual service (billing_type=${service.billing_type}, frequency=${service.frequency}, visits_per_year=${service.visits_per_year}) — NOT healing a profile onto it (fail closed); review the row before selling the program`);
     await recordState(knex, inserted);

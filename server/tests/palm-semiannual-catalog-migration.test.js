@@ -197,7 +197,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
 
   test('up() never overwrites an admin-created services row, but still heals its missing profile', async () => {
     const db = emptyDb();
-    const adminRow = { id: 'admin-palm', service_key: KEY, name: 'Adam Custom Palm Program', category: 'tree_shrub', billing_type: 'recurring', is_active: true };
+    const adminRow = { id: 'admin-palm', service_key: KEY, name: 'Adam Custom Palm Program', category: 'tree_shrub', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true };
     db.services.push({ ...adminRow });
     await migration.up(fakeKnex(db));
 
@@ -222,6 +222,13 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     db2.services.push({ id: 'admin-monthly', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'monthly', is_active: true });
     await migration.up(fakeKnex(db2));
     expect(db2.service_completion_profiles.find((r) => r.service_key === KEY)).toBeUndefined();
+
+    // Blank frequency / missing visit count are not close enough either
+    // (codex r18 pre-push P0): a healed bare row would prefill quarterly.
+    const db3 = emptyDb();
+    db3.services.push({ id: 'admin-bare', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', is_active: true });
+    await migration.up(fakeKnex(db3));
+    expect(db3.service_completion_profiles.find((r) => r.service_key === KEY)).toBeUndefined();
   });
 
   test('up() skips the profile for a row an admin deactivated (posture preserved)', async () => {
@@ -281,7 +288,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
 
   test('a profile HEALED onto a pre-existing service is removed on rollback — the admin service survives without our auto_send behavior (codex r11 P2)', async () => {
     const db = emptyDb();
-    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'semiannual', is_active: true });
+    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
     await migration.up(fakeKnex(db));
     expect(profileRow(db)).toBeDefined();
     await migration.down(fakeKnex(db));
@@ -298,7 +305,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     // through this profile — the never-ours deletion only applies while
     // nothing references the service.
     const db = emptyDb();
-    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'semiannual', is_active: true });
+    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
     await migration.up(fakeKnex(db));
     db.scheduled_services.push({ id: 'v1', service_id: 'admin-pre', service_type: 'Adam Custom Palm Program', status: 'pending' });
     await migration.down(fakeKnex(db));
