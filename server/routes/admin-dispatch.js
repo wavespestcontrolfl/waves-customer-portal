@@ -1135,6 +1135,36 @@ function reentryEditPlan({ exteriorMinutes, interiorMinutes, service = {} } = {}
   return { exterior, interior };
 }
 
+// Tech re-entry steppers at completion (owner rule 2026-08-11): optional
+// reentryExteriorMinutes / reentryInteriorMinutes posted by CompletionPanel
+// when the tech moved a stepper off its seeded default. Same 0–1440 bounds
+// as the after-the-fact admin edit above; an omitted/blank side returns
+// undefined so the computed-default advisory path stays byte-identical.
+// The 5/15-minute increments are a UI affordance only — the wire accepts
+// any whole minute so a legit stored value never bounces on replay. Pure
+// for testability (_test).
+function completionReentryPlan({ exteriorMinutes, interiorMinutes } = {}) {
+  const parseSide = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const rounded = Math.round(Number(value));
+    return Number.isFinite(rounded) && rounded >= 0 && rounded <= REENTRY_EDIT_MAX_MINUTES
+      ? rounded
+      : NaN;
+  };
+  const exterior = parseSide(exteriorMinutes);
+  const interior = parseSide(interiorMinutes);
+  if (Number.isNaN(exterior) || Number.isNaN(interior)) {
+    return {
+      status: 400,
+      error: {
+        error: `Re-entry minutes must be between 0 and ${REENTRY_EDIT_MAX_MINUTES}`,
+        code: 'reentry_invalid',
+      },
+    };
+  }
+  return { exterior, interior };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -1311,24 +1341,38 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   return blocks;
 }
 
-// Manufacturer re-entry interval (REI) for the products applied this visit, in
-// minutes — the most restrictive (max) across products. Returns null when no
-// applied product carries an REI so the caller keeps the service-line default.
-// Used to make the "Exterior ready in …" countdown reflect the product label
-// instead of a flat default.
-// Fail-open by design for the COMPLETION path only: there the floor is
-// defense-in-depth over the service-line defaults being written anyway, and
+// Manufacturer re-entry interval (REI) for the products applied this visit —
+// the most restrictive (max) across products, as { minutes, verified }.
+// `minutes` is null when no resolved product carries an REI so the caller
+// keeps the service-line default; `verified` is true only when the catalog
+// lookup succeeded AND resolved every submitted product id — a failed query
+// or a missing row (deploy skew, deleted product) means the label floor
+// could not be confirmed. Used to make the "Exterior ready in …" countdown
+// reflect the product label instead of a flat default.
+// Fail-open for the DEFAULTS leg only: there an unverified floor still
+// can't lower anything (the service-line defaults are written anyway), and
 // failing the whole closeout on a catalog blip would block the visit. The
+// tech stepper override leg must treat verified:false as "floor unknown"
+// and refuse to go below the computed default (codex P1 #3360). The lookup
+// runs in a SAVEPOINT so a failure degrades to unverified instead of
+// aborting the caller's completion transaction (waves-db §5b). The
 // re-entry correction PATCH deliberately does NOT use this helper — it
 // resolves the applied products inline and fails closed (codex P1 PR #3180
 // r2/r3).
-async function maxProductReentryMinutes(knex, submittedProducts = []) {
+async function productReentryFloor(knex, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
-  if (!productIds.length) return null;
-  const rows = await knex('products_catalog')
-    .whereIn('id', productIds)
-    .select('rei_hours')
-    .catch(() => []);
+  if (!productIds.length) return { minutes: null, verified: true };
+  let rows = null;
+  try {
+    rows = await knex.transaction(async (sp) => sp('products_catalog')
+      .whereIn('id', productIds)
+      .select('id', 'rei_hours'));
+  } catch {
+    rows = null;
+  }
+  if (!Array.isArray(rows)) return { minutes: null, verified: false };
+  const resolvedIds = new Set(rows.map((row) => String(row.id)));
+  const verified = productIds.every((id) => resolvedIds.has(String(id)));
   let maxMinutes = null;
   for (const row of rows) {
     const hours = Number(row.rei_hours);
@@ -1337,7 +1381,7 @@ async function maxProductReentryMinutes(knex, submittedProducts = []) {
       if (maxMinutes == null || minutes > maxMinutes) maxMinutes = minutes;
     }
   }
-  return maxMinutes;
+  return { minutes: maxMinutes, verified };
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -2790,6 +2834,25 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/reentry-defaults — the re-entry
+// stepper seeds for the completion panel: what a hands-off completion
+// would persist for this visit's service type (before any product-label
+// REI floor, which only ever raises the exterior side). Tech-or-admin
+// (router base auth) unlike the admin-only stored-advisory endpoints
+// below, because the steppers are a tech control at closeout; exposes
+// line defaults only, never a stored advisory.
+router.get('/:serviceId/reentry-defaults', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+    res.json({
+      exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/reentry — the completed visit's stored
 // re-entry windows plus the service-line defaults a fresh completion would
 // write. Read-only seed for the appointment editor's re-entry fields; the
@@ -2865,7 +2928,7 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // service_report_v1 record must exist (legacy records render from the old
 // dry-time fields — an "edit" there would audit a change the customer never
 // sees); an exterior correction may not undercut the most restrictive label
-// REI of the products applied on the visit (same maxProductReentryMinutes
+// REI of the products applied on the visit (same productReentryFloor
 // floor the completion path applies).
 //
 // What it writes (single transaction):
@@ -2968,7 +3031,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       }
       // Manufacturer REI floor (codex P1 PR #3180): the completion path
       // floors the exterior window against the most restrictive label REI of
-      // the products actually applied (maxProductReentryMinutes) — a
+      // the products actually applied (productReentryFloor) — a
       // correction must not undercut it, or the permanent report says an
       // area is ready before the label permits. Interior is not floored,
       // matching the completion path (rei_hours is the outdoor-treatment
@@ -2976,7 +3039,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       // lookup failure 500s and the admin retries, rather than skipping a
       // safety floor.
       if (plan.exterior !== undefined) {
-        // Inline STRICT resolution, not maxProductReentryMinutes: the
+        // Inline STRICT resolution, not productReentryFloor: the
         // helper's .catch(() => []) posture and its filter(Boolean) both
         // fail OPEN — a catalog lookup failure or a deleted product
         // (ON DELETE SET NULL leaves service_products.product_id null)
@@ -3005,7 +3068,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
         // A resolvable product with NO rei_hours on file carries no label
         // REI ("until dry") — that's a real answer, not a verification
         // failure; only finite intervals floor, most restrictive wins
-        // (same rule as the completion path's maxProductReentryMinutes).
+        // (same rule as the completion path's productReentryFloor).
         let productFloor = null;
         for (const row of catalogRows) {
           const hours = Number(row.rei_hours);
@@ -4125,6 +4188,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
+      reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
     } = req.body;
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return res.status(400).json({ error: 'offerInspectionCredit must be a boolean' });
@@ -4154,6 +4219,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'client_pest_rating_invalid',
         });
       }
+    }
+    // Tech-adjusted re-entry countdown (owner rule 2026-08-11): validated
+    // up-front like clientPestRating. An omitted side stays undefined and
+    // the advisory keeps its computed default for that side.
+    const reentryOverridePlan = completionReentryPlan({
+      exteriorMinutes: reentryExteriorMinutes,
+      interiorMinutes: reentryInteriorMinutes,
+    });
+    if (reentryOverridePlan.error) {
+      return res.status(reentryOverridePlan.status).json(reentryOverridePlan.error);
     }
     const zoneShapesError = PropertyZones.validateZoneShapesBody(zoneShapes);
     if (zoneShapesError) {
@@ -6462,12 +6537,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // back to the service-line default when no product carries an REI. Kept
             // no lower than the default so a 0-hr / "until dry" product still shows
             // a sensible dry-down window.
-            const productReentryMin = await maxProductReentryMinutes(trx, products || []);
+            const productReentry = await productReentryFloor(trx, products || []);
+            const productReentryMin = productReentry.minutes;
             // Type-aware base: cockroach-family visits default to a 120-min
             // INTERIOR window (owner rule 2026-08-11) instead of the pest
             // line's 30 — see getAdvisoryDefaults.
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
-            const advisoryDefaultsForVisit = productReentryMin != null
+            let advisoryDefaultsForVisit = productReentryMin != null
               ? {
                 ...lineAdvisoryDefaults,
                 exterior_reentry_min: Math.max(
@@ -6476,6 +6552,47 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 ),
               }
               : lineAdvisoryDefaults;
+            // Tech re-entry steppers (owner rule 2026-08-11): an adjusted
+            // side overrides its computed default and carries the same
+            // per-side reentry_adjusted marker the admin correction writes,
+            // so an explicit choice survives scope normalization (below and
+            // at read time) exactly like an after-the-fact edit. Label REI
+            // stays the exterior floor — a tech-lowered dry-down window
+            // never undercuts the most restrictive product label applied.
+            {
+              let techExterior = reentryOverridePlan.exterior;
+              const techInterior = reentryOverridePlan.interior;
+              // Fail closed when the label floor is UNVERIFIABLE (codex P1
+              // #3360): a lowering exterior override is dropped entirely —
+              // the computed default (line default raised by any known REI)
+              // stands unmarked, so scope normalization treats it like an
+              // untouched side. Raising is always safe and still applies.
+              const computedExteriorMin = Number(advisoryDefaultsForVisit?.exterior_reentry_min) || 0;
+              if (techExterior !== undefined && !productReentry.verified
+                && techExterior < computedExteriorMin) {
+                logger.warn('[completion] re-entry exterior override dropped — product REI floor unverifiable', {
+                  serviceId: svc.id,
+                  requestedExteriorMin: techExterior,
+                  keptExteriorMin: computedExteriorMin,
+                });
+                techExterior = undefined;
+              }
+              if (techExterior !== undefined || techInterior !== undefined) {
+                advisoryDefaultsForVisit = {
+                  ...advisoryDefaultsForVisit,
+                  ...(techExterior !== undefined
+                    ? { exterior_reentry_min: Math.max(techExterior, productReentryMin || 0) }
+                    : {}),
+                  ...(techInterior !== undefined
+                    ? { interior_reentry_min: techInterior }
+                    : {}),
+                  reentry_adjusted: {
+                    exterior: techExterior !== undefined,
+                    interior: techInterior !== undefined,
+                  },
+                };
+              }
+            }
             // Treatment Zone Mapper trace = explicit exterior scope (the
             // trace is drawn on the satellite exterior) — keeps the
             // dry-down timer on typed closeouts that hide area chips.
@@ -6522,7 +6639,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               tracedExteriorZone,
             });
             recordInsert.advisory = serializeJsonb(advisoryNormalized);
-            const interiorBefore = lineAdvisoryDefaults?.interior_reentry_min ?? null;
+            // Diff against the visit's PRE-normalization advisory (tech
+            // override included) so a stepper adjustment alone doesn't log
+            // as a scope normalization.
+            const interiorBefore = advisoryDefaultsForVisit?.interior_reentry_min ?? null;
             const interiorAfter = advisoryNormalized.interior_reentry_min ?? null;
             if (interiorBefore !== interiorAfter) {
               logger.info('[completion] re-entry scope normalized', {
@@ -13542,6 +13662,8 @@ module.exports._test = {
   adjustedCompletionEndInstant,
   timeOnSiteEditPlan,
   reentryEditPlan,
+  completionReentryPlan,
+  productReentryFloor,
   REENTRY_EDIT_MAX_MINUTES,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,

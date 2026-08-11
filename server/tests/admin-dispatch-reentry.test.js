@@ -64,8 +64,8 @@ const fs = require('fs');
 const path = require('path');
 
 const router = require('../routes/admin-dispatch');
-const { reentryEditPlan, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
-const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
+const { reentryEditPlan, completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
+const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
@@ -75,14 +75,15 @@ const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service
 const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
 
 // ---------------------------------------------------------------------------
-// Defaults (owner rule 2026-08-03)
+// Defaults (owner rule 2026-08-11: exterior 30 min, interior 2 hours —
+// supersedes 2026-08-03's 30-min interior)
 // ---------------------------------------------------------------------------
 
 describe('service-line advisory defaults', () => {
-  test('pest spray re-entry defaults to 30 min for BOTH interior and exterior', () => {
+  test('pest re-entry defaults to 30 min exterior, 120 min interior', () => {
     expect(SERVICE_LINE_CONFIGS.pest.advisoryDefaults).toMatchObject({
       exterior_reentry_min: 30,
-      interior_reentry_min: 30,
+      interior_reentry_min: 120,
     });
   });
 
@@ -127,12 +128,138 @@ describe('service-line advisory defaults', () => {
   test('non-cockroach types keep their line defaults', () => {
     expect(getAdvisoryDefaults('Quarterly Pest Control')).toMatchObject({
       exterior_reentry_min: 30,
-      interior_reentry_min: 30,
+      interior_reentry_min: 120,
     });
     expect(getAdvisoryDefaults('Lawn Care')).toMatchObject({
       exterior_reentry_min: 30,
       interior_reentry_min: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tech re-entry steppers at completion (owner rule 2026-08-11)
+// ---------------------------------------------------------------------------
+
+describe('completionReentryPlan — the tech stepper intake gate', () => {
+  test('omitted / blank sides pass through as undefined (default path untouched)', () => {
+    expect(completionReentryPlan({})).toEqual({ exterior: undefined, interior: undefined });
+    expect(completionReentryPlan({ exteriorMinutes: '', interiorMinutes: null }))
+      .toEqual({ exterior: undefined, interior: undefined });
+    expect(completionReentryPlan()).toEqual({ exterior: undefined, interior: undefined });
+  });
+
+  test('valid minutes round and pass, including an explicit 0 ("no wait")', () => {
+    expect(completionReentryPlan({ exteriorMinutes: 45, interiorMinutes: 0 }))
+      .toEqual({ exterior: 45, interior: 0 });
+    expect(completionReentryPlan({ exteriorMinutes: '25' }))
+      .toEqual({ exterior: 25, interior: undefined });
+    expect(completionReentryPlan({ interiorMinutes: 105.4 }))
+      .toEqual({ exterior: undefined, interior: 105 });
+  });
+
+  test('out-of-range or non-numeric values 400 with reentry_invalid', () => {
+    for (const bad of [
+      { exteriorMinutes: -5 },
+      { exteriorMinutes: REENTRY_EDIT_MAX_MINUTES + 1 },
+      { interiorMinutes: 'soon' },
+      { exteriorMinutes: 30, interiorMinutes: Infinity },
+    ]) {
+      const plan = completionReentryPlan(bad);
+      expect(plan.status).toBe(400);
+      expect(plan.error.code).toBe('reentry_invalid');
+    }
+  });
+
+  test('the /complete route validates the stepper fields through the plan', () => {
+    expect(source).toMatch(/completionReentryPlan\(\{\s*exteriorMinutes:\s*reentryExteriorMinutes/);
+  });
+});
+
+describe('completion-time tech override — advisory semantics', () => {
+  // What /complete builds when the tech moved a stepper: the override value
+  // plus the same per-side reentry_adjusted marker the admin edit writes.
+  // A tech-adjusted interior must survive scope normalization on an
+  // exterior-only visit exactly like an after-the-fact admin correction.
+  test('adjusted interior survives exterior-only scope; untouched side still normalizes', () => {
+    const built = buildCompletionAdvisory({
+      advisoryDefaults: {
+        exterior_reentry_min: 30,
+        interior_reentry_min: 45,
+        reentry_adjusted: { exterior: false, interior: true },
+      },
+      completionAreas: ['Perimeter'],
+      applications: [],
+    });
+    expect(built).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 45 });
+    expect(built.reentry_adjusted).toEqual({ exterior: false, interior: true });
+  });
+
+  test('unadjusted interior still zeroes on an explicitly exterior-only visit', () => {
+    const built = buildCompletionAdvisory({
+      advisoryDefaults: { exterior_reentry_min: 30, interior_reentry_min: 120 },
+      completionAreas: ['Perimeter'],
+      applications: [],
+    });
+    expect(built).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+  });
+
+  test('the /complete route floors a tech-lowered exterior at the product-label REI', () => {
+    // The override block must keep Math.max(techExterior, productReentryMin)
+    // — a stepper can undercut the line default but never the label.
+    expect(source).toMatch(/exterior_reentry_min:\s*Math\.max\(techExterior,\s*productReentryMin\s*\|\|\s*0\)/);
+  });
+
+  test('an UNVERIFIABLE label floor drops a lowering exterior override (codex P1 #3360)', () => {
+    // When productReentryFloor reports verified:false, a below-default
+    // exterior override must be discarded (default stands, unmarked) —
+    // never applied against a floor of 0.
+    expect(source).toMatch(/!productReentry\.verified\s*&&\s*techExterior\s*<\s*computedExteriorMin/);
+    expect(source).toMatch(/re-entry exterior override dropped — product REI floor unverifiable/);
+  });
+});
+
+describe('productReentryFloor — label-REI resolution with verification', () => {
+  const stubKnex = ({ rows, fail = false } = {}) => ({
+    transaction: async (fn) => {
+      if (fail) throw new Error('catalog unavailable');
+      return fn(() => ({ whereIn: () => ({ select: async () => rows }) }));
+    },
+  });
+
+  test('no submitted products → no floor, trivially verified', async () => {
+    expect(await productReentryFloor(stubKnex(), [])).toEqual({ minutes: null, verified: true });
+    expect(await productReentryFloor(stubKnex(), [{ rate: 1 }])).toEqual({ minutes: null, verified: true });
+  });
+
+  test('every product resolved → max REI in minutes, verified', async () => {
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: 4 }, { id: 'b', rei_hours: 0.5 }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }, { productId: 'b' }]))
+      .toEqual({ minutes: 240, verified: true });
+  });
+
+  test('a resolved product with no label REI reads as a 0-hr (until-dry) floor, verified', async () => {
+    // Pre-existing contract: Number(null) → 0 minutes, which the caller
+    // then keeps no lower than the line default via Math.max — an
+    // until-dry product still shows a sensible dry-down window.
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: null }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }]))
+      .toEqual({ minutes: 0, verified: true });
+  });
+
+  test('a missing catalog row (deleted product / deploy skew) → unverified', async () => {
+    const knex = stubKnex({ rows: [{ id: 'a', rei_hours: 1 }] });
+    expect(await productReentryFloor(knex, [{ productId: 'a' }, { productId: 'gone' }]))
+      .toEqual({ minutes: 60, verified: false });
+  });
+
+  test('a failed lookup degrades to unverified without throwing (savepoint-isolated)', async () => {
+    expect(await productReentryFloor(stubKnex({ fail: true }), [{ productId: 'a' }]))
+      .toEqual({ minutes: null, verified: false });
+  });
+
+  test('the lookup runs in a savepoint, not bare on the caller trx (waves-db §5b)', () => {
+    expect(source).toMatch(/rows = await knex\.transaction\(async \(sp\) => sp\('products_catalog'\)/);
   });
 });
 
@@ -930,7 +1057,7 @@ describe('GET /:serviceId/reentry — behavioral', () => {
       exteriorMinutes: 20,
       interiorMinutes: 45,
       adjusted: true,
-      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+      defaults: { exteriorMinutes: 30, interiorMinutes: 120 },
     });
   });
 
@@ -946,7 +1073,7 @@ describe('GET /:serviceId/reentry — behavioral', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({
       hasRecord: false,
-      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+      defaults: { exteriorMinutes: 30, interiorMinutes: 120 },
     });
   });
 
@@ -967,7 +1094,7 @@ describe('GET /:serviceId/reentry — behavioral', () => {
     expect(res.body).toEqual({
       hasRecord: false,
       legacyRecord: true,
-      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+      defaults: { exteriorMinutes: 30, interiorMinutes: 120 },
     });
   });
 
@@ -988,7 +1115,7 @@ describe('GET /:serviceId/reentry — behavioral', () => {
     expect(res.body).toEqual({
       hasRecord: false,
       incompleteRecord: true,
-      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+      defaults: { exteriorMinutes: 30, interiorMinutes: 120 },
     });
   });
 

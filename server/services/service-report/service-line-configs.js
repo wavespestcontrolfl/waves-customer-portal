@@ -33,10 +33,12 @@ const SERVICE_LINE_CONFIGS = {
     requiredPhotoCount: 4,
     advisoryDefaults: {
       exterior_reentry_min: 30,
-      // Owner rule 2026-08-03: interior spray re-entry defaults to 30 min
-      // (was 120). Per-visit corrections go through the admin re-entry edit
+      // Owner rule 2026-08-11: interior re-entry defaults to 2 hours
+      // (supersedes 2026-08-03's 30-min default). The tech adjusts per
+      // visit at completion via the CompletionPanel re-entry steppers;
+      // after-the-fact corrections stay on the admin re-entry edit
       // (PATCH /admin/dispatch/:serviceId/reentry).
-      interior_reentry_min: 30,
+      interior_reentry_min: 120,
       irrigation_hold_hr: 24,
       pet_advisory: 'Keep pets off treated zones until dry.',
     },
@@ -215,9 +217,11 @@ function getServiceLineConfig(serviceLineOrType) {
 }
 
 // Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
-// INTERIOR re-entry window instead of the pest line's 30 minutes; the
-// exterior dry-down default stays the pest line's 30. Covers the whole
-// family — cockroach control, German/native roach knockdowns and cleanouts,
+// INTERIOR re-entry window; the exterior dry-down default stays the pest
+// line's 30. (The pest line's own interior default later moved to 120 the
+// same day, making this a same-value guard — it stays so cockroach keeps
+// its 2-hour floor even if the pest line default moves again.) Covers the
+// whole family — cockroach control, German/native roach knockdowns and cleanouts,
 // plus legacy "palmetto" service names (palmetto = native roach; the bare
 // \bpalmetto\b token already maps to the pest line in detectServiceLine).
 // Per-visit corrections still go through the admin re-entry edit
