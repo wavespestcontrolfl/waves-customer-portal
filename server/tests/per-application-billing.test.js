@@ -132,14 +132,18 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
   // recurring lawn plan booked its reserved first visit and seeded nothing.
   const bimonthlyLine = { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', frequency: 'bi_monthly', visits: 6, visitsPerYear: 6 };
   const sixWeekLine = { name: 'Every 6 Weeks Lawn Care Service', service: 'lawn_care', cadence: 'every_6_weeks', frequency: 'every_6_weeks', visits: 9, visitsPerYear: 9 };
-  const quarterlyLine = { name: 'Quarterly Lawn Care Service', service: 'lawn_care', frequency: 'quarterly', visitsPerYear: 4 };
   const monthlyLine = { name: 'Monthly Lawn Care Service', service: 'lawn_care', frequency: 'monthly', visitsPerYear: 12 };
 
-  test('all four sellable lawn tiers seed their series (LAWN_TIER_META)', () => {
-    expect(supportsConverterFollowUpSeeding(quarterlyLine, {}, 'quarterly')).toBe(true);
+  test('all three SOLD lawn tiers seed their series (LAWN_TIERS — quarterly is retired)', () => {
     expect(supportsConverterFollowUpSeeding(bimonthlyLine, {}, 'bimonthly')).toBe(true);
     expect(supportsConverterFollowUpSeeding(sixWeekLine, {}, 'every_6_weeks')).toBe(true);
     expect(supportsConverterFollowUpSeeding(monthlyLine, {}, 'monthly')).toBe(true);
+  });
+
+  test('the RETIRED quarterly lawn cadence never seeds (owner 2026-08-04; public accepts 409 it — codex #3349 r2 P2)', () => {
+    const quarterlyLine = { name: 'Quarterly Lawn Care Service', service: 'lawn_care', frequency: 'quarterly', visitsPerYear: 4 };
+    expect(supportsConverterFollowUpSeeding(quarterlyLine, {}, 'quarterly')).toBe(false);
+    expect(converterFollowUpSeedingPattern(quarterlyLine, { service_type: 'Lawn Care' }, null)).toBe(null);
   });
 
   test('cadence resolves end-to-end from the accepted line, parent row keyed by service_type', () => {

@@ -136,17 +136,32 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern(line, { service_type: row.name }, null)).toBe('semiannual');
   });
 
-  test('recurring palm remaining-units link the SEMIANNUAL catalog identity, not the one-time row (codex #3349 P1)', () => {
+  test('two-visit palm remaining-units link the SEMIANNUAL catalog identity, not the one-time row (codex #3349 P1)', () => {
     // Estimator palm lines carry the label 'Palm Injection', which the
     // completion resolver's short-name fallback uniquely matches to the
     // ONE-TIME palm_injection row (token_only profile). The id link must
     // route the recurring program to its own typed recurring profile.
     expect(EstimateConverter.remainingUnitCatalogKey({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 })).toBe(KEY);
-    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Palm Injection Program' })).toBe(KEY);
-    // Lawn remaining-units deliberately have NO branch: accepted lawn line
-    // names are exactly the catalog row names, so name-resolution already
-    // lands the right row.
-    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Bi-Monthly Lawn Care Service' })).toBe(null);
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Palm Injection Program', frequency: 'semiannual' })).toBe(KEY);
+  });
+
+  test('one-application and cadence-less palm lines do NOT link the recurring identity (codex #3349 r2 P1)', () => {
+    // The builder's supported one-application palm option rides recurring
+    // services with visitsPerYear 1 — its correct identity is the one-time
+    // lane's name-resolved row, so the semiannual link must not claim it.
+    expect(EstimateConverter.remainingUnitCatalogKey({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 1 })).toBe(null);
+    // No cadence evidence at all → no identity claim either.
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Palm Injection Program' })).toBe(null);
+  });
+
+  test('sold lawn cadences link their catalog rows; retired quarterly and legacy lines do not (codex #3349 r2 P1)', () => {
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', frequency: 'bi_monthly', visitsPerYear: 6 })).toBe('lawn_care_recurring');
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Every 6 Weeks Lawn Care Service', service: 'lawn_care', frequency: 'every_6_weeks', visitsPerYear: 9 })).toBe('lawn_care_6week');
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Monthly Lawn Care Service', service: 'lawn_care', frequency: 'monthly', visitsPerYear: 12 })).toBe('lawn_care_monthly');
+    // Retired quarterly resolves no seeding pattern → no identity claim.
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Quarterly Lawn Care Service', service: 'lawn_care', frequency: 'quarterly', visitsPerYear: 4 })).toBe(null);
+    // Legacy cadence-less lawn keeps the name-only path unchanged.
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Lawn Care', service: 'lawn_care' })).toBe(null);
   });
 
   test('END-TO-END: a scheduled visit with NO service_id resolves the typed palm profile by name', async () => {
