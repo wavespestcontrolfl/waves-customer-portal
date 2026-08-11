@@ -11015,7 +11015,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                     recipientPhone: estimate.customer_phone,
                     label: 'estimate-accept',
                   });
-                  await db('sms_log').insert({
+                  const heldRow = {
                     customer_id: customerId || null,
                     direction: 'outbound',
                     from_phone: TWILIO_NUMBERS.getOutboundNumber(),
@@ -11033,8 +11033,45 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                         ? { ...recipientStamp, resolve_from_by_customer: true }
                         : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
                     }),
-                  });
-                  logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+                  };
+                  // The queued row is the ONLY delivery obligation this
+                  // text has (codex r25): the acceptance is already
+                  // committed, a retried /accept explicitly performs no
+                  // sends, and the onboarding email carries the portal URL
+                  // — not this booking URL. So the enqueue itself gets a
+                  // bounded retry, and exhaustion hands the obligation to
+                  // the office lane as a durable admin notification (the
+                  // repo's exception rail) instead of a log line nobody is
+                  // obligated to see.
+                  let queued = false;
+                  let lastEnqueueErr = null;
+                  for (let attempt = 1; attempt <= 3 && !queued; attempt += 1) {
+                    try {
+                      await db('sms_log').insert(heldRow);
+                      queued = true;
+                    } catch (enqueueErr) {
+                      lastEnqueueErr = enqueueErr;
+                      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
+                    }
+                  }
+                  if (queued) {
+                    logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+                  } else {
+                    logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id} after 3 attempts: ${lastEnqueueErr?.message}`);
+                    await require('../services/notification-service').notifyAdmin(
+                      'comms',
+                      'Held booking-link SMS needs a manual send',
+                      'A one-time estimate acceptance after 8 PM could not queue its booking-link SMS for the morning window, and nothing else retries it — text the customer their booking link from the composer.',
+                      {
+                        link: `/admin/estimates/${estimate.id}`,
+                        metadata: {
+                          estimateId: estimate.id,
+                          reason: 'held_booking_sms_enqueue_failed',
+                          heldForWindowOpen: sendResult.nextAllowedAt,
+                        },
+                      },
+                    );
+                  }
                 } catch (queueErr) {
                   logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
                 }

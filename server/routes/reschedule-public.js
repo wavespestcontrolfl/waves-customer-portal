@@ -831,6 +831,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
                     scheduled_service_id: svc.id,
                     original_block_code: msg.code,
                     replay_purpose: 'appointment',
+                    // The slot this body announces (codex r25): a second
+                    // move before 08:00 — including SmartRebooker, which
+                    // forces status back to 'confirmed' — must suppress
+                    // the frozen first-move copy at replay. Compare against
+                    // the ANCHOR visit's own committed slot (the queued row
+                    // is anchored to svc.id), falling back to the requested
+                    // series slot exactly like the reminder-sync loop.
+                    ...(() => {
+                      const anchorOcc = shiftedOccurrences.find((o) => String(o.id) === String(svc.id));
+                      const slotDate = String(anchorOcc?.date || date).slice(0, 10);
+                      const slotStart = hhmm(anchorOcc?.windowStart) || String(slot?.start_time || '').slice(0, 5);
+                      return {
+                        ...(slotDate ? { slot_scheduled_date: slotDate } : {}),
+                        ...(slotStart ? { slot_window_start: slotStart } : {}),
+                      };
+                    })(),
                     ...recipientStamp,
                     resolve_from_by_customer: true,
                   }),

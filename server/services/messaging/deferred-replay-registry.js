@@ -668,7 +668,7 @@ const REGISTRY = {
   // revalidate too.
   call_booking_contact_confirmation_deferred: {
     async recheck(meta) {
-      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation');
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation', meta);
       if (visit.eligible === false) return visit;
       return contactSlotStillAuthorized(meta, 'call-contact-confirmation');
     },
@@ -692,7 +692,7 @@ const REGISTRY = {
       // else (confirmation, prep, reschedule) is about an upcoming visit.
       const visit = Array.isArray(meta.required_visit_statuses) && meta.required_visit_statuses.length
         ? await visitStillInStatus(meta.scheduled_service_id, meta.required_visit_statuses, 'notice-contact')
-        : await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact');
+        : await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact', meta);
       if (visit.eligible === false) return visit;
       return contactSlotStillAuthorized(meta, 'notice-contact');
     },
@@ -802,12 +802,12 @@ function entryFor(entryPoint) {
 
 // Shared: a visit-anchored replay (prep instructions, booking-confirmation
 // fan-out) is noise once the visit dies or passes overnight.
-async function visitStillUpcoming(scheduledServiceId, label) {
+async function visitStillUpcoming(scheduledServiceId, label, slotSnapshot = null) {
   try {
     if (!scheduledServiceId) return { eligible: true };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('status', 'scheduled_date');
+      .first('status', 'scheduled_date', 'window_start');
     if (!svc) return { eligible: false, reason: 'visit-missing' };
     const status = String(svc.status || '').toLowerCase();
     // 'rescheduled' is the pending-rebook placeholder — the row keeps the
@@ -821,6 +821,19 @@ async function visitStillUpcoming(scheduledServiceId, label) {
       : String(svc.scheduled_date || '').slice(0, 10);
     const { etDateString } = require('../../utils/datetime-et');
     if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
+    // Slot pin (codex r25): rows whose frozen body announces a date/window
+    // carry a snapshot of the slot they were rendered against. A second
+    // move before the window opens — SmartRebooker forces status straight
+    // back to 'confirmed', so the status checks above pass — must not
+    // deliver the first move's copy. Rows without a snapshot (legacy, or
+    // the enqueue-time read failed) keep the status-only behavior.
+    if (slotSnapshot?.slot_scheduled_date && ymd && ymd !== String(slotSnapshot.slot_scheduled_date).slice(0, 10)) {
+      return { eligible: false, reason: 'slot-moved' };
+    }
+    if (slotSnapshot?.slot_window_start && svc.window_start
+      && String(svc.window_start).slice(0, 5) !== String(slotSnapshot.slot_window_start).slice(0, 5)) {
+      return { eligible: false, reason: 'slot-moved' };
+    }
     return { eligible: true };
   } catch (err) {
     return failClosed(label, scheduledServiceId, err);

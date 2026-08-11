@@ -1056,11 +1056,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // rail (call-booking secondary precedent). When NOTHING was accepted the
   // callers' own defer/skip paths re-fire the whole notice, so queueing
   // here too would double-text — rows are queued only on partial success.
-  // EXCEPT for callers that HAVE no re-fire path (codex r21): a terminal
-  // one-shot notice (no-show) is dropped outright by a full hold, so those
-  // callers opt into queueing every held contact by passing
-  // queueHeldContactsOnFullHold. Safe only where no cron/sweep re-sends.
-  if ((sentAny || sendOptions.queueHeldContactsOnFullHold === true) && heldContacts.length) {
+  if (sentAny && heldContacts.length) {
     await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
   }
   return sentAny;
@@ -1095,11 +1091,39 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     // The SERIES cancellation is the same class of notice, anchored to the
     // representative visit (codex r23) — without this entry its held
     // contacts fall through to the liveness predicate and are dropped
-    // while the series claim finalizes as sent.
+    // while the series claim finalizes as sent. (No no-show entry: the
+    // only no-show caller is operator-initiated and window-exempt, so its
+    // contacts can never be held — codex r25.)
     appointment_series_cancelled: ['cancelled', 'canceled'],
-    appointment_no_show: ['no_show'],
   };
   const requiredVisitStatuses = TERMINAL_NOTICE_STATUSES[messageType] || null;
+  // Upcoming-visit notices embed the slot in their frozen copy (codex
+  // r25): a confirmation queued at 21:00 for a visit the dispatcher (or
+  // SmartRebooker, which forces status back to 'confirmed') moves again
+  // before 08:00 would announce the WRONG date/window under a passing
+  // liveness check. Snapshot the slot the body was rendered against so the
+  // replay can compare; a failed read stamps nothing (legacy behavior —
+  // status checks still apply). Terminal notices carry no future slot.
+  let slotStamp = null;
+  if (!requiredVisitStatuses && metaExtra.scheduled_service_id) {
+    try {
+      const slotRow = await db('scheduled_services')
+        .where({ id: metaExtra.scheduled_service_id })
+        .first('scheduled_date', 'window_start');
+      if (slotRow) {
+        const ymd = slotRow.scheduled_date instanceof Date
+          ? slotRow.scheduled_date.toISOString().slice(0, 10)
+          : String(slotRow.scheduled_date || '').slice(0, 10);
+        slotStamp = {
+          ...(ymd ? { slot_scheduled_date: ymd } : {}),
+          ...(slotRow.window_start ? { slot_window_start: String(slotRow.window_start).slice(0, 5) } : {}),
+        };
+        if (!Object.keys(slotStamp).length) slotStamp = null;
+      }
+    } catch (slotErr) {
+      logger.warn(`[appt-remind] slot snapshot read failed for ${metaExtra.scheduled_service_id} — queueing without one: ${slotErr.message}`);
+    }
+  }
   for (const held of heldContacts) {
     try {
       await db('sms_log').insert({
@@ -1118,6 +1142,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
           original_block_code: 'QUIET_HOURS_HOLD',
           replay_purpose: purpose,
           ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
+          ...(slotStamp || {}),
           resolve_from_by_customer: true,
         }),
       });
@@ -3198,15 +3223,11 @@ const AppointmentReminders = {
       }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
         // Authenticated dispatcher click with an explicit notify choice —
         // exempt from the send window (rain-out/quick-move contract).
-        // options.operatorInitiated is threaded by the route; a future
-        // autonomous caller that omits it stays fenced AND keeps its
-        // notice via the hold rail below.
+        // options.operatorInitiated is threaded by the (only) route
+        // caller; an autonomous caller added later must bring its own
+        // held-delivery rail with it — none is carried speculatively
+        // (codex r25).
         operatorInitiated: options.operatorInitiated === true,
-        // A no-show notice is a one-shot: no cron re-fires it and the
-        // status is already terminal, so a full after-hours hold would
-        // drop it permanently for phone-only customers (codex r21).
-        // Queue every held contact for the window open instead.
-        queueHeldContactsOnFullHold: true,
       });
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
 

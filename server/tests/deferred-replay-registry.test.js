@@ -675,6 +675,44 @@ describe('deferred-replay registry', () => {
     expect(res.reason).toBe('visit-rescheduled');
   });
 
+  test('notice-contact slot pin (r25): a second overnight move suppresses the frozen first-move copy', async () => {
+    // SmartRebooker forces status straight back to 'confirmed', so the
+    // status checks pass — only the stamped slot exposes the second move.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: '2099-01-02', window_start: '09:00:00' }));
+    const dateMoved = await recheckDeferredReplay('appointment_notice_contact_deferred', {
+      scheduled_service_id: 'ss-1',
+      slot_scheduled_date: '2099-01-01',
+      slot_window_start: '09:00',
+    });
+    expect(dateMoved.eligible).toBe(false);
+    expect(dateMoved.reason).toBe('slot-moved');
+
+    // Same day, different window — still the wrong copy.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: '2099-01-01', window_start: '13:00:00' }));
+    const windowMoved = await recheckDeferredReplay('appointment_notice_contact_deferred', {
+      scheduled_service_id: 'ss-1',
+      slot_scheduled_date: '2099-01-01',
+      slot_window_start: '09:00',
+    });
+    expect(windowMoved.eligible).toBe(false);
+    expect(windowMoved.reason).toBe('slot-moved');
+
+    // Matching slot proceeds to the contact-slot check; rows without a
+    // snapshot (legacy) keep the status-only behavior.
+    db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: '2099-01-01', window_start: '09:00:00' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    const stillGood = await recheckDeferredReplay('appointment_notice_contact_deferred', {
+      scheduled_service_id: 'ss-1',
+      customer_id: 'cust-1',
+      to_phone: '+19415557777',
+      slot_scheduled_date: '2099-01-01',
+      slot_window_start: '09:00',
+    });
+    expect(stillGood.eligible).toBe(true);
+  });
+
   test("visit-anchored replays (r20): 'rescheduled' is non-upcoming for the shared gate", async () => {
     db.mockReturnValueOnce(firstChain({ status: 'rescheduled', scheduled_date: '2099-01-01' }));
     const prep = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 's1' });

@@ -129,16 +129,19 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ operatorInitiated: true }));
   });
 
-  test('r21: a one-shot notice with no re-fire path queues EVERY held contact on a full hold', async () => {
+  test('r25: a full hold queues NOTHING — the callers own re-fire, and no caller opts into a full-hold queue', async () => {
+    // The r21 queueHeldContactsOnFullHold escape hatch was removed in r25:
+    // its only prospective caller (no-show) is operator-initiated and
+    // window-exempt, so the path was unreachable. A full hold must queue
+    // nothing — queueing would double-text when the caller's own
+    // defer/skip path re-fires the whole notice.
     sendCustomerMessage.mockResolvedValue(HELD);
     const sent = await AppointmentReminders.safeSendAppointment(
       CUSTOMER, {}, async (c) => `Missed you ${c.role}`, 'appointment_no_show', 'appointment_cancellation',
-      { scheduled_service_id: 'ss-1' }, { queueHeldContactsOnFullHold: true },
+      { scheduled_service_id: 'ss-1' }, {},
     );
     expect(sent).toBe(false);
-    expect(db._inserts).toHaveLength(2);
-    expect(db._inserts.map((r) => r.to_phone)).toEqual([PRIMARY.phone, SPOUSE.phone]);
-    expect(JSON.parse(db._inserts[0].metadata).entry_point).toBe('appointment_notice_contact_deferred');
+    expect(db._inserts).toHaveLength(0);
   });
 
   test('r22: terminal-visit notices stamp the status their replay must still find', async () => {
@@ -151,13 +154,8 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     );
     expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['cancelled', 'canceled']);
 
-    db._inserts.length = 0;
-    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
-    await AppointmentReminders.safeSendAppointment(
-      CUSTOMER, {}, async () => 'Missed you', 'appointment_no_show', 'appointment_cancellation',
-      { scheduled_service_id: 'ss-1' }, {},
-    );
-    expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toEqual(['no_show']);
+    // (No no-show entry — its only caller is operator-initiated and
+    // window-exempt, so no no-show contact can ever be held; codex r25.)
 
     // r23: the SERIES cancellation is the same class of notice — without
     // its own entry its held contacts fall to the liveness predicate and
@@ -179,6 +177,49 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
       { scheduled_service_id: 'ss-1' }, {},
     );
     expect(JSON.parse(db._inserts[0].metadata).required_visit_statuses).toBeUndefined();
+  });
+
+  test('r25: upcoming-visit rows snapshot the slot their body was rendered against', async () => {
+    // Table-aware mock: the slot read must see a real visit row; every
+    // other lookup keeps the default null.
+    const tableAware = (table) => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => (table === 'scheduled_services'
+        ? { scheduled_date: '2026-08-12', window_start: '09:00:00' }
+        : null));
+      q.insert = jest.fn(async (row) => { db._inserts.push(row); });
+      return q;
+    };
+    db.mockImplementation(tableAware);
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Confirmed', 'confirmation', 'appointment_confirmation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    const meta = JSON.parse(db._inserts[0].metadata);
+    expect(meta.slot_scheduled_date).toBe('2026-08-12');
+    expect(meta.slot_window_start).toBe('09:00');
+
+    // Terminal notices carry no future slot — no snapshot stamped.
+    db._inserts.length = 0;
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Cancelled', 'appointment_cancelled', 'appointment_cancellation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(JSON.parse(db._inserts[0].metadata).slot_scheduled_date).toBeUndefined();
+
+    // Restore the suite's default implementation (mockImplementation
+    // survives clearAllMocks — a leaked table-aware mock would skew later
+    // tests).
+    db.mockImplementation(() => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => null);
+      q.insert = jest.fn(async (row) => { db._inserts.push(row); });
+      return q;
+    });
   });
 
   test('a later NON-hold block (opt-out) is not misread as held — nothing queued for it', async () => {
