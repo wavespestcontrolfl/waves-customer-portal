@@ -332,7 +332,7 @@ function serviceCatalogMatch(line, serviceIndex) {
       const {
         converterFollowUpSeedingPattern, seedingFamilyKey,
         visitsPerYearForRecurringService, visitCountFieldsConflict,
-        explicitCadenceFieldForService,
+        explicitCadenceFieldForService, explicitlyOneTimeCadence,
       } = require('../services/estimate-converter');
       const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
       if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
@@ -358,9 +358,15 @@ function serviceCatalogMatch(line, serviceIndex) {
       // palm_substring_mismatch and keep their normal matching path.
       if (seedingFamilyKey(line || {}, { service_type: lineName }) === 'palm_injection') {
         const visits = visitsPerYearForRecurringService(line || {});
+        // An EXPLICITLY one-time cadence ('one_time'/'once') is not
+        // recurring evidence (codex r17 P2) — the unrecognized-cadence
+        // sentinel would otherwise strip a genuine one-time palm booking
+        // of its catalog match (and its 60-minute catalog duration). A
+        // one-time spelling beside a >1 visit count still fails closed
+        // via the count check.
         const recurringEvidence = visitCountFieldsConflict(line || {})
           || (visits != null && visits > 1)
-          || !!explicitCadenceFieldForService(line || {});
+          || (!!explicitCadenceFieldForService(line || {}) && !explicitlyOneTimeCadence(line || {}));
         if (recurringEvidence) {
           logger.warn(`[admin-customers] palm line has recurring evidence but no valid semiannual resolution — leaving unmatched (fail closed)`);
           return null;

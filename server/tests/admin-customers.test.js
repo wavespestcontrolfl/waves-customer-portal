@@ -580,6 +580,12 @@ describe('admin customers route helpers', () => {
     // billed as a recurring plan.
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2, visits: 4 }, serviceIndex)).toBeFalsy();
+    // EXPLICITLY one-time palm rows keep the one-time match (codex r17
+    // P2): 'one_time' trips the unrecognized-cadence sentinel but is not
+    // recurring evidence.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // …but a one-time spelling beside a >1 visit count still fails closed.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
     // 'Palmetto…' labels reach this branch via the bare /palm/ substring
     // but are NOT palm — they keep their normal matching path.
     const palmettoIndex = indexServicesForSchedule([

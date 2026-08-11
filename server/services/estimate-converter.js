@@ -327,6 +327,33 @@ const STANDALONE_SUPPLEMENT_ROUTES = {
 // frequency field must still force semiannual, while a line whose FIELD
 // contradicts (monthly/quarterly + 2 visits) must fall through to normal
 // validation and decline (codex #3349 r4 P1).
+// The ONE cadence-field vocabulary (mirrors recurringServiceCadenceKey
+// minus its visit-count fallbacks) — explicitCadenceFieldForService and
+// explicitlyOneTimeCadence read the SAME list so a spelling can never
+// count for one and not the other (r8/r15 shared-vocabulary lesson).
+function cadenceFieldRawValues(svc = {}) {
+  return [
+    svc.frequency, svc.frequencyKey, svc.frequency_key,
+    svc.recurringPattern, svc.recurring_pattern,
+    svc.cadence, svc.cadenceKey, svc.cadence_key,
+    svc.planFrequency, svc.plan_frequency,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+}
+
+// Recognized one-time spellings — deliberately NOT in
+// normalizeRecurringPattern's vocabulary (a one-time value must never
+// resolve as a recurring cadence, so inside the converter these fields
+// surface the unrecognized sentinel and decline recurring paths, which is
+// correct). Consumers that need "is this line EXPLICITLY one-time?"
+// (admin catalog matching — codex r17 P2) ask here instead.
+const ONE_TIME_CADENCE_RE = /^(one[\s_-]?time|onetime|once|single)$/i;
+function explicitlyOneTimeCadence(svc = {}) {
+  const values = cadenceFieldRawValues(svc);
+  return values.length > 0 && values.every((value) => ONE_TIME_CADENCE_RE.test(value));
+}
+
 function explicitCadenceFieldForService(svc = {}) {
   // Every cadence-bearing FIELD spelling persisted on accepted lines —
   // including `cadence`/`planFrequency`, which estimate-public and the
@@ -338,14 +365,7 @@ function explicitCadenceFieldForService(svc = {}) {
   // P1: plan_frequency snake_case included) minus its visit-count
   // fallbacks — visit counts are exactly what this reader must NOT infer
   // from.
-  const rawValues = [
-    svc.frequency, svc.frequencyKey, svc.frequency_key,
-    svc.recurringPattern, svc.recurring_pattern,
-    svc.cadence, svc.cadenceKey, svc.cadence_key,
-    svc.planFrequency, svc.plan_frequency,
-  ]
-    .map((value) => String(value || '').trim())
-    .filter(Boolean);
+  const rawValues = cadenceFieldRawValues(svc);
   const normalized = rawValues.map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value));
   // A POPULATED cadence field the normalizer can't read (e.g.
   // 'every_4_months') is still cadence-bearing (pre-push r12 P1): treated
@@ -5380,6 +5400,7 @@ module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
 module.exports.explicitCadenceFieldForService = explicitCadenceFieldForService;
+module.exports.explicitlyOneTimeCadence = explicitlyOneTimeCadence;
 module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;
 module.exports.recurringLineAnnualAmount = recurringLineAnnualAmount;
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
