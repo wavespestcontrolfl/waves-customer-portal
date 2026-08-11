@@ -898,6 +898,49 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
+  it('an unlogged move BETWEEN two logged customer moves clears earlier sticky evidence — adjacency, not just the final landing (pre-push r8 P0)', async () => {
+    // Customer late-move lands on the 5th; something UNLOGGED (a direct
+    // admin edit — possibly a window-resetting company move) puts the visit
+    // on the 10th; the customer then moves the 10th → the 20th with a week's
+    // notice. The final logged landing matches the slot being cancelled, so
+    // the newest-landing check alone is blind to the seam — the 10th ≠ the
+    // 5th is the tell, and unverifiable lineage never charges.
+    stubDb(holdRow, {
+      rescheduleLog: [
+        { ...lateCustomerMove, new_date: '2026-07-05' },
+        {
+          original_date: '2026-07-10', original_window: '10:00:00-12:00:00',
+          reason_code: 'customer_request', initiated_by: 'customer_self_serve',
+          created_at: '2026-07-03T12:00:00Z', // a week out — not itself a late move
+          new_date: '2026-07-20', new_window: '10:00:00-12:00:00',
+        },
+      ],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a fresh LATE customer move after the unlogged seam re-arms sticky on its own strength', async () => {
+    // Same seam as above, but the second customer move is itself made 2
+    // hours before its slot — new evidence born after the gap, judged on
+    // its own terms, still charges.
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [
+        { ...lateCustomerMove, new_date: '2026-07-05' },
+        {
+          original_date: '2026-07-10', original_window: '10:00:00-12:00:00',
+          reason_code: 'customer_request', initiated_by: 'customer_self_serve',
+          created_at: '2026-07-10T12:00:00Z', // 10:00 ET slot = 14:00Z — 2 hours' notice
+          new_date: '2026-07-20', new_window: '10:00:00-12:00:00',
+        },
+      ],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
   it('the reminder suppresses its cutoff on EVIDENCE even while the enforcement gate is off — a dark-period promise must survive a later flip', async () => {
     delete process.env.GATE_STICKY_CANCEL_WINDOW;
     stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });

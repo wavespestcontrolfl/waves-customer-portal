@@ -928,8 +928,34 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     .orderBy('created_at', 'asc')
     .select('original_date', 'original_window', 'new_date', 'new_window', 'reason_code', 'initiated_by', 'created_at');
   const { parseETDateTime } = require('../utils/datetime-et');
+  // ET instant (ms) for a logged slot, or null when unparseable — shared by
+  // the adjacency check below and the final current-slot lineage check.
+  const slotInstant = (d, w) => {
+    const dateP = d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10);
+    const timeP = String(w || '').split('-')[0].slice(0, 8);
+    if (!dateP || !timeP) return null;
+    const t = parseETDateTime(`${dateP}T${timeP}`);
+    return t && !Number.isNaN(t.getTime()) ? t.getTime() : null;
+  };
   let sticky = null;
+  let prevLanding; // undefined until the first row is seen
   for (const row of rows || []) {
+    // Adjacency continuity (pre-push r8 P0): every logged move must depart
+    // from the previous logged move's landing. A mismatch means an UNLOGGED
+    // move (direct admin edit, series shift) happened BETWEEN two logged
+    // rows — invisible to the final current-slot check whenever the newest
+    // logged move happens to land on the slot being cancelled. The hidden
+    // move could have been a window-resetting company move, so earlier
+    // evidence is cleared exactly as if it were; the current row is still
+    // judged on its own strength below (a fresh late customer move re-arms).
+    // Unparseable slots on either side of the seam also clear — lineage we
+    // cannot verify never charges.
+    const originInstant = slotInstant(row.original_date, row.original_window);
+    if (prevLanding !== undefined
+      && (prevLanding === null || originInstant === null || originInstant !== prevLanding)) {
+      sticky = null;
+    }
+    prevLanding = slotInstant(row.new_date, row.new_window);
     // Customer-initiated = a customer ACTOR (self-serve page, SMS reply) OR
     // a staff-assisted move recorded with the customer_request reason — the
     // office phone flow logs initiated_by='admin' but the CUSTOMER asked
@@ -973,12 +999,8 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     // some later unlogged move (possibly a company series shift) superseded
     // the evidence. Unverifiable lineage never charges — fail toward free.
     const last = rows[rows.length - 1];
-    const dateP = last.new_date instanceof Date
-      ? last.new_date.toISOString().slice(0, 10)
-      : String(last.new_date || '').slice(0, 10);
-    const timeP = String(last.new_window || '').split('-')[0].slice(0, 8);
-    const landing = (dateP && timeP) ? parseETDateTime(`${dateP}T${timeP}`) : null;
-    if (!landing || Number.isNaN(landing.getTime()) || landing.getTime() !== currentStart.getTime()) sticky = null;
+    const landing = slotInstant(last.new_date, last.new_window);
+    if (landing === null || landing !== currentStart.getTime()) sticky = null;
   }
   return sticky;
 }
