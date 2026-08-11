@@ -1640,19 +1640,20 @@ const InvoiceService = {
     // explicit-amount path bills the operator's figure and needs no lock.
     const buildParams = async (conn = null) => {
       if (replayFromScheduled && conn) {
-        // Lock-order guard (codex r3 P1): customer key-share BEFORE the
-        // visit row lock — the invoice insert's customer FK takes KEY SHARE
-        // anyway, and taking it first keeps the global customer→scheduled-
-        // service order the extension accept path establishes (it locks the
-        // customer FOR UPDATE at entry, then the visit rows).
-        await conn.raw(
-          "SELECT id FROM customers WHERE id = ? FOR KEY SHARE",
-          [sr.customer_id],
-        );
-        const lockedRow = await conn("scheduled_services")
-          .where({ id: sr.scheduled_service_id })
-          .forUpdate()
-          .first("id", "estimated_price");
+        const {
+          acquireScheduledMintLockChain,
+          scheduledPriceMovedError,
+        } = require("./scheduled-invoice-mint");
+        // The shared lock chain (codex #3344 r9 P1 — this was the last
+        // hand-rolled copy of the key-share → visit-lock order): the
+        // advisory re-acquire inside the chain is a same-transaction no-op
+        // after adoptUnderMintLock, and the customer-before-visit order the
+        // extension accept path establishes is owned by the ONE module.
+        const lockedRow = await acquireScheduledMintLockChain(conn, {
+          scheduledServiceId: sr.scheduled_service_id,
+          customerId: sr.customer_id,
+          visitColumns: ["id", "estimated_price"],
+        });
         // Stale-basis refusal (codex #3344 r2): when the caller's amount
         // was derived from the row price, a locked price that no longer
         // matches means a reprice (the WaveGuard extension) landed since —
@@ -1667,17 +1668,7 @@ const InvoiceService = {
           const cents = (v) =>
             v === null || v === undefined ? null : Math.round(Number(v) * 100);
           if (cents(lockedRow.estimated_price) !== cents(scheduledPriceBasis)) {
-            const e = new Error(
-              "Scheduled service was repriced while minting — retry to bill the current price",
-            );
-            e.status = 409;
-            e.code = "SCHEDULED_PRICE_MOVED";
-            // The price the lock proved current (codex #3344 r5): the
-            // dispatch REQUIRED-mint catch refreshes its frozen mint cents
-            // from this so the released resume bills the moved price
-            // instead of replaying the stale freeze.
-            e.currentEstimatedPriceCents = cents(lockedRow.estimated_price);
-            throw e;
+            throw scheduledPriceMovedError(lockedRow);
           }
         }
       }

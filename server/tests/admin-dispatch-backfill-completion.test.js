@@ -1987,8 +1987,11 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // Both throw sites attach the locked price the restamp consumes.
       const mintHelperSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
       const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+      // ONE constructor owns the 409 shape (codex #3344 r9 P1) — both
+      // throw sites go through it, so the locked price always rides along.
       expect(mintHelperSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedSvc\.estimated_price\);/);
-      expect(invoiceSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedRow\.estimated_price\);/);
+      expect(mintHelperSource).toMatch(/throw scheduledPriceMovedError\(lockedSvc\);/);
+      expect(invoiceSource).toMatch(/throw scheduledPriceMovedError\(lockedRow\);/);
     });
 
     test('the required live RESUME proves the frozen cents against the locked row (codex #3344 r7 P0)', () => {

@@ -2744,6 +2744,30 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   // accepts over prepaid visits), so the class-wide scan stays cheap.
   try {
     const { WAVEGUARD_EXTENSION_CREDIT_BY } = require('./customer-credit');
+    // Final lost-dispute backing (codex #3344 r9 P1): closed(lost)
+    // deliberately leaves the prepay invoice 'overdue' so recollection can
+    // chase it — never a terminal status — and the webhook's inline
+    // refund-shaped sync can lose a transient
+    // reverseWaveguardExtensionCredits failure AFTER the event was acked.
+    // The durable evidence is the payment row the webhook stamped:
+    // metadata.dispute_final='lost', bound to this invoice by the recorded
+    // dispute_invoice_id or by still owning its PI — the same two arms the
+    // webhook's own lostDisputeOwnedInvoice check uses. An OPEN dispute
+    // never writes dispute_final, so mid-dispute anchors stay excluded; a
+    // recollected invoice leaves 'overdue' and stops matching.
+    const lostDisputeBacked = async (c, anchor) => {
+      if (String(anchor.status || '').toLowerCase() !== 'overdue') return false;
+      const row = await c('payments')
+        .whereRaw("metadata->>'dispute_final' = 'lost'")
+        .where(function lostBinding() {
+          this.whereRaw("metadata->>'dispute_invoice_id' = ?", [String(anchor.id)]);
+          if (anchor.stripe_payment_intent_id) {
+            this.orWhere('stripe_payment_intent_id', String(anchor.stripe_payment_intent_id));
+          }
+        })
+        .first('id');
+      return !!row;
+    };
     const extGrants = await conn('customer_credit_ledger')
       .where({ created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
       .where('delta', '>', 0)
@@ -2776,10 +2800,11 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       // collectible) out of the locked path entirely.
       const anchorInvoice = await conn('invoices')
         .where({ id: anchorInvoiceId })
-        .first('id', 'status');
+        .first('id', 'status', 'stripe_payment_intent_id');
       if (!anchorInvoice) continue;
       const anchorStatus = String(anchorInvoice.status || '').toLowerCase();
-      if (!INVOICE_CANCELLED_STATUSES.has(anchorStatus)) continue;
+      if (!INVOICE_CANCELLED_STATUSES.has(anchorStatus)
+        && !(await lostDisputeBacked(conn, anchorInvoice))) continue;
       // The refunded ANCHOR is the whole evidence (codex #3344 r1 P1): a
       // refunded term that had already decided renewal keeps its
       // 'renewed'/'switch_plan' status through the inline refund path, so
@@ -2816,10 +2841,16 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
         const lockedAnchor = await t('invoices')
           .where({ id: anchorInvoiceId })
           .forUpdate()
-          .first('id', 'status');
+          .first('id', 'status', 'stripe_payment_intent_id');
         if (!lockedAnchor) return 0;
         const lockedStatus = String(lockedAnchor.status || '').toLowerCase();
-        if (!INVOICE_CANCELLED_STATUSES.has(lockedStatus)) return 0;
+        // The lost-dispute arm re-proves under the same lock: a
+        // recollection commits 'paid' on the anchor row this transaction
+        // now holds, so whichever side wins, the loser sees the final
+        // state — a repaid anchor stands down here exactly like a repaid
+        // refund would.
+        if (!INVOICE_CANCELLED_STATUSES.has(lockedStatus)
+          && !(await lostDisputeBacked(t, lockedAnchor))) return 0;
         const term = await t('annual_prepay_terms')
           .where({ id: termId })
           .first('id', 'customer_id', 'status');

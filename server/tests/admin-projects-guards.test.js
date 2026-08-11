@@ -510,4 +510,14 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     const createBlock = source.slice(createAt, source.indexOf('});', createAt));
     expect(createBlock).toContain('database: trx');
   });
+
+  // Project↔visit lock order (codex #3344 r9 P2): the invoice send above
+  // holds the project FOR UPDATE and then waits on the visit lock via the
+  // shared chain, so the completion path must lock the project FIRST —
+  // its old visit-then-project order was the ABBA half Postgres resolves
+  // by aborting one side.
+  test('completeProjectBackedService locks the project row at transaction entry', () => {
+    const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
+    expect(completion).toMatch(/const project = await trx\('projects'\)\.where\(\{ id: projectId \}\)\.forUpdate\(\)\.first\(\);/);
+  });
 });

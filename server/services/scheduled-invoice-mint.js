@@ -99,6 +99,20 @@ async function acquireScheduledMintLockChain(trx, {
     .first(...visitColumns);
 }
 
+// The ONE stale-price refusal every scheduled-price writer throws (codex
+// #3344 r9 P1 — the error shape was hand-rolled in two modules). Terminal
+// for retry loops (err.status); currentEstimatedPriceCents is the price
+// the lock proved current — the dispatch REQUIRED-mint catch refreshes its
+// frozen mint cents from it so the released resume bills the moved price.
+function scheduledPriceMovedError(lockedSvc) {
+  const cents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
+  const e = new Error('Scheduled service was repriced while minting — retry to bill the current price');
+  e.status = 409;
+  e.code = 'SCHEDULED_PRICE_MOVED';
+  e.currentEstimatedPriceCents = cents(lockedSvc.estimated_price);
+  return e;
+}
+
 // Replay = the double-tap window returning the FIRST request's fresh
 // invoice; adoption = a replay transaction waking under the mint lock to
 // find another writer (Charge Now / completion mint) already committed one.
@@ -167,17 +181,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         if (!allowPriceMovement
           && (priceMovedBetween(svc, lockedSvc, 'estimated_price')
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
-          const e = new Error('Scheduled service was repriced while minting — retry to bill the current price');
-          e.status = 409;
-          e.code = 'SCHEDULED_PRICE_MOVED';
-          // The estimated_price the lock proved current (codex #3344 r5):
-          // the dispatch REQUIRED-mint catch refreshes its frozen mint
-          // cents from this — completionInvoiceAmount derives the required
-          // lane's amount from estimated_price, so the released resume then
-          // bills the moved price instead of replaying the stale freeze.
-          const cents = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 100));
-          e.currentEstimatedPriceCents = cents(lockedSvc.estimated_price);
-          throw e;
+          throw scheduledPriceMovedError(lockedSvc);
         }
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
@@ -229,5 +233,6 @@ module.exports = {
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,
+  scheduledPriceMovedError,
   mintScheduledServiceInvoiceWithDeposit,
 };
