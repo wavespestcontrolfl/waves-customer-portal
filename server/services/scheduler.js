@@ -3892,6 +3892,13 @@ function initScheduledJobs() {
             // calls would go unbridged and need pagination, a wider refactor that's
             // unwarranted today at ~0 Google-Ads-driven calls).
             const bridgeScanDays = 30;
+            // DB clock, captured BEFORE the scan reads anything: rescan_clear
+            // may only resolve records not re-reported since the scan started
+            // (last_seen_at < scanStartedAt — pre-push audit P1 r3), and
+            // last_seen_at is written by the DB clock, so the boundary must
+            // come from the same clock. A failure here throws to
+            // bridgePairError, which also skips the organic sweep.
+            const bridgeScanStartedAt = (await db.raw('SELECT now() AS db_now')).rows[0].db_now;
             const r = await callBridge.applyBridge({ days: bridgeScanDays, limit: 500 });
             const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
             if (capHit) {
@@ -3921,6 +3928,7 @@ function initScheduledJobs() {
             await callBridge.resolveAmbiguousBridgeCalls({
               ambiguousCallIds: dayAmbiguousCallIds,
               scanWindowStart: new Date(Date.now() - (bridgeScanDays - 1) * 24 * 60 * 60 * 1000),
+              scanStartedAt: bridgeScanStartedAt,
               rescanTrusted: !r.scanFailed && !capHit && !writeFailed,
             });
             if (r.scanFailed) bridgeBlockedReason = 'scan_failed';

@@ -571,6 +571,14 @@ async function attributeUnclaimedBridgeLeads({
   // durable arms above (sid, stamp) are proven call↔lead links and safely
   // carry the indefinite holds; the phone arm stays a same-window delay.
   excludePhoneCallIds = [],
+  // The exact leads the persisted holds cover — the phone-linkage snapshot
+  // taken when each ambiguity was observed (pre-push audit P1 r3). This is
+  // the indefinite-safe form of the phone arm: it names the leads that
+  // matched the caller's number WHILE the ambiguity was live, so a
+  // findReusableCallLead association (no sid, no stamp) keeps its hold
+  // after the call ages past the scan window without ever suppressing a
+  // later, distinct lead minted on the same household number.
+  excludeLeadIds = [],
 } = {}) {
   // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
   // module-scope import back at it would be a require cycle.
@@ -625,6 +633,12 @@ async function attributeUnclaimedBridgeLeads({
   };
 
   const applyAmbiguityExclusions = (qb) => {
+    if (excludeLeadIds.length) {
+      // Exact persisted call→lead phone linkage (see the excludeLeadIds
+      // parameter doc) — the indefinite hold for the one linkage mode that
+      // leaves neither a sid nor a stamp on the lead.
+      qb.whereNotIn('l.id', excludeLeadIds);
+    }
     if (excludeCallSids.length) {
       qb.where(function sidNotAmbiguous() {
         this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);

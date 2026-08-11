@@ -1582,33 +1582,79 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
   // write — and the shared retire primitive preserves any accumulated
   // history (reassign-else-demote). The re-held lead re-attributes when
   // the ambiguity genuinely resolves.
-  const reopenedIds = (await db('bridge_ambiguous_calls')
-    .whereIn('call_log_id', rows.map((r) => r.call_log_id))
-    .whereNotNull('resolved_at')
-    .select('call_log_id')).map((r) => String(r.call_log_id));
-  await db('bridge_ambiguous_calls')
-    .insert(rows)
-    .onConflict('call_log_id')
-    .merge({ last_seen_at: db.fn.now(), resolved_at: null, resolve_reason: null });
-  if (reopenedIds.length) {
-    // Lazy require: this module and call-attribution require each other.
-    const { retireCallAttributionRow } = require('./call-attribution');
-    let retired = 0;
-    for (const callId of reopenedIds) {
-      const provRows = await db('ad_service_attribution')
-        .where({ source_call_id: callId })
-        .whereNotNull('lead_id')
-        .select('lead_id');
-      for (const leadId of new Set(provRows.map((r) => String(r.lead_id)))) {
-        // In a transaction PER RETIRE: the primitive's FOR UPDATE reads
-        // must stay held through its demote-vs-delete decision (the r30
-        // lock-before-judging rule) — on the bare connection each
-        // statement autocommits and the lock releases immediately.
-        retired += await db.transaction(
-          (trx) => retireCallAttributionRow(trx, callId, leadId),
-        );
+  //
+  // ONE transaction for the whole lifecycle write (pre-push audit P1 r3):
+  // the reopen check, the upsert, the phone-linkage snapshot, and the
+  // interim-row retirement were separate autocommit statements, so a
+  // concurrent resolve could land between the reopen SELECT and the
+  // upsert — the record re-opened, but the interim organic row written in
+  // that gap was never retired. The existing records are locked FOR
+  // UPDATE first, which serializes this against
+  // resolveAmbiguousBridgeCalls' atomic UPDATEs (blocked until commit,
+  // their re-evaluated predicates then see the refreshed last_seen_at /
+  // cleared resolved_at and stand down). Lock order: bridge_ambiguous_calls
+  // rows first, then the retire primitive takes leads → call_log (the repo
+  // order); resolution touches only bridge_ambiguous_calls, so no path
+  // takes these locks in reverse.
+  const ids = rows.map((r) => String(r.call_log_id));
+  let retired = 0;
+  const reopenedIds = await db.transaction(async (trx) => {
+    const reopened = (await trx('bridge_ambiguous_calls')
+      .whereIn('call_log_id', ids)
+      .whereNotNull('resolved_at')
+      .forUpdate()
+      .select('call_log_id')).map((r) => String(r.call_log_id));
+    await trx('bridge_ambiguous_calls')
+      .insert(rows)
+      .onConflict('call_log_id')
+      .merge({ last_seen_at: trx.fn.now(), resolved_at: null, resolve_reason: null });
+    // Snapshot the call→lead PHONE linkage at observation time (pre-push
+    // audit P1 r3): the sid and stamp arms are durable links and carry an
+    // indefinite hold safely, but the broad last-10 phone arm takes only
+    // the day's fresh candidates (r2) — so a findReusableCallLead
+    // association with neither sid nor stamp lost its hold the day its
+    // call aged past the scan window. Persisting the exact leads whose
+    // phone matches the CALLER leg right now gives the indefinite hold a
+    // precise identity: a later, distinct lead minted on the same
+    // household number after the ambiguity ages out is never suppressed.
+    // Insert-only and idempotent; rows are inert while the record is
+    // resolved and re-arm automatically on a reopen. Deliberately no
+    // deleted_at filter — a hold on a soft-deleted lead is dormant until
+    // an undelete, then protective (a hold is recoverable, the organic
+    // label is not).
+    await trx.raw(
+      `INSERT INTO bridge_ambiguous_call_leads (call_log_id, lead_id)
+       SELECT cl.id, l.id
+         FROM call_log cl
+         JOIN leads l
+           ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
+          AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
+            = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
+        WHERE cl.id IN (${ids.map(() => '?').join(', ')})
+       ON CONFLICT DO NOTHING`,
+      ids,
+    );
+    if (reopened.length) {
+      // Lazy require: this module and call-attribution require each other.
+      const { retireCallAttributionRow } = require('./call-attribution');
+      for (const callId of reopened) {
+        const provRows = await trx('ad_service_attribution')
+          .where({ source_call_id: callId })
+          .whereNotNull('lead_id')
+          .select('lead_id');
+        for (const leadId of new Set(provRows.map((r) => String(r.lead_id)))) {
+          // Same transaction as the reopen upsert: the primitive's FOR
+          // UPDATE reads stay held through its demote-vs-delete decision
+          // (the r30 lock-before-judging rule), and a crash between the
+          // reopen and the retire can no longer strand the interim row —
+          // they commit or roll back together.
+          retired += await retireCallAttributionRow(trx, callId, leadId);
+        }
       }
     }
+    return reopened;
+  });
+  if (reopenedIds.length) {
     logger.info(`[bridge-ambiguity] reopened ${reopenedIds.length} record(s), retired ${retired} interim attribution row(s)`);
   }
   return rows.length;
@@ -1626,39 +1672,52 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
 //                    rescan-cleared and wait for 'bridged' or hold forever —
 //                    the owner chose a permanent hold over a silent wrong
 //                    paid/organic label.
-async function resolveAmbiguousBridgeCalls({ ambiguousCallIds = [], scanWindowStart, rescanTrusted = false } = {}) {
-  const bridgedIds = (await db('bridge_ambiguous_calls as bac')
-    .join('call_log as cl', 'cl.id', 'bac.call_log_id')
-    .whereNull('bac.resolved_at')
-    .whereNotNull('cl.google_ads_call_resource_name')
-    .select('bac.call_log_id')).map((r) => r.call_log_id);
-  if (bridgedIds.length) {
-    await db('bridge_ambiguous_calls')
-      .whereIn('call_log_id', bridgedIds)
+//
+// Both resolutions are single atomic UPDATEs (pre-push audit P1 r3) — no
+// read-then-write gap for a concurrent record pass to land inside — and
+// 'rescan_clear' additionally requires the record NOT refreshed since this
+// scan STARTED (last_seen_at < scanStartedAt): a slow scan can never clear
+// an ambiguity a concurrent manual apply re-reported while it ran, and a
+// record pass holding the row FOR UPDATE blocks these UPDATEs until it
+// commits, after which the re-evaluated predicates see the refreshed
+// last_seen_at and stand down. scanStartedAt is captured from the DB clock
+// (SELECT now() before scanning) so it compares against last_seen_at in
+// one clock domain. A missing scanStartedAt fails CLOSED — no
+// rescan_clear, same as an untrusted scan.
+async function resolveAmbiguousBridgeCalls({
+  ambiguousCallIds = [], scanWindowStart, scanStartedAt, rescanTrusted = false,
+} = {}) {
+  const bridged = await db('bridge_ambiguous_calls')
+    .whereNull('resolved_at')
+    .whereExists(function bridgedCall() {
+      this.select(1).from('call_log as cl')
+        .whereRaw('cl.id = bridge_ambiguous_calls.call_log_id')
+        .whereNotNull('cl.google_ads_call_resource_name');
+    })
+    .update({ resolved_at: db.fn.now(), resolve_reason: 'bridged' });
+  let rescanCleared = 0;
+  if (rescanTrusted && scanWindowStart && scanStartedAt) {
+    rescanCleared = await db('bridge_ambiguous_calls')
       .whereNull('resolved_at')
-      .update({ resolved_at: db.fn.now(), resolve_reason: 'bridged' });
-  }
-  let rescanIds = [];
-  if (rescanTrusted && scanWindowStart) {
-    rescanIds = (await db('bridge_ambiguous_calls as bac')
-      .join('call_log as cl', 'cl.id', 'bac.call_log_id')
-      .whereNull('bac.resolved_at')
-      .where('cl.created_at', '>=', scanWindowStart)
+      .where('last_seen_at', '<', scanStartedAt)
       .modify((qb) => {
-        if (ambiguousCallIds.length) qb.whereNotIn('bac.call_log_id', ambiguousCallIds);
+        // Belt to the last_seen gate's suspenders: the day's candidate ids
+        // were refreshed by applyBridge before this runs, so the gate
+        // already protects them — the explicit exclusion also covers a
+        // caller that captured scanStartedAt late.
+        if (ambiguousCallIds.length) qb.whereNotIn('call_log_id', ambiguousCallIds);
       })
-      .select('bac.call_log_id')).map((r) => r.call_log_id);
-    if (rescanIds.length) {
-      await db('bridge_ambiguous_calls')
-        .whereIn('call_log_id', rescanIds)
-        .whereNull('resolved_at')
-        .update({ resolved_at: db.fn.now(), resolve_reason: 'rescan_clear' });
-    }
+      .whereExists(function rescanCoveredCall() {
+        this.select(1).from('call_log as cl')
+          .whereRaw('cl.id = bridge_ambiguous_calls.call_log_id')
+          .where('cl.created_at', '>=', scanWindowStart);
+      })
+      .update({ resolved_at: db.fn.now(), resolve_reason: 'rescan_clear' });
   }
-  if (bridgedIds.length || rescanIds.length) {
-    logger.info(`[bridge-ambiguity] resolved ${bridgedIds.length} bridged, ${rescanIds.length} rescan-cleared`);
+  if (bridged || rescanCleared) {
+    logger.info(`[bridge-ambiguity] resolved ${bridged} bridged, ${rescanCleared} rescan-cleared`);
   }
-  return { bridged: bridgedIds.length, rescanCleared: rescanIds.length };
+  return { bridged, rescanCleared };
 }
 
 // ALL open records, shaped for attributeUnclaimedBridgeLeads' exclusion
@@ -1668,9 +1727,18 @@ async function openAmbiguousCallExclusions() {
   const open = await db('bridge_ambiguous_calls')
     .whereNull('resolved_at')
     .select('call_log_id', 'twilio_call_sid');
+  // The phone-linkage snapshot for OPEN records: the exact leads each
+  // indefinite hold covers (see recordAmbiguousBridgeCalls) — the durable
+  // replacement for routing persisted holds through the broad phone arm
+  // (pre-push audit P1 r3).
+  const heldLeads = await db('bridge_ambiguous_call_leads as bal')
+    .join('bridge_ambiguous_calls as bac', 'bac.call_log_id', 'bal.call_log_id')
+    .whereNull('bac.resolved_at')
+    .select('bal.lead_id');
   return {
     excludeCallIds: [...new Set(open.map((r) => String(r.call_log_id)))],
     excludeCallSids: [...new Set(open.map((r) => r.twilio_call_sid).filter(Boolean))],
+    excludeLeadIds: [...new Set(heldLeads.map((r) => String(r.lead_id)))],
   };
 }
 
