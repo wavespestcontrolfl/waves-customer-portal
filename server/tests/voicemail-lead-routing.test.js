@@ -770,3 +770,58 @@ describe('shouldStampCallLeadLinkage — durable stamp on EVERY different-sid re
     })).toBe(false);
   });
 });
+
+describe('isSameCallLeadReuse — stamp identity yields to current-phone identity', () => {
+  const { isSameCallLeadReuse } = CallRecordingProcessor._test;
+  const PHONE = '+19415550101';
+
+  test('sid match is same-call identity regardless of phone', () => {
+    expect(isSameCallLeadReuse({
+      existingLead: { id: 'lead-own', twilio_call_sid: 'CA-1', phone: PHONE },
+      callTwilioSid: 'CA-1',
+      priorStampedLeadId: null,
+      phone: PHONE,
+    })).toBe(true);
+  });
+
+  test('stamped row re-selected by the caller\'s CURRENT phone is PLAIN phone reuse (pre-push P1 r1)', () => {
+    // Customer-less caller phone-reused a customer-owned lead; the root fix
+    // stamped it. On retry the phone branch re-finds the same row — bare ID
+    // equality must not drag it through the anonymous-strict same-call
+    // predicates (unclaimed-only), which 0-row the guarded write and drop a
+    // valid association.
+    expect(isSameCallLeadReuse({
+      existingLead: { id: 'lead-r', twilio_call_sid: 'CA-original', phone: PHONE },
+      callTwilioSid: 'CA-retry',
+      priorStampedLeadId: 'lead-r',
+      phone: PHONE,
+    })).toBe(false);
+  });
+
+  test('stamped row whose phone does NOT match the caller stays same-call identity', () => {
+    // Phone-less retry of a stamped call, or the lead's phone was edited
+    // away — the stamp is the only identity, strict predicates apply.
+    expect(isSameCallLeadReuse({
+      existingLead: { id: 'lead-r', twilio_call_sid: 'CA-original', phone: null },
+      callTwilioSid: 'CA-retry',
+      priorStampedLeadId: 'lead-r',
+      phone: null,
+    })).toBe(true);
+
+    expect(isSameCallLeadReuse({
+      existingLead: { id: 'lead-r', twilio_call_sid: 'CA-original', phone: '+19415550999' },
+      callTwilioSid: 'CA-retry',
+      priorStampedLeadId: 'lead-r',
+      phone: PHONE,
+    })).toBe(true);
+  });
+
+  test('a different row than the stamp is never same-call', () => {
+    expect(isSameCallLeadReuse({
+      existingLead: { id: 'lead-other', twilio_call_sid: 'CA-x', phone: PHONE },
+      callTwilioSid: 'CA-retry',
+      priorStampedLeadId: 'lead-r',
+      phone: PHONE,
+    })).toBe(false);
+  });
+});

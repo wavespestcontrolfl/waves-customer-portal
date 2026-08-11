@@ -2315,6 +2315,35 @@ function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid
     || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
 }
 
+// Classifies whether the reused row is SAME-CALL identity (this call's own
+// earlier work, by sid or stamp) — which routes the guarded write through
+// applySameCallLeadEligibility's strict predicates — or ordinary contact
+// reuse.
+//
+// The stamp arm must NOT claim a row the caller's CURRENT phone re-selects
+// (pre-push P1 r1 on the root fix): a customer-less phone-bearing call may
+// legitimately reuse a customer-OWNED lead (the phone lookup applies no
+// ownership filter when customerId is null — phone is strong identity), and
+// the root fix stamps that reuse. On retry the stamp-arm lookup rejects the
+// owned row (applySameCallLeadEligibility requires unclaimed for anonymous
+// same-call rows), the phone fallback re-finds it, and inferring same-call
+// from BARE ID EQUALITY then re-applied the anonymous-strict predicates to
+// a phone-identified row — the guarded write 0-rowed and the retry dropped
+// a valid association. When the row's stored phone equals the caller's
+// phone (exact string — the phone branch matched on equality, so a re-found
+// row always compares equal; a format mismatch just falls back to the
+// stricter classification), phone identity dominates: the write runs the
+// phone path's own ownership backstop and the re-stamp arm still refreshes
+// the ledgers. The sid arm is unaffected — a same-sid row is this call's
+// own insert regardless of phone.
+function isSameCallLeadReuse({ existingLead, callTwilioSid, priorStampedLeadId, phone }) {
+  if (!existingLead) return false;
+  if (callTwilioSid && existingLead.twilio_call_sid === callTwilioSid) return true;
+  if (!priorStampedLeadId || String(existingLead.id) !== priorStampedLeadId) return false;
+  if (phone && String(existingLead.phone || '') === String(phone)) return false;
+  return true;
+}
+
 // The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
 // later attempt rejects the call. One list so the stamp and the restore can
@@ -8303,18 +8332,19 @@ const CallRecordingProcessor = {
           stampedLeadId: priorStampedLeadId,
           ...sameCallEligibility,
         });
-        // Same-call reuse (retry reprocessing found the lead THIS call's
-        // earlier attempt inserted) is strong identity — the weak-identity
-        // write revalidation below must not apply its email/name predicates
-        // to it (a name-less caller's own row would fail them and re-mint).
         // Same-call reuse (a retry found the lead THIS call's earlier attempt
         // inserted, by sid — or already REUSED, by stamp) is strong identity,
         // so the weak-identity write revalidation must not apply its
         // email/name predicates to it (a name-less caller's own row would
-        // fail them and re-mint).
-        const sameCallLeadReuse = !!(existingLead
-          && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
-            || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
+        // fail them and re-mint). A stamp-identified row the caller's
+        // CURRENT phone re-selects is classified as plain phone reuse
+        // instead — see isSameCallLeadReuse.
+        const sameCallLeadReuse = isSameCallLeadReuse({
+          existingLead,
+          callTwilioSid: call.twilio_call_sid,
+          priorStampedLeadId,
+          phone,
+        });
         // A fresh insert with no prior stamp self-links via its own sid at
         // insert time — REUSE of a different-sid lead puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
@@ -13517,6 +13547,7 @@ CallRecordingProcessor._test = {
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,
+  isSameCallLeadReuse,
   shouldStampCallLeadLinkage,
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
