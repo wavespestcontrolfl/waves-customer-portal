@@ -89,10 +89,19 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
     const fresh = await trx('scheduled_services')
       .where({ id: svc.id })
       .forUpdate()
-      .first('technician_id', 'status', 'customer_confirmed', 'source_action');
+      .first('technician_id', 'status', 'customer_confirmed', 'source_action', 'scheduled_date');
     if (!fresh || fresh.technician_id !== req.technicianId) {
       const e = new Error('Not assigned to this service');
       e.code = 'TECH_OWNERSHIP_LOST';
+      throw e;
+    }
+    // Re-run the stale-tap date guard under the row lock (Codex P1 round 4):
+    // the route-entry check used the pre-lock snapshot, and a visit moved to
+    // a future day must not be APPROVED by a stale tap — phase 3 rejecting
+    // the advance later doesn't help once the confirmation is permanent.
+    if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
+      const e = new Error('Rescheduled to a future date');
+      e.code = 'FUTURE_SCHEDULED_DATE';
       throw e;
     }
     if (!isPendingOutboundReviewBooking(fresh)) {
