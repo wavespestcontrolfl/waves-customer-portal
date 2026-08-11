@@ -593,9 +593,12 @@ describe('send-with-invoice hold_report_until_paid', () => {
     mockTables({
       project,
       invoice: createdInvoice,
-      // No reusable draft, no already-paid invoice, then the row created by
-      // InvoiceService.create. This mirrors the first completion attempt.
-      invoiceFirstResults: [null, null, createdInvoice],
+      // No reusable draft, no already-paid invoice (pre-lock pass), the
+      // same two misses again for the in-lock re-check (codex r5 round —
+      // the advisory/visit locks repeat both checks before creating), then
+      // the row created by InvoiceService.create. Mirrors the first
+      // completion attempt.
+      invoiceFirstResults: [null, null, null, null, createdInvoice],
     });
 
     await withServer(async (baseUrl) => {

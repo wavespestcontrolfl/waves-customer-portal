@@ -1639,7 +1639,15 @@ async function reverseWaveguardExtensionCredits(term, conn = db) {
         reversedCount += 1;
       }
     };
-    if (conn === db) await db.transaction(work); else await work(conn);
+    // Best-effort demands a SAVEPOINT on a caller's transaction (pre-push
+    // P1, codex r5 round): the catch below swallows, but a failed statement
+    // leaves a raw caller trx ABORTED — every later statement in that
+    // transaction then fails while this helper reports a quiet no-op.
+    // conn.transaction() on a knex trx is a savepoint: the failure rolls
+    // back to it and the caller's transaction stays healthy.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
   } catch (err) {
     logger.warn(`[annual-prepay] WaveGuard extension credit reversal skipped for term ${term?.id}: ${err.message}`);
   }
@@ -1707,7 +1715,12 @@ async function restoreWaveguardExtensionCredits(term, conn = db) {
         restoredCount += 1;
       }
     };
-    if (conn === db) await db.transaction(work); else await work(conn);
+    // Savepoint on a caller's transaction — same reasoning as the reversal
+    // helper above (pre-push P1, codex r5 round): a swallowed failure must
+    // not leave the owning transaction aborted.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
   } catch (err) {
     logger.warn(`[annual-prepay] WaveGuard extension credit restore skipped for term ${term?.id}: ${err.message}`);
   }

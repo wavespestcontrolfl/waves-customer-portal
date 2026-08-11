@@ -3011,6 +3011,15 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // commit) keeps the reprice out until the invoice is visible to the
     // extension's probes.
     if (scheduledServiceId) {
+      // The shared mint serialization, not a parallel one (pre-push P0,
+      // codex r5 round): every other scheduled-service invoice writer
+      // (completion mint, Charge Now, checkout) serializes on the two-key
+      // ['schedule.invoice.mint', ssId] advisory lock — taken FIRST, same
+      // as scheduled-invoice-mint, so this path contends in the same order.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['schedule.invoice.mint', String(scheduledServiceId)],
+      );
       // Lock-order guard (codex r3 P1): customer key-share BEFORE the visit
       // row lock — the create() below inserts the invoice on this trx and
       // its customer FK takes KEY SHARE regardless; taking it first keeps
@@ -3024,6 +3033,44 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .where({ id: scheduledServiceId })
         .forUpdate()
         .first('id');
+      // In-lock replay re-check (pre-push P0, codex r5 round): the reuse and
+      // already-billed checks above ran BEFORE these locks — a canonical
+      // mint that held them first can commit an invoice for this visit and
+      // this transaction would wake and create a duplicate collectible.
+      // Repeat both checks now that no other writer can mint: an invoice
+      // that appeared is adopted (or 409s) exactly like the pre-lock pass.
+      // The derived scheduledServiceId is included in the linkage — the
+      // pre-lock pass could only see project.scheduled_service_id.
+      const lockedReuse = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereNotIn('status', ['void', 'paid'])
+        .where(function invoiceLinkage() {
+          this.orWhere({ scheduled_service_id: scheduledServiceId });
+          if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (lockedReuse) {
+        await persistProjectInvoiceLink(project, lockedReuse.id, trx);
+        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project), created: false };
+      }
+      const lockedBilled = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereIn('status', ['paid', 'processing'])
+        .where(function billedLinkage() {
+          this.orWhere({ scheduled_service_id: scheduledServiceId });
+          if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (lockedBilled) {
+        await persistProjectInvoiceLink(project, lockedBilled.id, trx);
+        const err = new Error(`This visit is already billed on invoice ${lockedBilled.invoice_number} (${lockedBilled.status}). Nothing was sent.`);
+        err.code = 'already_billed';
+        err.invoiceId = lockedBilled.id;
+        err.invoiceNumber = lockedBilled.invoice_number;
+        throw err;
+      }
     }
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {

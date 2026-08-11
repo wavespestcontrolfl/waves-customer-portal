@@ -468,3 +468,36 @@ describe('WDO photo addendum captions', () => {
     )).toBe('Obstruction or inaccessible area: North attic corner blocked by stored materials.');
   });
 });
+
+// Project draft-invoice mint serialization (pre-push P0, codex #3344 r5
+// round): the non-WDO draft bills scheduled-service pricing, so it must be
+// impossible for it and a canonical completion/Charge Now mint to each
+// create a collectible invoice for the same visit. The contract: the SHARED
+// two-key advisory lock first (same key every scheduled-service invoice
+// writer uses), then the customer key-share, then the visit row lock, and
+// the reuse/already-billed checks REPEATED inside the locks before
+// InvoiceService.create runs on the lock transaction.
+describe('resolveOrCreateProjectInvoice mint serialization (source contract)', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../routes/admin-projects.js'), 'utf8');
+
+  test('advisory lock → customer key-share → visit lock → in-lock reuse/billed re-checks → create', () => {
+    const advisoryAt = source.indexOf("'schedule.invoice.mint', String(scheduledServiceId)");
+    const keyShareAt = source.indexOf('FOR KEY SHARE', advisoryAt);
+    const visitLockAt = source.indexOf('.forUpdate()', keyShareAt);
+    const reuseRecheckAt = source.indexOf('const lockedReuse =');
+    const billedRecheckAt = source.indexOf('const lockedBilled =');
+    const createAt = source.indexOf('const createdNonWdo = await InvoiceService.create({');
+    expect(advisoryAt).toBeGreaterThan(-1);
+    expect(keyShareAt).toBeGreaterThan(advisoryAt);
+    expect(visitLockAt).toBeGreaterThan(keyShareAt);
+    expect(reuseRecheckAt).toBeGreaterThan(visitLockAt);
+    expect(billedRecheckAt).toBeGreaterThan(reuseRecheckAt);
+    expect(createAt).toBeGreaterThan(billedRecheckAt);
+    // The canonical shared lock shape, not a project-private key.
+    expect(source).toContain('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    // The create stays on the lock transaction (self-deadlock guard).
+    const createBlock = source.slice(createAt, source.indexOf('});', createAt));
+    expect(createBlock).toContain('database: trx');
+  });
+});

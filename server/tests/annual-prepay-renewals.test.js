@@ -1857,6 +1857,35 @@ describe('reverseWaveguardExtensionCredits (tier-extension refund claw-back)', (
     db.transaction = jest.fn(async (cb) => cb(db));
   });
 
+  // Savepoint on a caller transaction (pre-push P1, codex r5 round): same
+  // contract as the restore helper — a swallowed failure on a raw caller
+  // trx would leave it aborted; a knex trx runs the work under
+  // conn.transaction (a savepoint) instead.
+  test('a caller transaction runs the claw-back under conn.transaction (savepoint), not raw', async () => {
+    const tables = {
+      customers: [query({ first: { id: 'customer-1', account_credits: 20 } })],
+      customer_credit_ledger: [
+        query({ rows: [grantRow] }), // per-term grants
+        query({ rows: [] }), // legacy-shape grants
+        query({ rows: [grantRow] }), // marker events (grant-last → clawable)
+      ],
+    };
+    const trx = jest.fn((table) => {
+      const queue = tables[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
+      return queue.shift();
+    });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    const reversed = await AnnualPrepayRenewals.reverseWaveguardExtensionCredits(TERM, trx);
+
+    expect(reversed).toBe(1);
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -4.9 }), trx);
+  });
+
   // Ledger queue order per run: per-term grants → legacy-shape grants →
   // (per legacy: park dedupe + park insert) → per-credit marker events.
   test('reverses the extension grant when its prepay term refunds', async () => {
@@ -2202,6 +2231,35 @@ describe('restoreWaveguardExtensionCredits (repayment restore after the claw-bac
 
     expect(restored).toBe(0);
     expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  // Savepoint on a caller transaction (pre-push P1, codex r5 round): the
+  // helper swallows its own errors, so a failed statement on a RAW caller
+  // trx would leave that transaction aborted while the helper reports a
+  // quiet no-op — every later statement in the caller then fails. A knex
+  // trx must therefore be wrapped via conn.transaction (a savepoint).
+  test('a caller transaction runs the work under conn.transaction (savepoint), not raw', async () => {
+    const tables = {
+      customers: [query({ first: { id: 'customer-1' } })],
+      customer_credit_ledger: [
+        query({ rows: [reversalRow] }),
+        query({ rows: [grantEvent, reversalRow] }),
+      ],
+    };
+    const trx = jest.fn((table) => {
+      const queue = tables[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
+      return queue.shift();
+    });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    const restored = await AnnualPrepayRenewals.restoreWaveguardExtensionCredits(TERM, trx);
+
+    expect(restored).toBe(1);
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: 4.9 }), trx);
   });
 });
 
