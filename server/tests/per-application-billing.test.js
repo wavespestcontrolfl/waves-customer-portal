@@ -158,6 +158,17 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(supportsConverterFollowUpSeeding({ ...monthlyLine, visitsPerYear: 6 }, {}, 'monthly')).toBe(false);
   });
 
+  test('lawn and palm follow-ups book flat 60-minute slots on every path (codex duration rounds)', () => {
+    const { durationMinutesForRecurringService } = EstimateConverter;
+    // The catalog identity links are duration-silent (the lawn rows carry
+    // a 45-minute default that contradicts the 60-minute slot authority),
+    // so the family default lives in the converter like tree_shrub's.
+    expect(durationMinutesForRecurringService({ name: 'Bi-Monthly Lawn Care Service' }, 'bimonthly')).toBe(60);
+    expect(durationMinutesForRecurringService({ name: 'Palm Injection', service: 'palm_injection' }, 'semiannual')).toBe(60);
+    // An explicit line duration still wins.
+    expect(durationMinutesForRecurringService({ name: 'Monthly Lawn Care Service', estimatedDurationMinutes: 90 }, 'monthly')).toBe(90);
+  });
+
   test('COMMERCIAL lawn never collapses into the residential allowlist — office-scheduled via the bell (codex r6 P1)', () => {
     // serviceKeyFor reduces any /lawn/ text to lawn_care, and custom
     // commercial proposals can carry residential-shaped visit counts.

@@ -2079,6 +2079,15 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   // same value estimate-slot-availability uses), so seeded follow-ups match
   // what a self-booked T&S slot would reserve.
   if (key === 'tree_shrub') return 60;
+  // Lawn and palm book flat 60-minute slots too (the estimate-slot
+  // authority for lawn; the semiannual palm catalog row's own default) —
+  // seeded parents and children match what a reserved slot books on every
+  // path. The catalog identity links are deliberately duration-silent
+  // (IDENTITY_ONLY_CATALOG_KEYS — the lawn rows' 45-minute default
+  // contradicts the slot authority), so the family default lives HERE,
+  // exactly like tree_shrub's (codex #3349 duration rounds, both
+  // directions: no 45-minute clobber, no null drift).
+  if (key === 'lawn_care' || key === 'palm_injection') return 60;
   return null;
 }
 
