@@ -113,6 +113,25 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 // non-GSM char survives normalization.
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
+// A rendered custom body must carry every promise this flow makes: the
+// dispatcher's message, the new time, and the link (or reply fallback).
+// The shared template validator permits declared variables to be OMITTED,
+// so an admin edit to rain_out_moved_custom_v1 could drop any of the three
+// and still render truthy (codex PR P1/P2) — callers reject the move (or
+// the send) when this returns false. Needles are GSM-normalized because
+// that's the form the renderer embeds; the URL needle is scheme-less
+// (renderSmsTemplate strips https:// from portal hosts, and the stripped
+// form is a substring of the schemed form for every other host).
+function customBodyCarriesPromises(body, { customMessage, date, window, rescheduleUrl }) {
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  if (!body.includes(normalizeGsmPunctuation(customMessage))) return false;
+  if (!body.includes(normalizeGsmPunctuation(customerArrivalOption(date, window)))) return false;
+  const linkNeedle = rescheduleUrl
+    ? String(rescheduleUrl).replace(/^https?:\/\//i, '')
+    : 'Need a different time? Reply to this message.';
+  return body.includes(linkNeedle);
+}
+
 // Dispatcher-typed note appended to the end of the moved SMS ("Gate code
 // still works, see you Friday!"). Two hard limits, both re-checked here
 // because the sheet's mirrors are advisory only:
@@ -763,12 +782,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} missing/disabled — moved ${serviceId} without SMS`);
         return { sent: false, reason: 'missing_template' };
       }
-      // Same two belts commit()'s pre-check wears (codex PR P2s): a body
-      // that lost the dispatcher's message or exceeds the cap must not
-      // send from an unvalidated caller either.
-      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
-      if (!body.includes(normalizeGsmPunctuation(customerNote))) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render dropped the dispatcher message for ${serviceId} — no SMS`);
+      // Same belts commit()'s pre-check wears (codex PR P1/P2): a body
+      // missing a required clause or exceeding the cap must not send from
+      // an unvalidated caller either.
+      if (!customBodyCarriesPromises(body, {
+        customMessage: customerNote, date: chosen.date, window: chosen.window, rescheduleUrl,
+      })) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render is missing a required clause for ${serviceId} — no SMS`);
         return { sent: false, reason: 'custom_message_dropped' };
       }
       const { countSegments } = require('./messaging/segment-counter');
@@ -1006,16 +1026,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       // Missing/disabled custom row: the message that IS the reason can't
       // send, so fail the move here instead of silently moving the visit
       // messageless (the disabled row is the ops kill switch). Same
-      // rejection when an admin edit dropped {custom_message} from the
-      // template — the shared validator doesn't require declared variables
-      // to be used, so a render can be truthy while carrying none of the
-      // dispatcher's words, and this flow's whole promise is that it does
-      // (codex PR P2). Compare against the GSM-normalized note: that is
-      // the form the renderer embeds.
+      // rejection when an admin template edit dropped {custom_message},
+      // {new_option}, or {link_clause} — a truthy render isn't proof the
+      // customer gets the message, the new time, AND a way to adjust
+      // (codex PR P1/P2; see customBodyCarriesPromises).
       if (!body) return { ok: false, reason: 'custom_message_unavailable' };
-      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
-      if (!body.includes(normalizeGsmPunctuation(note))) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render dropped the dispatcher message for ${serviceId} — rejecting pre-move`);
+      if (!customBodyCarriesPromises(body, {
+        customMessage: note, date: target.date, window: target.window, rescheduleUrl: url,
+      })) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render is missing a required clause for ${serviceId} — rejecting pre-move`);
         return { ok: false, reason: 'custom_message_unavailable' };
       }
       const { countSegments } = require('./messaging/segment-counter');
