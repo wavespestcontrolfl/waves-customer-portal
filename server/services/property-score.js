@@ -151,7 +151,9 @@ async function pestComponent(customerId, knex) {
   // visit, opted-out service line) skips to the next VISIBLE score instead of
   // hiding an older valid one. A visible-but-insufficient view stops the walk
   // — surfacing an older score behind a newer insufficient one would be stale.
-  for (const rowRef of Array.isArray(history) ? history : []) {
+  const historyRows = Array.isArray(history) ? history : [];
+  for (let i = 0; i < historyRows.length; i += 1) {
+    const rowRef = historyRows[i];
     if (!rowRef || !rowRef.service_record_id) continue;
     const fullRow = await loadScoreForServiceRecord(knex, rowRef.service_record_id).catch(() => null);
     const serviceRecord = await knex('service_records')
@@ -174,10 +176,12 @@ async function pestComponent(customerId, knex) {
     if (!view) continue;
     if (view.score != null) {
       const score = pressureToHealth(view.score);
-      // trendDelta is current-minus-previous in the engine's 0–5 scale.
-      const previousScore = view.trendDelta != null
-        ? pressureToHealth(view.score - view.trendDelta)
-        : null;
+      // Previous point comes from the next older history row's
+      // displayed_score — the same basis as the current value. Reconstructing
+      // it from trend_delta breaks after a manual override (applyOverride
+      // changes displayed_score without recalculating the delta).
+      const olderRow = historyRows.slice(i + 1).find((r) => r && r.displayed_score != null);
+      const previousScore = olderRow ? pressureToHealth(Number(olderRow.displayed_score)) : null;
       return {
         ...base,
         status: 'scored',
