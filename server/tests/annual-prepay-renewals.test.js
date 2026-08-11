@@ -738,7 +738,10 @@ describe('annual prepay renewal helpers', () => {
       coverage_service_type: 'Palm Injection',
       coverage_visit_count: 2,
     }, undefined, { today: '2026-01-01' });
-    expect(result.createdCount + result.existingCount).toBeGreaterThanOrEqual(2);
+    // The other-term row is excluded even though it carries the recurring
+    // identity — the new term seeds its FULL sold count.
+    expect(result.existingCount).toBe(0);
+    expect(result.createdCount).toBe(2);
   });
 
   test('a FAILED palm identity lookup rejects the refresh — never silently excludes id-carrying rows (codex r21 P0)', async () => {

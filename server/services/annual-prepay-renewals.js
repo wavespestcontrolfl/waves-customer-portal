@@ -189,6 +189,11 @@ async function findVisitWindowConflict(conn, {
   const blocking = rows.filter((row) => !(
     String(row.customer_id) === String(customerId)
     && serviceMatchesCoverage(row, serviceType)
+    // The exemption must be exactly as narrow as ADOPTION (codex r21
+    // pre-push P1): a row the coverage refused to adopt (wrong identity,
+    // other term) is real occupancy — the timed insert must not overlap
+    // it.
+    && (typeof adoptableFor?.isAdoptable !== 'function' || adoptableFor.isAdoptable(row))
     && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
   ));
   return blocking.length ? blocking[0] : null;
@@ -389,6 +394,12 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
 // payment-pending term's reserved/sold first visit carries only
 // source_estimate_id; excluding it would seed replacement visits and
 // leave the sold visit separately billable).
+function rowLinkedToAnotherTerm(term, row) {
+  return row.annual_prepay_term_id != null
+    && term?.id != null
+    && String(row.annual_prepay_term_id) !== String(term.id);
+}
+
 function rowCommittedToTerm(term, row) {
   // Direct evidence (term link or prepaid stamp) always commits. Estimate
   // provenance commits ONLY rows that READ recurring (is_recurring /
@@ -401,10 +412,7 @@ function rowCommittedToTerm(term, row) {
   // (codex r21 pre-push P0, fourth pass): its prepaid stamp or shared
   // estimate must not let a neighboring/boundary term consume it, or the
   // newly paid term seeds short while the other term's visit double-counts.
-  const linkedToOtherTerm = row.annual_prepay_term_id != null
-    && term?.id != null
-    && String(row.annual_prepay_term_id) !== String(term.id);
-  if (linkedToOtherTerm) return false;
+  if (rowLinkedToAnotherTerm(term, row)) return false;
   const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
     || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   if (directCommitment) return true;
@@ -475,8 +483,12 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     const carriesRecurringPalmIdentity = (row) =>
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
-    matching = matching.filter((row) => carriesRecurringPalmIdentity(row)
-      || rowCommittedToTerm(term, row));
+    // A row linked to ANOTHER term never counts (codex r21 pre-push P0,
+    // fifth pass): even carrying the recurring identity, it belongs to
+    // that term's coverage — counting it here seeds this term short while
+    // attach/stamping refuse to move it.
+    matching = matching.filter((row) => !rowLinkedToAnotherTerm(term, row)
+      && (carriesRecurringPalmIdentity(row) || rowCommittedToTerm(term, row)));
   }
   if (matching.length <= coverageVisitCount) return matching;
 
@@ -981,6 +993,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // or a genuine one-time palm appointment on the same day would be
   // swallowed into prepaid coverage.
   const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+    && !rowLinkedToAnotherTerm(term, row)
     && (!coverageIsPalm
       || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
@@ -1021,7 +1034,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           scheduledDate,
           windowStart,
           durationMinutes: baseDuration,
-          adoptableFor: { customerId: term.customer_id, coverageServiceType },
+          adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
         });
         if (conflict) {
           logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
