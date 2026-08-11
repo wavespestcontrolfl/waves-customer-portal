@@ -15,12 +15,10 @@ const {
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
+  isPendingOutboundReviewBooking,
 } = require('../services/call-booking-source-actions');
 const { transitionJobStatus } = require('../services/job-status');
-const {
-  runOutboundReviewConfirmHook,
-  isPendingOutboundReviewBooking,
-} = require('../services/outbound-review-confirm');
+const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
 
@@ -87,14 +85,6 @@ describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection'
 
   test('matches a pending, unconfirmed outbound-review row', () => {
     expect(isPendingOutboundReviewBooking(base)).toBe(true);
-  });
-
-  test('is ONE function shared with the source-action module (no second copy to drift)', () => {
-    // The shared writer's guard (job-status.js) and the tech-route bypass both
-    // import the classifier from call-booking-source-actions — the re-export
-    // here must be the same function object, not a reimplementation.
-    const sourceActions = require('../services/call-booking-source-actions');
-    expect(isPendingOutboundReviewBooking).toBe(sourceActions.isPendingOutboundReviewBooking);
   });
 
   test('does NOT match other source_actions, non-pending status, confirmed rows, or missing rows', () => {

@@ -17,11 +17,6 @@
  */
 
 const logger = require('./logger');
-// Re-exported below so confirm-hook callers get the classifier and the hook
-// from one import; the definition lives with the source-action markers
-// (call-booking-source-actions) — the same module the shared writer's guard
-// uses, so the two can never drift.
-const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -201,4 +196,4 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
 }
 
-module.exports = { runOutboundReviewConfirmHook, isPendingOutboundReviewBooking };
+module.exports = { runOutboundReviewConfirmHook };

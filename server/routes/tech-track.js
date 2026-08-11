@@ -41,10 +41,162 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const trackTransitions = require('../services/track-transitions');
 const { transitionJobStatus } = require('../services/job-status');
-const {
-  isPendingOutboundReviewBooking,
-  runOutboundReviewConfirmHook,
-} = require('../services/outbound-review-confirm');
+const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
+const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+
+// ── Dispatch-implies-confirm phases (owner decision 2026-08-11) ──
+//
+// A pending outbound-callback booking used to 409 the tech's En Route /
+// On Site taps ("pending office review"). With one owner-operator running
+// both portals, the assigned tech's field tap IS the review, so these taps
+// auto-confirm first. Three phases, shared by both routes:
+//
+//   1. confirm  — row-locked trx: recheck ownership + review state, stamp
+//                 customer_confirmed, pending → confirmed.
+//   2. hook     — the SAME post-commit best-effort side effects the admin
+//                 confirm paths run (arm deferred reminders, convert the
+//                 originating call lead, resolve the outbound_booking_review
+//                 card, inspection-credit evidence, card-on-file request).
+//                 MUST run while status is still 'confirmed': the card
+//                 funnel rejects visits past confirmed, and the previsit
+//                 sweep has the same status list. Day-of reminder arming
+//                 sends nothing (72h leg fires only >24.25h out; 24h leg
+//                 only for tomorrow-ET visits).
+//   3. advance  — row-locked trx: recheck ownership + future-date, then the
+//                 status CAS to en_route / on_site.
+//
+// Every phase serializes on a per-service advisory lock (Codex P1 round 3):
+// without it, a second tap that lands mid-hook reads 'confirmed', advances
+// immediately, and the first tap's card-on-file leg then sees a past-
+// confirmed status and skips permanently. The fence queues any concurrent
+// advance behind the running hook. Lock ordering is always advisory → row
+// (a row-lock-first path could deadlock against a fence holder).
+async function lockDispatchFence(trx, serviceId) {
+  await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
+    `outbound-review-dispatch:${serviceId}`,
+  ]);
+}
+
+// Phases 1 + 2. Throws TECH_OWNERSHIP_LOST / REVIEW_STATE_CHANGED (the
+// routes translate to 403 / 409).
+async function autoConfirmOutboundReviewBooking(req, svc) {
+  await db.transaction(async (trx) => {
+    await lockDispatchFence(trx, svc.id);
+    // Recheck INSIDE the trx, row-locked: the pre-trx ownership check alone
+    // leaves a window where dispatch reassigns the visit (same race admin-
+    // schedule's status route locks against), and the office can resolve
+    // the review concurrently.
+    const fresh = await trx('scheduled_services')
+      .where({ id: svc.id })
+      .forUpdate()
+      .first('technician_id', 'status', 'customer_confirmed', 'source_action');
+    if (!fresh || fresh.technician_id !== req.technicianId) {
+      const e = new Error('Not assigned to this service');
+      e.code = 'TECH_OWNERSHIP_LOST';
+      throw e;
+    }
+    if (!isPendingOutboundReviewBooking(fresh)) {
+      const e = new Error('Review state changed');
+      e.code = 'REVIEW_STATE_CHANGED';
+      throw e;
+    }
+    await trx('scheduled_services')
+      .where({ id: svc.id })
+      .update({ customer_confirmed: true });
+    await transitionJobStatus({
+      jobId: svc.id,
+      fromStatus: 'pending',
+      toStatus: 'confirmed',
+      transitionedBy: req.technicianId,
+      trx,
+    });
+  });
+
+  // Re-read AFTER the confirm commit so the hook arms reminders with the
+  // CURRENT schedule (Codex P1 round 3): a reschedule landing between
+  // phase 1 and the hook would otherwise leave the moved visit carrying a
+  // reminder clock built from the stale snapshot — registerAppointment
+  // persists the supplied time and returns existing rows unchanged.
+  const hookRow = await db('scheduled_services')
+    .where({ id: svc.id })
+    .first(
+      'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type',
+      'source_call_log_id', 'is_callback', 'estimated_price',
+    );
+
+  // The hook itself is best-effort and catches per-leg internally; the
+  // wrapper trx exists only to hold the fence so concurrent advances queue
+  // until the side effects (card leg included) have run.
+  await db.transaction(async (trx) => {
+    await lockDispatchFence(trx, svc.id);
+    await runOutboundReviewConfirmHook(db, hookRow || svc, 'tech-track');
+  });
+}
+
+// Phase-3 entry guard. The status CAS alone is NOT enough (Codex P1
+// round 2): the phase-2 window admits a reassignment (technician_id only —
+// status stays 'confirmed') or a future-date reschedule (date/window only),
+// and either stale advance would text the customer a tracking notice.
+// Throws TECH_OWNERSHIP_LOST / FUTURE_SCHEDULED_DATE.
+async function guardAdvance(trx, req, svc) {
+  await lockDispatchFence(trx, svc.id);
+  const fresh = await trx('scheduled_services')
+    .where({ id: svc.id })
+    .forUpdate()
+    .first('technician_id', 'scheduled_date');
+  if (!fresh || fresh.technician_id !== req.technicianId) {
+    const e = new Error('Not assigned to this service');
+    e.code = 'TECH_OWNERSHIP_LOST';
+    throw e;
+  }
+  if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
+    const e = new Error('Rescheduled to a future date');
+    e.code = 'FUTURE_SCHEDULED_DATE';
+    throw e;
+  }
+}
+
+// Shared 403/409 translations for the phase errors above plus the shared
+// writer's typed conflicts. Returns true if the response was sent.
+function respondToTransitionConflict(res, err, fromStatus) {
+  if (err && err.code === 'TECH_OWNERSHIP_LOST') {
+    // Same contract as the routes' pre-trx ownership check.
+    res.status(403).json({ error: 'Not assigned to this service' });
+    return true;
+  }
+  if (err && err.code === 'FUTURE_SCHEDULED_DATE') {
+    // Same contract as the pre-trx stale-tap guard.
+    res.status(409).json({
+      error: 'This job has been rescheduled to a future date. Refresh your route.',
+      code: 'future_scheduled_date',
+    });
+    return true;
+  }
+  if (err && err.code === 'REVIEW_STATE_CHANGED') {
+    res.status(409).json({
+      error: 'This booking was just updated by the office. Refresh your route and try again.',
+      code: 'review_state_changed',
+    });
+    return true;
+  }
+  // The shared writer's review-booking guard should no longer fire on these
+  // routes (auto-confirm above) — kept as a safety net for a race with a
+  // concurrent office reject.
+  if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+    res.status(409).json({
+      error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+      code: 'outbound_review_unconfirmed',
+    });
+    return true;
+  }
+  if (err && err.message && err.message.includes('not in state')) {
+    res.status(409).json({
+      error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+    });
+    return true;
+  }
+  return false;
+}
 const {
   buildOnSiteLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -134,14 +286,9 @@ router.post('/:id/en-route', async (req, res, next) => {
       });
     }
 
-    // Dispatch-implies-confirm (owner decision 2026-08-11): a pending
-    // outbound-callback booking used to 409 here ("pending office review").
-    // With one owner-operator running both portals, the assigned tech's
-    // field tap IS the review — so auto-confirm first (customer_confirmed
-    // stamped + pending → confirmed, same lifecycle semantics as the
-    // admin-dispatch confirm path), then continue to en_route. The shared-
-    // writer guard still blocks every other caller; the admin surfaces keep
-    // their explicit review flow.
+    // Dispatch-implies-confirm — see the phase helpers at the top of this
+    // file. The shared-writer guard still blocks every other caller; the
+    // admin surfaces keep their explicit review flow.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
 
     // 1. Admin-side status flip via transitionJobStatus. Same
@@ -152,76 +299,11 @@ router.post('/:id/en-route', async (req, res, next) => {
     // for a no-op tap.
     if (fromStatus !== 'en_route') {
       try {
-        // Phase 1 — auto-confirm in its OWN trx, row-locked. The recheck
-        // inside the trx closes the reassignment window (Codex P1 on this
-        // PR, same race admin-schedule's status route locks against):
-        // the pre-trx ownership check alone would let a stale tap from a
-        // reassigned tech stamp customer_confirmed and approve the review.
         if (autoConfirmReview) {
-          await db.transaction(async (trx) => {
-            const fresh = await trx('scheduled_services')
-              .where({ id: svc.id })
-              .forUpdate()
-              .first('technician_id', 'status', 'customer_confirmed', 'source_action');
-            if (!fresh || fresh.technician_id !== req.technicianId) {
-              const e = new Error('Not assigned to this service');
-              e.code = 'TECH_OWNERSHIP_LOST';
-              throw e;
-            }
-            if (!isPendingOutboundReviewBooking(fresh)) {
-              // Office confirmed/rejected it between our read and this trx.
-              const e = new Error('Review state changed');
-              e.code = 'REVIEW_STATE_CHANGED';
-              throw e;
-            }
-            await trx('scheduled_services')
-              .where({ id: svc.id })
-              .update({ customer_confirmed: true });
-            await transitionJobStatus({
-              jobId: svc.id,
-              fromStatus: 'pending',
-              toStatus: 'confirmed',
-              transitionedBy: req.technicianId,
-              trx,
-            });
-          });
-
-          // Phase 2 — confirm side effects (arm deferred reminders, convert
-          // the originating call lead, resolve the outbound_booking_review
-          // card, inspection-credit evidence, card-on-file request) — the
-          // SAME post-commit best-effort hook the admin confirm paths run,
-          // so a field-confirmed booking is never confirmed-but-half-armed.
-          // MUST run while status is still 'confirmed' (Codex P1 on this
-          // PR): requestCardForAppointment re-reads the visit and skips
-          // anything past pending/confirmed, and the previsit sweep has the
-          // same status list — running the hook after the en_route flip
-          // permanently skips the card funnel for this booking. Day-of
-          // reminder arming sends nothing: the 72h leg only fires >24.25h
-          // out and the 24h leg only for tomorrow-ET visits.
-          await runOutboundReviewConfirmHook(db, svc, 'tech-track');
+          await autoConfirmOutboundReviewBooking(req, svc);
         }
-
-        // Phase 3 — advance. The status CAS alone is NOT enough here (Codex
-        // P1 round 2): the phase-2 hook leaves a real window in which
-        // dispatch can reassign the visit (technician_id only — status stays
-        // 'confirmed') or reschedule it to a future date (date/window only),
-        // and either stale advance would text the customer a tracking
-        // notice. Re-read row-locked and re-run both guards inside the trx.
         await db.transaction(async (trx) => {
-          const fresh = await trx('scheduled_services')
-            .where({ id: svc.id })
-            .forUpdate()
-            .first('technician_id', 'scheduled_date');
-          if (!fresh || fresh.technician_id !== req.technicianId) {
-            const e = new Error('Not assigned to this service');
-            e.code = 'TECH_OWNERSHIP_LOST';
-            throw e;
-          }
-          if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
-            const e = new Error('Rescheduled to a future date');
-            e.code = 'FUTURE_SCHEDULED_DATE';
-            throw e;
-          }
+          await guardAdvance(trx, req, svc);
           await transitionJobStatus({
             jobId: svc.id,
             fromStatus: autoConfirmReview ? 'confirmed' : fromStatus,
@@ -231,37 +313,7 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         });
       } catch (err) {
-        if (err && err.code === 'TECH_OWNERSHIP_LOST') {
-          // Same contract as the pre-trx check above.
-          return res.status(403).json({ error: 'Not assigned to this service' });
-        }
-        if (err && err.code === 'FUTURE_SCHEDULED_DATE') {
-          // Same contract as the pre-trx stale-tap guard above.
-          return res.status(409).json({
-            error: 'This job has been rescheduled to a future date. Refresh your route.',
-            code: 'future_scheduled_date',
-          });
-        }
-        if (err && err.code === 'REVIEW_STATE_CHANGED') {
-          return res.status(409).json({
-            error: 'This booking was just updated by the office. Refresh your route and try again.',
-            code: 'review_state_changed',
-          });
-        }
-        // The shared writer's review-booking guard should no longer fire on
-        // this path (auto-confirm above) — kept as a safety net for a race
-        // with a concurrent office reject.
-        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-          return res.status(409).json({
-            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-            code: 'outbound_review_unconfirmed',
-          });
-        }
-        if (err && err.message && err.message.includes('not in state')) {
-          return res.status(409).json({
-            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
-          });
-        }
+        if (respondToTransitionConflict(res, err, fromStatus)) return undefined;
         throw err;
       }
     }
@@ -333,67 +385,19 @@ router.post('/:id/on-site', async (req, res, next) => {
       });
     }
 
-    // Dispatch-implies-confirm — same owner decision as the en-route leg
-    // above. Arrival without a prior En Route tap (geofence or manual) must
-    // not dead-end on the review popup either.
+    // Dispatch-implies-confirm — same phase helpers as the en-route leg.
+    // Arrival without a prior En Route tap (geofence or manual) must not
+    // dead-end on the review popup either.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
 
     if (fromStatus !== 'on_site') {
       const arrivedAt = new Date();
       try {
-        // Phase 1 + 2 — same shape and Codex P1 rationale as the en-route
-        // leg above: row-locked in-trx recheck before the confirm flip,
-        // then the shared confirm hook while status is still 'confirmed'
-        // (the card-on-file leg is dead once the row passes confirmed).
         if (autoConfirmReview) {
-          await db.transaction(async (trx) => {
-            const fresh = await trx('scheduled_services')
-              .where({ id: svc.id })
-              .forUpdate()
-              .first('technician_id', 'status', 'customer_confirmed', 'source_action');
-            if (!fresh || fresh.technician_id !== req.technicianId) {
-              const e = new Error('Not assigned to this service');
-              e.code = 'TECH_OWNERSHIP_LOST';
-              throw e;
-            }
-            if (!isPendingOutboundReviewBooking(fresh)) {
-              const e = new Error('Review state changed');
-              e.code = 'REVIEW_STATE_CHANGED';
-              throw e;
-            }
-            await trx('scheduled_services')
-              .where({ id: svc.id })
-              .update({ customer_confirmed: true });
-            await transitionJobStatus({
-              jobId: svc.id,
-              fromStatus: 'pending',
-              toStatus: 'confirmed',
-              transitionedBy: req.technicianId,
-              trx,
-            });
-          });
-          await runOutboundReviewConfirmHook(db, svc, 'tech-track');
+          await autoConfirmOutboundReviewBooking(req, svc);
         }
-
-        // Phase 3 — advance to on_site with the lifecycle stamps. Same
-        // row-locked ownership + future-date recheck as the en-route leg
-        // (Codex P1 round 2): the phase-2 window admits a reassignment or a
-        // future-date reschedule that the status CAS alone can't see.
         await db.transaction(async (trx) => {
-          const fresh = await trx('scheduled_services')
-            .where({ id: svc.id })
-            .forUpdate()
-            .first('technician_id', 'scheduled_date');
-          if (!fresh || fresh.technician_id !== req.technicianId) {
-            const e = new Error('Not assigned to this service');
-            e.code = 'TECH_OWNERSHIP_LOST';
-            throw e;
-          }
-          if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
-            const e = new Error('Rescheduled to a future date');
-            e.code = 'FUTURE_SCHEDULED_DATE';
-            throw e;
-          }
+          await guardAdvance(trx, req, svc);
           const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
           if (Object.keys(lifecycleUpdates).length > 0) {
             await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
@@ -407,33 +411,7 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         });
       } catch (err) {
-        // Same error translations as the en-route leg above.
-        if (err && err.code === 'TECH_OWNERSHIP_LOST') {
-          return res.status(403).json({ error: 'Not assigned to this service' });
-        }
-        if (err && err.code === 'FUTURE_SCHEDULED_DATE') {
-          return res.status(409).json({
-            error: 'This job has been rescheduled to a future date. Refresh your route.',
-            code: 'future_scheduled_date',
-          });
-        }
-        if (err && err.code === 'REVIEW_STATE_CHANGED') {
-          return res.status(409).json({
-            error: 'This booking was just updated by the office. Refresh your route and try again.',
-            code: 'review_state_changed',
-          });
-        }
-        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-          return res.status(409).json({
-            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-            code: 'outbound_review_unconfirmed',
-          });
-        }
-        if (err && err.message && err.message.includes('not in state')) {
-          return res.status(409).json({
-            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
-          });
-        }
+        if (respondToTransitionConflict(res, err, fromStatus)) return undefined;
         throw err;
       }
     }
