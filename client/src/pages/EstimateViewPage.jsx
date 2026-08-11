@@ -4366,10 +4366,14 @@ function EstimateViewPageInner() {
           slotId: existingAppointment ? undefined : selectedSlotId,
           existingAppointmentId: existingAppointment?.id,
           paymentMethodPreference: paymentPreference,
-          // Attests which card-hold fee-policy copy THIS bundle renders —
-          // bump in lockstep with the disclosure sentence (saved-method
-          // holds have no other consent surface to record it from).
-          cardHoldDisclosureVersion: 'sticky_v1',
+          // Attests which card-hold fee-policy copy THIS TAB RENDERED —
+          // render-bound, never a constant: sent only under the same
+          // predicate that renders the card-hold disclosure (depositNote /
+          // capture modal). A tab loaded while the hold wasn't required
+          // never saw the sentence and must not attest (saved-method holds
+          // have no other consent surface). Bump in lockstep with the
+          // disclosure sentence.
+          cardHoldDisclosureVersion: (serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime) ? 'sticky_v1' : undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
