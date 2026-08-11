@@ -2495,7 +2495,11 @@ const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
 //  - total_stations and stations_inaccessible are customer-visible too and
 //    reconcile through their own tight forms.
 const STATION_NOUN_SRC = '(?:(?:exterior|interior|in-ground|ground|installed|bait|termite|rodent|monitoring)\\s+)*stations?';
-const STATION_PARTITIVE_GUARD_SRC = '(?<!\\bof\\s+)(?<!\\bof\\s+the\\s+)';
+// "A total of 12 stations were checked" DECLARES 12 — only a partitive
+// numerator upstream ("10 of the 12") marks the number as a denominator,
+// so the guard skips an "of" that is itself governed by "total" (codex r3
+// on #3358).
+const STATION_PARTITIVE_GUARD_SRC = '(?<!(?<!\\btotal\\s)\\bof\\s+)(?<!(?<!\\btotal\\s)\\bof\\s+the\\s+)';
 const STATION_AUX_GAP_SRC = '(?:\\s+(?:were|was|have|has|had|been|all|now|already|just|also|[a-z]+ly))*';
 const STATION_CHECKED_ACTIVE_RE = new RegExp(
   `\\b(?:checked|inspected)\\s+(?:all\\s+|the\\s+)?(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
@@ -2508,21 +2512,43 @@ const STATION_CHECKED_PASSIVE_RE = new RegExp(
 // Tempered gap: stops at clause boundaries AND refuses to bridge a
 // negation, so "feeding was not observed at 3 stations" claims nothing.
 const STATION_NEGATION_FREE_GAP_SRC = '(?:(?!\\b(?:no|not|none|never|zero)\\b)[^.!?;,:]){0,24}?';
+// A windowed negation/scope lookbehind (codex r3 on #3358): the immediate
+// single-word lookbehind missed "NO SIGNS OF termite activity … at 3
+// stations", and "we will continue MONITORING activity at 3 stations" is
+// monitoring SCOPE, not an observed subset. Any negation or scope word
+// within the same clause fragment (no ,;:.!? between) suppresses the
+// claim — the safe direction: a missed claim publishes copy, a false
+// claim discards it.
+const STATION_ACTIVITY_SCOPE_GUARD_SRC = '(?<!\\b(?:no|not|none|never|zero|without|for|monitor|monitors|monitored|monitoring|watch|watching|check|checking|prevent|preventing)\\b[^.!?;,:]{0,24})';
 const STATION_ACTIVITY_AT_RE = new RegExp(
-  `\\b(?<!\\bno\\s)(?<!\\bnot\\s)(?<!\\bwithout\\s)(?:activity|feeding|consumption)\\b${STATION_NEGATION_FREE_GAP_SRC}\\b(?:at|in|across)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
+  `\\b${STATION_ACTIVITY_SCOPE_GUARD_SRC}(?:activity|feeding|consumption)\\b${STATION_NEGATION_FREE_GAP_SRC}\\b(?:at|in|across)\\s+(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
   'gi',
 );
 const STATION_ACTIVITY_MOD_SRC = '(?:(?:visible|light|moderate|heavy|active|fresh|recent|new|termite|rodent)\\s+)*';
+// "showed SIGNS OF activity" / "had EVIDENCE OF termite activity" are
+// direct positive assertions (codex r3 on #3358) — the evidence noun is
+// optional between the verb and the activity noun. "showed no signs of
+// activity" still claims nothing: 'no' is not a whitelisted modifier.
+const STATION_EVIDENCE_OF_SRC = '(?:(?:signs|evidence|indications|traces)\\s+of\\s+)?';
 const STATION_ACTIVITY_WITH_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\s+${STATION_ACTIVITY_MOD_SRC}(?:activity|feeding|consumption|hits?)\\b`,
+  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:with|showing|showed|had)\\s+${STATION_ACTIVITY_MOD_SRC}${STATION_EVIDENCE_OF_SRC}${STATION_ACTIVITY_MOD_SRC}(?:activity|feeding|consumption|hits?)\\b`,
   'gi',
 );
+// "on the property LINE/perimeter" is a LOCATION, not a roster-total
+// construction (codex r3 on #3358) — the total claim must end at
+// "property", not inside a longer location phrase.
 const STATION_TOTAL_RE = new RegExp(
-  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:(?:are\\s+)?(?:installed|in\\s+place)|(?:on|around|across)\\s+(?:the\\s+|your\\s+)?property)\\b`,
+  `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\s+(?:(?:are\\s+)?(?:installed|in\\s+place)|(?:on|around|across)\\s+(?:the\\s+|your\\s+)?property(?!\\s+(?:line|lines|perimeter|edge|edges|border|borders|corner|corners|boundary|boundaries|fence)))\\b`,
   'gi',
 );
 const STATION_INACCESSIBLE_RE = new RegExp(
   `\\b${STATION_PARTITIVE_GUARD_SRC}(\\d+)\\s+${STATION_NOUN_SRC}\\b(?:\\s+(?:were|was|are|is))?\\s+(?:inaccessible|not\\s+accessible|unreachable|could\\s+not\\s+be\\s+(?:accessed|reached|checked))\\b`,
+  'gi',
+);
+// Active inaccessible claims (codex r3 on #3358): "we could not access 2
+// bait stations", "we were unable to reach 2 stations".
+const STATION_INACCESSIBLE_ACTIVE_RE = new RegExp(
+  `\\b(?:could\\s+not|couldn['’]t|(?:was|were)\\s+unable\\s+to|unable\\s+to)\\s+(?:access|reach|check|inspect|open|service)\\s+(?:all\\s+|the\\s+)?(\\d+)\\s+${STATION_NOUN_SRC}\\b`,
   'gi',
 );
 const CAUGHT_CLAIM_RE = new RegExp(
@@ -2706,7 +2732,7 @@ function countContradictions(text, values = {}) {
   );
   check(claimedCounts(str, [STATION_TOTAL_RE]), values.total_stations, 'station_total_mismatch');
   check(
-    claimedCounts(str, [STATION_INACCESSIBLE_RE]),
+    claimedCounts(str, [STATION_INACCESSIBLE_RE, STATION_INACCESSIBLE_ACTIVE_RE]),
     values.stations_inaccessible,
     'station_inaccessible_mismatch',
   );
@@ -2847,6 +2873,17 @@ const LEVEL_CLAIM_GOVERN_GAP_RE = new RegExp(
   // Negations stay governed (codex on #3358): "may NOT be heavy" is
   // qualified prose, not a heavy claim — refusing it dropped valid copy.
   + 'not|never|no|longer|yet|'
+  // Transition verbs whose RESULT is the claimed band stay governed too
+  // (codex r3 on #3358): "may REACH heavy levels", "could ESCALATE TO
+  // heavy". The preposition is the real discriminator — "from" is not
+  // filler, so "may decrease FROM the heavy activity observed today"
+  // (a current-state reference) stays refused.
+  + 'reach|reaches|reaching|escalate|escalates|escalating|climb|climbs|climbing|'
+  + 'rise|rises|rising|increase|increases|increasing|decrease|decreases|decreasing|'
+  + 'drop|drops|dropping|spike|spikes|spiking|approach|approaches|approaching|'
+  + 'trend|trends|trending|grow|grows|growing|build|builds|building|'
+  + 'worsen|worsens|worsening|improve|improves|improving|fall|falls|falling|'
+  + 'decline|declines|declining|hit|hits|hitting|'
   + 'very|quite|somewhat|more|less|rather|fairly|relatively|[a-z]+ly))*\\s*$',
   'i',
 );
@@ -2868,8 +2905,14 @@ function intentGovernsLevelClaim(before) {
 // empty). The FIRST marker after the claim governs it when only filler
 // stands between them; "was heavy today and can continue" stays refused —
 // 'today'/'and' are not filler, so that trailing 'can' never reaches back.
+// The after-side marker set is RESTRICTED to qualifiers that can govern a
+// subject-position claim (codex r3 on #3358): the full intent regex
+// includes causal/scheduling tokens like "due to", and "Heavy activity
+// DUE TO moisture was observed today" asserts current heavy — only true
+// modals and expectation verbs read backward onto their subject.
+const LEVEL_CLAIM_AFTER_INTENT_RE = /\b(?:will|shall|may|might|could|can|should|expect(?:s|ed|ing)?|anticipate[sd]?|typical(?:ly)?|usual(?:ly)?)\b/i;
 function intentGovernsLevelClaimFromAfter(afterText) {
-  const re = new RegExp(LEVEL_CLAIM_INTENT_RE.source, 'gi');
+  const re = new RegExp(LEVEL_CLAIM_AFTER_INTENT_RE.source, 'gi');
   const first = re.exec(afterText);
   if (!first) return false;
   const gap = afterText.slice(0, first.index).replace(/[,;]/g, '');

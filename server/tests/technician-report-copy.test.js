@@ -564,6 +564,47 @@ describe('typed snapshot — technician report body in the generic tail composit
     )).not.toHaveProperty('bodySource');
   });
 
+  // Round-3 #3358 findings, pinned as a matrix straight on the guards.
+  test('station guard round 3: locations, totals, evidence forms, scope, and active inaccessible (codex #3358 r3)', () => {
+    const { countContradictions } = require('../services/service-report/activity-indicators');
+    const silent = [
+      ['Feeding was found at 2 bait stations on the property line.', { total_stations: '12', stations_with_activity: '2' }],
+      ['We refreshed bait at 4 stations around the property perimeter.', { total_stations: '12' }],
+      ['10 of the 12 bait stations were checked.', { stations_checked: '10' }],
+      ['3 bait stations showed no signs of activity.', { stations_with_activity: '0' }],
+      ['We will continue monitoring activity at 3 bait stations.', { stations_with_activity: '1' }],
+      ['No signs of termite activity were found at 3 bait stations.', { stations_with_activity: '0' }],
+    ];
+    for (const [text, values] of silent) {
+      expect(countContradictions(text, values)).toEqual([]);
+    }
+    const claims = [
+      ['A total of 12 bait stations were checked today.', { stations_checked: '10' }],
+      ['3 bait stations showed signs of activity.', { stations_with_activity: '1' }],
+      ['3 bait stations had evidence of termite activity.', { stations_with_activity: '1' }],
+      ['We could not access 2 bait stations today.', { stations_inaccessible: '1' }],
+      ['We were unable to reach 2 bait stations.', { stations_inaccessible: '1' }],
+    ];
+    for (const [text, values] of claims) {
+      expect(countContradictions(text, values)).not.toEqual([]);
+    }
+  });
+
+  test('intent scoping round 3: causal due-to refused, band transitions governed (codex #3358 r3)', () => {
+    const { activityLevelContradictions } = require('../services/service-report/activity-indicators');
+    // "due to moisture" is causal — the sentence asserts current heavy.
+    expect(activityLevelContradictions('Heavy activity due to moisture was observed today.', 1))
+      .not.toEqual([]);
+    // Transition modals whose result is the band stay governed…
+    expect(activityLevelContradictions('Activity may reach heavy levels without continued treatment.', 1))
+      .toEqual([]);
+    expect(activityLevelContradictions('Roach activity could escalate to heavy levels if untreated.', 1))
+      .toEqual([]);
+    // …while the current-state "from" reference stays refused.
+    expect(activityLevelContradictions('Activity may decrease from the heavy activity observed today.', 1))
+      .not.toEqual([]);
+  });
+
   test('negated and subject-position intent qualifiers stay governed (codex #3358)', () => {
     const base = {
       projectType: 'cockroach',
