@@ -583,6 +583,54 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  test('a payment-pending reserved palm visit (estimate provenance only) is ADOPTED and retargeted, never replaced (codex r18 pre-push P0)', async () => {
+    // The sold first visit of a not-yet-activated term carries only
+    // source_estimate_id — no term link, no prepaid stamp, no identity.
+    // Estimate provenance counts as commitment: the visit is adopted into
+    // coverage and backfilled, instead of being excluded (which would
+    // seed a replacement and leave the sold visit separately billable).
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, source_estimate_id: 'est-42', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
+      services: [
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-resv',
+      customer_id: 'customer-palm',
+      source_estimate_id: 'est-42',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved']);
+  });
+
   test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {
     const columnQuery = query({
       columnInfo: {

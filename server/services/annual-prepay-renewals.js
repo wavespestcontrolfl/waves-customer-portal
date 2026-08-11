@@ -384,6 +384,18 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   return dates;
 }
 
+// A scheduled row COMMITTED to a term: linked by id, prepaid-stamped, or
+// sharing the term's source estimate (codex r18 pre-push P0 — a
+// payment-pending term's reserved/sold first visit carries only
+// source_estimate_id; excluding it would seed replacement visits and
+// leave the sold visit separately billable).
+function rowCommittedToTerm(term, row) {
+  return (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD)
+    || (term?.source_estimate_id != null && row.source_estimate_id != null
+      && String(row.source_estimate_id) === String(term.source_estimate_id));
+}
+
 // Palm coverage family detection, shared by coverage matching and the
 // seeding identity guard (codex r18 pre-push P0/P1): word-boundary
 // fallback keeps 'Palmetto…' service types out when the resolver errors.
@@ -416,9 +428,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? rows
     : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  const isCommittedToTerm = (row) =>
-    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
-    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
   let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
   // PALM coverage candidates require identity or provenance (codex r18
   // pre-push P0): matching is by service-type TEXT, and Waves sells
@@ -803,8 +813,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // suppressed. Only a row already attached to THIS term retargets;
       // rows with no identity evidence at all (name-only) remain the
       // original r15 case.
-      const committedToTerm = (row) => term?.id != null
-        && String(row.annual_prepay_term_id) === String(term.id);
+      const committedToTerm = (row) => rowCommittedToTerm(term, row);
       const retargetable = (row) => row && row.id
         && (
           (!row.service_id && !row.service_key_snapshot)
@@ -947,7 +956,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     && (!coverageIsPalm
       || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
-      || (term?.id != null && String(row.annual_prepay_term_id) === String(term.id)));
+      || rowCommittedToTerm(term, row));
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;

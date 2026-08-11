@@ -573,7 +573,16 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   if (kind !== 'recurring' && price == null) return null;
 
   const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
-  const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // The matched catalog row's own cadence beats the hardcoded quarterly
+  // fallback (codex r18 pre-push P0): a bare explicit semiannual palm
+  // selection carries no line cadence data, and a quarterly prefill on a
+  // two-application identity would book four visits. Preferring the
+  // identity's frequency keeps service id and cadence agreeing whenever
+  // the line itself is silent; lines WITH cadence data are untouched.
+  const catalogCadence = kind === 'recurring' && rawMatched?.frequency
+    ? cadenceFromEstimateLine({ frequency: rawMatched.frequency }, null)
+    : null;
+  const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, catalogCadence || 'quarterly') : 'one_time';
   // Never stamp the monthly catalog identity on a seasonal mosquito line
   // (codex r16 P2): the seasonal row is normally in the index (queried
   // explicitly despite is_active=false), but a fuzzy hit on mosquito_monthly
