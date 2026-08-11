@@ -162,7 +162,11 @@ async function runBondRenewalSweep() {
           first_name: String(bond.first_name || '').trim() || 'there',
           bond_term: bond.service_type,
           renewal_date: displayDate(bond.renews_at),
-          renewal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
+          // Land on the My Plan tab, where the bond card lives
+          // (GATE_PORTAL_TERMITE_BOND). Unauthenticated clicks survive the
+          // round-trip: ProtectedRoute redirects to /login?next=<this path>
+          // and LoginPage navigates back after the SMS code.
+          renewal_url: `${FALLBACK_PORTAL_HOME_URL}/?tab=plan`,
           customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
           company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         },

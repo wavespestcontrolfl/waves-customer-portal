@@ -95,6 +95,19 @@ describe('runBondRenewalSweep blocked-send handling', () => {
     }));
   });
 
+  test('"Renew my bond" CTA deep-links to the My Plan bond card, not bare login', async () => {
+    // The portal bond card lives on the My Plan tab
+    // (GATE_PORTAL_TERMITE_BOND); /login?next= round-trips the tab param
+    // for logged-out clicks. "View my account" stays on plain login.
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+
+    await runBondRenewalSweep();
+
+    const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/?tab=plan');
+    expect(args.payload.customer_portal_url).toBe('https://portal.wavespestcontrol.com/login');
+  });
+
   test('first attempt uses the STABLE key (sent-but-unstamped rows dedupe, no double email)', async () => {
     // Prior run sent the email but died before stamping: the stable key
     // dedupes as sent:true and the stamp gets retried — one email total.

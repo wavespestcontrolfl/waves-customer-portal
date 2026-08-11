@@ -416,6 +416,55 @@ router.get('/station-map', async (req, res, next) => {
   }
 });
 
+// GET /api/property/termite-bond — the authenticated customer's active
+// termite bond(s) for the My Plan coverage card: term, start, and renewal
+// dates only. Coverage TERMS stay out of the payload on purpose — the card
+// holds the same generic-coverage line as the renewal email
+// (termite.bond_renewal): specifics are a conversation, not portal copy.
+// Dark behind GATE_PORTAL_TERMITE_BOND (default OFF), same convention as
+// GATE_PORTAL_STATION_MAP above; gate-off and no-bond both answer 200
+// {available:false} — the client renders nothing rather than an error.
+function portalTermiteBondEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.GATE_PORTAL_TERMITE_BOND || '').trim().toLowerCase());
+}
+
+// termite_bonds.started_at / renews_at are ET business-calendar DATEs; pg
+// returns them as 'YYYY-MM-DD' strings or Date objects at UTC midnight.
+// Slice in UTC — an ET-aware formatter would shift them back a day.
+function bondDateString(d) {
+  const s = d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+router.get('/termite-bond', async (req, res, next) => {
+  try {
+    if (!portalTermiteBondEnabled()) {
+      return res.json({ available: false, reason: 'disabled', bonds: [] });
+    }
+    // Fail-soft: a bonds query error renders no card, never a broken tab.
+    const rows = await db('termite_bonds')
+      .where({ customer_id: req.customerId, status: 'active' })
+      .orderBy('renews_at', 'desc')
+      .select('service_type', 'term_years', 'started_at', 'renews_at', 'status')
+      .catch(() => []);
+    const bonds = rows
+      .map((r) => ({
+        serviceType: r.service_type,
+        termYears: Number(r.term_years) || 1,
+        startedAt: bondDateString(r.started_at),
+        renewsAt: bondDateString(r.renews_at),
+        status: r.status,
+      }))
+      .filter((b) => b.startedAt && b.renewsAt);
+    if (!bonds.length) {
+      return res.json({ available: false, reason: 'no_bond', bonds: [] });
+    }
+    return res.json({ available: true, bonds });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
 
 module.exports._private = {
