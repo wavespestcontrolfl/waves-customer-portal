@@ -999,3 +999,54 @@ describe('phoneReuseStillValidOnLockedRow — the phone arm revalidated under th
     expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-1' }, { ...args, customerId: 'cust-1' })).toBe(true);
   });
 });
+
+describe('deriveStampLinkAuthority — authority from the selecting arm, never bare phone presence', () => {
+  const { deriveStampLinkAuthority } = CallRecordingProcessor._test;
+  const PHONE = '+19415550101';
+
+  test('phone-arm selection is phone authority (revalidated under the lock)', () => {
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'phone', priorStampedLeadVia: null,
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+  });
+
+  test('a NON-matching phone on an email-authorized stamp does NOT upgrade (the r4 P1)', () => {
+    // Spouse's callback number on a retry of an email-linked lead: the
+    // number never corroborated this linkage — upgrading from presence
+    // alone handed later customer-less retries the relaxed ownership rule.
+    expect(deriveStampLinkAuthority({
+      phone: '+19415550999', existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
+  });
+
+  test('stamp-selected rows corroborate via the locked lead\'s number or a phone the pass writes', () => {
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: null, writesPhone: true,
+    })).toBe('phone');
+  });
+
+  test('prior phone authority survives a phone-less retry; legacy stamps stay strict', () => {
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'phone',
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: null,
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
+  });
+
+  test('a fresh email-arm stamp records email', () => {
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'email', priorStampedLeadVia: null,
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
+  });
+});

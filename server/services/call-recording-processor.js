@@ -2382,6 +2382,30 @@ function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclai
   return true;
 }
 
+// Derives the authority a stamp records (metadata.lead_link_via) from the
+// SELECTING ARM, never from bare phone presence (pre-push P1 on r4): a
+// retry can carry a resolved phone that has nothing to do with the lead —
+// a spouse's callback number on an email-authorized stamp — and stamping
+// 'phone' from presence alone would hand later customer-less retries the
+// relaxed ownership rule for a linkage the number never corroborated.
+// 'phone' requires actual corroboration THIS pass: the phone arm selected
+// the row (revalidated under the lock), the locked lead already carries
+// the caller's number, or this pass's enrichment writes it (fill-only —
+// the lead will carry it from here on). Otherwise a stamp-selected row
+// PRESERVES its prior authority (a historical phone corroboration stands
+// through a phone-less retry; a legacy/via-less stamp stays strict as
+// 'email'), and a fresh email-arm stamp records 'email'.
+function deriveStampLinkAuthority({ phone, existingLeadVia, priorStampedLeadVia, lockedLeadPhone, writesPhone }) {
+  const phoneCorroborated = !!phone && (
+    existingLeadVia === 'phone'
+    || String(lockedLeadPhone || '') === String(phone)
+    || !!writesPhone
+  );
+  if (phoneCorroborated) return 'phone';
+  if (existingLeadVia === 'same_call_stamp' && priorStampedLeadVia === 'phone') return 'phone';
+  return 'email';
+}
+
 // The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
 // later attempt rejects the call. One list so the stamp and the restore can
@@ -9281,12 +9305,12 @@ const CallRecordingProcessor = {
                     // moved-link branch below consumes it this same
                     // transaction.
                     // lead_link_via records the AUTHORITY that linked this
-                    // call to the lead (codex P2): 'phone' when this pass
-                    // carries the caller's number (a gained-phone re-stamp
-                    // upgrades the authority — the number now corroborates
-                    // the link), 'email' otherwise. Retry eligibility for a
-                    // phone-authorized stamp keeps the phone path's
-                    // ownership rules; email/legacy stamps stay strict.
+                    // call to the lead (codex P2), derived from the
+                    // SELECTING ARM by deriveStampLinkAuthority — never
+                    // from bare phone presence (pre-push P1 on r4). Retry
+                    // eligibility for a phone-authorized stamp keeps the
+                    // phone path's ownership rules; email/legacy stamps
+                    // stay strict.
                     metadata: db.raw(
                       "(jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
@@ -9298,7 +9322,14 @@ const CallRecordingProcessor = {
                         String(leadId), JSON.stringify(prior), JSON.stringify(prior),
                         String(leadId), JSON.stringify(written), JSON.stringify(written),
                         String(leadId), nextSeq, nextSeq,
-                        JSON.stringify(phone ? 'phone' : 'email'),
+                        JSON.stringify(deriveStampLinkAuthority({
+                          phone,
+                          existingLeadVia,
+                          priorStampedLeadVia,
+                          lockedLeadPhone: lockedLead?.phone,
+                          writesPhone: Object.prototype.hasOwnProperty.call(effectiveUpdates, 'phone')
+                            && String(effectiveUpdates.phone || '') === String(phone),
+                        })),
                       ],
                     ),
                     updated_at: new Date(),
@@ -13634,6 +13665,7 @@ CallRecordingProcessor._test = {
   reaffirmedFilledLeadFields,
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
+  deriveStampLinkAuthority,
   parseStampedLeadId,
   parseStampedLeadLink,
   phoneReuseStillValidOnLockedRow,
