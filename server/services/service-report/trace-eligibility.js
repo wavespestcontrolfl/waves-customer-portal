@@ -574,23 +574,49 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
   // geometry (codex P2 r19, extended to the add-on rescue path in r20):
   // the render path trusts capture_mode for its presentation. Absent mode
   // (legacy clients) passes.
-  const modeMismatchBlock = (variant) => {
+  const modeMismatchBlock = (satVerdict) => {
     if (captureMode === undefined || captureMode === null || captureMode === '') return null;
+    const { variant, captionKey } = satVerdict;
     // 'yard' is the mosquito outline capture (owner 2026-08-11) — an area
     // claim like the lawn modes, so it satisfies an 'outline' verdict.
     const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight' || captureMode === 'yard';
     const wantsLawn = variant === 'outline';
-    if (lawnMode === wantsLawn) return null;
-    return {
-      status: 400,
-      payload: {
-        error: wantsLawn
-          ? 'This service maps the treated area — use the lawn outline workflow, not the perimeter tracer.'
-          : 'This service maps the treated perimeter — use the perimeter tracer, not the lawn outline workflow.',
-        code: 'trace_capture_mode_mismatch',
-        reason: variant,
-      },
-    };
+    if (lawnMode !== wantsLawn) {
+      return {
+        status: 400,
+        payload: {
+          error: wantsLawn
+            ? 'This service maps the treated area — use the lawn outline workflow, not the perimeter tracer.'
+            : 'This service maps the treated perimeter — use the perimeter tracer, not the lawn outline workflow.',
+          code: 'trace_capture_mode_mismatch',
+          reason: variant,
+        },
+      };
+    }
+    // Within the outline family, yard and lawn are NOT interchangeable
+    // (codex P2 r2 on #3354): the report trusts capture_mode for its
+    // coverage claim, so a mosquito trace stamped 'lawn' would publish
+    // "treated lawn area" for a yard treatment, and a 'yard' stamp on a
+    // lawn/flea lane would claim beds the visit never covered. The
+    // winning verdict's captionKey is the discriminator — same field the
+    // feed hands the client to pick the workflow.
+    if (wantsLawn) {
+      const wantsYard = captionKey === 'yardCoverage';
+      const postedYard = captureMode === 'yard';
+      if (wantsYard !== postedYard) {
+        return {
+          status: 400,
+          payload: {
+            error: wantsYard
+              ? 'This service maps the treated yard — lawn and landscape beds. Re-open the mapper to use the yard outline workflow.'
+              : 'This service maps the treated lawn — use the lawn outline workflow, not the yard tracer.',
+            code: 'trace_capture_mode_mismatch',
+            reason: wantsYard ? 'yard' : 'lawn',
+          },
+        };
+      }
+    }
+    return null;
   };
   // The 'photo' variant is eligible for a treated-point map but NOT for the
   // satellite tracer — foam has no perimeter and no area to trace. Without
@@ -638,7 +664,7 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
     // (resolveTraceRenderVerdict) surfaces already hold this line; capture was
     // the one that leaked.
     if (!traceEligibilityGateOn()) return null;
-    return modeMismatchBlock(capabilities.satellite.variant);
+    return modeMismatchBlock(capabilities.satellite);
   }
   // Photo-only: nothing on this visit supports a trace. This block is what the
   // marks gate legitimately introduces, so it stands on the photo gate alone.

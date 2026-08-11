@@ -793,6 +793,56 @@ describe('classification behavior', () => {
     }
   });
 
+  test('yard and lawn capture modes are not interchangeable within the outline family (codex P2 #3354)', async () => {
+    const prev = process.env.GATE_TRACE_ELIGIBILITY;
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    try {
+      // Mosquito lane wants 'yard': a stale client posting 'lawn' would
+      // publish "treated lawn area" for a yard treatment.
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'mosquito_monthly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, { captureMode: 'lawn' },
+        )).toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'yard' } });
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, { captureMode: 'yard' },
+        )).toBeNull();
+        // absent mode (legacy clients) still passes
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, {},
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+      jest.resetModules();
+      // Lawn lane wants lawn modes: 'yard' would claim beds the visit
+      // never covered.
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'lawn_care_monthly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Lawn Care Monthly' }, null, { captureMode: 'yard' },
+        )).toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'lawn' } });
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Lawn Care Monthly' }, null, { captureMode: 'lawn_highlight' },
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prev;
+      jest.resetModules();
+    }
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))

@@ -2730,7 +2730,8 @@ function emptyCaptureExempt(str, index) {
 // prose ("low areas of the yard") from costing the tech their copy unless
 // it actually contradicts the record. Claims are judged per clause and
 // only in clauses that talk about activity/infestation/pressure;
-// future/conditional intent and prior-visit references are exempt.
+// future/conditional intent and prior-visit references exempt a claim
+// only when they actually govern it (see the scoping rules below).
 // Refusal falls back to the deterministic template — a completion is
 // never blocked on copy — and the tech's confirmed reconciliation prompt
 // overrides this screen like every other (a person reviewed the
@@ -2742,12 +2743,22 @@ const LEVEL_CLAIM_BANDS = {
 };
 const LEVEL_CLAIM_WORD_RE = /\b(very\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)\b(?!-)/gi;
 const LEVEL_CLAIM_NOUN_RE = /\b(?:activity|infestation|pressure)\b/i;
-const LEVEL_CLAIM_EXEMPT_RE = new RegExp(
+// Exemptions scope to the CLAIM they qualify, not the whole clause (codex
+// P1 r2 on #3354: "activity was heavy today and can continue between
+// visits" must not let the trailing "can" launder the completed heavy
+// claim). Intent/conditional markers govern only what FOLLOWS them, so
+// they exempt a claim only from the span BEFORE it ("may be heavy" — yes;
+// "was heavy … and can continue" — no). A prior-visit reference qualifies
+// its claim from either side but only NEARBY — "was heavy at our last
+// visit" — so it exempts from the before-span or a short window after the
+// claim, never from the far end of a long clause.
+const LEVEL_CLAIM_INTENT_RE = new RegExp(
   `${EMPTY_CAPTURE_INTENT_RE.source}`
-  + '|\\b(?:last|previous|prior|initial|first|earlier)\\s+(?:visit|service|stop|check|treatment)\\b'
   + '|\\b(?:typical(?:ly)?|usual(?:ly)?|may|might|could|can)\\b',
   'i',
 );
+const LEVEL_CLAIM_PRIOR_VISIT_RE = /\b(?:last|previous|prior|initial|first|earlier)\s+(?:visit|service|stop|check|treatment)\b/i;
+const LEVEL_CLAIM_PRIOR_VISIT_WINDOW = 48;
 function levelBandForScore(score) {
   if (!Number.isInteger(score) || score < 1) return null;
   if (score >= 4) return 3;
@@ -2759,13 +2770,18 @@ function activityLevelContradictions(text, finalBand) {
   const found = [];
   for (const clause of clauses(String(text || ''))) {
     if (!LEVEL_CLAIM_NOUN_RE.test(clause)) continue;
-    if (LEVEL_CLAIM_EXEMPT_RE.test(clause)) continue;
     for (const match of clause.matchAll(LEVEL_CLAIM_WORD_RE)) {
       const word = match[1].toLowerCase().replace(/\s+/g, ' ');
       const claimBand = LEVEL_CLAIM_BANDS[word];
-      if (claimBand && Math.abs(claimBand - finalBand) >= 2) {
-        found.push(`level_claim_mismatch:${word}`);
-      }
+      if (!claimBand || Math.abs(claimBand - finalBand) < 2) continue;
+      const before = clause.slice(0, match.index);
+      const after = clause.slice(
+        match.index + match[0].length,
+        match.index + match[0].length + LEVEL_CLAIM_PRIOR_VISIT_WINDOW,
+      );
+      if (LEVEL_CLAIM_INTENT_RE.test(before)) continue;
+      if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
+      found.push(`level_claim_mismatch:${word}`);
     }
   }
   return found;

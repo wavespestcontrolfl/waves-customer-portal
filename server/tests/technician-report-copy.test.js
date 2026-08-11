@@ -436,6 +436,35 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(adjacent.bodySource).toBe('technician_report');
   });
 
+  test('an exemption word AFTER the claim does not launder it (codex P1 r2)', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Cockroach activity was heavy today and can continue between visits without treatment. '
+        + 'We applied gel bait behind the appliances.',
+    });
+    expect(result.body).not.toContain('heavy');
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('an intent marker BEFORE the claim still exempts it', () => {
+    const result = buildTodaysResult({
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+      technicianReportBody: 'Without continued treatment, activity may become heavy again. '
+        + 'We applied gel bait behind the appliances.',
+    });
+    expect(result.bodySource).toBe('technician_report');
+  });
+
   test('prior-visit and conditional level references are exempt from the screen', () => {
     const result = buildTodaysResult({
       projectType: 'cockroach',
