@@ -710,6 +710,49 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
   });
 
+  test('LOST-CLAIM webhook-first race: the webhook wins between the browser\'s read and its claim — the echo still records (Codex #3342 r9)', async () => {
+    // Initial read sees pending, so the completed-row recovery in
+    // completeSecureCardCapture never runs; the claim then misses because
+    // the webhook completed the row (non-sticky, no echo available). The
+    // lost-claim path must route the fresh completed row through the same
+    // consent-echo recording, or this interleaving silently keeps the
+    // reschedule-then-cancel dodge.
+    mockRetrieveSetupIntent.mockResolvedValueOnce(GOOD_INTENT);
+    let reads = 0;
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      if (reads === 1) return { ...REQUEST }; // still pending at the browser's read
+      return {
+        id: 'req-1', status: 'completed', updated_at: new Date(),
+        stripe_setup_intent_id: 'seti_1', fee_agreed_at: new Date(), sticky_window_disclosed: false,
+      };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => {
+      updates.push(patch);
+      return patch.status === 'completing' ? 0 : 1; // the webhook won the claim
+    };
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(updates.some((p) => p.sticky_window_disclosed === true)).toBe(true);
+  });
+
+  test('LOST-CLAIM webhook-first race: a failed echo write NACKs here too — never acked as recorded', async () => {
+    mockRetrieveSetupIntent.mockResolvedValueOnce(GOOD_INTENT);
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      if (reads === 1) return { ...REQUEST };
+      return {
+        id: 'req-1', status: 'completed', updated_at: new Date(),
+        stripe_setup_intent_id: 'seti_1', fee_agreed_at: new Date(), sticky_window_disclosed: false,
+      };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 0);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+  });
+
   test('webhook-first race: a mismatched SetupIntent or missing echo records NOTHING on the completed row', async () => {
     const updates = [];
     mockTableHandlers.appointment_card_requests.first = () => ({

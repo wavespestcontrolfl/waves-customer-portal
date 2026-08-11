@@ -843,6 +843,41 @@ async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason 
   } catch (e) { logger.warn(`[appt-card-request] capture review alert failed: ${e.message}`); }
 }
 
+// Records the browser's attested disclosure echo on a row the WEBHOOK
+// completed — the webhook tail carries no echo and stamps non-sticky, so
+// the confirming tab's later/racing POST is the only consent artifact.
+// Shared by BOTH webhook-first interleavings (Codex #3342 r9 P1): the row
+// already completed at the browser's initial read, AND the webhook winning
+// between that read and the browser's pending→completing claim. The echo
+// is pinned to the SAME SetupIntent the row completed with (proof this is
+// the confirming tab), never applied to satisfied rows (no fee disclosure
+// at all). ok:false (consent_echo_failed) means the caller must NOT ack —
+// the client keeps its 3DS params on the NACK and a reload retries the
+// idempotent /complete.
+async function recordWebhookFirstConsentEcho({ row, setupIntentId, disclosureVersion }) {
+  if (
+    row?.status !== 'completed'
+    || disclosureVersion !== STICKY_DISCLOSURE_VERSION
+    || !setupIntentId
+    || row.stripe_setup_intent_id !== setupIntentId
+    || !row.fee_agreed_at
+    || row.sticky_window_disclosed
+  ) return { ok: true };
+  try {
+    const upgraded = await db('appointment_card_requests')
+      .where({ id: row.id, status: 'completed', stripe_setup_intent_id: setupIntentId })
+      .update({ sticky_window_disclosed: true, updated_at: new Date() });
+    if (upgraded !== 1) {
+      logger.warn(`[appt-card-request] webhook-first consent echo matched ${upgraded} rows for request ${row.id} — not acking`);
+      return { ok: false, code: 'consent_echo_failed' };
+    }
+  } catch (err) {
+    logger.warn(`[appt-card-request] webhook-first consent echo record failed for request ${row.id}: ${err.message}`);
+    return { ok: false, code: 'consent_echo_failed' };
+  }
+  return { ok: true };
+}
+
 // POST /secure/:token completion. Verify live, then the shared completion
 // tail below.
 async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
@@ -855,33 +890,8 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
     // AUTHORITATIVE consent artifact — record it idempotently, pinned to
     // the SAME SetupIntent this row completed with (proof it is the
     // confirming tab), never on satisfied rows (no fee disclosure at all).
-    if (
-      request.status === 'completed'
-      && disclosureVersion === STICKY_DISCLOSURE_VERSION
-      && setupIntentId
-      && request.stripe_setup_intent_id === setupIntentId
-      && request.fee_agreed_at
-      && !request.sticky_window_disclosed
-    ) {
-      // This write is the ONLY path that records the browser's consent for
-      // a webhook-first completion — swallowing a failure while acking
-      // success loses the disclosed sticky window for good (pre-push r8
-      // P1): the client keeps its 3DS params only on failure, so a NACK
-      // here is what makes the retry (an idempotent /complete re-POST on
-      // reload) possible. Verify exactly one row moved before acking.
-      try {
-        const upgraded = await db('appointment_card_requests')
-          .where({ id: request.id, status: 'completed', stripe_setup_intent_id: setupIntentId })
-          .update({ sticky_window_disclosed: true, updated_at: new Date() });
-        if (upgraded !== 1) {
-          logger.warn(`[appt-card-request] webhook-first consent echo matched ${upgraded} rows for request ${request.id} — not acking`);
-          return { ok: false, code: 'consent_echo_failed' };
-        }
-      } catch (err) {
-        logger.warn(`[appt-card-request] webhook-first consent echo record failed for request ${request.id}: ${err.message}`);
-        return { ok: false, code: 'consent_echo_failed' };
-      }
-    }
+    const echo = await recordWebhookFirstConsentEcho({ row: request, setupIntentId, disclosureVersion });
+    if (!echo.ok) return echo;
     return { ok: true, alreadyCompleted: true };
   }
 
@@ -1027,8 +1037,20 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     : claimQuery.where({ selected_plan: request.selected_plan });
   let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
   if (claimed !== 1) {
-    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status', 'updated_at');
-    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+    const fresh = await db('appointment_card_requests').where({ id: request.id })
+      .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed');
+    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') {
+      // The webhook won BETWEEN this call's initial read (still pending)
+      // and the claim above (Codex #3342 r9 P1) — its completion tail
+      // carried no echo and stamped non-sticky, and the initial-read
+      // recovery in completeSecureCardCapture never saw a completed row.
+      // Record the browser's echo here too, or this interleaving silently
+      // keeps the reschedule-then-cancel dodge. The webhook caller passes
+      // no disclosureVersion, so this is a no-op on that path.
+      const echo = await recordWebhookFirstConsentEcho({ row: fresh, setupIntentId, disclosureVersion });
+      if (!echo.ok) return echo;
+      return { ok: true, alreadyCompleted: true };
+    }
     // Stale-claim lease (Codex #2771 r4): a worker killed between the
     // claim and the completed/revert write strands the row 'completing'
     // forever, and both retry paths would spin on completion_in_progress.
