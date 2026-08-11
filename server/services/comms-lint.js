@@ -50,6 +50,34 @@ const URL_SHORTENER_HOSTS = [
 
 const SMS_SEGMENT_LIMIT = 2; // owner ruling: 2 segments is fine, 3+ is not
 
+// Bare-host detection for the SMS link-scheme rule. The ruling is
+// direction-specific: OUR portal link goes bare, every third-party link
+// keeps https:// (a bare host won't preview). Own-domain hosts are exempt
+// (they're the "goes bare" side of the ruling), and the TLD list is
+// deliberately short and conservative — a false positive on prose
+// ("no.problem") costs more than a missed exotic TLD nothing we send uses.
+const BARE_EXEMPT_HOST_RE = /(?:^|\.)wavespestcontrol\.com$/i;
+const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app'];
+const BARE_HOST_RE = new RegExp(
+  `(?:^|[\\s(])((?:[a-z0-9][a-z0-9-]*\\.)+(?:${BARE_HOST_TLDS.join('|')}))(?=[\\s).,!?:;'"]|/|$)`,
+  'gim'
+);
+
+/** First bare (scheme-less) third-party host in the text, or null. */
+function findBareThirdPartyHost(text) {
+  // Scheme-qualified URLs already satisfy the rule and email addresses are
+  // not links — remove both before scanning for what's left bare.
+  const stripped = String(text || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\S+@\S+/g, ' ');
+  BARE_HOST_RE.lastIndex = 0;
+  let m;
+  while ((m = BARE_HOST_RE.exec(stripped)) !== null) {
+    if (!BARE_EXEMPT_HOST_RE.test(m[1])) return m[1];
+  }
+  return null;
+}
+
 function isGsm7(text) {
   return detectEncoding(String(text ?? '')).encoding === 'GSM_7';
 }
@@ -99,9 +127,9 @@ const RULES = [
       if (/https?:\/\/portal\.wavespestcontrol\.com/i.test(text)) {
         return 'portal link carries a scheme — portal.wavespestcontrol.com goes bare in SMS';
       }
-      // Third-party links keep their scheme: a bare g.page won't preview.
-      const bareGPage = text.replace(/https?:\/\/g\.page/gi, '').match(/(?:^|[^/.\w])g\.page/i);
-      return bareGPage ? 'bare g.page link — third-party links keep https:// in SMS' : null;
+      // Third-party links keep their scheme: a bare host won't preview.
+      const bare = findBareThirdPartyHost(text);
+      return bare ? `bare ${bare} link — third-party links keep https:// in SMS` : null;
     },
   },
   {
@@ -209,4 +237,4 @@ function lintFlags(text, context = {}) {
   }));
 }
 
-module.exports = { lintComms, lintFlags, smsSegmentCount, isGsm7, RULES, URL_SHORTENER_HOSTS };
+module.exports = { lintComms, lintFlags, smsSegmentCount, isGsm7, findBareThirdPartyHost, RULES, URL_SHORTENER_HOSTS };

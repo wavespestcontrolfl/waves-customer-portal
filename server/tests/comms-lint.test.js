@@ -58,6 +58,26 @@ describe('lintComms mechanics', () => {
     expect(r.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('flags any bare third-party host, not just g.page', () => {
+    const r = lintComms('Leave us a review at trustpilot.com when you get a chance.', { channel: 'sms', audience: 'customer' });
+    const hit = r.failures.find((f) => f.rule === 'portal-link-scheme');
+    expect(hit).toBeDefined();
+    expect(hit.reason).toContain('trustpilot.com');
+  });
+
+  it('exempts scheme-qualified links, email addresses, and own-domain hosts from the bare-host rule', () => {
+    const r = lintComms(
+      'Pay at portal.wavespestcontrol.com, review us at https://maps.google.com/waves, or email contact@wavespestcontrol.com.',
+      { channel: 'sms', audience: 'customer' }
+    );
+    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+  });
+
+  it('does not read prose abbreviations or TLD-prefixed words as bare hosts', () => {
+    const r = lintComms('No.problem at all. Communication is key, e.g. we text before arrival.', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+  });
+
   it('produces flags-array entries in the consumer shape', () => {
     const flags = lintFlags('So excited!! 🎉', { channel: 'sms', audience: 'customer' });
     expect(flags.length).toBeGreaterThan(0);
