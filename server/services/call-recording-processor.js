@@ -12835,16 +12835,30 @@ const CallRecordingProcessor = {
                     service_interest: extracted.matched_service || extracted.requested_service || null,
                     repair_of_rejection: true,
                   };
+                  // The EXACT row the rejection demoted on this lead
+                  // (codex P1 r32) — the sweep's reclaim is conditioned
+                  // on this identity, never on "some legacy row on the
+                  // lead": a reused lead's pre-migration or web
+                  // acquisition row is unprovenanced too, and seizing it
+                  // overwrites another acquisition's owner and
+                  // dimensions. No recorded demote on this lead means
+                  // there is nothing of this call's to reclaim.
+                  const demotedRecorded = Array.isArray(mdRaw.no_attribution_demoted_rows)
+                    ? mdRaw.no_attribution_demoted_rows.find(
+                      (d) => d && d.id && String(d.lead_id) === String(target),
+                    )
+                    : null;
+                  if (demotedRecorded) repairPayload.reclaim_row_id = String(demotedRecorded.id);
                 }
               }
             }
             await trx('call_log').where({ id: call.id }).update({
               metadata: repairPayload
                 ? db.raw(
-                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids', '{attribution_transfer_pending}', ?::jsonb, true)",
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows', '{attribution_transfer_pending}', ?::jsonb, true)",
                   [JSON.stringify(repairPayload)],
                 )
-                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids'"),
+                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows'"),
             });
           }
         }
@@ -12865,7 +12879,15 @@ const CallRecordingProcessor = {
             .select('lead_id'))
             .map((r) => String(r.lead_id)),
         )];
-        await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+        // WHICH rows the retire DEMOTED to legacy, by exact id (codex P1
+        // r32): a lead id alone is not enough for the later reclaim — a
+        // reused lead can carry OTHER unprovenanced rows (pre-migration,
+        // web acquisition), and "some legacy row on the lead" seized an
+        // unrelated acquisition's row and overwrote its owner and
+        // dimensions. Only a row this rejection itself demoted is provably
+        // this call's history.
+        const demotedRows = [];
+        await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id, { demoted: demotedRows });
         // Durable no-attribution verdict, same transaction (pre-push P1
         // r14): the google bridge would otherwise re-join this call's
         // sid-linked lead on its next scan and recreate the row just
@@ -12875,14 +12897,23 @@ const CallRecordingProcessor = {
         await trx('call_log')
           .where({ id: call.id })
           .update({
-            metadata: retiredLeadIds.length
-              ? db.raw(
-                "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true)",
-                [JSON.stringify(retiredLeadIds)],
-              )
-              : db.raw(
-                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
-              ),
+            metadata: (() => {
+              if (!retiredLeadIds.length) {
+                return db.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
+                );
+              }
+              if (!demotedRows.length) {
+                return db.raw(
+                  "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true)",
+                  [JSON.stringify(retiredLeadIds)],
+                );
+              }
+              return db.raw(
+                "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true), '{no_attribution_demoted_rows}', ?::jsonb, true)",
+                [JSON.stringify(retiredLeadIds), JSON.stringify(demotedRows)],
+              );
+            })(),
           });
       }
       return written;

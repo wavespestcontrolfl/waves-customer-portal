@@ -12,6 +12,8 @@ let lockedCallRow = null;
 let provenancedRow = null; // ad_service_attribution first for {source_call_id}
 let legacyRowByLead = {}; // fromLeadId -> legacy NULL-provenance row
 let existingByLead = {}; // leadId -> existing funnel row (record's dedup lookup)
+let asaRowById = {}; // rowId -> row (the reclaim's exact-identity recheck)
+let asaUpdateResult = 1; // rows matched by ad_service_attribution updates
 const updates = [];
 const inserts = [];
 
@@ -40,13 +42,21 @@ const mockDb = jest.fn((table) => {
       const bySource = whereObj('source_call_id');
       if (bySource !== undefined) return provenancedRow || undefined;
       const byLead = whereObj('lead_id');
-      const wantsNullProvenance = b._wheres.some((x) => x[0] === 'whereNull' && x[1] === 'source_call_id');
-      if (wantsNullProvenance) return legacyRowByLead[byLead] || undefined;
-      return existingByLead[byLead] || undefined;
+      if (byLead !== undefined) {
+        const wantsNullProvenance = b._wheres.some((x) => x[0] === 'whereNull' && x[1] === 'source_call_id');
+        if (wantsNullProvenance) return legacyRowByLead[byLead] || undefined;
+        return existingByLead[byLead] || undefined;
+      }
+      const byId = whereObj('id');
+      if (byId !== undefined) return asaRowById[byId] || undefined;
+      return undefined;
     }
     return undefined;
   };
-  b.update = (patch) => { updates.push({ table, wheres: b._wheres.slice(), patch }); return Promise.resolve(1); };
+  b.update = (patch) => {
+    updates.push({ table, wheres: b._wheres.slice(), patch });
+    return Promise.resolve(table === 'ad_service_attribution' ? asaUpdateResult : 1);
+  };
   b.insert = (row) => { inserts.push({ table, row }); return b; };
   b.onConflict = () => b;
   b.ignore = () => b;
@@ -89,6 +99,8 @@ beforeEach(() => {
   provenancedRow = null;
   legacyRowByLead = {};
   existingByLead = {};
+  asaRowById = {};
+  asaUpdateResult = 1;
   updates.length = 0;
   inserts.length = 0;
 });
@@ -313,17 +325,19 @@ describe('sweepPendingAttributionTransfers', () => {
     expect(markerClearUpdates()).toHaveLength(1);
   });
 
-  test('a REPAIR marker RECLAIMS the legacy row this rejection demoted, instead of retrying forever (codex P1 r25)', async () => {
+  test('a REPAIR marker RECLAIMS the legacy row this rejection demoted, by PERSISTED identity (codex P1 r25 + r32)', async () => {
     // The retire preserves history by clearing source_call_id, so the
     // corrected pass finds a legacy row on the live lead and
     // recordCallPpcAttribution refuses with 'unprovenanced_row' — a retry
-    // lane that for a repair marker can never resolve on its own.
+    // lane that for a repair marker can never resolve on its own. The
+    // marker carries the demoted row's EXACT id, recorded at rejection.
     const repair = {
       to_lead_id: 'lead-B',
       lead_source: 'waves_website',
       is_paid: false,
       detail: 'Sarasota city page',
       repair_of_rejection: true,
+      reclaim_row_id: 'asa-legacy',
     };
     const md = { attribution_transfer_pending: repair };
     scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
@@ -346,9 +360,82 @@ describe('sweepPendingAttributionTransfers', () => {
       is_paid: false,
       lead_source_detail: 'Sarasota city page',
     });
-    // Conditioned on the row still being unprovenanced.
+    // Conditioned on the EXACT persisted row, still on this lead, still
+    // unprovenanced (codex P1 r32) — never "any legacy row on the lead".
+    expect(reclaim.wheres).toContainEqual(['where', { id: 'asa-legacy', lead_id: 'lead-B' }]);
     expect(reclaim.wheres).toContainEqual(['whereNull', 'source_call_id']);
     expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a REPAIR marker with NO persisted reclaim identity CLEARS — an unrelated legacy row is never seized (codex P1 r32)', async () => {
+    // The rejection wrote no_attribution having demoted nothing on this
+    // lead (or found no provenanced row at all). The blocking legacy row
+    // is another acquisition's — pre-migration or web — and re-pointing it
+    // overwrites that row's owner and attribution dimensions
+    // (irreversible). Same definitive-refusal class as 'other_source'.
+    const repair = {
+      to_lead_id: 'lead-B',
+      lead_source: 'waves_website',
+      is_paid: false,
+      detail: 'Sarasota city page',
+      repair_of_rejection: true,
+    };
+    const md = { attribution_transfer_pending: repair };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    existingByLead['lead-B'] = { id: 'asa-web-legacy', lead_source: 'waves_website' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.cleared).toBe(1);
+    expect(s.recorded).toBe(0);
+    expect(updates.filter((u) => u.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a reclaim whose exact row is GONE clears — nothing of this call remains, the blocking row is someone else\'s (codex P1 r32)', async () => {
+    const repair = {
+      to_lead_id: 'lead-B',
+      lead_source: 'waves_website',
+      is_paid: false,
+      detail: 'Sarasota city page',
+      repair_of_rejection: true,
+      reclaim_row_id: 'asa-deleted',
+    };
+    const md = { attribution_transfer_pending: repair };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    existingByLead['lead-B'] = { id: 'asa-other', lead_source: 'waves_website' };
+    asaUpdateResult = 0; // conditioned update matches nothing
+    // asaRowById empty: the identity recheck finds the row deleted
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.cleared).toBe(1);
+    expect(markerClearUpdates()).toHaveLength(1);
+  });
+
+  test('a reclaim whose exact row still EXISTS but no longer matches retries — the next pass\'s guards decide (codex P1 r32)', async () => {
+    const repair = {
+      to_lead_id: 'lead-B',
+      lead_source: 'waves_website',
+      is_paid: false,
+      detail: 'Sarasota city page',
+      repair_of_rejection: true,
+      reclaim_row_id: 'asa-legacy',
+    };
+    const md = { attribution_transfer_pending: repair };
+    scanRows = [{ id: 'call-1', metadata: md, created_at: '2026-08-09T12:00:00Z' }];
+    lockedCallRow = { id: 'call-1', processing_token: null, metadata: md, created_at: '2026-08-09T12:00:00Z' };
+    existingByLead['lead-B'] = { id: 'asa-legacy', lead_source: 'waves_website' };
+    asaUpdateResult = 0; // re-provenanced or moved between refusal and reclaim
+    asaRowById['asa-legacy'] = { id: 'asa-legacy' };
+
+    const s = await sweepPendingAttributionTransfers();
+
+    expect(s.blocked).toBe(1);
+    expect(s.cleared).toBe(0);
+    expect(markerClearUpdates()).toHaveLength(0);
   });
 
   test('a stamp-less marker whose target lead is gone/soft-deleted clears — the lock re-applies the live predicate (codex P1 r19)', async () => {

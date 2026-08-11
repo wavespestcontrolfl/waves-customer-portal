@@ -603,6 +603,56 @@ describe('resolveSourceCallProvenanceLocked — anonymous stamp-less repoint (co
     expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
   });
+
+  test("an ORPHANED provenanced row (lead hard-deleted, lead_id NULL) is NOT a repoint — claim-time backfill reaches the orphan transfer (codex P1 r32)", async () => {
+    // ad_service_attribution.lead_id is ON DELETE SET NULL. String(null)
+    // read the orphan as residing on a different lead and refused
+    // 'call_repointed', so the sid-linked replacement lead could never
+    // recover the row through reconcileMovedCallAttributionRow's orphan
+    // arm — it stayed blocking the partial-UNIQUE slot forever.
+    firstByTable.leads = {
+      id: 'lead-old',
+      customer_id: 'cust-1',
+      lead_source_id: 'src-1',
+      service_interest: 'pest control',
+      created_at: '2026-08-01T12:00:00.000Z',
+      twilio_call_sid: 'CAy',
+    };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 'call-9' }]];
+    firstByTable.call_log = {
+      id: 'call-9',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: '{}', // stamp-less
+      customer_id: null, // anonymous
+    };
+    const orphan = { id: 'row-1', lead_id: null };
+    firstQueueByTable.ad_service_attribution = [
+      orphan, // resolveSourceCallProvenanceLocked's provenance read
+      orphan, // recordCallPpcAttribution's provenance recovery read
+      { id: 'row-1' }, // reconcile: source row locked by (source_call_id, lead IS NULL)
+      undefined, // reconcile: no conflicting row on the target lead
+      { // record's dedup lookup: the row NOW TRANSFERRED onto this lead
+        id: 'row-1',
+        lead_id: 'lead-old',
+        source_call_id: 'call-9',
+        lead_source: 'google_ads',
+        lead_source_detail: null,
+        customer_id: 'cust-1',
+      },
+    ];
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-old', customerId: 'cust-1' });
+
+    expect(res.reason).not.toBe('call_repointed');
+    expect(res.recorded).toBe(true);
+    // The orphan was TRANSFERRED (updated onto the live lead), never re-inserted.
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+    const transfer = updateCalls.find((u) => u.table === 'ad_service_attribution' && u.row.lead_id === 'lead-old');
+    expect(transfer).toBeTruthy();
+    expect(transfer.row.customer_id).toBe('cust-1');
+  });
 });
 
 describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock (codex P1, PR #3303 r8)', () => {

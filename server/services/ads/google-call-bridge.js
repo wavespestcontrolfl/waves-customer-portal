@@ -772,7 +772,13 @@ async function sidJoinAttributionElsewhere(trx, callLog) {
   const prov = await trx('ad_service_attribution')
     .where({ source_call_id: callLog.id })
     .first('id', 'lead_id');
-  return !!(prov && String(prov.lead_id) !== String(callLog.leadId));
+  // ORPHANED provenance is NOT "elsewhere" (codex P1 r32): lead_id is ON
+  // DELETE SET NULL, so a hard-deleted lead leaves this call's row with a
+  // NULL lead_id — String(null) read that as a different lead and returned
+  // the conflict before recordCallPpcAttribution could reach
+  // reconcileMovedCallAttributionRow's orphan-transfer arm. Only a live,
+  // DIFFERENT lead proves a repoint; a NULL orphan proceeds to recovery.
+  return !!(prov && prov.lead_id != null && String(prov.lead_id) !== String(callLog.leadId));
 }
 
 async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {

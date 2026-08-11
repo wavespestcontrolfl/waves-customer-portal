@@ -609,4 +609,12 @@ describe('sidJoinAttributionElsewhere (codex P1, PR #3303 r15)', () => {
     // a row elsewhere (mirror of sidJoinOwnerConflict's exemption).
     await expect(sidJoinAttributionElsewhere(trxWith({ id: 'row-1', lead_id: 'lead-B' }), { id: 'call-1', leadId: 'lead-A', stampedLeadId: 'lead-A' })).resolves.toBe(false);
   });
+
+  test('an ORPHANED row (lead hard-deleted, lead_id NULL) is NOT "elsewhere" — recovery must stay reachable (codex P1 r32)', async () => {
+    // ad_service_attribution.lead_id is ON DELETE SET NULL; String(null)
+    // read the orphan as a different lead and returned lead_owner_conflict
+    // before recordCallPpcAttribution could reach
+    // reconcileMovedCallAttributionRow's orphan-transfer arm.
+    await expect(sidJoinAttributionElsewhere(trxWith({ id: 'row-1', lead_id: null }), { id: 'call-1', leadId: 'lead-A' })).resolves.toBe(false);
+  });
 });

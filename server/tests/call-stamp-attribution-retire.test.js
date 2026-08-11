@@ -387,9 +387,23 @@ describe('rejection-repair marker on the no_attribution clear (codex P1 r20)', (
   });
 
   test('the marker is written ATOMICALLY with the clear — one jsonb expression, marker armed on the already-cleared object', () => {
-    expect(branch).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids', '\{attribution_transfer_pending\}'/);
+    expect(branch).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows', '\{attribution_transfer_pending\}'/);
     // and the plain clear is still the fallback when no repair is possible
-    expect(branch).toMatch(/: db\.raw\("COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids'"\)/);
+    expect(branch).toMatch(/: db\.raw\("COALESCE\(metadata, '\{\}'::jsonb\) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows'"\)/);
+  });
+
+  test('the reclaim identity is PERSISTED at rejection and carried per target lead (codex P1 r32)', () => {
+    // The rejection records the EXACT rows its retire demoted — a lead id
+    // alone let the sweep seize a reused lead's unrelated pre-migration /
+    // web-acquisition legacy row and overwrite its owner and dimensions.
+    expect(src).toMatch(/retireAllCallAttributionRows\(trx, call\.id, \{ demoted: demotedRows \}\)/);
+    expect(src).toMatch(/'\{no_attribution_demoted_rows\}'/);
+    // The marker carries ONLY the row demoted on ITS OWN target lead;
+    // no recorded demote there ⇒ no reclaim identity ⇒ the sweep clears
+    // rather than guessing.
+    expect(branch).toMatch(/mdRaw\.no_attribution_demoted_rows\.find/);
+    expect(branch).toMatch(/String\(d\.lead_id\) === String\(target\)/);
+    expect(branch).toMatch(/repairPayload\.reclaim_row_id = String\(demotedRecorded\.id\)/);
   });
 
   test('the shared resolver is used by the lead path too — no second copy of the variant matching', () => {

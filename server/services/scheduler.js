@@ -3863,6 +3863,13 @@ function initScheduledJobs() {
         // failed tick — a swallowed throw cleared last_error/
         // consecutive_failures and made a persistent outage look healthy.
         let bridgePairError = null;
+        // The organic pass degrades internally too (source-scan catch →
+        // zeroed summary, per-lead catches → summary.failed) so it never
+        // throws on its own — same shape as the transfer sweep's P2 (codex
+        // P2 r29). Inspect the summary and surface degradation in the
+        // job-health record; captured separately so it can never mask a
+        // bridge error.
+        let organicError = null;
         try {
           const googleAds = require('./ads/google-ads');
           // The fallback below may only run after a COMPLETE, HEALTHY bridge
@@ -3945,7 +3952,9 @@ function initScheduledJobs() {
             const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
             const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
             const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days, ...organicExclusions });
-            logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}`);
+            logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}, failed ${s.failed || 0}`);
+            if (s.scanFailed) organicError = new Error('[bridge-unclaimed] source scan failed');
+            else if (s.failed > 0) organicError = new Error(`[bridge-unclaimed] ${s.failed} lead(s) failed`);
           }
         } catch (err) {
           bridgePairError = err;
@@ -3978,6 +3987,7 @@ function initScheduledJobs() {
         // logs it and the lease records a failed tick (bridge error takes
         // precedence; a swallowed throw cleared last_error on outages).
         if (bridgePairError) throw bridgePairError;
+        if (organicError) throw organicError;
         if (sweepError) throw sweepError;
       });
     } catch (err) {

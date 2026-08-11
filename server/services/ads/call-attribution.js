@@ -448,7 +448,14 @@ async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid })
       const prov = await trx('ad_service_attribution')
         .where({ source_call_id: locked.id })
         .first('id', 'lead_id');
-      if (prov && String(prov.lead_id) !== String(leadId)) {
+      // ORPHANED provenance is NOT a repoint (codex P1 r32, the same
+      // shape as sidJoinAttributionElsewhere): lead_id is ON DELETE SET
+      // NULL, so a hard-deleted lead leaves the row with a NULL lead_id —
+      // String(null) read that as residing on a different lead and
+      // refused, so claim-time backfill could never reach
+      // reconcileMovedCallAttributionRow's orphan-transfer arm. Only a
+      // live, DIFFERENT lead proves a repoint elsewhere.
+      if (prov && prov.lead_id != null && String(prov.lead_id) !== String(leadId)) {
         return { refusedReason: 'call_repointed' };
       }
     }
@@ -568,9 +575,12 @@ async function attributeUnclaimedBridgeLeads({
     });
   } catch (err) {
     logger.error(`[call-attribution] bridge-unclaimed source scan failed: ${err.message}`);
-    return { candidates: 0, recorded: 0, skipped: 0 };
+    // scanFailed distinguishes an outage from a genuinely quiet day (codex
+    // P2 r29): a zeroed summary alone let the cron record a healthy tick
+    // through a persistent source-scan failure.
+    return { candidates: 0, recorded: 0, skipped: 0, failed: 0, scanFailed: true };
   }
-  if (!bridgeSources.length) return { candidates: 0, recorded: 0, skipped: 0 };
+  if (!bridgeSources.length) return { candidates: 0, recorded: 0, skipped: 0, failed: 0 };
 
   const sourceById = new Map(bridgeSources.map((s) => [s.id, s]));
   const days = Math.max(1, parseInt(olderThanDays, 10) || 7);
@@ -723,6 +733,11 @@ async function attributeUnclaimedBridgeLeads({
 
   let recorded = 0;
   let skipped = 0;
+  // Errors counted APART from benign refusals (codex P2 r29): 'skipped'
+  // mixes deliberate waits (ambiguous, refused verdicts) with thrown
+  // per-lead failures, so a wedged sweep looked identical to a cautious
+  // one and never reached the cron's job-health record.
+  let failed = 0;
   for (const lead of leads) {
     const source = sourceById.get(lead.lead_source_id);
     const channel = attributionForSourceType(source?.source_type);
@@ -795,13 +810,14 @@ async function attributeUnclaimedBridgeLeads({
     } catch (sweepErr) {
       logger.warn(`[call-attribution] bridge-unclaimed sweep failed for lead ${lead.id}: ${sweepErr.message}`);
       res = { recorded: false, reason: 'error' };
+      failed += 1;
     }
-    if (res.recorded) recorded += 1; else skipped += 1;
+    if (res.recorded) recorded += 1; else if (res.reason !== 'error') skipped += 1;
   }
   if (leads.length) {
-    logger.info(`[call-attribution] bridge-unclaimed sweep — candidates ${leads.length}, recorded ${recorded}, skipped ${skipped}`);
+    logger.info(`[call-attribution] bridge-unclaimed sweep — candidates ${leads.length}, recorded ${recorded}, skipped ${skipped}, failed ${failed}`);
   }
-  return { candidates: leads.length, recorded, skipped };
+  return { candidates: leads.length, recorded, skipped, failed };
 }
 
 // Retire the funnel row a specific call created for a specific lead —
@@ -1049,7 +1065,12 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
   }
 }
 
-async function retireCallAttributionRow(dbc, callLogId, leadId) {
+// `demoted` (optional array, codex P1 r32): collects `{ id, lead_id }` for
+// every row this retire DEMOTES to legacy — the caller persists those
+// identities on the rejection verdict so a later corrected pass can reclaim
+// EXACTLY its own row. Reassigned and deleted rows are never pushed:
+// neither leaves an unprovenanced row of this call's behind.
+async function retireCallAttributionRow(dbc, callLogId, leadId, { demoted } = {}) {
   if (!callLogId || !leadId) return 0;
   // REASSIGN provenance to a settled successor instead of deleting
   // (pre-push P0 r19): delete-and-recreate loses booked_amount /
@@ -1178,9 +1199,13 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
     .first(...HISTORY_ROW_COLS);
   if (!existing) return 0;
   if (rowCarriesFunnelHistory(existing)) {
-    return dbc('ad_service_attribution')
+    const demotedCount = await dbc('ad_service_attribution')
       .where({ id: existing.id, lead_id: leadId, source_call_id: callLogId })
       .update({ source_call_id: null, updated_at: new Date() });
+    if (demotedCount && Array.isArray(demoted)) {
+      demoted.push({ id: String(existing.id), lead_id: String(leadId) });
+    }
+    return demotedCount;
   }
   return dbc('ad_service_attribution')
     .where({ lead_id: leadId, source_call_id: callLogId })
@@ -1193,7 +1218,11 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
 // (pre-push P1 r11): sid-linked calls carry source_call_id but no metadata
 // stamp, and stamp-gated retirement left their rows reporting funnel
 // stage/revenue for a rejected call.
-async function retireAllCallAttributionRows(dbc, callLogId) {
+// `demoted` passes through to retireCallAttributionRow (codex P1 r32).
+// Orphan (NULL-lead) demotes are deliberately NOT collected: the repair
+// marker targets a live lead, and an orphan row has none to reclaim onto —
+// reconcileMovedCallAttributionRow's orphan arm owns that recovery.
+async function retireAllCallAttributionRows(dbc, callLogId, { demoted } = {}) {
   if (!callLogId) return 0;
   // Per-lead through the shared single-row primitive (pre-push P0 r19):
   // each lead's row is REASSIGNED to a surviving successor when one
@@ -1220,7 +1249,7 @@ async function retireAllCallAttributionRows(dbc, callLogId) {
     }
   }
   for (const leadId of new Set(rows.filter((r) => r.lead_id != null).map((r) => String(r.lead_id)))) {
-    affected += await retireCallAttributionRow(dbc, callLogId, leadId);
+    affected += await retireCallAttributionRow(dbc, callLogId, leadId, { demoted });
   }
   return affected;
 }
@@ -1607,12 +1636,26 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
         // corrected pass finds a legacy row on the live lead and
         // recordCallPpcAttribution refuses with 'unprovenanced_row' — the
         // generic retry lane, which for a repair marker never resolves
-        // because nothing else will ever re-provenance that row. A repair
-        // marker is exactly the case where the legacy row's identity IS
-        // known: it is this call's own demoted row on this lead. Re-point
+        // because nothing else will ever re-provenance that row. Re-point
         // it, under the lead lock already held, conditioned on it still
         // being unprovenanced so a concurrent writer cannot be overwritten.
+        // By PERSISTED identity ONLY (codex P1 r32): "some legacy row on
+        // the lead" is not proof of ownership — a reused lead's
+        // pre-migration or web-acquisition row is unprovenanced too, and
+        // seizing it overwrote another acquisition's owner, channel and
+        // service dimensions (first-touch and revenue corruption — the
+        // irreversible branch). The rejection now records the exact rows
+        // it demoted; the marker carries the one for this lead.
         if (pending.repair_of_rejection && res && res.reason === 'unprovenanced_row') {
+          // No recorded demote on this lead ⇒ the blocking legacy row is
+          // ANOTHER acquisition's, and the lead is counted once by
+          // design — the same definitive-refusal class as 'other_source'.
+          // Clearing (not retrying) also covers the rejection that found
+          // no provenanced row at all yet still wrote no_attribution.
+          if (!pending.reclaim_row_id) {
+            await clearMarker();
+            return 'cleared';
+          }
           // The reclaim carries the DECISION too (codex P1 r30):
           // recordCallPpcAttribution returned before applying any patch, so
           // restoring provenance alone left the row on its old owner,
@@ -1620,7 +1663,7 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           // data the corrected pass exists to replace.
           const reclaimInterest = pending.service_interest || null;
           const reclaimed = await trx('ad_service_attribution')
-            .where({ lead_id: liveLeadId })
+            .where({ id: pending.reclaim_row_id, lead_id: liveLeadId })
             .whereNull('source_call_id')
             .update({
               source_call_id: row.id,
@@ -1636,6 +1679,19 @@ async function sweepPendingAttributionTransfers({ limit = 100 } = {}) {
           if (reclaimed) {
             await clearMarker();
             return 'recorded';
+          }
+          // The exact row is GONE entirely ⇒ nothing of this call's
+          // remains to reclaim, and the lead's blocking row is someone
+          // else's — definitive refusal, clear. A row that still exists
+          // but no longer matches (re-provenanced, or moved off this
+          // lead) retries: the next pass's write hits the provenanced-row
+          // guards ('other_call') and clears through them.
+          const reclaimTarget = await trx('ad_service_attribution')
+            .where({ id: pending.reclaim_row_id })
+            .first('id');
+          if (!reclaimTarget) {
+            await clearMarker();
+            return 'cleared';
           }
         }
         return blocked();

@@ -12,6 +12,8 @@
 
 let listByTable = {};
 let firstByTable = {};
+let listRejectsByTable = {}; // table -> awaited list query rejects (outage)
+let txnRejects = false; // per-lead transaction throws (codex P2 r29)
 const insertCalls = [];
 
 const mockDb = jest.fn((table) => {
@@ -25,15 +27,21 @@ const mockDb = jest.fn((table) => {
   b.modify = jest.fn((fn) => { fn(b); return b; });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
-  b.then = (res, rej) => Promise.resolve(
-    listByTable[table] !== undefined ? listByTable[table] : [1],
-  ).then(res, rej);
+  b.then = (res, rej) => {
+    if (listRejectsByTable[table]) return Promise.reject(new Error('db down')).then(res, rej);
+    return Promise.resolve(
+      listByTable[table] !== undefined ? listByTable[table] : [1],
+    ).then(res, rej);
+  };
   return b;
 });
 // The sweep now runs each candidate through a locked transaction (lead
 // FOR UPDATE re-read + provenance resolution + funnel write on one
 // connection) — the mock passes the same builder through.
-mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
+mockDb.transaction = jest.fn(async (fn) => {
+  if (txnRejects) throw new Error('txn down');
+  return fn(mockDb);
+});
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -65,6 +73,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   listByTable = {};
   firstByTable = {};
+  listRejectsByTable = {};
+  txnRejects = false;
   insertCalls.length = 0;
   // Provenance resolution's sid/stamp candidate queries — default to no
   // linked calls (provenance NULL, permanently conservative).
@@ -95,7 +105,7 @@ describe('attributeUnclaimedBridgeLeads', () => {
 
     const res = await attributeUnclaimedBridgeLeads({ olderThanDays: 7 });
 
-    expect(res).toEqual({ candidates: 1, recorded: 1, skipped: 0 });
+    expect(res).toEqual({ candidates: 1, recorded: 1, skipped: 0, failed: 0 });
     const row = insertCalls.find((c) => c.table === 'ad_service_attribution').row;
     expect(row).toMatchObject({
       lead_id: 'lead-1',
@@ -117,14 +127,14 @@ describe('attributeUnclaimedBridgeLeads', () => {
       id: 'lead-anon', customer_id: null, created_at: '2026-06-01', lead_source_id: 'src-bridge', twilio_call_sid: null,
     };
     const res = await attributeUnclaimedBridgeLeads();
-    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1 });
+    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1, failed: 0 });
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
   });
 
   test('no bridge-target lead_sources rows → no-op zeros', async () => {
     listByTable.lead_sources = [OTHER_SOURCE];
     const res = await attributeUnclaimedBridgeLeads();
-    expect(res).toEqual({ candidates: 0, recorded: 0, skipped: 0 });
+    expect(res).toEqual({ candidates: 0, recorded: 0, skipped: 0, failed: 0 });
     expect(mockDb).not.toHaveBeenCalledWith('leads as l');
   });
 
@@ -134,7 +144,7 @@ describe('attributeUnclaimedBridgeLeads', () => {
       id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge',
     }];
     const res = await attributeUnclaimedBridgeLeads();
-    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1 });
+    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1, failed: 0 });
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
   });
 
@@ -149,8 +159,28 @@ describe('attributeUnclaimedBridgeLeads', () => {
     // recordCallPpcAttribution's lead_id lookup finds a row owned by another source
     firstByTable.ad_service_attribution = { id: 'asa-1', lead_source: 'google_ads' };
     const res = await attributeUnclaimedBridgeLeads();
-    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1 });
+    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1, failed: 0 });
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a source-scan failure reports scanFailed — an outage is not a quiet day (codex P2 r29)', async () => {
+    // The internal catch returned a zeroed summary the cron read as a
+    // healthy tick with zero work — same class as the transfer sweep's
+    // r16 finding.
+    listRejectsByTable.lead_sources = true;
+    const res = await attributeUnclaimedBridgeLeads();
+    expect(res).toEqual({ candidates: 0, recorded: 0, skipped: 0, failed: 0, scanFailed: true });
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('a per-lead failure counts in failed, NOT skipped — a wedged sweep is distinguishable from a cautious one (codex P2 r29)', async () => {
+    listByTable.lead_sources = [BRIDGE_SOURCE];
+    listByTable['leads as l'] = [{
+      id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge',
+    }];
+    txnRejects = true;
+    const res = await attributeUnclaimedBridgeLeads();
+    expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 0, failed: 1 });
   });
 });
 
@@ -227,7 +257,7 @@ describe('scheduler wiring', () => {
   });
 
   test('a bridge-pair failure is rethrown AFTER the transfer sweep (codex P2, PR #3303 r15)', () => {
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 12000);
     // Captured, not swallowed: the sweep still runs, then the failure
     // surfaces so the lease's job-health record counts the failed tick.
     expect(block).toMatch(/bridgePairError = err/);
@@ -236,13 +266,29 @@ describe('scheduler wiring', () => {
   });
 
   test('transfer-sweep degradation surfaces in job health too (codex P2, PR #3303 r16)', () => {
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 9000);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 12000);
     // The sweep degrades internally (scan catch → scanFailed, per-row
     // catches → summary.failed) — the cron inspects the summary and throws
     // so a stalled retry lane cannot masquerade as a healthy tick.
     expect(block).toMatch(/s\.scanFailed/);
     expect(block).toMatch(/s\.failed > 0/);
     expect(block).toMatch(/if \(sweepError\) throw sweepError/);
+  });
+
+  test('ORGANIC-pass degradation surfaces in job health too, never masking a bridge error (codex P2 r29)', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 12000);
+    // attributeUnclaimedBridgeLeads degrades internally the same way
+    // (source-scan catch → scanFailed, per-lead catches → failed) — the
+    // cron must inspect ITS summary as well, or a persistent organic
+    // outage records healthy ticks forever.
+    expect(block).toMatch(/if \(s\.scanFailed\) organicError = new Error\('\[bridge-unclaimed\] source scan failed'\)/);
+    expect(block).toMatch(/else if \(s\.failed > 0\) organicError = new Error/);
+    expect(block).toMatch(/if \(organicError\) throw organicError/);
+    // Precedence: bridge error first, then organic, then the transfer sweep.
+    expect(block.indexOf('if (bridgePairError) throw bridgePairError'))
+      .toBeLessThan(block.indexOf('if (organicError) throw organicError'));
+    expect(block.indexOf('if (organicError) throw organicError'))
+      .toBeLessThan(block.indexOf('if (sweepError) throw sweepError'));
   });
 
   test('organic-candidate eligibility is re-applied under the lead lock (codex P1+P2, PR #3303 r14/r16)', () => {
