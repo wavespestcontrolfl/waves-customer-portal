@@ -281,6 +281,14 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(asaRead._wheres).toContainEqual(['where', 'asa.attribution_basis', 'bridge_unclaimed_sweep']);
     // No born-after bound at first sighting — there is no resolution yet.
     expect(asaRead._wheres.some(([m, col]) => m === 'where' && col === 'asa.created_at')).toBe(false);
+    // The MARKER arm runs BEFORE the provenanced arm (audit r17): the
+    // successor branch of the exact-provenance retire can reassign a
+    // marked row's provenance, and marker-second re-selected and stripped
+    // what the reassignment just wrote.
+    const loopSrc = require('fs').readFileSync(require('path').join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8')
+      .split('for (const callId of reconcileIds)')[1];
+    expect(loopSrc.indexOf("attribution_basis', 'bridge_unclaimed_sweep'"))
+      .toBeLessThan(loopSrc.indexOf('source_call_id: callId'));
   });
 
   test('no valid candidates → no insert at all', async () => {

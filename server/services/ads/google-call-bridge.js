@@ -1758,31 +1758,22 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         .map((r) => [String(r.call_log_id), r.resolved_at]));
       for (const callId of reconcileIds) {
         if (bridgedCalls.has(callId)) continue;
-        // PROVENANCED arm — reopens AND first sightings. On a non-bridged
-        // bridge-target call a provenanced row can only be the seven-day
-        // fallback's organic write (call-time attribution is suppressed
-        // for bridge targets, and a paid claim implies 'bridged', which
-        // never reaches this loop): late-discovered ambiguity must undo
-        // it or per-lead dedupe blocks the eventual paid attribution
-        // forever (codex P1, r3 GH round).
-        const provRows = await trx('ad_service_attribution')
-          .where({ source_call_id: callId })
-          .whereNotNull('lead_id')
-          .select('lead_id');
-        for (const leadId of new Set(provRows.map((r) => String(r.lead_id)))) {
-          // Same transaction as the reopen upsert: the primitive's FOR
-          // UPDATE reads stay held through its demote-vs-delete decision
-          // (the r30 lock-before-judging rule), and a crash between the
-          // reopen and the retire can no longer strand the interim row —
-          // they commit or roll back together.
-          retired += await retireCallAttributionRow(trx, callId, leadId);
-        }
-        // SNAPSHOT arm (pre-push audit P1 r6): a PHONE-linked lead's
+        // SNAPSHOT (marker) arm — deliberately BEFORE the provenanced arm
+        // (pre-push audit P1 r17): retireCallAttributionRow's successor
+        // branch can REASSIGN a marked sweep row's provenance, and running
+        // the marker arm second re-selected that same row and stripped or
+        // deleted what the reassignment just wrote. Marker-first is also
+        // semantically right: for a sweep-written row the intended end
+        // state IS delete-or-demote (successor reassignment exists for
+        // call-time paid rows), and once this arm settles a marked row the
+        // exact-provenance lookup below can no longer match it.
+        //
+        // (pre-push audit P1 r6): a PHONE-linked lead's
         // interim organic row does not carry THIS call's provenance — the
         // provenance resolver deliberately has no phone arm (r25), and
         // when the reused lead kept its ORIGINAL call's sid the resolver
         // borrows THAT provenance instead (codex P1, r7 GH round) — so
-        // the exact-call retire above cannot see it either way. The row
+        // the exact-call retire below cannot see it either way. The row
         // is identified by its WRITER MARKER, not reconstruction (codex
         // P1s GH r7/r8 + audit r15/r16): the unclaimed sweep stamps
         // attribution_basis = 'bridge_unclaimed_sweep' on its inserts,
@@ -1811,17 +1802,38 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         const snapLeadIds = (await trx('bridge_ambiguous_call_leads')
           .where({ call_log_id: callId })
           .select('lead_id')).map((r) => String(r.lead_id));
-        if (!snapLeadIds.length) continue;
-        // Repo lock order: leads before attribution rows.
-        await trx('leads').whereIn('id', snapLeadIds).forUpdate().select('id');
-        const interimRows = await trx('ad_service_attribution as asa')
-          .whereIn('asa.lead_id', snapLeadIds)
-          .where('asa.attribution_basis', 'bridge_unclaimed_sweep')
-          .modify((qb) => { if (resolvedAt) qb.where('asa.created_at', '>', resolvedAt); })
-          .select('asa.id');
-        for (const row of interimRows) {
-          retired += await retireRowPreservingHistory(trx, row.id);
+        if (snapLeadIds.length) {
+          // Repo lock order: leads before attribution rows.
+          await trx('leads').whereIn('id', snapLeadIds).forUpdate().select('id');
+          const interimRows = await trx('ad_service_attribution as asa')
+            .whereIn('asa.lead_id', snapLeadIds)
+            .where('asa.attribution_basis', 'bridge_unclaimed_sweep')
+            .modify((qb) => { if (resolvedAt) qb.where('asa.created_at', '>', resolvedAt); })
+            .select('asa.id');
+          for (const row of interimRows) {
+            retired += await retireRowPreservingHistory(trx, row.id);
+          }
         }
+        // PROVENANCED arm — reopens AND first sightings. On a non-bridged
+        // bridge-target call a provenanced row can only be the seven-day
+        // fallback's organic write (call-time attribution is suppressed
+        // for bridge targets, and a paid claim implies 'bridged', which
+        // never reaches this loop): late-discovered ambiguity must undo
+        // it or per-lead dedupe blocks the eventual paid attribution
+        // forever (codex P1, r3 GH round).
+        const provRows = await trx('ad_service_attribution')
+          .where({ source_call_id: callId })
+          .whereNotNull('lead_id')
+          .select('lead_id');
+        for (const leadId of new Set(provRows.map((r) => String(r.lead_id)))) {
+          // Same transaction as the reopen upsert: the primitive's FOR
+          // UPDATE reads stay held through its demote-vs-delete decision
+          // (the r30 lock-before-judging rule), and a crash between the
+          // reopen and the retire can no longer strand the interim row —
+          // they commit or roll back together.
+          retired += await retireCallAttributionRow(trx, callId, leadId);
+        }
+
       }
     }
     return { reopened, firstSightings };
