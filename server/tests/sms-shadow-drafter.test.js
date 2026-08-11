@@ -1,4 +1,5 @@
 const {
+  isCommercialProperty,
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,
@@ -13,6 +14,21 @@ const {
   INTENDED_ACTION_TYPES,
 } = require('../services/sms-shadow-drafter');
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
+
+describe('isCommercialProperty — comms-lint commercial exemption', () => {
+  test('commercial and business count, case-insensitively', () => {
+    expect(isCommercialProperty({ property_type: 'commercial' })).toBe(true);
+    expect(isCommercialProperty({ property_type: 'Commercial' })).toBe(true);
+    expect(isCommercialProperty({ property_type: 'business' })).toBe(true);
+  });
+
+  test('residential, null, and missing customers do not', () => {
+    expect(isCommercialProperty({ property_type: 'residential' })).toBe(false);
+    expect(isCommercialProperty({ property_type: null })).toBe(false);
+    expect(isCommercialProperty({})).toBe(false);
+    expect(isCommercialProperty(null)).toBe(false);
+  });
+});
 
 describe('few-shot voice grounding (v7)', () => {
   test('prompt version bumped to v10', () => {

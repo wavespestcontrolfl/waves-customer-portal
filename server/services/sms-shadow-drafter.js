@@ -76,6 +76,15 @@ const DRAFTER = 'house_voice';
 const PROMPT_VERSION = 'house_voice_v10';
 const SHADOW_STATUS = 'shadow';
 
+/**
+ * Commercial/business account per customers.property_type, for the comms-lint
+ * per-application exemption. Case-normalized — rows carry both 'commercial'
+ * and 'Commercial' (same comparison as the admin-schedule tax path).
+ */
+function isCommercialProperty(customer) {
+  return ['commercial', 'business'].includes(String(customer?.property_type || '').toLowerCase());
+}
+
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
 // behaves like v6); count is bounded so the prompt can't balloon.
 const FEWSHOT_ENABLED = process.env.SHADOW_FEWSHOT !== 'false';
@@ -946,9 +955,16 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // used twice: recorded as flags on every row, and consulted before the
     // autonomous rung below. These drafts are replies on an existing
     // customer thread — the transactional class under the #3343 STOP-line
-    // ruling — so stopExpected is a known false, never a guess.
+    // ruling — so stopExpected is a known false, never a guess. Commercial
+    // accounts are exempt from the per-application wording rule, so the
+    // lint context carries the customer's class.
     const commsLint = require('./comms-lint');
-    const lint = commsLint.lintComms(parsed.reply, { channel: 'sms', audience: 'customer', stopExpected: false });
+    const lint = commsLint.lintComms(parsed.reply, {
+      channel: 'sms',
+      audience: 'customer',
+      stopExpected: false,
+      commercial: isCommercialProperty(customer),
+    });
 
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
     // with the decision insert inside publishSuggestion's locked
@@ -1124,12 +1140,16 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
         }
-      } else if (deliveryMode === 'suggest' || deliveryMode === suggestMode.AUTO_SEND_MODE) {
+      } else if (deliveryMode === 'suggest'
+          || (deliveryMode === suggestMode.AUTO_SEND_MODE && require('../config/feature-gates').isEnabled('smsSuggestMode'))) {
         // suggest mode, or an auto-send-mode draft the deterministic lint
         // harness flagged: a flagged draft never rides the autonomous rung —
         // it fails closed to the human composer card (same autonomy boundary
         // as the placeholder and ungrounded-amount withholds), where the
-        // recorded flags are visible to the reviewer.
+        // recorded flags are visible to the reviewer. The demotion checks the
+        // suggest gate at publication time: with it off, the agent-draft
+        // route hides this workflow, and a published card nobody can see
+        // would pull the draft out of the judge pool for nothing.
         if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
           logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) — auto-send demoted to composer card (customer=${customer?.id || 'unknown'} intent=${intentName})`);
         }
@@ -1146,6 +1166,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           lintFailures: lint.failures,
         });
         if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+      } else if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+        // Lint-failed auto-send draft with the suggest gate OFF: stay
+        // shadow (judge pool keeps it) rather than publishing a card the
+        // composer would hide — fail closed, never into a void.
+        logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) and suggest gate is off — draft kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
       }
     }
 
@@ -1172,6 +1197,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
 
 module.exports = {
   draftShadowReply,
+  isCommercialProperty,
   generateGroundedDraft,
   generateDraftOnce,
   draftRouteFor,
