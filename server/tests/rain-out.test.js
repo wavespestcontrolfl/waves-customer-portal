@@ -1894,6 +1894,37 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
+    test('series-anchor path: the prebuilt SMS quotes the NORMALIZED on-the-hour window that actually books', async () => {
+      // codex r2 P1: an off-hour custom-time target on a recurring visit is
+      // floored to the hour by the series path — the SMS must be rendered
+      // from that normalized window, never the raw request (13:30 booking
+      // 13:00 while the text says 1:30 PM).
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      try {
+        mockCustomRender();
+        wireDb({
+          scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, is_recurring: true }) })],
+        });
+
+        const result = await RainOut.commit({
+          ...COMMIT_ARGS,
+          target: { date: '2026-06-12', window: { start: '13:30', end: '14:30' } },
+        });
+
+        expect(result.ok).toBe(true);
+        expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith(
+          'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
+          expect.any(Object),
+        );
+        const sent = sendCustomerMessage.mock.calls[0][0];
+        expect(sent.body).toContain('Fri, Jun 12, 1:00 PM - 3:00 PM');
+        expect(sent.body).not.toContain('1:30 PM');
+      } finally {
+        delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+      }
+    });
+
     test('custom template body stays GSM-7 and a representative render fits 2 segments', () => {
       const { BODY } = require('../models/migrations/20260811000020_rain_out_moved_custom_template')._test;
       const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');

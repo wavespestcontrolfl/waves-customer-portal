@@ -928,6 +928,32 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
+  const todayStr = etDateString();
+  // "Same day" compares against the ANCHOR's scheduled date (not the wall
+  // clock) — a push is same-day when the jobs stay on the date they were
+  // already on.
+  const anchorDateStr = service.scheduled_date
+    ? String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date).slice(0, 10)
+    : todayStr;
+  // Owner rule: windows are ALWAYS on the hour. The series mover writes
+  // its anchor's start to every shifted occurrence, so an off-hour
+  // TECH-SUPPLIED target (custom input passes the routes' date-only
+  // validation) would mint a whole off-hour series — normalize through
+  // the same on-the-hour block the options sheet books (codex P1).
+  // Hoisted ABOVE the custom-move pre-render: everything downstream —
+  // the prebuilt SMS body included — must see the window that actually
+  // books, or the text quotes a time the schedule doesn't hold (codex
+  // r2 P1). Scoped to the rain-out's own anchor: route SIBLINGS keep
+  // their existing windows on a day move, and rounding a legacy
+  // half-hour window would silently shift that customer's time.
+  if (process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+    && !!service.is_recurring
+    && String(target.date) !== anchorDateStr
+    && (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0) {
+    target = { ...target, window: oneHourWindow(target.window.start) };
+  }
   // A no-show is about THIS customer only — route scope would move every
   // remaining stop, text each unrelated customer "we missed you", and stamp
   // each with a customer_noshow log row that counts toward the
@@ -993,7 +1019,6 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
   }
 
-  const todayStr = etDateString();
   let jobs;
   if (scope === 'route') {
     const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service);
@@ -1004,16 +1029,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
   // Same-day route push: the anchor books exactly target.window (what
   // the tech saw in the sheet); siblings shift by the anchor's window
-  // delta so the route's running order survives. "Same day" compares
-  // against the ANCHOR's scheduled date (not the wall clock) — a push
-  // is same-day when the jobs stay on the date they were already on.
-  // Falls back to 0 (keep own windows) when the anchor has no
-  // parseable window.
-  const anchorDateStr = service.scheduled_date
-    ? String(service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString()
-        : service.scheduled_date).slice(0, 10)
-    : todayStr;
+  // delta so the route's running order survives. Falls back to 0 (keep
+  // own windows) when the anchor has no parseable window.
   const isSameDay = String(target.date) === anchorDateStr;
   const anchorStartMin = hhmmToMinutes(service.window_start);
   const targetStartMin = hhmmToMinutes(target.window.start);
@@ -1120,18 +1137,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
       && String(target.date) !== jobDateStr;
-    // Owner rule: windows are ALWAYS on the hour. The series mover writes
-    // its anchor's start to every shifted occurrence, so an off-hour
-    // TECH-SUPPLIED target (custom input passes the routes' date-only
-    // validation) would mint a whole off-hour series — normalize through
-    // the same on-the-hour block the options sheet books (codex P1).
-    // Scoped to the rain-out's own anchor: route SIBLINGS keep their
-    // existing windows on a day move, and rounding a legacy half-hour
-    // window would silently shift that customer's time.
-    if (wantsSeriesShift && job.id === serviceId
-      && (hhmmToMinutes(newWindow?.start) ?? 0) % 60 !== 0) {
-      newWindow = oneHourWindow(newWindow.start);
-    }
+    // The anchor's on-the-hour normalization for this path lives at the
+    // TOP of commit() (before the custom move's SMS pre-render) — by here
+    // target.window is already the window that books.
     let shiftedOccurrences = null;
     try {
       if (wantsSeriesShift) {
