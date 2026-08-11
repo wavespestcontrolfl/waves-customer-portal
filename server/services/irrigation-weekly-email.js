@@ -905,30 +905,23 @@ async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
   return gaps;
 }
 
-// Emails the system itself sends ONLY while it considers the customer a live
-// recurring member — each fires on a positive membership state transition
-// (or, for renewal_reminder/updated, on an existing live membership), so the
-// newest one is proof of membership AT THAT MOMENT, independent of how
-// visits were stamped. membership.reactivated matters (pre-push P1): the
-// deactivate/reactivate flow emits it INSTEAD of another started, so a set
-// without it would leave every reactivated member excluded forever by the
-// cancellation comparison below. membership.paused is deliberately neither
-// positive nor negative. Used by the membership-evidence gap leg below.
-const MEMBERSHIP_EVIDENCE_TEMPLATES = [
-  'membership.started',
-  'membership.updated',
-  'membership.renewal_reminder',
-  'membership.reactivated',
-  'welcome.new_recurring',
-];
+// Membership evidence is AUTHORITATIVE CURRENT STATE — the same
+// hasMembership predicate the membership lifecycle emails key off (extracted
+// to services/membership-state.js, one shared copy). Email history was
+// deliberately abandoned as evidence here (codex #3341 r4 + pre-push P1
+// chain): email_messages rows are delivery artifacts — senders skip when the
+// address is missing/invalid — so a no-email member (exactly the class a gap
+// check exists to find) never accumulates email evidence, cancellation
+// leaves started rows behind, and reactivation emits a different key. The
+// customers row is current-state truth for all of those at once.
 
 /**
  * Membership-evidence gap leg (owner ruling 2026-08-10). The evidence-based
  * gap check above shares the sender's predicate BY DESIGN, which leaves one
- * blind spot: a customer the system itself enrolled as a recurring member
- * (membership.started / welcome.new_recurring email, or a customer_plan_rates
- * row) whose lawn visits were never stamped as a recurring series and who has
- * no demonstrated cadence yet. They fail the evidence filter, so the Monday
+ * blind spot: a customer whose CURRENT state says recurring member
+ * (hasMembership on the customers row — real tier or paid monthly rate,
+ * excluding auto-derived label-only rows) but whose lawn visits were never
+ * stamped as a recurring series and who has no demonstrated cadence yet. They fail the evidence filter, so the Monday
  * sweep AND findLawnEmailAudienceGaps are both blind to them — indefinitely,
  * not just for one week (verified live 2026-08-10: a new member's first lawn
  * visit booked as a one-time, no future row). This leg pages that class; the
@@ -970,30 +963,18 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
            AND (${lawnLikeSql}))`,
       [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
     )
-    // …plus CURRENT membership evidence the system itself produced. A
-    // membership.started email is durable — cancellation sends
-    // membership.canceled without deleting it (codex #3341 r4 P2) — so the
-    // latest POSITIVE signal (started/welcome email, or a plan-rate row,
-    // which also survives cancellation) must be strictly newer than the
-    // latest cancellation email. No positive signal at all ⇒ both sides
-    // collapse to epoch and the strict inequality excludes the customer,
-    // preserving the evidence requirement. recipient_id is varchar (it can
-    // address technicians/tests too); cast the uuid side or Postgres
-    // rejects the comparison.
-    .whereRaw(
-      `GREATEST(
-         COALESCE((SELECT MAX(em.created_at) FROM email_messages em
-                    WHERE em.recipient_id = c.id::text AND em.recipient_type = 'customer'
-                      AND em.template_key IN (${MEMBERSHIP_EVIDENCE_TEMPLATES.map(() => '?').join(', ')})), 'epoch'::timestamptz),
-         COALESCE((SELECT MAX(cpr.created_at) FROM customer_plan_rates cpr
-                    WHERE cpr.customer_id = c.id), 'epoch'::timestamptz)
-       ) > COALESCE((SELECT MAX(emc.created_at) FROM email_messages emc
-                      WHERE emc.recipient_id = c.id::text AND emc.recipient_type = 'customer'
-                        AND emc.template_key = ?), 'epoch'::timestamptz)`,
-      [...MEMBERSHIP_EVIDENCE_TEMPLATES, 'membership.canceled'],
-    )
+    // …plus a coarse SQL prefilter for membership state; the EXACT rule
+    // (tier-key normalization, non-membership labels, auto-derived
+    // label-only rows) runs in JS below via the shared hasMembership /
+    // isAutoDerivedTierLabelRow predicates — never a SQL re-implementation
+    // that could diverge from them.
+    .where(function membershipStatePrefilter() {
+      this.whereNotNull('c.waveguard_tier').orWhere('c.monthly_rate', '>', 0);
+    })
     .select(
       'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
+      // Fields the exact membership predicates below read.
+      'c.waveguard_tier', 'c.monthly_rate', 'c.waveguard_tier_source', 'c.billing_mode',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
       // The most recent visit evidencing the class, so the watchdog can key
@@ -1011,9 +992,17 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
         [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
       ),
     );
+  // Lazy requires: self-booking-plan-sync is a heavy module and this leg
+  // runs once per daily watchdog tick.
+  const { hasMembership } = require('./membership-state');
+  const { isAutoDerivedTierLabelRow } = require('./self-booking-plan-sync');
   const gaps = [];
   // Intentional opt-out: never pageable, same rule as the evidence legs.
-  for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok)) {
+  // Membership must hold under the EXACT shared predicates: hasMembership
+  // (real tier or paid monthly rate) minus auto-derived label-only rows —
+  // the same pairing the lifecycle emails use (admin-customers.js).
+  for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok
+    && hasMembership(row) && !isAutoDerivedTierLabelRow(row))) {
     // Same prerequisite validators as findLawnEmailAudienceGaps (codex
     // #3341 r1 P2): stamping the series makes the customer evidence-
     // positive, but the SENDER still skips an unusable email or bad
@@ -1067,7 +1056,6 @@ module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
   findUnstampedRecurringLawnMembers,
-  MEMBERSHIP_EVIDENCE_TEMPLATES,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
   fetchUpcomingWeekRainForecast,

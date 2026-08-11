@@ -724,6 +724,8 @@ describe('findLawnEmailAudienceGaps', () => {
     const unstamped = (over = {}) => ({
       id: 'cust-7', first_name: 'Stu', last_name: 'Sample',
       email: 'stu@example.com', latitude: 27.3, longitude: -82.5,
+      // Authoritative membership state (hasMembership): paid monthly plan.
+      waveguard_tier: null, monthly_rate: 45, waveguard_tier_source: null, billing_mode: 'monthly',
       email_pref_ok: true, tips_pref_ok: true,
       ...over,
     });
@@ -758,18 +760,20 @@ describe('findLawnEmailAudienceGaps', () => {
       );
     });
 
-    test('positive membership evidence covers the whole live-membership lifecycle (pre-push P1)', () => {
-      // The deactivate/reactivate flow emits membership.reactivated INSTEAD
-      // of another started — without it in the positive set, the
-      // cancellation comparison excludes every reactivated member forever.
-      // canceled is the negative signal and must never be positive evidence.
-      const { MEMBERSHIP_EVIDENCE_TEMPLATES } = require('../services/irrigation-weekly-email');
-      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).toEqual(expect.arrayContaining([
-        'membership.started', 'membership.updated', 'membership.renewal_reminder',
-        'membership.reactivated', 'welcome.new_recurring',
-      ]));
-      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).not.toContain('membership.canceled');
-      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).not.toContain('membership.paused');
+    test('membership is judged by AUTHORITATIVE customer state, not email history (pre-push P1 chain)', async () => {
+      // Email rows are delivery artifacts — a no-email member (exactly this
+      // leg's target class) never accumulates them, cancellation leaves
+      // started rows behind, reactivation emits a different key. The shared
+      // hasMembership predicate on the row is current-state truth: cleared
+      // tier + zero rate = cancelled = no page; auto-derived label-only
+      // rows (tier from source 'auto', no paid rate) never count.
+      mockBookRows([
+        unstamped({ id: 'member' }),
+        unstamped({ id: 'cancelled', waveguard_tier: null, monthly_rate: 0 }),
+        unstamped({ id: 'label-only', waveguard_tier: 'Bronze', monthly_rate: 0, waveguard_tier_source: 'auto', billing_mode: 'per_visit' }),
+      ]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => g.customerId)).toEqual(['member']);
     });
 
     test('the gap carries the triggering visit id so a later regression re-pages (codex r3 P2)', async () => {
