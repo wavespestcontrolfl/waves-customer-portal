@@ -123,7 +123,9 @@ async function lawnComponent(customerId, knex) {
 async function pestComponent(customerId, knex) {
   const base = { key: 'pest', label: 'Pest Pressure' };
   const config = await loadActiveConfig(knex).catch(() => null);
-  const history = await loadHistoryForCustomer(knex, customerId, { limit: 6 }).catch(() => []);
+  // serviceLine-scoped: mosquito is a separate component — a mosquito visit's
+  // score must never stand in for Pest Pressure.
+  const history = await loadHistoryForCustomer(knex, customerId, { serviceLine: 'pest', limit: 6 }).catch(() => []);
   const latest = Array.isArray(history) && history.length ? history[0] : null;
 
   if (latest && latest.service_record_id) {
@@ -260,8 +262,11 @@ const IRRIGATION_COPY = {
 
 async function irrigationComponent(customerId, knex) {
   const base = { key: 'irrigation', label: 'Irrigation' };
+  // service_date first — opening an old report can self-heal a missing
+  // snapshot later, and that backfill must not read as the current picture.
   const snap = await knex('lawn_water_intake_snapshots')
     .where({ customer_id: customerId })
+    .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
     .first('status', 'interpretation', 'water_gap_inches', 'service_date')
     .catch(() => null);
