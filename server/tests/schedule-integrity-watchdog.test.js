@@ -21,13 +21,14 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []),
+  findUnstampedRecurringLawnMembers: jest.fn(async () => []),
 }));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
-const { findLawnEmailAudienceGaps } = require('../services/irrigation-weekly-email');
+const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
 const {
   runScheduleIntegrityWatchdog,
   runInner,
@@ -264,6 +265,45 @@ describe('runInner alerting', () => {
     // row for a trailing-evidence gap. Query-param form: the SPA has no
     // /admin/customers/<id> route; Customer 360 opens from ?customerId.
     expect(opts.link).toBe('/admin/customers?customerId=cust-9');
+  });
+
+  test('an unstamped recurring member rings with the stamp-the-series copy', async () => {
+    // Membership-evidence leg (owner ruling 2026-08-10): the customer was
+    // enrolled as a member but no visit carries a recurring marker, so the
+    // shared evidence predicate — and therefore the leg above — cannot see
+    // them. The fix is booking/stamping the series, not editing a field.
+    findUnstampedRecurringLawnMembers.mockResolvedValueOnce([
+      { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'] },
+    ]);
+    makeDbMock();
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ lawnEmailGaps: 1, lawnGapCheckFailed: false, alerted: 1 });
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toContain("aren't stamped as a recurring series");
+    expect(body).toContain('recurring series');
+    expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-7:no_recurring_marked_lawn_visit');
+    expect(opts.link).toBe('/admin/customers?customerId=cust-7');
+  });
+
+  test('an unstamped member with a bad email lists BOTH fixes on one card (codex r1 P2)', async () => {
+    findUnstampedRecurringLawnMembers.mockResolvedValueOnce([
+      { customerId: 'cust-8', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit', 'no_email'] },
+    ]);
+    makeDbMock();
+    await runInner({ now: NOW });
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('also fix: no_email');
+    expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-8:no_email+no_recurring_marked_lawn_visit');
+  });
+
+  test('the unstamped-member dedupe key is scoped to the offending booking, so a regression re-pages (codex r3 P2)', async () => {
+    findUnstampedRecurringLawnMembers.mockResolvedValueOnce([
+      { customerId: 'cust-8', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'], triggerVisitId: 'visit-42' },
+    ]);
+    makeDbMock();
+    await runInner({ now: NOW });
+    const [, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-8:no_recurring_marked_lawn_visit:visit-42');
   });
 
   test('a failed lawn-gap check is REPORTED, never silently zero — and other classes still page', async () => {

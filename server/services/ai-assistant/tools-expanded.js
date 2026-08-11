@@ -242,7 +242,9 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       if (invoiceForSend.payer_id) {
         return { sent: false, payer_billed: true, message: 'This invoice is billed to a third-party payer and is not payable by the customer.' };
       }
-      const sendResult = await InvoiceService.sendViaSMS(invoiceId);
+      // Operator-confirmed IB write (send gated by the confirm-action trust
+      // boundary) — carries the send-window operator marker.
+      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
       const sent = !!(sendResult?.sent || sendResult?.ok);
       const invoice = await db('invoices').where('id', invoiceId).first();
 

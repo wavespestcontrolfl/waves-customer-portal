@@ -307,6 +307,58 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           if (smsResult?.sent && smsResult.providerMessageId === 'gate-blocked') {
             smsResult = { ...smsResult, sent: false, reason: 'sms_gate_off' };
           }
+          // Send-window hold: the lifetime auto-grant is burned by this
+          // call and nothing retries — queue the refreshed-link text on
+          // the scheduled rail so the promised SMS still arrives at
+          // 8:00 AM (the registry recheck suppresses it if the estimate
+          // goes terminal overnight).
+          if (!smsResult.sent
+            && smsResult.code === 'QUIET_HOURS_HOLD'
+            && smsResult.deferred
+            && smsResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              // A linked estimate may legitimately hold a phone that is NOT
+              // the account phone (email-matched linkage) — the shared
+              // identity check decides refresh vs freeze so the bearer
+              // estimate link can't be retargeted at replay.
+              const { recipientRefreshStamp } = require('./messaging/deferred-recipient-identity');
+              const recipientStamp = await recipientRefreshStamp({
+                customerId: estimate.customer_id,
+                recipientPhone: estimate.customer_phone,
+                label: 'estimate-extension',
+              });
+              await db('sms_log').insert({
+                customer_id: estimate.customer_id || null,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: estimate.customer_phone,
+                message_body: body,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: 'estimate_extended',
+                metadata: JSON.stringify({
+                  entry_point: 'estimate_extension_deferred',
+                  estimate_id: estimate.id,
+                  original_block_code: smsResult.code,
+                  replay_purpose: 'estimate_followup',
+                  // The expiry this body NAMES (codex r26): an admin
+                  // re-extension before 08:00 moves expires_at again, and
+                  // the frozen "{new_expiry}" copy would contradict the
+                  // newer grant's own confirmation. The recheck suppresses
+                  // when the live expires_at no longer matches.
+                  granted_expires_at: newExpiry.toISOString(),
+                  ...(estimate.customer_id
+                    ? { ...recipientStamp, resolve_from_by_customer: true }
+                    : { consent_basis: { status: 'transactional_allowed', source: entryPoint } }),
+                }),
+              });
+              smsResult = { ...smsResult, scheduled: true };
+              logger.info(`[estimate-extension] Extension SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            } catch (queueErr) {
+              logger.error(`[estimate-extension] Held extension SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
+            }
+          }
         }
       }
     } catch (err) {

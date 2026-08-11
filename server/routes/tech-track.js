@@ -353,6 +353,9 @@ router.post('/:id/rain-out', async (req, res, next) => {
       scope: scope === 'route' ? 'route' : 'job',
       target,
       notifyCustomer: notifyCustomer !== false,
+      // Authenticated tech quick-move tap — the moved SMS is exempt from
+      // the 8AM-8PM send window (operator-initiated, not machine-initiated).
+      operatorInitiated: true,
     });
 
     if (!result.ok) {

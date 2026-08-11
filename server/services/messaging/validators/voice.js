@@ -63,6 +63,10 @@ function validateNoCustomerEmoji(input, policy) {
 
 module.exports = {
   validateNoCustomerEmoji,
+  // Canonical emoji detector — single source of truth, also consumed by
+  // comms-lint so the advisory harness can never drift from what the
+  // send-path validator enforces.
+  findEmoji,
   // Exposed for tests
   _internals: {
     findEmoji,

@@ -84,11 +84,10 @@ function validateTemplateBody(body, variables, templateKey = null) {
 // already, so there is nothing to win and a tappable link to lose.
 //
 // SMS ONLY — this runs inside the SMS renderer. Email and PDF surfaces build
-// their URLs elsewhere and keep the full scheme.
-const SCHEMELESS_SMS_HOSTS = [
-  'portal.wavespestcontrol.com',
-  'waves-customer-portal-production.up.railway.app',
-];
+// their URLs elsewhere and keep the full scheme. The host list is shared
+// with comms-lint (services/messaging/sms-link-policy.js) so the renderer
+// and the lint never disagree about which hosts go bare.
+const { SCHEMELESS_SMS_HOSTS } = require('../services/messaging/sms-link-policy');
 const PORTAL_SCHEME_RE = new RegExp(
   `https://(?=(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})[/\\s]|(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})$)`,
   'g'

@@ -96,6 +96,15 @@ async function holdGeneration(estimateId) {
 // (generation-salted) and inserts a new pending row. Returns
 // { clientSecret, setupIntentId, noShowFeeAmount, cancelWindowHours } for the
 // capture UI, or null when Stripe isn't configured.
+// Disclosure-version handshake: the CLIENT attests which fee-policy copy it
+// is rendering, and the ACCEPT is the sole writer of the sticky marker
+// (Codex #3342 r7 P1) — a pre-consent mint-time seed could be preserved by
+// an old worker's accept during a rolling deploy (old recordCardHoldHeld
+// never touches the column), so nothing writes the marker before consent:
+// old-worker accepts leave the column at its default false, and only
+// new-worker accepts record the accepting tab's attestation.
+const CARD_HOLD_STICKY_DISCLOSURE_VERSION = 'sticky_v1';
+
 async function createCardHoldSetupIntentForEstimate(estimate) {
   const pending = await db('estimate_card_holds')
     .where({ estimate_id: estimate.id, status: 'pending' })
@@ -135,6 +144,10 @@ async function createCardHoldSetupIntentForEstimate(estimate) {
       stripe_setup_intent_id: setupIntent.id,
       no_show_fee_amount: cardHoldNoShowFee(),
       cancel_window_hours: cardHoldCancelWindowHours(),
+      // Deliberately NO sticky_window_disclosed here (Codex #3342 r7 P1):
+      // the marker is written ONLY at acceptance from the accepting tab's
+      // attestation — a pre-consent seed could be preserved through an
+      // old-worker accept during a rolling deploy.
       status: 'pending',
       updated_at: db.fn.now(),
     })
@@ -216,7 +229,7 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attached to the customer separately (post-commit, retryable) via
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
-async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, trx = db }) {
+async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, disclosureVersion = null, trx = db }) {
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
@@ -246,6 +259,13 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
   const frozenAccepted = Number.isFinite(acceptedNum) && acceptedNum > 0
     ? Math.round(acceptedNum * 100) / 100
     : null;
+  // The ACCEPTING tab's disclosure attestation is the SOLE writer of the
+  // sticky marker on this rail (Codex #3342 r7 P1): acceptance IS the
+  // consent moment, the accept surface shows the sentence, and old-worker
+  // accepts (which never touch the column) leave the default false — so a
+  // rolling deploy can never preserve a pre-consent seed. A missing/legacy
+  // attestation (old bundle) records false: fail toward free.
+  const stickyDisclosed = disclosureVersion === CARD_HOLD_STICKY_DISCLOSURE_VERSION;
   const fields = {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId || null,
@@ -253,6 +273,7 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     no_show_fee_amount: noShowFee,
     cancel_window_hours: windowHours,
     accepted_amount: frozenAccepted,
+    sticky_window_disclosed: stickyDisclosed,
     agreed_at: trx.fn.now(),
     held_at: trx.fn.now(),
     status: 'held',
@@ -274,6 +295,8 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
       .orderBy('created_at', 'desc')
       .first('id');
     if (savedMethodRow) {
+      // The accept that actually BOOKS is the consent trail — its
+      // attestation overwrites a superseded earlier attempt's row.
       await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update(fields);
     } else {
       await trx('estimate_card_holds').insert({ estimate_id: estimateId, stripe_setup_intent_id: null, ...fields });
@@ -664,7 +687,11 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
 // Charge the flat fee against the held card (face value, off-session). The fee
 // is read from the FROZEN hold row, not live constants. Idempotent on the hold
 // row; never throws into the host flow.
-async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
+// attachSelfHeal: the sticky cancel branch passes false (Codex #3342 r5 P1)
+// — card removal is revocation there, and the self-heal below would
+// resurrect a card removed in the check-to-charge gap. All other legs keep
+// the historical self-heal behavior.
+async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date(), attachSelfHeal = true }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
@@ -719,7 +746,12 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
     // Stripe customer yet and an off-session charge would fail forever — attach
     // it first (idempotent). The completion path gets this via
     // resolveHoldPaymentMethodRowId; the fee path charges the pm id directly.
-    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+    // Skipped for the sticky cancel branch (revocation semantics): a card
+    // removed in the check-to-charge gap then simply fails the off-session
+    // charge below — never resurrected.
+    if (attachSelfHeal) {
+      await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+    }
     paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
       paymentMethodId: hold.stripe_payment_method_id,
@@ -842,6 +874,137 @@ function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
 }
 
+// Sticky cancel window (owner ruling 2026-08-10): a customer-initiated
+// reschedule made while the THEN-CURRENT slot was inside the fee window must
+// not launder a later cancel into a free one. Before this check, rebooker's
+// in-place overwrite of scheduled_date/window_start reset the clock —
+// "reschedule 10 days out at T-2h, then cancel" dodged the disclosed
+// late-cancel fee entirely. Scans reschedule_log (rebooker stamps
+// original_date/original_window on every move) for the earliest customer
+// move that would itself have been a late cancel, judged by the SAME window
+// predicate the calling rail charges by — isWithinWindow(serviceStart, at)
+// closes over the rail's frozen hold/request terms, so the booking-age
+// narrowing and boundary semantics stay rail-exact. Company moves
+// (tech/admin/weather_auto actors, or customer picks carrying a company-move
+// reason) never stick: WE moved them. Rescheduling itself stays free either
+// way — only the cancel-after-late-reschedule loses its dodge.
+// Kill switch (dark-ship): sticky-window ENFORCEMENT is opt-in per
+// environment — the registered stickyCancelWindow money gate
+// (GATE_STICKY_CANCEL_WINDOW), default OFF, consumed through the central
+// registry so gate-status reporting sees it. Fail closed on a registry
+// read error, mirroring isApptCardFeeRailEnabled. The updated disclosure
+// copy ships live either way: copy stricter than enforcement is the safe
+// direction (a customer who believes the fee applies and gets a free
+// release is never harmed); enforcement stricter than copy never happens
+// while dark.
+function isStickyCancelWindowEnabled() {
+  try {
+    return require('../config/feature-gates').isEnabled('stickyCancelWindow');
+  } catch (err) {
+    logger.warn('[estimate-card-holds] sticky gate read failed — treating as off', { error: err.message });
+    return false;
+  }
+}
+
+// notBefore is the rail's CONSENT anchor (held_at for the card-hold rail,
+// fee_agreed_at for the appointment-card rail): a reschedule made before the
+// customer accepted the fee terms can never authorize a later fee — only
+// moves made under the agreement stick. No resolvable anchor → no sticky at
+// all (fail toward free; a fee we can't tie to consent is never charged).
+// NOT gated internally (Codex #3342 r4 P1): enforcement call sites check
+// isStickyCancelWindowEnabled() themselves, while customer COPY (the
+// reminder's cutoff suppression) must see the evidence even while the gate
+// is off — a dated free-cancel promise sent during a dark interval must
+// never be broken by a later flip.
+async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, notBefore, currentStart = null }) {
+  const boundary = notBefore instanceof Date ? notBefore : (notBefore ? new Date(notBefore) : null);
+  if (!boundary || Number.isNaN(boundary.getTime())) return null;
+  // ALL rows, chronologically — company rows are needed too: a later
+  // Waves-initiated move SUPERSEDES prior sticky evidence (Codex #3342 r3
+  // P1). The authoritative classification lives in JS so unit doubles
+  // exercise it.
+  const rows = await db('reschedule_log')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'asc')
+    .select('original_date', 'original_window', 'new_date', 'new_window', 'reason_code', 'initiated_by', 'created_at');
+  const { parseETDateTime } = require('../utils/datetime-et');
+  // ET instant (ms) for a logged slot, or null when unparseable — shared by
+  // the adjacency check below and the final current-slot lineage check.
+  const slotInstant = (d, w) => {
+    const dateP = d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10);
+    const timeP = String(w || '').split('-')[0].slice(0, 8);
+    if (!dateP || !timeP) return null;
+    const t = parseETDateTime(`${dateP}T${timeP}`);
+    return t && !Number.isNaN(t.getTime()) ? t.getTime() : null;
+  };
+  let sticky = null;
+  let prevLanding; // undefined until the first row is seen
+  for (const row of rows || []) {
+    // Adjacency continuity (pre-push r8 P0): every logged move must depart
+    // from the previous logged move's landing. A mismatch means an UNLOGGED
+    // move (direct admin edit, series shift) happened BETWEEN two logged
+    // rows — invisible to the final current-slot check whenever the newest
+    // logged move happens to land on the slot being cancelled. The hidden
+    // move could have been a window-resetting company move, so earlier
+    // evidence is cleared exactly as if it were; the current row is still
+    // judged on its own strength below (a fresh late customer move re-arms).
+    // Unparseable slots on either side of the seam also clear — lineage we
+    // cannot verify never charges.
+    const originInstant = slotInstant(row.original_date, row.original_window);
+    if (prevLanding !== undefined
+      && (prevLanding === null || originInstant === null || originInstant !== prevLanding)) {
+      sticky = null;
+    }
+    prevLanding = slotInstant(row.new_date, row.new_window);
+    // Customer-initiated = a customer ACTOR (self-serve page, SMS reply) OR
+    // a staff-assisted move recorded with the customer_request reason — the
+    // office phone flow logs initiated_by='admin' but the CUSTOMER asked
+    // for the move, and that path must not stay a fee dodge. The actor is
+    // authoritative even when the reason is a weather/quick-move code:
+    // reschedule-sms.js keeps the pending move's reason on the customer's
+    // OWN pick, and reschedule-public.js classifies that pick as the
+    // customer's move, not a Waves one — an SMS pick made inside the window
+    // is exactly as sticky as the same pick on the reschedule page.
+    const customerInitiated = /^customer/.test(String(row.initiated_by || ''))
+      || /^customer_request/.test(String(row.reason_code || ''));
+    if (!customerInitiated) {
+      // A Waves move (tech, admin, weather_auto, auto_dispatch, system with
+      // ops/weather reasons) resets the clock — documented policy — so it
+      // also invalidates any earlier sticky evidence: WE chose the slot the
+      // customer would now be cancelling. A later customer late-move can
+      // re-arm sticky from scratch.
+      sticky = null;
+      continue;
+    }
+    if (sticky) continue; // earliest surviving evidence wins
+    // Same DATE+TIME → ET-instant composition as scheduledServiceApptTime:
+    // original_window logs as '<window_start>-<window_end>' raw TIME values.
+    const datePart = row.original_date instanceof Date
+      ? row.original_date.toISOString().slice(0, 10)
+      : String(row.original_date || '').slice(0, 10);
+    const timePart = String(row.original_window || '').split('-')[0].slice(0, 8);
+    if (!datePart || !timePart) continue;
+    const originalStart = parseETDateTime(`${datePart}T${timePart}`);
+    if (!originalStart || Number.isNaN(originalStart.getTime())) continue;
+    const rescheduledAt = row.created_at ? new Date(row.created_at) : null;
+    if (!rescheduledAt || Number.isNaN(rescheduledAt.getTime())) continue;
+    if (rescheduledAt.getTime() < boundary.getTime()) continue; // pre-consent move — terms not yet accepted
+    if (isWithinWindow(originalStart, rescheduledAt)) sticky = { originalStart, rescheduledAt };
+  }
+  if (sticky && currentStart instanceof Date && !Number.isNaN(currentStart.getTime()) && rows.length) {
+    // Unlogged-move invalidation (Codex #3342 r4 P1): series shifts update
+    // sibling visits WITHOUT a reschedule_log row (rebooker logs only the
+    // anchor), and direct admin moves can skip the log entirely — so when
+    // the newest LOGGED move did not land on the slot now being cancelled,
+    // some later unlogged move (possibly a company series shift) superseded
+    // the evidence. Unverifiable lineage never charges — fail toward free.
+    const last = rows[rows.length - 1];
+    const landing = slotInstant(last.new_date, last.new_window);
+    if (landing === null || landing !== currentStart.getTime()) sticky = null;
+  }
+  return sticky;
+}
+
 // Single entry for the cancel path: charge the late-cancel fee if the
 // cancellation lands inside the window, otherwise release the hold free. The
 // appointment's ET start instant is resolved from the trusted shared helper
@@ -871,8 +1034,77 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     // instant instead of re-resolving (or failing to resolve) it.
     return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
   }
+  // Sticky window: outside the CURRENT slot's window, the cancel is still a
+  // late cancel if a customer-initiated reschedule was itself made inside
+  // the window. Sticky evidence applies ONLY to a LIVE current slot — a
+  // start already past the cancellation grace releases free exactly as
+  // before (cancel_past_start: the visit came and went undelivered, and
+  // day-later cleanup must never bill), and an unresolved start keeps this
+  // rail's fail-toward-release posture. Lookup failure also releases free —
+  // never charge a fee we can't justify against evidence we hold.
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
-  const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
+  const startMs = startDate && !Number.isNaN(startDate.getTime()) ? startDate.getTime() : null;
+  const startLive = startMs != null && (startMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
+  let sticky = null;
+  // sticky_window_disclosed is the FROZEN policy marker (migration
+  // 20260810000040): only rows whose consent surface stated the sticky rule
+  // may be charged on its strength — legacy consents stay non-sticky. The
+  // enforcement gate is checked HERE, not in the helper, so the reminder's
+  // copy suppression can see evidence while the gate is dark. BOTH gates
+  // are required, matching the preview (pre-push r8 P1): with the parent
+  // card-hold rail off, sticky evidence must not enter this branch —
+  // chargeNoShowFee would refuse (feature_disabled) WITHOUT releasing,
+  // stranding the hold on a cancelled visit that a later rail re-enable
+  // could then charge; falling through releases free instead.
+  if (isCardHoldEnabled() && startLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
+    try {
+      sticky = await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
+        notBefore: hold.held_at,
+        currentStart: startDate,
+      });
+    } catch (err) {
+      logger.warn('[estimate-card-holds] sticky-window lookup for cancel failed — releasing free', { scheduledServiceId, error: err.message });
+    }
+  }
+  if (sticky) {
+    // Card removal is REVOCATION (AGENTS.md, mirroring the appointment-card
+    // rail — Codex #3342 r4 P1): the sticky branch must not ride
+    // chargeNoShowFee's attach self-heal onto a card the customer
+    // deliberately removed. Missing local payment_methods row → free
+    // release + office alert; an unverifiable lookup also releases free
+    // (this rail's posture).
+    try {
+      const pmRow = await db('payment_methods')
+        .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+        .first('id');
+      if (!pmRow) {
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Late-cancel fee not charged — card removed',
+            'A cancellation after an inside-window reschedule would have drawn the late-cancel fee, but the customer removed the saved card — treated as revocation; the hold was released. Bill manually if the fee applies.',
+            {
+              link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+              metadata: { scheduledServiceId, reason: 'sticky_payment_method_revoked' },
+            },
+          );
+        } catch (e) { logger.warn('[estimate-card-holds] sticky revocation alert failed', { error: e.message }); }
+        return releaseCardHold({ scheduledServiceId, reason: 'sticky_payment_method_revoked' });
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] sticky pm-revocation check failed — releasing free', { scheduledServiceId, error: err.message });
+      return releaseCardHold({ scheduledServiceId, reason: 'sticky_pm_check_failed' });
+    }
+    // Charge against the CURRENT start — the visit being cancelled is the
+    // live row (verified live just above), so the fee path's staleness
+    // guard judges THIS cancel's freshness. No attach self-heal: a card
+    // removed between the revocation check above and this charge must fail
+    // the charge, never be resurrected.
+    return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now, attachSelfHeal: false });
+  }
+  const startPassed = startMs != null && startMs <= now.getTime();
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
 }
 
@@ -903,10 +1135,55 @@ async function cardHoldReminderNote(scheduledServiceId) {
     const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
     const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
     let cutoffClause = '';
+    let start = null;
     try {
       const { scheduledServiceApptTime } = require('./appointment-reminders');
-      const start = await scheduledServiceApptTime(scheduledServiceId);
-      const startMs = start ? new Date(start).getTime() : NaN;
+      start = await scheduledServiceApptTime(scheduledServiceId);
+    } catch (err) {
+      logger.warn('[estimate-card-holds] reminder appt-time resolution failed — generic copy', { error: err.message });
+    }
+    // Sticky window: once a customer-initiated late reschedule exists there
+    // is NO free-cancel instant left to promise — a dated cutoff would
+    // promise a free cancel the fee check won't honor. Judged on EVIDENCE,
+    // deliberately ignoring the enforcement gate (Codex #3342 r4 P1): a
+    // cutoff promised while the gate is dark must survive a later flip, so
+    // the copy assumes enforcement. The generic clause (fee on
+    // cancel/no-show, rescheduling free) is accurate in every state, so a
+    // FAILED lookup also suppresses the cutoff rather than guessing.
+    let suppressCutoff = true;
+    let stickyEvidence = false;
+    if (!hold.sticky_window_disclosed) {
+      // Legacy consent — sticky can never charge this row, so the dated
+      // free-cancel cutoff stays a promise the fee check honors.
+      suppressCutoff = false;
+    } else {
+      try {
+        stickyEvidence = !!(await findStickyLateReschedule({
+          scheduledServiceId,
+          isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
+          notBefore: hold.held_at,
+          currentStart: start ? new Date(start) : null,
+        }));
+        suppressCutoff = stickyEvidence;
+      } catch (err) {
+        logger.warn('[estimate-card-holds] reminder sticky-window lookup failed — generic copy', { error: err.message });
+      }
+    }
+    // Card removal is revocation on the charge path — the reminder must
+    // agree (Codex #3342 r8 P2): with sticky evidence on file the handler
+    // releases FREE when the local payment_methods row is gone and the
+    // admin preview reports feeApplies:false, so copy threatening the fee
+    // (or claiming a card on file) would promise a charge nothing bills.
+    // A thrown lookup reaches the outer catch and returns '' — same
+    // never-threaten-what-we-can't-verify posture as the handler/preview.
+    if (stickyEvidence) {
+      const pmRow = await db('payment_methods')
+        .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+        .first('id');
+      if (!pmRow) return '';
+    }
+    try {
+      const startMs = (!suppressCutoff && start) ? new Date(start).getTime() : NaN;
       if (Number.isFinite(startMs)) {
         const heldMs = hold.held_at ? new Date(hold.held_at).getTime() : NaN;
         const byWindow = startMs - windowHours * 3600000;
@@ -959,7 +1236,35 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   } catch (err) {
     logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed', { error: err.message });
   }
-  const feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+  let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+  const previewStartMs = start ? new Date(start).getTime() : NaN;
+  const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
+  if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
+    // Sticky window — the preview must agree with handleCardHoldCancellation
+    // or the operator's confirm prompt lies (same enforcement gate, same
+    // evidence). Same fail-soft posture as the cancel path (a failed lookup
+    // there releases free, so feeApplies:false here stays coherent).
+    try {
+      feeApplies = !!(await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
+        notBefore: hold.held_at,
+        currentStart: start ? new Date(start) : null,
+      }));
+      if (feeApplies) {
+        // Card removal is revocation on the charge path — the preview must
+        // agree (Codex #3342 r5 P2): the handler releases free when the
+        // local payment_methods row is gone, so no fee prompt.
+        const pmRow = await db('payment_methods')
+          .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+          .first('id');
+        if (!pmRow) feeApplies = false;
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed', { error: err.message });
+      feeApplies = false;
+    }
+  }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
   return { held: true, feeApplies, feeAmount };
 }
@@ -1134,7 +1439,12 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   let emailDelivered = false;
   if (!receiptOptOut && !emailDeterministicMiss && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))) {
     try {
-      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+      // Same idempotency key as the receipt-delivery queue's email leg — a
+      // held SMS below hands this invoice to that queue, and its 8:00 AM
+      // job re-attempts BOTH legs; the shared key makes its email leg
+      // dedupe against this delivered one instead of emailing a second
+      // copy of the receipt.
+      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `receipt_email_auto:${invoice.id}` });
       if (emailResult?.ok) {
         emailDelivered = true;
       } else if (emailResult?.error === 'No receipt recipient email') {
@@ -1146,10 +1456,32 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // payment_receipt template/policy (kill switch, per-location number,
   // opt-out — a texts opt-out is enforced by the policy, so the doomed
   // fallback attempt for an opted-out customer is skipped up-front).
+  let smsQueuedForWindow = false;
   if (!receiptOptOut && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))) {
     try {
       await require('./invoice').sendReceipt(invoice.id);
-    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
+    } catch (e) {
+      // Send-window hold: the money and paid invoice are already committed
+      // and this path has no retry — hand the receipt to the durable
+      // receipt-delivery queue at the window open (idempotent per invoice)
+      // so an SMS-only customer still gets their no-show fee receipt.
+      if (e.code === 'QUIET_HOURS_HOLD' && e.nextAllowedAt) {
+        try {
+          const { enqueueReceiptDelivery } = require('./receipt-delivery-queue');
+          const queued = await enqueueReceiptDelivery({
+            invoiceId: invoice.id,
+            source: 'no_show_fee_window_hold',
+            nextAttemptAt: new Date(e.nextAllowedAt),
+          });
+          smsQueuedForWindow = true;
+          logger.info('[estimate-card-holds] no-show fee receipt held (send window) — handed to the receipt queue', { invoiceId: invoice.id, enqueued: queued.enqueued, deduped: queued.deduped });
+        } catch (queueErr) {
+          logger.error('[estimate-card-holds] held no-show receipt enqueue failed', { invoiceId: invoice.id, error: queueErr.message });
+        }
+      } else {
+        logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message });
+      }
+    }
   }
   // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
   // does) — stamp off a delivered email AFTER the SMS attempt: stamping
@@ -1158,7 +1490,12 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // a delivered/deduped result: stamping a no-recipient / provider failure
   // would wrongly drop the paid fee invoice from the admin needs-receipt
   // retry path. Idempotent via whereNull (the SMS leg may have stamped).
-  if (emailDelivered) {
+  // NOT while a window-held SMS sits on the receipt queue: the queue's 8 AM
+  // job calls unforced sendReceipt, so stamping off tonight's email would
+  // make that leg read 'already-sent' and drop the text a channel='both'
+  // customer asked for — the queue stamps when its SMS actually sends (and
+  // its email leg dedupes on the shared idempotency key above).
+  if (emailDelivered && !smsQueuedForWindow) {
     await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
       .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
   }
@@ -1210,6 +1547,8 @@ module.exports = {
   // no-show fee, whichever rail charged it).
   CARD_HOLD_POST_START_GRACE_MS,
   NO_SHOW_FEE_MAX_AGE_MS,
+  findStickyLateReschedule,
+  isStickyCancelWindowEnabled,
   sendNoShowFeeReceipt,
   _private: {
     cardHoldIntentMatchesEstimate,

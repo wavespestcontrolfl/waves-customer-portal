@@ -495,7 +495,7 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row) {
+async function fireStep(row, { operatorInitiated = false } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -597,7 +597,7 @@ async function fireStep(row) {
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row);
+    await fireTouch(row, { operatorInitiated });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -610,7 +610,7 @@ async function fireStep(row) {
   }
 }
 
-async function fireTouch(row) {
+async function fireTouch(row, { operatorInitiated = false } = {}) {
   const step = config.steps[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -735,6 +735,10 @@ async function fireTouch(row) {
 
   let smsSent = false;
   let smsSkipReason = null;
+  let smsDeferUntil = null;
+  // The held SMS leg failed to reach the scheduled rail: nothing durable
+  // owns it, so this touch must stay retryable (codex r21).
+  let smsHoldUnowned = false;
   if (customer?.phone) {
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
@@ -755,10 +759,62 @@ async function fireTouch(row) {
         customerId: customer.id,
         invoiceId: row.invoice_id,
         entryPoint: 'invoice_followup_sequence',
+        // Send-window operator marker: only the admin "send now" route sets
+        // it (an operator clicked THIS touch at this moment); the 10:16 ET
+        // cron path stays fenced.
+        ...(operatorInitiated ? { operatorInitiated: true } : {}),
         metadata: { original_message_type: 'invoice_followup' },
       });
       if (sendResult.blocked || sendResult.sent === false) {
         smsSkipReason = sendResult.code || 'sms_blocked';
+        // Send-window block (this cron runs hourly, incl. nights): not a
+        // delivery failure — remember the window open so the no-channel
+        // branch below defers the touch instead of pausing the sequence.
+        if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.nextAllowedAt) {
+          const at = new Date(sendResult.nextAllowedAt);
+          if (!Number.isNaN(at.getTime())) smsDeferUntil = at;
+          // Email already carried this touch: the no-channel defer below
+          // won't run and step_index advances, so the held SMS leg must be
+          // persisted NOW or it is never retried. Queue the exact rendered
+          // body on the scheduled-SMS rail for the window open — one
+          // enqueue per touch fire. An enqueue FAILURE leaves the pay-link
+          // text with no owner at all, so the step is held back for a
+          // retry instead of advancing (the email's per-step idempotency
+          // key dedupes its leg on the re-fire).
+          if (smsDeferUntil && emailResult.ok) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: customer.phone,
+                message_body: body,
+                status: 'scheduled',
+                scheduled_for: smsDeferUntil,
+                message_type: 'invoice_followup',
+                metadata: JSON.stringify({
+                  entry_point: 'invoice_followup_deferred',
+                  invoice_id: row.invoice_id,
+                  followup_sequence_id: row.id,
+                  original_block_code: sendResult.code,
+                  replay_purpose: 'payment_link',
+                  // The amount the frozen body NAMES (codex r27): credit
+                  // applied/reversed overnight changes the balance while
+                  // the invoice stays collectible — the replay suppresses
+                  // on mismatch and the sequence's next touch re-renders.
+                  rendered_amount: amount,
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
+            } catch (queueErr) {
+              smsHoldUnowned = true;
+              logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — holding the step for retry at the window open (email leg already delivered, idempotency-keyed)`);
+            }
+          }
+        }
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else {
         smsSent = true;
@@ -770,12 +826,24 @@ async function fireTouch(row) {
   }
 
   if (!smsSent && !emailResult.ok) {
-    await db('invoice_followup_sequences').where({ id: row.id }).update({
-      updated_at: db.fn.now(),
-      status: 'paused',
-      paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
-      next_touch_at: null,
-    });
+    if (smsDeferUntil) {
+      // Nothing failed — the touch fired outside the 8AM-8PM ET send
+      // window and no email leg covered it. Keep the sequence active and
+      // move ONLY this touch to the window open; the same step re-fires at
+      // 8:00 AM with a fresh credit draw (tonight's is reversed below,
+      // same as the pause branch — nothing was delivered).
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        next_touch_at: smsDeferUntil,
+      });
+    } else {
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        status: 'paused',
+        paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
+        next_touch_at: null,
+      });
+    }
     // No reminder went out — reverse the credit THIS dun drew down so we don't consume
     // it for an undelivered touch (matches the invoice/project send rollback). Only
     // this dun's increment; any prior applied credit stays. The invoice is collectible
@@ -788,6 +856,23 @@ async function fireTouch(row) {
         logger.warn(`[invoice-followups] credit reversal after undelivered dun skipped for ${row.invoice_id}: ${e.message}`);
       }
     }
+    return;
+  }
+
+  // Held SMS with no durable owner (codex r21): the email carried its own
+  // leg, but advancing step_index here would retire a pay-link text that
+  // was never queued and is never retried. Keep THIS step current and move
+  // the touch to the window open — the re-fire re-renders the SMS and
+  // re-attempts the enqueue, while the email's per-step idempotency key
+  // (invoice_followup_email:<invoice>:<step>) suppresses a second email.
+  // No credit reversal: unlike the nothing-delivered defer above, the email
+  // leg DID deliver against this draw.
+  if (smsHoldUnowned && smsDeferUntil) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
+      next_touch_at: smsDeferUntil,
+    });
+    logger.warn(`[invoice-followups] sequence ${row.id} step ${row.step_index} held at its current index — the deferred SMS leg never reached the rail; retrying at ${smsDeferUntil.toISOString()}`);
     return;
   }
 
@@ -875,7 +960,38 @@ async function stopOnPayment(invoiceId) {
             metadata: { original_message_type: 'invoice_thank_you' },
           });
           if (sendResult.blocked || sendResult.sent === false) {
-            logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+            // Send-window hold: this is event-driven (the payment just
+            // landed) and the sequence is already marked completed —
+            // nothing retries, so queue the thank-you for 8:00 AM. A paid
+            // invoice's acknowledgment can't go stale, so no recheck.
+            if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: customer.id,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: customer.phone,
+                  message_body: body,
+                  status: 'scheduled',
+                  scheduled_for: new Date(sendResult.nextAllowedAt),
+                  message_type: 'invoice_thank_you',
+                  metadata: JSON.stringify({
+                    entry_point: 'invoice_followup_thank_you_deferred',
+                    invoice_id: invoiceId,
+                    original_block_code: sendResult.code,
+                    replay_purpose: 'payment_receipt',
+                    refresh_customer_phone: true,
+                    resolve_from_by_customer: true,
+                  }),
+                });
+                logger.info(`[invoice-followups] thank-you SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[invoice-followups] held thank-you requeue failed for invoice ${invoiceId}: ${queueErr.message}`);
+              }
+            } else {
+              logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+            }
           }
         }
       }
@@ -1035,7 +1151,7 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
  * Send the next touch right now, even if it's not due yet. Virginia uses this
  * when a customer is dodging (e.g. "push them to day-14 language today").
  */
-async function sendNextTouchNow(invoiceId) {
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
 
@@ -1060,7 +1176,7 @@ async function sendNextTouchNow(invoiceId) {
     )
     .first();
 
-  if (row) await fireStep(row);
+  if (row) await fireStep(row, { operatorInitiated });
 }
 
 /**
@@ -1094,6 +1210,9 @@ async function isDunningStopped(invoiceId) {
 module.exports = {
   scheduleForInvoice,
   runPending,
+  // Used by the scheduled-SMS executor to suppress stale deferred
+  // invoice/dunning replays (paid/void overnight).
+  isTerminalInvoice,
   stopOnPayment,
   releaseFromAutopayHold,
   handleAutopayFailure,

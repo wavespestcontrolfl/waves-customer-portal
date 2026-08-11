@@ -264,6 +264,59 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // so treat them as failed asks and release to ask_failed for the
       // save-triggered retry (#2956 r4).
       const sentinelSid = /^(gate|template|internal|owner)-/.test(String(result?.sid || result?.providerMessageId || ''));
+      // Send-window hold: ask_failed is only re-claimed by a LATER contact
+      // save, so a night hold would leave this recipient blocked from all
+      // texts indefinitely. Queue the ask on the scheduled-SMS rail for
+      // 8:00 AM instead — the queued row owns the ask, the row stays
+      // pending (dispatched), and the recipient's YES reply flips it
+      // through the normal inbound path.
+      if (result.blocked
+        && result.code === 'QUIET_HOURS_HOLD'
+        && result.deferred
+        && result.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          // Queue row + dispatch marker commit ATOMICALLY: a committed
+          // queue row with a failed dispatched_at write leaves the ask
+          // pending-undispatched, and the 10-minute stale-pending recovery
+          // (sweep + save-time reclaim) would re-ask while the queued row
+          // still delivers at 8:00 AM — duplicate asks. Exactly one marked
+          // row or the whole enqueue rolls back to the ask_failed release.
+          await db.transaction(async (trx) => {
+            await trx('sms_log').insert({
+              customer_id: customer?.id || null,
+              direction: 'outbound',
+              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+              to_phone: claim.phone,
+              message_body: claim.body,
+              status: 'scheduled',
+              scheduled_for: new Date(result.nextAllowedAt),
+              message_type: 'recipient_optin_request',
+              metadata: JSON.stringify({
+                entry_point: 'recipient_optin_deferred',
+                original_block_code: result.code,
+                replay_purpose: 'appointment',
+                // Replay-time staleness recheck keys (deferred-replay
+                // registry): the ask only sends if this row is still pending.
+                optin_phone_key: claim.key,
+                optin_customer_id: claim.customerId || null,
+              }),
+            });
+            const marked = await trx('recipient_optin')
+              .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+              .update({ dispatched_at: new Date(), updated_at: new Date() });
+            if (marked !== 1) {
+              throw new Error(`dispatch marker update touched ${marked} rows (expected 1)`);
+            }
+          });
+          requested += 1;
+          logger.info(`[recipient-optin] ask for ***${claim.key.slice(-4)} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+          continue;
+        } catch (queueErr) {
+          logger.error(`[recipient-optin] held ask requeue failed for ***${claim.key.slice(-4)}: ${queueErr.message}`);
+          // fall through to the ask_failed release below
+        }
+      }
       if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —

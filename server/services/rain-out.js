@@ -130,24 +130,11 @@ function containsBareHost(text) {
   return false;
 }
 
-// The regex is textual, so hosts hidden behind encodings that a URL parser
-// (or a tapping thumb) canonicalizes back to the real hostname would slip
-// it: `bit%2ely`, fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`,
-// zero-width joins (codex PR P1). Check the shortener set against a
-// canonicalized copy too: NFKC fold, unicode dot forms → '.', zero-width
-// chars stripped, then bounded percent-decode.
-function normalizeForLinkCheck(raw) {
-  let out = String(raw).normalize('NFKC');
-  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
-  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
-  for (let i = 0; i < 3; i++) {
-    let decoded;
-    try { decoded = decodeURIComponent(out); } catch { break; }
-    if (decoded === out) break;
-    out = decoded;
-  }
-  return out;
-}
+// Hosts hidden behind encodings that a URL parser (or a tapping thumb)
+// canonicalizes back to the real hostname would slip the textual regex —
+// the shared canonicalizer lives in messaging/sms-link-policy.js (single
+// source with comms-lint; codex PR P1 provenance preserved there).
+const { normalizeForLinkCheck } = require('./messaging/sms-link-policy');
 
 // Compliance fold: compatibility normalization + default-ignorable
 // characters (soft hyphen, joiners, directional marks, variation
@@ -576,7 +563,7 @@ async function getOptions(serviceId) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false } }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   // Moved-first means the new slot is already booked — no confirmation
@@ -731,6 +718,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     purpose: 'appointment',
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
+    // Send-window operator marker (validators/send-window.js): a quick-move
+    // notice is the direct consequence of an operator's commit click with an
+    // explicit notifyCustomer choice — the moratorium is for
+    // machine-initiated sends, not a human moving a visit at night. Threaded
+    // from the authenticated routes (never assumed here) so any future
+    // autonomous caller of commit() stays fenced by default.
+    ...(operatorInitiated ? { operatorInitiated: true } : {}),
     // original_message_type doubles as the per-template ops kill-switch key
     // (twilio.js isTemplateActive) and MUST be the key of the rung that
     // actually rendered: the legacy rain_out_moved row is retired
@@ -790,8 +784,15 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  *                                            metadata.adminUserId on each moved-SMS
  *                                            so sms_log.admin_user_id records who
  *                                            drove the send (and who authored a note).
+ * @param {boolean} [args.operatorInitiated=false]  send-window exemption for the
+ *                                            moved SMS. Only the authenticated
+ *                                            tech/admin routes set it (an
+ *                                            operator clicked the move and chose
+ *                                            notifyCustomer); defaults fenced so
+ *                                            a future autonomous caller can't
+ *                                            text at night by omission.
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech' }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -1154,6 +1155,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           customerNote: job.id === serviceId ? note : null,
           actorUserId,
           forecastHealth,
+          operatorInitiated,
         });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);

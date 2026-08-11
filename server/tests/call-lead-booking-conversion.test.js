@@ -22,6 +22,9 @@ const logger = require('../services/logger');
 const { _test } = require('../services/call-recording-processor');
 const { convertCallLeadOnPhoneBooking, findReusableCallLead } = _test;
 
+// findReusableCallLead returns { lead, matchedVia }; these tests assert the ROW.
+const findLead = async (db, args) => (await findReusableCallLead(db, args)).lead;
+
 // Inner (savepoint) db stub: routes table calls to configurable results and
 // records update/insert payloads. where(fn) invokes the closure against the
 // same builder (mirroring knex) so the ownership-guard predicate is recorded.
@@ -284,7 +287,7 @@ describe('findReusableCallLead', () => {
     // foreign-owned lead invisible so the caller gets a fresh row instead.
     const database = makeLookupDb(null);
 
-    const lead = await findReusableCallLead(database, { phone: PHONE, customerId: 'cust-1', workableUnnamedLead: false });
+    const lead = await findLead(database, { phone: PHONE, customerId: 'cust-1', workableUnnamedLead: false });
 
     expect(lead).toBeNull();
     expect(database).toHaveBeenCalledWith('leads');
@@ -302,7 +305,7 @@ describe('findReusableCallLead', () => {
   test('customer-less recovery path reuses only an ACTIVE lead, with no ownership predicate', async () => {
     const database = makeLookupDb({ id: 'lead-7' });
 
-    const lead = await findReusableCallLead(database, { phone: PHONE, customerId: null, workableUnnamedLead: true });
+    const lead = await findLead(database, { phone: PHONE, customerId: null, workableUnnamedLead: true });
 
     expect(lead).toEqual({ id: 'lead-7' });
     expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
@@ -317,7 +320,7 @@ describe('findReusableCallLead', () => {
     // never enrich a lead one of them owns (codex round-6 P2).
     const database = makeLookupDb({ id: 'lead-9' });
 
-    const lead = await findReusableCallLead(database, {
+    const lead = await findLead(database, {
       phone: PHONE, customerId: null, workableUnnamedLead: true, unclaimedOnly: true,
     });
 
@@ -330,7 +333,7 @@ describe('findReusableCallLead', () => {
   test('no phone → no lookup at all', async () => {
     const database = makeLookupDb({ id: 'never' });
 
-    const lead = await findReusableCallLead(database, { phone: null, customerId: 'cust-1', workableUnnamedLead: false });
+    const lead = await findLead(database, { phone: null, customerId: 'cust-1', workableUnnamedLead: false });
 
     expect(lead).toBeNull();
     expect(database).not.toHaveBeenCalled();

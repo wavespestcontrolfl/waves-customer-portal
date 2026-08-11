@@ -3192,8 +3192,44 @@ const WET_STATE_CLAIM_RE = /\b(?:while|when|whether|even\s+(?:when|while|if))\s+
 // Refusal/failure/inability framing negates the confirmation too (Codex
 // PR r15: "refuses to confirm", "failed to confirm", "unable to confirm").
 const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t|refus\\w+|fail\\w+|unable|declin\\w+|neglect\\w+|without)";
+// "timing" only counts when it is not APPOINTMENT timing (Codex #3348):
+// "the technician will confirm the timing of your next visit" is a
+// scheduling promise, not the idiom's second part — the lookahead rejects
+// a scheduling object after "timing", while bare "confirms the timing"
+// (the idiom's canonical form) and "timing of re-entry" still qualify.
+// The gap is TEMPERED on re-entry words (Codex #3348 r2): "timing after
+// the application before re-entry" concerns re-entry — an intervening
+// re-entry/dry/safe/return word defuses the exclusion. Two exclusion
+// branches (Codex #3348 r3+r4):
+//   1. A next/upcoming-determined object is ALWAYS appointment timing —
+//      trailing drying words cannot re-qualify "the timing of your next
+//      visit based on drying conditions".
+//   2. Other scheduling objects exclude only when NO drying context
+//      follows in the sentence: "confirm the timing after the visit based
+//      on drying conditions" is the current treatment visit and passes.
+// "timing" binds by ALLOWLIST, not noun blocklist (Codex #3348 r5/r6 —
+// blocklisting scheduling nouns was whack-a-mole: "appointment timing",
+// then "route timing", "billing timing"...). A compound noun on the left
+// only qualifies when it is a determiner, a confirmation verb, or a
+// re-entry word; an "of/for" object on the right must bind to re-entry/
+// drying context. The two prepositional branches below keep the earlier
+// verdicts: next/upcoming objects are ALWAYS appointment timing, other
+// scheduling objects defuse only when drying context follows. (Lookbehind
+// is server-side only — never ships in client chunks.)
+// "entry" alone is allowlisted because the hyphen in "re-entry" makes it
+// its own word for the lookbehind's boundary.
+const TIMING_LEFT_ALLOW_SRC = "(?:the|a|their|your|its|that|this|exact|precise|right|proper|confirms?|confirmed|verif(?:y|ies|ied)|advises?|advised|on|know|knows|re-?entry|entry|dry(?:ing)?|safety|safe|return)";
+const TIMING_GAP_SRC = "(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?";
+const TIMING_OBJ_SRC = `(?<!\\b(?!${TIMING_LEFT_ALLOW_SRC}\\b)[a-z][a-z-]*[\\s-])timing`
+  // A scheduling noun within a short left window (spanning possessives and
+  // up to two modifiers) is appointment timing even when the adjacent word
+  // is allowlisted: "the next visit's precise timing" (Codex #3348 r7).
+  + "(?<!\\b(?:visit|appointment|arrival|estimate|quote|call|service|application|route|billing)(?:['’]s)?[\\s-](?:[a-z][a-z-]*[\\s-]){0,2}timing)"
+  + `(?!\\s+(?:of|for)\\b(?![^.!?\\n]{0,40}?\\b(?:re-?ent\\w+|dry\\w*|safe\\b|return\\w*)\\b))`
+  + `(?!${TIMING_GAP_SRC}\\b(?:next|upcoming)\\s+(?:visit|appointment|arrival|application|service)\\b)`
+  + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call|service|application)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;
 const TECH_CONFIRMS_RE = new RegExp(
-  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
+  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:${TIMING_OBJ_SRC}|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,
   'i',
 );
@@ -3911,6 +3947,10 @@ module.exports = {
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
   isThirdPartyPriceCitation,
+  // single source of truth for the re-entry/safety compliance predicate
+  // (AGENTS.md "Compliance language on any customer surface") — consumed by
+  // comms-lint so the SMS harness can never drift from the publish gate.
+  reentrySafetyClaimFinding,
   // single source of truth for the product-claim + prevention-promise
   // policies — consumed by the writer prompts so instruction and enforcement
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).

@@ -161,6 +161,9 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, pestType, 
     purpose: 'appointment',
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
+    // Sole caller is the admin send-prep route — an operator-clicked send,
+    // exempt from the send window (allowlisted entry point).
+    entryPoint: 'admin_prep_guide_send',
     metadata: {
       original_message_type: 'prep_info',
       pest_type: pestType,

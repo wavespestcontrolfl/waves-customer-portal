@@ -38,6 +38,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
+const { isWithinSendWindowET } = require('./messaging/send-window');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
@@ -87,8 +88,6 @@ const MIN_CALL_SECONDS = 120;
 // reaching the send path (admin force-reprocess, processAllPending backfill)
 // must never text hours or days later (codex P1).
 const MAX_CALL_AGE_MS = 24 * 60 * 60 * 1000;
-const QUIET_START_HOUR_ET = 8;   // inclusive — sends allowed from 08:00 ET
-const QUIET_END_HOUR_ET = 20;    // exclusive — no sends at/after 20:00 ET
 
 // Farewell detection over the transcript tail. A dropped call ends
 // mid-thought; a normal call ends with a goodbye exchange. Two tiers: STRONG
@@ -228,13 +227,13 @@ function callbackClause(dialedLine) {
   return ` at (${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
+// Boundary source is the shared customer-SMS window module — this fence
+// predates GATE_SMS_SEND_WINDOW and stays live regardless of the gate (the
+// gate check lives in the canonical-path validator, not in the bounds), but
+// the 8/20 ET hours themselves must have exactly one owner so a future
+// hours change can't update one fence and leave the other stale.
 function withinSendWindowET(now = new Date()) {
-  const hour = Number(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour: 'numeric',
-    hour12: false,
-  }).format(now));
-  return hour >= QUIET_START_HOUR_ET && hour < QUIET_END_HOUR_ET;
+  return isWithinSendWindowET(now);
 }
 
 async function stampStatus(leadId, status) {

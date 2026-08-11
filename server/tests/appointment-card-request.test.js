@@ -102,6 +102,9 @@ const mockGetTemplate = jest.fn(async () => 'Hi Pat! Secure your visit: https://
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: (...a) => mockGetTemplate(...a),
 }));
+jest.mock('../config/twilio-numbers', () => ({
+  getOutboundNumber: () => '+19410000000',
+}));
 
 const {
   requestCardForAppointment,
@@ -335,7 +338,9 @@ describe('the send', () => {
       // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
       // send that reaches the template — the $0/unpriced guard upstream is
       // what keeps it off zero-amount visits. GSM-7-safe (no em-dash).
-      cancel_fee_line: expect.stringMatching(/^\n\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\.$/),
+      // Trailing-space clause (owner spacing pass 2026-08-11): the template
+      // places the token directly before the card-security sentence.
+      cancel_fee_line: expect.stringMatching(/^\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\. $/),
     }));
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -357,6 +362,56 @@ describe('the send', () => {
     });
     expect(res.action).toBe('sent');
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19419998888' }));
+  });
+
+  test('window-held queue: an explicit alternate recipient is FROZEN — no primary-phone refresh at replay (r19 P1)', async () => {
+    // blocked:true = validator stop (the pipeline never reached the
+    // provider) — the shape the send-window boundary actually returns.
+    const windowHold = { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: '2099-07-20T12:00:00Z' };
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+
+    // Consented alternate (AI call pipeline redirect): the queued row keeps
+    // the chosen recipient. refresh_customer_phone here would make
+    // resolveScheduledRecipient swap the 64-hex bearer link onto the
+    // account holder's number at 8 AM — a different person than the
+    // immediate path's explicit recipient decision.
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', recipientPhone: '+19419998888' });
+    const queued = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].to_phone).toBe('+19419998888');
+    const meta = JSON.parse(queued[0].metadata);
+    expect(meta.explicit_recipient).toBe(true);
+    expect(meta.refresh_customer_phone).toBeUndefined();
+
+    // The account holder's own number (default path) keeps the send-time
+    // refresh — a stale snapshot must not ride customer trust.
+    mockDbTouches = [];
+    mockTableHandlers = baseHandlers();
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'booking' });
+    const queuedDefault = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queuedDefault).toHaveLength(1);
+    const metaDefault = JSON.parse(queuedDefault[0].metadata);
+    expect(metaDefault.refresh_customer_phone).toBe(true);
+    expect(metaDefault.explicit_recipient).toBeUndefined();
+
+    // A recipientPhone that IS the account number (formatting differences
+    // aside) also refreshes — identity, not string equality.
+    mockDbTouches = [];
+    mockTableHandlers = baseHandlers();
+    mockSendCustomerMessage.mockResolvedValueOnce(windowHold);
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'booking', recipientPhone: '9415551234' });
+    const queuedSame = touches('sms_log')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row);
+    expect(queuedSame).toHaveLength(1);
+    const metaSame = JSON.parse(queuedSame[0].metadata);
+    expect(metaSame.refresh_customer_phone).toBe(true);
+    expect(metaSame.explicit_recipient).toBeUndefined();
   });
 
   test('an abandoned inline pending row gets its ONE text — same token, no new row', async () => {
@@ -657,6 +712,120 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
+  test("the sticky-window consent marker is stamped from the completing tab's echoed disclosure version", async () => {
+    // Frozen fee terms present (stamped at render) — the consent stamp rides them.
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, no_show_fee_amount: '49.00', cancel_window_hours: 24 });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true });
+    const completed = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completed.sticky_window_disclosed).toBe(true);
+    expect(completed.fee_agreed_at).toEqual(expect.any(Date));
+  });
+
+  test('a missing/legacy echo (old bundle, webhook backstop) stamps NON-sticky alongside the consent — never chargeable under unseen terms', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, no_show_fee_amount: '49.00', cancel_window_hours: 24 });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    const completed = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completed.sticky_window_disclosed).toBe(false);
+  });
+
+  test('webhook-first race: the browser\'s later /complete records its consent echo on the completed row (Codex #3342 r7)', async () => {
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { updates.push(patch); return 1; };
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(updates.some((p) => p.sticky_window_disclosed === true)).toBe(true);
+  });
+
+  test('webhook-first race: a FAILED or zero-row echo write NACKs instead of acking — the client keeps its 3DS params and a reload retries (pre-push r8 P1)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    // Zero rows moved (the row changed under us) — never acked as recorded.
+    mockTableHandlers.appointment_card_requests.update = () => 0;
+    let res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+    // Thrown write — same NACK; this update is the SOLE writer of the
+    // webhook-first consent marker, so a swallowed failure would lose the
+    // disclosed sticky window permanently.
+    mockTableHandlers.appointment_card_requests.update = () => { throw new Error('db down'); };
+    res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+  });
+
+  test('LOST-CLAIM webhook-first race: the webhook wins between the browser\'s read and its claim — the echo still records (Codex #3342 r9)', async () => {
+    // Initial read sees pending, so the completed-row recovery in
+    // completeSecureCardCapture never runs; the claim then misses because
+    // the webhook completed the row (non-sticky, no echo available). The
+    // lost-claim path must route the fresh completed row through the same
+    // consent-echo recording, or this interleaving silently keeps the
+    // reschedule-then-cancel dodge.
+    mockRetrieveSetupIntent.mockResolvedValueOnce(GOOD_INTENT);
+    let reads = 0;
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      if (reads === 1) return { ...REQUEST }; // still pending at the browser's read
+      return {
+        id: 'req-1', status: 'completed', updated_at: new Date(),
+        stripe_setup_intent_id: 'seti_1', fee_agreed_at: new Date(), sticky_window_disclosed: false,
+      };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => {
+      updates.push(patch);
+      return patch.status === 'completing' ? 0 : 1; // the webhook won the claim
+    };
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(updates.some((p) => p.sticky_window_disclosed === true)).toBe(true);
+  });
+
+  test('LOST-CLAIM webhook-first race: a failed echo write NACKs here too — never acked as recorded', async () => {
+    mockRetrieveSetupIntent.mockResolvedValueOnce(GOOD_INTENT);
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      if (reads === 1) return { ...REQUEST };
+      return {
+        id: 'req-1', status: 'completed', updated_at: new Date(),
+        stripe_setup_intent_id: 'seti_1', fee_agreed_at: new Date(), sticky_window_disclosed: false,
+      };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 0);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+  });
+
+  test('webhook-first race: a mismatched SetupIntent or missing echo records NOTHING on the completed row', async () => {
+    const updates = [];
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_OTHER',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { updates.push(patch); return 1; };
+    // Mismatched intent + valid echo.
+    await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    // Matching intent + NO echo.
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(updates.some((p) => 'sticky_window_disclosed' in p)).toBe(false);
+  });
+
   test('happy path: saves, records consent, enrolls, marks the row completed', async () => {
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', ip: '1.2.3.4', userAgent: 'jest' });
     expect(res).toEqual({ ok: true });
@@ -918,6 +1087,11 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(stamp.no_show_fee_amount.bindings).toContain(75);
     expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
     expect(stamp.cancel_window_hours.bindings).toContain(24);
+    // The render must NOT write the sticky-window marker (Codex #3342 r5
+    // P1): render-time seeding poisons rows across a rolling deploy. The
+    // marker is consent-time-only, stamped by the completion tail from the
+    // completing tab's echoed disclosure version.
+    expect(stamp.sticky_window_disclosed).toBeUndefined();
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
     expect(stamp.fee_agreed_at).toBeUndefined();
   });
@@ -1037,7 +1211,19 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
     // Row values, never live config — and the exact enforced window stated.
+    // No sticky marker on the row → the terms it ACCEPTED, without the
+    // reset sentence (pre-push r8 P1): legacy rows are never sticky-charged
+    // and must never be shown the sticky rule.
     expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
+  });
+
+  test('a sticky-marked row\'s secured render carries the reset sentence it consented to', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24, sticky_window_disclosed: true,
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free, though a reschedule made within 24 hours doesn\'t reset the cancellation window.');
   });
 
   test('secured render for a satisfied (auto-secured) row carries NO fee note — no disclosure means no fee', async () => {
@@ -1052,6 +1238,29 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('the disclosure echo token rides ONLY the ready payload — secured/completing/closed carry no stickyDisclosureVersion (Codex #3342 r8 P1)', async () => {
+    // A secured payload that carried the version would be latched into the
+    // client's sessionStorage; a replayed 3DS return could then upgrade a
+    // non-sticky webhook/legacy completion to sticky_window_disclosed=true
+    // from a disclosure rendered only AFTER consent.
+    const ready = await loadSecureCardPageData(REQUEST.token);
+    expect(ready.state).toBe('ready');
+    expect(ready.stickyDisclosureVersion).toBe('sticky_v1');
+
+    for (const status of ['completed', 'completing', 'satisfied']) {
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status, updated_at: new Date() });
+      const res = await loadSecureCardPageData(REQUEST.token);
+      expect(res.state).toBe('secured');
+      expect('stickyDisclosureVersion' in res).toBe(false);
+    }
+
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST });
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
+    const closed = await loadSecureCardPageData(REQUEST.token);
+    expect(closed.state).toBe('closed');
+    expect('stickyDisclosureVersion' in closed).toBe(false);
   });
 
   test('cancelled or past visit → closed (no intent minted)', async () => {
@@ -1213,7 +1422,10 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
     expect(Object.keys(res).sort()).toEqual([
       // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
       // ruling) — present in ALL states, unrelated to the plan gate this test pins.
-      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+      // stickyDisclosureVersion joined 2026-08-10 (sticky cancel window) —
+      // the completing tab's echo token; attached ONLY to the ready state
+      // (Codex #3342 r8 P1), unrelated to the plan gate this test pins.
+      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
     ]);
   });
 

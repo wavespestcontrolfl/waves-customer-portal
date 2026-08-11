@@ -928,17 +928,13 @@ function customerPhoneMatches(phone, customer = {}) {
   return samePhone(phone, customer.phone);
 }
 
-const LEAD_PIPELINE_STAGES = new Set([
-  'new_lead',
-  'contacted',
-  'qualified',
-  'estimate_needed',
-  'estimate_draft',
-  'estimate_sent',
-  'estimate_viewed',
-  'follow_up',
-  'negotiating',
-]);
+// Extracted VERBATIM to the shared util (codex P1 PR #3303 r19) — the
+// attribution retire path mirrors this exact gate on phone-matched
+// successors; never re-inline or duplicate it.
+const { LEAD_PIPELINE_STAGES, shouldCreateCallLeadForCustomer } = require('../utils/call-lead-customer-gate');
+// Dialed-number → lead_sources resolution, shared with the finalization
+// rejection-repair branch (codex P1 PR #3303 r20).
+const { resolveCallLeadSource } = require('../utils/call-lead-source');
 
 // Terminal lead statuses (`leads.status`). Mirrors admin-leads.js's own
 // "active lead" definition (status NOT IN these). The customer-less recovery
@@ -948,12 +944,6 @@ const LEAD_PIPELINE_STAGES = new Set([
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
 const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
-
-function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
-  if (!customer) return false;
-  if (createdCustomerFromCall) return true;
-  return LEAD_PIPELINE_STAGES.has(String(customer.pipeline_stage || '').toLowerCase());
-}
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -1162,28 +1152,12 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
   };
 }
 
-// Call types that are NOT new sales leads. spam/voicemail are handled by their
-// own booleans + early return; these are the existing-customer/non-sales calls
-// the classifier now labels so they stop spawning leads. Kept narrow on purpose:
-// a genuine new prospect is `new_inquiry`, so vetoing on these never drops a real
-// lead, it only stops re-triaging people who already bought or aren't buying.
-const NON_LEAD_CALL_TYPES = new Set([
-  'existing_customer_scheduling',
-  'existing_customer_service',
-  'complaint',
-  'billing',
-  'wrong_number',
-]);
-
-// Content-based veto: the call is not a new lead when the model explicitly says
-// so (is_lead === false) or labels it a non-lead call_type. Both signals are
-// optional — when the model omits them (or extraction fell back), this returns
-// false so behavior matches the legacy pipeline-stage-only gate.
-function isNonLeadCallContent(extracted = {}) {
-  if (extracted && extracted.is_lead === false) return true;
-  const callType = String(extracted?.call_type || '').trim().toLowerCase();
-  return NON_LEAD_CALL_TYPES.has(callType);
-}
+// Non-lead call-content classification — shared with the attribution retire
+// path's durable-evidence gate (codex P1 PR #3303 r18), so the linkage
+// decision and the successor-inheritance gate can never drift apart. The
+// definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
+// the util; semantics unchanged.
+const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
 // merge first-touch holds (Codex #3084 r44): the peer that reclaimed the
@@ -1407,20 +1381,10 @@ async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, call
 // referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
 // Returns that name, or '' when there's no referral — used to override the dialed-
 // number source with the 'referral' channel so word-of-mouth is attributed.
-const REFERRAL_PLACEHOLDER_VALUES = new Set([
-  'null', 'none', 'n/a', 'na', 'no', 'false', 'true', 'unknown', 'undefined',
-  'not mentioned', 'not stated', 'not specified', 'not provided', 'nobody', 'no one',
-]);
-function referrerNameFromExtracted(extracted = {}) {
-  // Model-generated JSON has no schema enforcement — fail CLOSED: a non-string
-  // sentinel (e.g. boolean false) or a placeholder phrase must NOT be read as a
-  // referrer name and flip a normal call to lead_source='referral'.
-  const v = extracted?.referred_by;
-  if (typeof v !== 'string') return '';
-  const raw = v.trim();
-  if (!raw || REFERRAL_PLACEHOLDER_VALUES.has(raw.toLowerCase())) return '';
-  return raw.slice(0, 100); // sane cap for a name/'unnamed' (detail is clamped again at write)
-}
+// Extracted VERBATIM to the shared util (codex P1 r24) so the attribution
+// retire's successor rehome judges referral evidence the SAME way; never
+// re-inline it here.
+const { referrerNameFromExtracted, REFERRAL_PLACEHOLDER_VALUES } = require('../utils/call-lead-source');
 
 // Additional properties discussed on the call (multi-property callers: a
 // landlord's rental + home, two units, a second house). Prefer the V1
@@ -1875,15 +1839,10 @@ function leadContactCompleteness(fields = {}) {
 // is the phone. Without this branch a fully-identified prospect calling from
 // a blocked number produced no lead row anywhere (name + email + address +
 // quote promised → invisible in Leads/Customers, triage cards only).
-function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
-  const text = (v) => String(v == null ? '' : v).trim();
-  const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
-  if (!phone) {
-    return hasServiceIntent && EMAIL_RE.test(text(extracted.email).toLowerCase());
-  }
-  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
-  return hasServiceIntent && (hasReachback || voicemail === true);
-}
+// Extracted VERBATIM to the shared util (pre-push P1 PR #3303 r20) — the
+// attribution retire path mirrors this exact gate on customer-less
+// phone-matched successors; never re-inline or duplicate it.
+const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
 
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
@@ -2199,26 +2158,33 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 // and the guarded write rebuilt it ~400 lines away. One function means the
 // two can no longer drift, and a new predicate added here is automatically
 // enforced at both sites.
-function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workableUnnamedLead }) {
+function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workableUnnamedLead, phoneAuthorizedStamp = false }) {
   let out = query.whereNull('deleted_at');
   if (workableUnnamedLead) {
     out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
-  if (unclaimedOnly || !customerId) {
+  if (unclaimedOnly || (!customerId && !phoneAuthorizedStamp)) {
     // Anonymous retries require an UNCLAIMED row too, not just the
     // shared-phone-ambiguity case: unclaimedOnly is derived from shared-phone
     // candidates and is false for a customer-less caller, so without the
     // `!customerId` arm a row claimed between attempts stayed eligible and
     // an anonymous extraction could overwrite a customer-owned lead
-    // (audit P1 r15).
+    // (audit P1 r15). EXCEPTION (codex P2 on the root fix): a
+    // PHONE-authorized stamp (metadata.lead_link_via === 'phone') was
+    // legitimately allowed to target a customer-owned lead at stamp time —
+    // the phone path applies no ownership filter for a customer-less
+    // caller — so its retry keeps the same ownership rules the original
+    // linkage ran under instead of the anonymous-strict set. Email/legacy
+    // stamps (via absent) stay strict; shared-phone ambiguity
+    // (unclaimedOnly) is never relaxed.
     out = out.whereNull('customer_id');
-  } else {
+  } else if (customerId) {
     out = out.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   return out;
 }
 
-async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null }) {
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null, stampedLeadVia = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
   // attempt already inserted, and the call SID is the strongest identity
@@ -2240,6 +2206,14 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // and taking the newest let retries pick an arbitrary one (audit P1 r21).
   // Resolve the sid lead first; consult the stamp only when no eligible sid
   // lead exists. Both arms pass the SAME eligibility as the contact lookups.
+  // The return carries WHICH arm resolved the row ({ lead, matchedVia }) —
+  // the guarded write must inherit the eligibility of the arm that actually
+  // selected the row (pre-push P1 r2 on the root fix): a stamp-selected row
+  // passed applySameCallLeadEligibility (unclaimed for a customer-less
+  // caller) and the write must repeat exactly that, while a row the PHONE
+  // fallback selected runs the phone path's own ownership rules. Inferring
+  // the arm after the fact (id/phone equality) misclassified both
+  // directions.
   if (callSid) {
     // An ineligible sid row falls through to contact reuse or a fresh mint
     // like any other rejected candidate.
@@ -2247,14 +2221,19 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       database('leads').where('twilio_call_sid', callSid),
       { customerId, unclaimedOnly, workableUnnamedLead },
     ).orderBy('created_at', 'desc').first();
-    if (own) return own;
+    if (own) return { lead: own, matchedVia: 'same_call_sid' };
   }
   if (stampedLeadId) {
+    // A phone-authorized stamp keeps the ownership rules its original
+    // linkage ran under (see applySameCallLeadEligibility) — otherwise a
+    // legitimately customer-owned phone-reused lead was rejected here and,
+    // when the phone fallback could no longer re-select it, the retry
+    // minted a duplicate and settled the durable link (codex P2).
     const own = await applySameCallLeadEligibility(
       database('leads').where('id', stampedLeadId),
-      { customerId, unclaimedOnly, workableUnnamedLead },
+      { customerId, unclaimedOnly, workableUnnamedLead, phoneAuthorizedStamp: stampedLeadVia === 'phone' },
     ).orderBy('created_at', 'desc').first();
-    if (own) return own;
+    if (own) return { lead: own, matchedVia: 'same_call_stamp' };
   }
   // The email key must be a REAL email, validated here and not just at the
   // workable-signal gate: customer-attached calls reach this lookup without
@@ -2263,7 +2242,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // storing the same garbage value (pre-push audit P1, PR #3275).
   const emailLcRaw = String(email || '').trim().toLowerCase();
   const emailLc = EMAIL_RE.test(emailLcRaw) ? emailLcRaw : '';
-  if (!phone && !emailLc) return null;
+  if (!phone && !emailLc) return { lead: null, matchedVia: null };
   let query = database('leads').whereNull('deleted_at');
   // Email matching engages ONLY when there is no phone: a phone match stays
   // the sole identity key for identified callers (an email-also match could
@@ -2288,7 +2267,10 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   // Phone identity is strong — the newest match wins outright.
-  if (phone) return query.orderBy('created_at', 'desc').first();
+  if (phone) {
+    const row = await query.orderBy('created_at', 'desc').first();
+    return { lead: row || null, matchedVia: row ? 'phone' : null };
+  }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
   // (or a transcription collision can fabricate the overlap), and reusing
@@ -2304,7 +2286,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // duplicates past the cap (codex P2 r6/r13).
   const norm = (v) => String(v || '').trim().toLowerCase();
   const firstLc = norm(firstName);
-  if (!firstLc) return null; // positive corroboration impossible — fresh row
+  if (!firstLc) return { lead: null, matchedVia: null }; // positive corroboration impossible — fresh row
   query = query.whereRaw('LOWER(TRIM(first_name)) = ?', [firstLc]);
   const lastLc = norm(lastName);
   if (lastLc) {
@@ -2313,21 +2295,118 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       [lastLc],
     );
   }
-  return query.orderBy('created_at', 'desc').first();
+  const row = await query.orderBy('created_at', 'desc').first();
+  return { lead: row || null, matchedVia: row ? 'email' : null };
 }
 
 // The lead stamp an earlier attempt of this call may have written
-// (call_log.metadata.lead_id — the phone-less reused-lead linkage). One
+// (call_log.metadata.lead_id — the reused-lead linkage). One
 // parser for every site that reconciles it: Step 4b, the implausible-
 // transcript rejection, and the spam/veto terminal exits.
 function parseStampedLeadId(call) {
-  try {
-    const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
-    return md?.lead_id ? String(md.lead_id) : null;
-  } catch { return null; }
+  return parseStampedLeadLink(call).leadId;
 }
 
-// The lead columns the phone-less reuse enrichment can mutate — snapshotted
+// The stamp plus its AUTHORITY (metadata.lead_link_via, 'phone' | 'email'):
+// which identity linked this call to the lead when the stamp was written.
+// A phone-authorized stamp on a customer-OWNED lead is legitimate (the
+// phone path applies no ownership filter for a customer-less caller), so a
+// retry's stamp-arm eligibility must not reject it with the
+// anonymous-strict unclaimed rule — that minted a duplicate and settled the
+// supposedly durable link whenever the phone fallback could no longer
+// re-select the row (lead phone corrected, or the retry's extraction lost
+// the number — codex P2 r1 ×2 on the root fix). Stamps written before this
+// key exists parse as via=null and keep the strict treatment.
+function parseStampedLeadLink(call) {
+  try {
+    const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+    if (!md?.lead_id) return { leadId: null, via: null };
+    return {
+      leadId: String(md.lead_id),
+      via: md.lead_link_via === 'phone' || md.lead_link_via === 'email' ? md.lead_link_via : null,
+    };
+  } catch { return { leadId: null, via: null }; }
+}
+
+// Decides whether THIS pass writes the durable call→lead stamp
+// (call_log.metadata.lead_id + rollback ledgers + ordering marker).
+//
+// ROOT FIX (owner ruling 2026-08-11): phone-bearing reuse stamps too.
+// findReusableCallLead links a phone-bearing call to an existing lead
+// without touching the lead's sid, so the association used to be
+// reconstructable only by phone matching — the approximation five
+// #3347-era review findings traced their residual holes to (mutable
+// phones, later distinct same-number leads, post-window reprocessing).
+// With the stamp the linkage is durable, and the bridge/sweep phone
+// arms become transitional coverage for pre-fix legacy calls only.
+//
+// Arm 1 (fresh stamp): ANY reuse of a lead that does not carry this
+// call's own sid. The same-sid exclusion is what keeps the standing
+// invariant true — stamps are only ever written for different-sid
+// leads (a same-sid row IS this call's own insert; the sid is its
+// durable linkage). Race-recovered rows are freshly minted with this
+// call's sid, so they self-link the same way.
+// Arm 2 (re-stamp): a retry whose current stamp already points at the
+// final lead refreshes the ledgers in the same fenced transaction as
+// its writes — including a retry that GAINED a phone but is enriching
+// the lead its earlier attempt stamped (codex P1 r22), or a lost
+// rejection would be unable to CAS-restore this pass's mutations.
+function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid, leadId, currentStampedLeadId }) {
+  return (!!existingLead && !raceRecovered
+    && !(callTwilioSid && existingLead.twilio_call_sid === callTwilioSid))
+    || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
+}
+
+
+// Re-applies the PHONE arm's selecting predicates against the LOCKED lead
+// row before the stamp is written (codex P2 on the root fix): a
+// phone-matched lead edited (number corrected away), closed, converted, or
+// soft-deleted between findReusableCallLead and the transaction's row lock
+// no longer satisfies the identity/lifecycle the selection was based on —
+// and the ordinary phone-path write only repeats customer ownership, so
+// without this the pass stamped a durable association onto (and enriched)
+// an obsolete row. Mirrors the phone branch's own predicate set exactly:
+// phone equality, deleted_at, the workableUnnamedLead lifecycle trio, and
+// the ownership arm.
+function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead }) {
+  if (!lockedLead) return false;
+  if (lockedLead.deleted_at) return false;
+  if (String(lockedLead.phone || '') !== String(phone)) return false;
+  if (workableUnnamedLead) {
+    if (TERMINAL_LEAD_STATUSES.includes(lockedLead.status)) return false;
+    if (lockedLead.converted_at) return false;
+  }
+  if (unclaimedOnly && lockedLead.customer_id != null) return false;
+  if (customerId && lockedLead.customer_id != null
+    && String(lockedLead.customer_id) !== String(customerId)) return false;
+  return true;
+}
+
+// Derives the authority a stamp records (metadata.lead_link_via) from the
+// SELECTING ARM, never from bare phone presence (pre-push P1 on r4): a
+// retry can carry a resolved phone that has nothing to do with the lead —
+// a spouse's callback number on an email-authorized stamp — and stamping
+// 'phone' from presence alone would hand later customer-less retries the
+// relaxed ownership rule for a linkage the number never corroborated.
+// 'phone' requires actual corroboration THIS pass: the phone arm selected
+// the row (revalidated under the lock), the locked lead already carries
+// the caller's number, or this pass's enrichment writes it (fill-only —
+// the lead will carry it from here on). Otherwise a stamp-selected row
+// PRESERVES its prior authority (a historical phone corroboration stands
+// through a phone-less retry; a legacy/via-less stamp stays strict as
+// 'email'), and a fresh email-arm stamp records 'email'.
+function deriveStampLinkAuthority({ phone, existingLeadVia, priorStampedLeadVia, lockedLeadPhone, writesPhone }) {
+  const phoneCorroborated = !!phone && (
+    existingLeadVia === 'phone'
+    || String(lockedLeadPhone || '') === String(phone)
+    || !!writesPhone
+  );
+  if (phoneCorroborated) return 'phone';
+  if (existingLeadVia === 'same_call_stamp' && priorStampedLeadVia === 'phone') return 'phone';
+  return 'email';
+}
+
+// The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
 // later attempt rejects the call. One list so the stamp and the restore can
 // never drift.
@@ -2542,7 +2621,7 @@ const STAMPED_LEAD_FIELD_CASTS = {
 // restamp's old epoch inside ITSELF (it already holds the lead lock this
 // body takes — same-transaction re-locks are no-ops); every other caller
 // omits it and gets the standalone transaction.
-async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = null) {
+async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = null, attribution = { mode: 'keep' }) {
   const run = async (trx) => {
     const readOwnMd = async () => {
       const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
@@ -2552,7 +2631,31 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     };
     let md = await readOwnMd();
     let stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
-    if (!stampedLeadId) return true;
+    if (!stampedLeadId) {
+      // Definitive retirement is provenance-only, NOT stamp-gated
+      // (pre-push P1 r11): a sid-linked call carries source_call_id on its
+      // funnel row but never a metadata stamp, and a force-reprocess that
+      // reclassifies it spam/voicemail/implausible/non-lead must not leave
+      // that row reporting funnel stage and revenue for a rejected call.
+      // Fenced the same way the stamp-clear write is: only the claim
+      // holder may retire — and the ownership read takes the row lock
+      // (pre-push P0 r18): a plain SELECT left a window where a peer
+      // could reclaim the call between the check and the delete, and the
+      // stale worker would irreversibly retire booked/completed
+      // attribution despite having lost ownership. FOR UPDATE holds the
+      // call row through the retirement in this same transaction, so a
+      // reclaimer serializes behind it and this worker's token either
+      // still matches (it owns the row) or the read returns nothing.
+      if (attribution.mode !== 'retire') return true;
+      const owned = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .forUpdate()
+        .first('id');
+      if (!owned) return false;
+      await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+      return true;
+    }
     // Reconciliation is SERIALIZED on the stamped lead's row — the same
     // FOR UPDATE lock the stamp+enrich transaction takes, acquired BEFORE
     // the call_log clear so every stamp writer follows one lock order
@@ -2582,14 +2685,53 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
     const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
     const ownSeq = Number.isFinite(Number(md.lead_stamp_seq)) ? Number(md.lead_stamp_seq) : null;
+    // The pre-stamp settle persists the FORMER lead's identity atomically
+    // with its clear (codex P1 r17): the settle commits in its own
+    // transaction before the replacement stamp's — if that later
+    // transaction fails, the retry claims a call with NO stamp and no
+    // preSettleStampedLeadId, so the moved-link branch (its legacy-blocker
+    // check and pending-transfer marker) would be skipped and
+    // runCallPpcAttribution would double-count the call against the former
+    // lead's unresolved legacy row. The breadcrumb rides THIS fenced
+    // write; a successful restamp removes it in the stamp transaction.
+    const clearedExpr = "((((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq') - 'lead_link_via'";
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq'"),
+        metadata: attribution.preserveFormerLeadId
+          ? db.raw(`jsonb_set(${clearedExpr}, '{attribution_former_lead_id}', ?::jsonb, true)`, [JSON.stringify(String(stampedLeadId))])
+          : db.raw(clearedExpr),
         updated_at: new Date(),
       });
     if (!cleared) return false;
+    // Attribution disposition rides the clear (codex P0/P1, PR #3303): the
+    // funnel row THIS call created (exact provenance — lead_id +
+    // source_call_id; NULL-provenance and other calls' rows never match)
+    // accumulates booked/completed stages and revenue via
+    // lead-funnel-bridge, so a blanket delete-and-recreate LOSES history.
+    // The CALL SITE states intent:
+    //   'retire'   — definitive unlink (rejection terminals, the non-lead
+    //                verdict, a mint failure): the call supports no lead.
+    //   'transfer' — the call's linkage MOVED to a known lead (pre-stamp
+    //                settle, stale-stamp maintenance): the row follows via
+    //                the shared primitive, stages intact; a target-slot
+    //                conflict retires (the target's row is another call's
+    //                evidence).
+    //   'keep'     — the row already sits on the right lead (same-lead
+    //                chronological restamp) or the caller cannot rule a
+    //                surviving linkage out: never destroy history.
+    if (attribution.mode === 'retire') {
+      // Provenance-wide (every lead's row for this call), not just the
+      // stamped lead's — rejection means the call supports no lead at all
+      // (pre-push P1 r11).
+      await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+    } else if (attribution.mode === 'transfer' && attribution.transferToLeadId
+      && String(attribution.transferToLeadId) !== String(stampedLeadId)) {
+      await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
+        trx, call.id, stampedLeadId, attribution.transferToLeadId, new Date(),
+      );
+    }
     if (priorState && writtenState) {
       // Successors are read BEFORE the restore because they gate it (codex
       // P2 r19). Two calls can write the SAME value to a field — both
@@ -2708,6 +2850,142 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     return true;
   };
   return existingTrx ? run(existingTrx) : db.transaction(run);
+}
+
+// Former-lead linkage reconciliation for a STAMP-LESS successful relink
+// (codex P1 PR #3303 r18): a standalone keep-settle persisted
+// metadata.attribution_former_lead_id, and only the in-loop stamp path
+// consumed it — a retry that gained a phone (or selected a sid-linked
+// lead) settles stamp-less, skipped the former lead's legacy-blocker check
+// and the pending-transfer marker, and runCallPpcAttribution then inserted
+// a SECOND row for the new lead while the former lead's unresolved row
+// stood. Also covers a live-stamp maintenance TRANSFER
+// (transferredFormerLeadId), whose reconcile outcome
+// clearStampAndRestoreLead cannot surface: a 'none' there with a stranded
+// legacy row is the same double-count.
+//
+// One transaction in the repo-wide lock order (leads → call_log), fenced
+// on the processing token; the authoritative breadcrumb is re-read under
+// the lock, so a breadcrumb the stamp transaction already consumed reads
+// back cleared and the whole call no-ops. Returns { conflictRetired } —
+// true suppresses this pass's funnel write, exactly like the in-stamp
+// moved-link branch. Fence loss throws abortProcessing.
+async function reconcileFormerLeadLinkage({
+  call, procToken, callSid, leadId, transferredFormerLeadId = null,
+  leadSourceRow = null, extracted = {}, customerId = null,
+}) {
+  let conflictRetired = false;
+  await db.transaction(async (trx) => {
+    // The final lead's row lock serializes this with concurrent stampers
+    // and rejections; the fenced call-row lock makes the breadcrumb read
+    // authoritative. The target is re-validated LIVE under its lock
+    // (codex P1 r19): soft-deleted between linkage and this transaction,
+    // transferring the former lead's history onto it would strand the row
+    // where runCallPpcAttribution's live-lead predicate can never repair
+    // it, and consuming the breadcrumb would erase the only retry state.
+    // Keep the breadcrumb (a later reprocess re-runs this reconciliation)
+    // and suppress this pass's funnel write.
+    const lockedTarget = await trx('leads')
+      .where({ id: leadId })
+      .whereNull('deleted_at')
+      .forUpdate()
+      .first('id');
+    if (!lockedTarget) {
+      conflictRetired = true;
+      logger.warn(`[call-proc] stamp-less relink of ${callSid} targets a missing/deleted lead ${leadId} — breadcrumb retained, funnel write suppressed`);
+      return;
+    }
+    const owned = await trx('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .forUpdate()
+      .first('id', 'metadata');
+    if (!owned) {
+      const lost = new Error('processing claim lost during former-lead linkage reconciliation');
+      lost.abortProcessing = true;
+      throw lost;
+    }
+    let ownedMd = {};
+    try {
+      ownedMd = typeof owned.metadata === 'string' ? (JSON.parse(owned.metadata) || {}) : (owned.metadata || {});
+    } catch { ownedMd = {}; }
+    const breadcrumb = ownedMd.attribution_former_lead_id ? String(ownedMd.attribution_former_lead_id) : null;
+    const formerLeadId = breadcrumb || (transferredFormerLeadId ? String(transferredFormerLeadId) : null);
+    let markerPayload = null;
+    if (formerLeadId && formerLeadId !== String(leadId)) {
+      const attrMod = require('./ads/call-attribution');
+      // The transfer-settle path already moved the row when it could —
+      // re-running is a no-op there ('none': the source row is gone) and
+      // the BREADCRUMB path's actual move. Outcome semantics mirror the
+      // in-stamp moved-link branch.
+      const moveOutcome = await attrMod.reconcileMovedCallAttributionRow(
+        trx, call.id, formerLeadId, leadId, new Date(),
+      );
+      if (moveOutcome === 'retired_conflict') conflictRetired = true;
+      if (moveOutcome === 'none') {
+        // 'none' is ambiguous: the former row may be gone (a completed
+        // transfer — fine) or LEGACY NULL-provenance (frozen — another
+        // call may own it). Only the stranded legacy shape suppresses
+        // this pass's funnel write and arms the durable retry marker,
+        // exactly like the stamped path (codex P1 r11/r12).
+        const stranded = await trx('ad_service_attribution')
+          .where({ lead_id: formerLeadId })
+          .whereNull('source_call_id')
+          .first('id');
+        if (stranded) {
+          conflictRetired = true;
+          const markerAttr = leadSourceRow
+            ? attrMod.attributionForSourceType(leadSourceRow.source_type)
+            : null;
+          const markerBridgeTarget = leadSourceRow
+            && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+          if (customerId && markerAttr && !markerBridgeTarget) {
+            markerPayload = {
+              from_lead_id: String(formerLeadId),
+              // The marker's TARGET, persisted explicitly (codex P1 r19):
+              // this relink is deliberately STAMP-LESS (gained-phone /
+              // sid-linked — no metadata.lead_id), and the transfer sweep
+              // derives its target from the stamp, so without this the
+              // sweep read the marker as a positively-cleared linkage and
+              // deleted it without ever writing the attribution it
+              // carried. The sweep gives a live stamp precedence.
+              to_lead_id: String(leadId),
+              lead_source: markerAttr.leadSource,
+              is_paid: markerAttr.isPaid,
+              detail: leadSourceRow.name || 'inbound call',
+              service_interest: extracted.matched_service || extracted.requested_service || null,
+            };
+          }
+          logger.warn(`[call-proc] stamp-less relink of ${callSid} left a legacy unprovenanced row on lead ${formerLeadId} — funnel write suppressed to avoid double-counting`);
+        }
+      }
+    }
+    // Consume the breadcrumb (and arm the marker) in ONE fenced write; the
+    // same-lead breadcrumb (linkage returned home) clears without
+    // reconciliation — its row already sits on this lead and the funnel
+    // write dedupes by lead. Nothing to write when only the transfer path
+    // ran breadcrumb-less and found no stranded row.
+    if (breadcrumb || markerPayload) {
+      const cleared = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          metadata: markerPayload
+            ? db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'attribution_former_lead_id', '{attribution_transfer_pending}', ?::jsonb, true)",
+              [JSON.stringify(markerPayload)],
+            )
+            : db.raw("COALESCE(metadata, '{}'::jsonb) - 'attribution_former_lead_id'"),
+          updated_at: new Date(),
+        });
+      if (!cleared) {
+        const lost = new Error('processing claim lost during former-lead breadcrumb consumption');
+        lost.abortProcessing = true;
+        throw lost;
+      }
+    }
+  });
+  return { conflictRetired };
 }
 
 // New-lead admin surfacing for a lead minted by call processing — the fresh
@@ -5437,6 +5715,13 @@ const CallRecordingProcessor = {
           processing_status: 'processing',
           processing_token: procToken,
           processing_generation: db.raw('processing_generation + 1'),
+          // DURABLE — finalization must NOT clear this (pre-push audit P1,
+          // ambiguity-record r9). It records when the LAST processing pass
+          // started, and the bridge-ambiguity phone snapshot bounds its
+          // lead capture on it: every pass that can link a lead — the
+          // age-unlimited force-reprocess included — claims here first.
+          // In-flight state is carried by processing_token/status alone;
+          // every reader COALESCEs behind a status guard.
           processing_started_at: new Date(),
           updated_at: new Date(),
         }, ['processing_generation']);
@@ -5474,6 +5759,13 @@ const CallRecordingProcessor = {
           processing_status: 'processing',
           processing_token: procToken,
           processing_generation: db.raw('processing_generation + 1'),
+          // DURABLE — finalization must NOT clear this (pre-push audit P1,
+          // ambiguity-record r9). It records when the LAST processing pass
+          // started, and the bridge-ambiguity phone snapshot bounds its
+          // lead capture on it: every pass that can link a lead — the
+          // age-unlimited force-reprocess included — claims here first.
+          // In-flight state is carried by processing_token/status alone;
+          // every reader COALESCEs behind a status guard.
           processing_started_at: new Date(),
           updated_at: new Date(),
         }, ['processing_generation']);
@@ -5661,7 +5953,6 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
@@ -5785,39 +6076,43 @@ const CallRecordingProcessor = {
       // presenting the rejected call — and its hallucinated summary — as
       // lead evidence). Fence-lost bails exactly like the rejection write's
       // own 0-row path below.
-      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      // The settle's attribution retirement and the rejection write commit
+      // as ONE fenced transaction (pre-push P0 r12): committed separately,
+      // a fence reclaim between them left the call retryable while its
+      // booked/completed funnel history was already deleted — irreversible
+      // data loss, since a retry recreates only a stage='lead' row. A
+      // 0-row terminal write throws inside the transaction so the retire
+      // and stamp clear roll back with it.
+      const rejectionMeta = JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }));
+      const rejectionStampSettled = await db.transaction(async (trx) => {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        if (!settled) return false;
+        const rejected = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            processing_status: 'voicemail',
+            answered_by: 'voicemail',
+            call_outcome: 'voicemail',
+            transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+            transcription_metadata: rejectionMeta,
+            ai_extraction: null,
+            ai_extraction_enriched: null,
+            v2_extraction_status: null,
+            disposition: null,
+            review_status: null,
+            customer_id: null,
+            processing_token: null,
+            updated_at: new Date(),
+          });
+        if (rejected === 0) {
+          const lost = new Error('rejection fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!rejectionStampSettled) {
-        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
-        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
-      }
-      // Fence on processing_token like the finalization write: if a peer
-      // reclaimed the stale lock, this matches 0 rows and we bail without
-      // overwriting the peer's state. Clear disposition + enriched extraction
-      // too — a force-reprocess of a previously-stamped row (e.g. a phantom
-      // estimate_send from the hallucination) must not leave stale artifacts.
-      const rejected = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update({
-          processing_status: 'voicemail',
-          answered_by: 'voicemail',
-          call_outcome: 'voicemail',
-          transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps })),
-          ai_extraction: null,
-          ai_extraction_enriched: null,
-          v2_extraction_status: null,
-          disposition: null,
-          review_status: null,
-          // A prior hallucinated extraction (force-reprocess path) may have
-          // linked this empty voicemail to a phantom customer; the unified
-          // voice sync attaches messages whenever customer_id is set, so unlink.
-          customer_id: null,
-          processing_token: null,
-          processing_started_at: null,
-          updated_at: new Date(),
-        });
-      if (rejected === 0) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
       }
@@ -5874,7 +6169,6 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'no_transcription',
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -5924,7 +6218,6 @@ const CallRecordingProcessor = {
         processing_status: 'extraction_failed',
         extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       }).returning(['extraction_attempts']);
       const attempts = Number(failedRow?.extraction_attempts) || 0;
@@ -6128,16 +6421,10 @@ const CallRecordingProcessor = {
       // — atomically, fenced (codex P1 r15 / audit P1 r17/r19). A transient
       // failure here throws to the outer extraction_failed guard rather
       // than finalizing with the rejected linkage in place.
-      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
-      if (!stampSettled) {
-        logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
-      }
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
-        processing_started_at: null,
         updated_at: new Date(),
       };
       if (extracted.is_voicemail) {
@@ -6180,11 +6467,31 @@ const CallRecordingProcessor = {
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
         }
       }
-      const terminalWrote = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update(terminalUpdate);
-      if (!terminalWrote) {
+      // Merge note (#3303 × #3304): the invalidation above stays OUTSIDE
+      // this transaction on purpose — its durability contract is that a
+      // failure throws to extraction_failed with a quarantine queue
+      // behind it, and a rollback here would undo that.
+      // The settle's attribution retirement and the fenced terminal write
+      // commit as ONE transaction, BEFORE the shadow/triage side effects
+      // (pre-push P1 r2, P0 r12): committed separately, a fence reclaim
+      // between them left the call retryable while its funnel history was
+      // already deleted. A 0-row terminal write throws inside the
+      // transaction so the retire and stamp clear roll back with it.
+      const terminalSettled = await db.transaction(async (trx) => {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        if (!settled) return false;
+        const terminalWrote = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update(terminalUpdate);
+        if (!terminalWrote) {
+          const lost = new Error('terminal fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
+      if (!terminalSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
@@ -6334,6 +6641,12 @@ const CallRecordingProcessor = {
     let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
+    // Does the veto include a DEFINITIVE content rejection? Only
+    // spam_or_wrong_number proves prior attribution fraudulent —
+    // out_of_service_area and do_not_contact_requested are policy holds,
+    // and force-reprocessing a previously booked call under one must not
+    // delete its accumulated revenue (pre-push P0 r15).
+    let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
@@ -6752,6 +7065,7 @@ const CallRecordingProcessor = {
             }
             v2RoutingBlocked = true;
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
+            v2VetoDefinitiveRejection = (finalFlags || []).includes('spam_or_wrong_number');
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
           } else {
             // Approved — dispatch proceeds on the AV-normalized address
@@ -7126,30 +7440,55 @@ const CallRecordingProcessor = {
       // earlier attempt's lead stamp and restore that lead's prior summary,
       // atomically and fenced (codex P1 r15 / audit P1 r17/r19); a
       // transient failure throws to the outer extraction_failed guard.
-      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
-      if (!vetoStampSettled) {
-        logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
-      }
-      // Fenced like the finalization write (pre-push P1 r2): the settle
-      // above is not an ownership guarantee — it returns true with nothing
-      // to clear, and the claim can be reclaimed between its commit and
-      // this write.
-      const vetoWrote = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update({
-          ai_extraction: JSON.stringify(extracted),
-          call_summary: extracted.call_summary || null,
-          sentiment: extracted.sentiment || null,
-          lead_quality: extracted.lead_quality || null,
-          processing_status: extracted.is_spam ? 'spam' : 'processed',
-          review_status: 'open',
-          processing_token: null,
-          processing_started_at: null,
-          updated_at: new Date(),
-        });
-      if (!vetoWrote) {
+      // The settle's attribution retirement and the fenced terminal write
+      // commit as ONE transaction (pre-push P1 r2, P0 r12): committed
+      // separately, a fence reclaim between them left the call retryable
+      // while its funnel history was already deleted. A 0-row terminal
+      // write throws inside the transaction so the retire and stamp clear
+      // roll back with it.
+      const vetoSettled = await db.transaction(async (trx) => {
+        // Only a DEFINITIVE rejection settles the stamp at all (codex P1,
+        // PR #3303 r3): a policy hold (out_of_service_area /
+        // do_not_contact_requested) invalidates neither the call→lead
+        // linkage nor its attribution — 'keep' preserved the funnel row
+        // but the clear still removed the stamp, and the bridge then read
+        // the missing linkage as a settled unlink and retired the row
+        // anyway. Policy holds preserve stamp, lead state, and row.
+        if (v2VetoDefinitiveRejection) {
+          const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+          if (!settled) return false;
+        }
+        const vetoWrote = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            ai_extraction: JSON.stringify(extracted),
+            call_summary: extracted.call_summary || null,
+            sentiment: extracted.sentiment || null,
+            lead_quality: extracted.lead_quality || null,
+            processing_status: extracted.is_spam ? 'spam' : 'processed',
+            review_status: 'open',
+            processing_token: null,
+            // A definitive rejection that finalizes 'processed' (wrong
+            // number with is_spam false) needs the durable marker or the
+            // bridge re-attributes it next scan (pre-push P1 r16). A
+            // NON-definitive policy hold CLEARS a stale marker instead
+            // (codex P1, PR #3303 r4): a force-reprocess that corrected a
+            // prior definitive rejection into out_of_service_area/DNC
+            // must not leave the call terminally rejected forever.
+            metadata: v2VetoDefinitiveRejection
+              ? db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)")
+              : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+            updated_at: new Date(),
+          });
+        if (!vetoWrote) {
+          const lost = new Error('veto fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
+      if (!vetoSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
@@ -7913,6 +8252,10 @@ const CallRecordingProcessor = {
     // customerExpected is false, so a swallowed failure would otherwise look
     // fully 'processed'.
     let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
+    // Armed by the non-lead-verdict stamp settle: its attribution retire
+    // must ride the FINAL fenced status write, not the settle's own
+    // transaction (pre-push P0 r12).
+    let deferredNonLeadAttributionRetire = false;
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
       // Call-creation provenance rides the SAME durable write that links
@@ -8005,7 +8348,7 @@ const CallRecordingProcessor = {
     // phone or was vetoed out of lead creation entirely — or the consumers
     // that read the stamp keep associating this call with a lead a prior
     // attempt chose (audit P1 r22).
-    const priorStampedLeadId = parseStampedLeadId(call);
+    const { leadId: priorStampedLeadId, via: priorStampedLeadVia } = parseStampedLeadLink(call);
     // Linkage completion flag: once this call's flow involves a reused lead
     // or a prior stamp, it must EXIT with its linkage settled (stamped,
     // re-pointed, or cleared by the maintenance block). A throw anywhere
@@ -8016,11 +8359,15 @@ const CallRecordingProcessor = {
     // lookup: a transient findReusableCallLead failure on a stamped retry
     // would otherwise finalize with the old stamp unrevalidated (codex P1
     // r14).
-    let phoneLessLinkagePending = !!priorStampedLeadId;
+    let leadLinkagePending = !!priorStampedLeadId;
     // Assigned inside the try once the lead source resolves; declared out
     // here so the section catch can run it on a benign failure (codex P2).
     // The default no-op keeps pre-lead-source failures safe.
     let runCallPpcAttribution = async () => {};
+    // Set when a repoint transfer hit a target-slot conflict — this pass's
+    // attribution must not run against the target's foreign row (codex P1,
+    // PR #3303 r4).
+    let attributionConflictRetired = false;
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -8038,31 +8385,52 @@ const CallRecordingProcessor = {
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
         };
-        const existingLead = await findReusableCallLead(db, {
+        const { lead: existingLead, matchedVia: existingLeadVia } = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
           firstName: extracted.first_name || null,
           lastName: extracted.last_name || null,
           callSid: call.twilio_call_sid || null,
           stampedLeadId: priorStampedLeadId,
+          stampedLeadVia: priorStampedLeadVia,
           ...sameCallEligibility,
         });
-        // Same-call reuse (retry reprocessing found the lead THIS call's
-        // earlier attempt inserted) is strong identity — the weak-identity
-        // write revalidation below must not apply its email/name predicates
-        // to it (a name-less caller's own row would fail them and re-mint).
         // Same-call reuse (a retry found the lead THIS call's earlier attempt
         // inserted, by sid — or already REUSED, by stamp) is strong identity,
         // so the weak-identity write revalidation must not apply its
         // email/name predicates to it (a name-less caller's own row would
-        // fail them and re-mint).
-        const sameCallLeadReuse = !!(existingLead
-          && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
-            || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
-        // A fresh phone-less insert with no prior stamp self-links via its
-        // own sid at insert time — phone-less REUSE puts linkage state in
+        // fail them and re-mint). Decided by the LOOKUP'S OWN provenance,
+        // never inferred from id/phone equality after the fact (pre-push P1
+        // r1+r2 on the root fix): a stamp-arm-rejected customer-owned row
+        // the phone fallback re-finds is plain phone reuse (its write runs
+        // the phone path's ownership rules, keeping retries idempotent),
+        // while a row the stamp arm itself selected keeps the same-call
+        // strict predicates its lookup enforced — so a claim landing
+        // between lookup and write 0-rows instead of overwriting the
+        // newly-claimed lead.
+        const sameCallLeadReuse = existingLeadVia === 'same_call_sid'
+          || existingLeadVia === 'same_call_stamp';
+        // The guarded write and the 0-row recheck repeat EXACTLY the
+        // eligibility the selecting arm enforced — including the
+        // phone-authorized-stamp relaxation when the stamp arm applied it
+        // (codex P2): a stamp-arm hit under relaxed ownership must not be
+        // re-judged by the strict set at write time, and vice versa. Sid-arm
+        // hits stay strict (a sid row is this call's own insert).
+        const sameCallWriteEligibility = {
+          ...sameCallEligibility,
+          phoneAuthorizedStamp: existingLeadVia === 'same_call_stamp' && priorStampedLeadVia === 'phone',
+        };
+        // A fresh insert with no prior stamp self-links via its own sid at
+        // insert time — REUSE of a different-sid lead puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
-        if (!phone && existingLead) phoneLessLinkagePending = true;
+        // Phone-bearing reuse included: since the durable-linkage root fix
+        // it stamps exactly like phone-less reuse, so its failures must
+        // escalate to the retry lane the same way. A same-sid reuse is this
+        // call's own row — the sid is the durable linkage, no stamp needed.
+        if (existingLead
+          && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)) {
+          leadLinkagePending = true;
+        }
         // The stamp as it stands NOW — updated when the in-loop stamp+write
         // transaction runs, so the post-loop maintenance reconciles the
         // ACTUAL stamp, not the one from processing start.
@@ -8076,28 +8444,19 @@ const CallRecordingProcessor = {
         let leadSourceId = null;
         let leadSourceRow = null;
         try {
-          const digits = (call.to_phone || '').replace(/\D/g, '');
-          const ten = digits.length >= 10 ? digits.slice(-10) : null;
-          const variants = new Set([call.to_phone].filter(Boolean));
-          if (ten) {
-            variants.add(ten);
-            variants.add(`1${ten}`);
-            variants.add(`+1${ten}`);
-            variants.add(`(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`);
+          // Shared with the rejection-repair branch at finalization (codex
+          // P1 r20) — never re-inline the variant matching or the referral
+          // override, or a repaired row lands on a different channel than
+          // the original write.
+          const { row: ls, variants, matchedByNumber } = await resolveCallLeadSource({
+            dbc: db,
+            toPhone: call.to_phone,
+            preferReferral: !!referrerNameFromExtracted(extracted),
+          });
+          if (!matchedByNumber) {
+            logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${variants.map(maskPhone).join(', ')})`);
           }
-          const ls = await db('lead_sources')
-            .where('is_active', true)
-            .whereIn('twilio_phone_number', [...variants])
-            .first();
           if (ls) { leadSourceId = ls.id; leadSourceRow = ls; }
-          else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
-          // Explicit referral wins over the number-matched source: point the lead at
-          // the 'referral' lead_sources row so the PPC funnel attributes it to the
-          // referral channel (its per-conversion reward cost), not the dialed line.
-          if (referrerNameFromExtracted(extracted)) {
-            const refRow = await db('lead_sources').where({ source_type: 'referral', is_active: true }).first().catch(() => null);
-            if (refRow) { leadSourceId = refRow.id; leadSourceRow = refRow; }
-          }
         } catch (e) {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
@@ -8115,9 +8474,96 @@ const CallRecordingProcessor = {
               : null;
             const isBridgeTarget = leadSourceRow
               && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-            if (leadId && customerId && callAttr && !isBridgeTarget) {
-              const pending = require('./ads/call-attribution').recordCallPpcAttribution({
-                customerId,
+            if (leadId && customerId && callAttr && !isBridgeTarget && !attributionConflictRetired) {
+              // Token-fenced under the call row lock (pre-push P0 r17):
+              // with sourceCallId in play, a STALE worker's provenance
+              // recovery could move the history-bearing row back — or
+              // conflict-retire it — before its own finalization writes
+              // zero rows; that loss is irreversible. Ownership is
+              // verified inside the transaction and every attribution
+              // statement rides it, in the repo-wide leads → call_log
+              // acquisition order.
+              const pending = db.transaction(async (trx) => {
+                // Repo-wide lock order is leads → call_log (the bridge
+                // and every stamp writer). Lock the selected lead FIRST
+                // (pre-push P1 r8) — the funnel insert's FK takes KEY
+                // SHARE on this lead anyway, and acquiring the call row
+                // first inverted the order against a stamp writer
+                // holding the lead and waiting on this call. The LOCKED
+                // row's eligibility and owner are authoritative (GH P1
+                // r6): a lead soft-deleted or reassigned after the
+                // enrichment write must not receive attribution keyed to
+                // the stale snapshot's customer.
+                const lockedLead = await trx('leads')
+                  .where({ id: leadId })
+                  .whereNull('deleted_at')
+                  .forUpdate()
+                  .first('id', 'customer_id');
+                if (!lockedLead) return;
+                const owned = await trx('call_log')
+                  .where({ id: call.id })
+                  .where('processing_token', procToken)
+                  .forUpdate()
+                  .first('id', 'metadata');
+                if (!owned) return;
+                // A LIVE pending-transfer marker DEFERS the funnel write to
+                // the daily sweep (codex P1 r13): a later pass revisiting
+                // the SAME stamped lead skips the moved-link branch
+                // (preSettleStampedLeadId === leadId), so
+                // attributionConflictRetired starts false again and this
+                // write would double-count the call against the former
+                // lead's still-unresolved legacy row. Read under the row
+                // lock — serialized with both the marker writer and the
+                // sweep — so the marker's presence is authoritative: while
+                // it stands, ONLY the sweep may complete the write.
+                let ownedMd = {};
+                try {
+                  ownedMd = typeof owned.metadata === 'string'
+                    ? (JSON.parse(owned.metadata) || {})
+                    : (owned.metadata || {});
+                } catch { ownedMd = {}; }
+                if (ownedMd.attribution_transfer_pending) {
+                  // REFRESH the deferred decision before deferring (codex
+                  // P1 r14): this pass may have re-classified the service
+                  // or referral — the sweep writes the MARKER's saved
+                  // fields, so leaving the old payload would record stale
+                  // channel/service attribution once the blocker resolves.
+                  // from_lead_id and last_attempt_at are preserved; only
+                  // the funnel decision is re-supplied from THIS pass.
+                  // The TARGET refreshes with the decision (codex P1 r23).
+                  // A later force-reprocess can move the call again to a
+                  // phone- or sid-linked lead, and that relink is
+                  // deliberately stamp-less — so the sweep has no live
+                  // stamp to override a stale to_lead_id and would resolve
+                  // the marker against the obsolete lead once the legacy
+                  // blocker cleared. This pass holds the authoritative
+                  // answer in its own locked leadId.
+                  const refreshed = {
+                    ...ownedMd.attribution_transfer_pending,
+                    ...(leadId ? { to_lead_id: String(leadId) } : {}),
+                    lead_source: callAttr.leadSource,
+                    is_paid: callAttr.isPaid,
+                    detail: leadSourceRow.name || 'inbound call',
+                    service_interest: extracted.matched_service || extracted.requested_service || null,
+                  };
+                  await trx('call_log')
+                    .where({ id: call.id })
+                    .where('processing_token', procToken)
+                    .update({
+                      metadata: db.raw(
+                        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
+                        [JSON.stringify(refreshed)],
+                      ),
+                      updated_at: new Date(),
+                    });
+                  return;
+                }
+                const attrRes = await require('./ads/call-attribution').recordCallPpcAttribution({
+                // The locked owner EXACTLY (GH P1 r6) — an unassigned
+                // lead's live owner is NULL and recordCallPpcAttribution
+                // refuses it, instead of pairing the row with the
+                // pre-lock snapshot's customer.
+                customerId: lockedLead.customer_id || null,
                 leadId,
                 leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
                 isPaid: callAttr.isPaid,
@@ -8134,10 +8580,43 @@ const CallRecordingProcessor = {
                 // primary by design.
                 serviceInterest: extracted.matched_service || extracted.requested_service || null,
                 leadDate: call.created_at || null, // date by the actual call
-              }).catch(() => {});
+                // Provenance for the bridge's repoint reconciliation (codex
+                // P1, PR #3303): the funnel row THIS call creates carries
+                // its call id, so a later stamp repoint can transfer or
+                // retire exactly this row and never another call's.
+                sourceCallId: call.id || null,
+                dbc: trx,
+                });
+                // recordCallPpcAttribution catches its own SQL errors and
+                // returns reason 'error' — but a failed statement has
+                // ABORTED this transaction, so resolving normally would
+                // let PostgreSQL roll it back silently while the call
+                // finalizes without attribution (pre-push P1 r10, same
+                // rule as google-call-bridge). Throw so the catch below
+                // logs it as the real failure it is.
+                if (attrRes?.reason === 'error') {
+                  throw new Error(attrRes.error || 'attribution_write_failed');
+                }
+              }).catch((txnErr) => {
+                // Never silent, and never final (pre-push P1 r8, GH P1
+                // r6): dedicated/organic calls have no bridge scan to
+                // re-heal a dropped attribution, so a failed transaction
+                // (deadlocked transfer, aborted insert) must RETHROW
+                // after logging — the outer processing failure path then
+                // marks the call retryable instead of finalizing it as
+                // processed with permanently wrong funnel state.
+                logger.warn(`[call-proc] PPC attribution transaction failed for ${callSid}: ${txnErr.code || txnErr.name || 'error'}`);
+                const wrapped = new Error(`PPC attribution transaction failed: ${txnErr.code || txnErr.name || 'error'}`);
+                wrapped.attributionTxnFailure = true;
+                throw wrapped;
+              });
               await pending;
             }
           } catch (attrErr) {
+            // Only the dispatch scaffolding (source lookups, gating) is
+            // swallowed here — a failed attribution TRANSACTION
+            // propagates so the run retries (GH P1 r6).
+            if (attrErr.attributionTxnFailure) throw attrErr;
             logger.warn(`[call-proc] PPC attribution dispatch failed: ${attrErr.code || attrErr.name || 'error'}`);
           }
         };
@@ -8490,7 +8969,7 @@ const CallRecordingProcessor = {
               // overwritten, then a soft-deleted or closed row enriched
               // while the call finished clean). A 0-row outcome lands in the
               // reconciliation below.
-              enrichmentWrite = applySameCallLeadEligibility(enrichmentWrite, sameCallEligibility);
+              enrichmentWrite = applySameCallLeadEligibility(enrichmentWrite, sameCallWriteEligibility);
             }
             if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
@@ -8534,8 +9013,9 @@ const CallRecordingProcessor = {
                 );
               }
             }
-            // Phone-less reuse of a different-sid lead: the rollback
-            // snapshot (prior + written values) must be DURABLE BEFORE the
+            // Reuse of a different-sid lead (phone-bearing or phone-less —
+            // both stamp since the root fix): the rollback snapshot
+            // (prior + written values) must be DURABLE BEFORE the
             // lead mutation commits — the stamp and the enrichment write
             // run in ONE transaction (audit P1 r20: a crash between them
             // left the lead mutated with no rollback state, and a retry
@@ -8555,9 +9035,13 @@ const CallRecordingProcessor = {
             // stamp can never point at it; the sid-match exclusion cannot
             // co-occur with a stamp either (stamps are only ever written
             // for different-sid leads).
-            const stampThisPass = (!phone && existingLead && !raceRecovered
-              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid))
-              || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
+            const stampThisPass = shouldStampCallLeadLinkage({
+              existingLead,
+              raceRecovered,
+              callTwilioSid: call.twilio_call_sid,
+              leadId,
+              currentStampedLeadId,
+            });
             if (stampThisPass) {
               // A prior stamp pointing at a DIFFERENT lead must be settled
               // (cleared + its lead's state restored) BEFORE the
@@ -8566,10 +9050,25 @@ const CallRecordingProcessor = {
               // re-stamps; overwriting a different lead's ledger stranded
               // the anonymous call's enrichment on a now-claimed lead
               // permanently.
+              // The funnel-row TRANSFER does NOT ride this standalone
+              // settle (pre-push P1 r9): if the stamp/enrich transaction
+              // below then failed, the call would land extraction_failed
+              // with no stamp while its attribution sat on a target whose
+              // linkage never committed — and a later rejection could not
+              // retire it. The settle only clears/restores ('keep'); the
+              // transfer runs INSIDE the stamp transaction, after the
+              // replacement linkage is written (see preSettleStampedLeadId
+              // below).
+              let preSettleStampedLeadId = null;
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                preSettleStampedLeadId = currentStampedLeadId;
                 let priorSettled;
                 try {
-                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+                  // preserveFormerLeadId: the settle's clear persists the
+                  // former lead as metadata.attribution_former_lead_id in
+                  // the SAME fenced write (codex P1 r17) — a failed
+                  // restamp's retry recovers it below.
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep', preserveFormerLeadId: true });
                 } catch (settleErr) {
                   if (settleErr.abortProcessing) throw settleErr;
                   const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
@@ -8583,6 +9082,25 @@ const CallRecordingProcessor = {
                 }
                 currentStampedLeadId = null;
               }
+              if (!preSettleStampedLeadId) {
+                // RETRY breadcrumb (codex P1 r17): a prior attempt settled
+                // the old stamp and then failed before its replacement
+                // stamp committed — this retry claims the call with no
+                // stamp, so the moved-link branch below would never see
+                // the former lead, skipping the legacy-blocker check and
+                // the pending-transfer marker and double-counting the
+                // call. The settle persisted the former lead's id into
+                // call metadata (read fresh at claim time); a successful
+                // restamp clears it in the stamp write.
+                try {
+                  const cmd = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+                  if (cmd.attribution_former_lead_id
+                    && String(cmd.attribution_former_lead_id) !== String(leadId)) {
+                    preSettleStampedLeadId = String(cmd.attribution_former_lead_id);
+                  }
+                } catch { /* unparseable metadata — no breadcrumb */ }
+              }
+              let phoneReuseRevokedUnderLock = false;
               enriched = await db.transaction(async (trx) => {
                 // Snapshot under a ROW LOCK inside the same transaction that
                 // stamps and updates (codex P2 r16): two concurrent
@@ -8598,6 +9116,23 @@ const CallRecordingProcessor = {
                   .forUpdate()
                   .first();
                 let lockedLead = await lockLeadRow();
+                // A PHONE-selected row is revalidated against the LOCKED
+                // state BEFORE anything is written (codex P2): the lookup's
+                // selecting predicates can stop holding in the gap (number
+                // corrected away, row closed/converted/soft-deleted), and
+                // the phone-path write below only repeats ownership — the
+                // pass would stamp a durable association onto an obsolete
+                // row. On failure nothing is stamped or enriched; the
+                // association is dropped after the transaction (Needs
+                // Review lane) and maintenance settles any prior stamp.
+                // Same-call arms keep their own eligibility (the guarded
+                // write repeats it) and the email arm's write enforces its
+                // full predicate set in SQL already.
+                if (existingLeadVia === 'phone'
+                  && !phoneReuseStillValidOnLockedRow(lockedLead, { phone, ...sameCallEligibility })) {
+                  phoneReuseRevokedUnderLock = true;
+                  return 0;
+                }
                 // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
                 // older call after a DIFFERENT call enriched the same reused
                 // lead (codex P2 r17)? Its old stamp belongs to a finished
@@ -8627,7 +9162,7 @@ const CallRecordingProcessor = {
                     .whereRaw("COALESCE((metadata->>'lead_stamp_seq')::bigint, 0) > ?", [ownSeq])
                     .first('id');
                   if (interveningStamp) {
-                    const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx);
+                    const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'keep' });
                     if (!settled) {
                       const lost = new Error('processing claim lost during call→lead restamp settle');
                       lost.abortProcessing = true;
@@ -8764,16 +9299,37 @@ const CallRecordingProcessor = {
                     // same-lead RETRY; a different-lead stamp and a settled
                     // restamp both take a fresh marker, which is what makes
                     // the restamp the newest mutation on the lead.
+                    // The trailing removal clears the settle's
+                    // attribution_former_lead_id breadcrumb once the
+                    // replacement stamp durably lands (codex P1 r17) — the
+                    // moved-link branch below consumes it this same
+                    // transaction.
+                    // lead_link_via records the AUTHORITY that linked this
+                    // call to the lead (codex P2), derived from the
+                    // SELECTING ARM by deriveStampLinkAuthority — never
+                    // from bare phone presence (pre-push P1 on r4). Retry
+                    // eligibility for a phone-authorized stamp keeps the
+                    // phone path's ownership rules; email/legacy stamps
+                    // stay strict.
                     metadata: db.raw(
-                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
+                      "(jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
                       + `, '{lead_written_state}', ${writtenExpr}, true)`
-                      + `, '{lead_stamp_seq}', ${seqExpr}, true)`,
+                      + `, '{lead_stamp_seq}', ${seqExpr}, true)`
+                      + ", '{lead_link_via}', ?::jsonb, true)) - 'attribution_former_lead_id'",
                       [
                         JSON.stringify(String(leadId)),
                         String(leadId), JSON.stringify(prior), JSON.stringify(prior),
                         String(leadId), JSON.stringify(written), JSON.stringify(written),
                         String(leadId), nextSeq, nextSeq,
+                        JSON.stringify(deriveStampLinkAuthority({
+                          phone,
+                          existingLeadVia,
+                          priorStampedLeadVia,
+                          lockedLeadPhone: lockedLead?.phone,
+                          writesPhone: Object.prototype.hasOwnProperty.call(effectiveUpdates, 'phone')
+                            && String(effectiveUpdates.phone || '') === String(phone),
+                        })),
                       ],
                     ),
                     updated_at: new Date(),
@@ -8783,9 +9339,95 @@ const CallRecordingProcessor = {
                   lost.abortProcessing = true;
                   throw lost;
                 }
+                // The moved linkage just COMMITTED (stamp written in this
+                // transaction) — now the funnel row this call created on
+                // the previously stamped lead follows it, stages intact
+                // (pre-push P0/P1 r8/r9). Same transaction, same lead lock.
+                if (preSettleStampedLeadId && String(preSettleStampedLeadId) !== String(leadId)) {
+                  // Outcome captured (codex P1, PR #3303 r4): a
+                  // retired_conflict means the target lead owns a row this
+                  // call cannot prove is its own, and the later
+                  // attribution pass must not touch it. The shared
+                  // unprovenanced-row freeze in recordCallPpcAttribution
+                  // is the backstop; suppressing the pass here avoids the
+                  // wasted round-trip and keeps intent explicit.
+                  const moveOutcome = await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
+                    trx, call.id, preSettleStampedLeadId, leadId, new Date(),
+                  );
+                  if (moveOutcome === 'retired_conflict') attributionConflictRetired = true;
+                  // A LEGACY row on the former lead cannot move (codex P1,
+                  // PR #3303 r11 — the bridge path already suppresses this
+                  // shape): NULL provenance is permanently frozen because
+                  // another call may own it, so the transfer reports
+                  // 'none' with the old row still in place. Letting this
+                  // pass insert a provenanced row for the new lead would
+                  // count the same call on BOTH leads — the row cannot be
+                  // discovered by call id, so nothing would ever reconcile
+                  // them. Suppress the write and name both for an operator.
+                  if (moveOutcome === 'none') {
+                    const stranded = await trx('ad_service_attribution')
+                      .where({ lead_id: preSettleStampedLeadId })
+                      .whereNull('source_call_id')
+                      .first('id');
+                    if (stranded) {
+                      attributionConflictRetired = true;
+                      // The suppressed write stays in a RETRY LANE (codex
+                      // P1 r12): the call finalizes as 'processed' and —
+                      // unlike a bridge-target call, which the daily bridge
+                      // scan keeps re-detecting — nothing ever rescans a
+                      // dedicated/organic call, so once the operator
+                      // resolved the legacy row the new lead stayed
+                      // unattributed forever. Persist a durable marker
+                      // carrying the CALL-TIME funnel decision (source /
+                      // paid / detail / service) in the SAME fenced
+                      // transaction as the stamp; the daily attribution
+                      // sweep (sweepPendingAttributionTransfers) completes
+                      // the write against the LIVE stamped lead once the
+                      // blocking row is gone. Gated on the exact predicate
+                      // the suppressed write ran under — a non-attributing
+                      // source or bridge target would never have written,
+                      // so it gets no marker.
+                      const attrMod = require('./ads/call-attribution');
+                      const markerAttr = leadSourceRow
+                        ? attrMod.attributionForSourceType(leadSourceRow.source_type)
+                        : null;
+                      const markerBridgeTarget = leadSourceRow
+                        && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+                      if (customerId && markerAttr && !markerBridgeTarget) {
+                        await trx('call_log')
+                          .where({ id: call.id })
+                          .where('processing_token', procToken)
+                          .update({
+                            metadata: db.raw(
+                              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{attribution_transfer_pending}', ?::jsonb, true)",
+                              [JSON.stringify({
+                                from_lead_id: String(preSettleStampedLeadId),
+                                lead_source: markerAttr.leadSource,
+                                is_paid: markerAttr.isPaid,
+                                detail: leadSourceRow.name || 'inbound call',
+                                service_interest: extracted.matched_service || extracted.requested_service || null,
+                              })],
+                            ),
+                            updated_at: new Date(),
+                          });
+                      }
+                      logger.warn(`[call-proc] repoint of ${callSid} left a legacy unprovenanced row on lead ${preSettleStampedLeadId} — funnel write suppressed to avoid double-counting`);
+                    }
+                  }
+                }
                 return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });
-              currentStampedLeadId = String(leadId);
+              if (phoneReuseRevokedUnderLock) {
+                // The locked row no longer satisfies the phone arm's
+                // selecting predicates — nothing was stamped or enriched.
+                // Drop the association (Needs Review lane); the maintenance
+                // block settles any prior stamp via its lead-less branch.
+                logger.warn(`[call-proc] phone-reused lead ${leadId} no longer matches the selecting predicates under lock — dropping the association for ${maskSid(callSid)}`);
+                leadId = null;
+                sameCallOwnershipRejected = true;
+              } else {
+                currentStampedLeadId = String(leadId);
+              }
             } else {
               enriched = await enrichmentWrite.update(leadUpdates);
             }
@@ -8812,7 +9454,7 @@ const CallRecordingProcessor = {
               let verified = true;
               try {
                 stillEligible = await applySameCallLeadEligibility(
-                  db('leads').where({ id: leadId }), sameCallEligibility,
+                  db('leads').where({ id: leadId }), sameCallWriteEligibility,
                 ).first('id');
               } catch (eligErr) {
                 // FAIL CLOSED (codex P2): swallowing this and keeping leadId
@@ -8824,6 +9466,43 @@ const CallRecordingProcessor = {
               }
               if (!verified || !stillEligible) {
                 logger.warn(`[call-proc] same-call lead ${leadId} ${verified ? 'is no longer eligible' : 'eligibility unverifiable'} — dropping the association for ${maskSid(callSid)}`);
+                leadId = null;
+                sameCallOwnershipRejected = true;
+              }
+            }
+            if (!enriched && !sameCallLeadReuse && phone && existingLead && !raceRecovered
+              && leadId && currentStampedLeadId === String(leadId)) {
+              // Stamped phone-bearing reuse whose guarded write landed 0
+              // rows: beyond the row id, the plain phone write carries only
+              // the customer-ownership backstop, so 0 rows means the lead
+              // was claimed by a DIFFERENT customer between lookup and
+              // write (or the row vanished). Before the root fix this pass
+              // finalized with leadId still pointing at the foreign row —
+              // now that the stamp is durable state it must not survive
+              // pointing there either. Re-check the write's own predicate
+              // and drop the association when it no longer holds; the
+              // maintenance block below then settles the stamp via its
+              // lead-less branch and the Needs Review card surfaces the
+              // call. Fail closed on an unverifiable re-read, same doctrine
+              // as the same-call check above. Eligibility here is the PHONE
+              // path's own, NOT applySameCallLeadEligibility — a
+              // customer-less phone caller may legitimately reuse a claimed
+              // lead (phone is strong identity), so only the ownership
+              // backstop the write itself ran under applies.
+              let stillOurs = null;
+              let verified = true;
+              try {
+                let recheck = db('leads').where({ id: leadId });
+                if (customerId) {
+                  recheck = recheck.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+                }
+                stillOurs = await recheck.first('id');
+              } catch (eligErr) {
+                verified = false;
+                logger.warn(`[call-proc] phone-reuse ownership re-read failed: ${eligErr.code || eligErr.name || 'db_error'}`);
+              }
+              if (!verified || !stillOurs) {
+                logger.warn(`[call-proc] phone-reused lead ${leadId} ${verified ? 'was claimed by another customer' : 'ownership unverifiable'} — dropping the association for ${maskSid(callSid)}`);
                 leadId = null;
                 sameCallOwnershipRejected = true;
               }
@@ -8929,7 +9608,16 @@ const CallRecordingProcessor = {
             break;
           }
 
-          // Call→lead linkage maintenance for the phone-less path, WITHOUT
+          // Set when the maintenance settle below TRANSFERRED this call's
+          // linkage off a live stamp — the former lead may still hold a
+          // legacy (NULL-provenance) row this call cannot move, and the
+          // breadcrumb-consumption block after the settle owns that check
+          // (codex P1 r18).
+          let maintenanceFormerLeadId = null;
+          // Call→lead linkage maintenance for every stamped linkage
+          // (phone-less always; phone-bearing whenever a stamp is or was
+          // in play — a stamp-less phone-bearing fresh insert self-links
+          // via its sid and needs nothing here), WITHOUT
           // rolling the lead's twilio_call_sid (rolling it destroyed the
           // older call's identity — audit P1 r16): a reused lead keeps its
           // ORIGINAL call's sid, so this call's association lives in
@@ -8951,10 +9639,10 @@ const CallRecordingProcessor = {
             // direct writes use. The STAMP itself is written in-loop,
             // atomically with the enrichment write — maintenance only ever
             // clears.
-            const settleClear = async () => {
+            const settleClear = async (attribution) => {
               let ok;
               try {
-                ok = await clearStampAndRestoreLead(call, procToken, callSid);
+                ok = await clearStampAndRestoreLead(call, procToken, callSid, null, attribution);
               } catch (clearErr) {
                 if (clearErr.abortProcessing) throw clearErr;
                 const wrapped = new Error(`call→lead link clear failed: ${clearErr.code || clearErr.name || 'db_error'}`);
@@ -8970,20 +9658,91 @@ const CallRecordingProcessor = {
             if (!leadId) {
               // Mint failure dropped the lead — a leftover stamp would leave
               // the OR-join consumers associating this call with a lead that
-              // is now foreign (it lost the claim race). Unlink.
-              if (currentStampedLeadId) await settleClear();
+              // is now foreign (it lost the claim race). Unlink the stamp,
+              // but 'keep' the funnel row (codex P1, PR #3303 r3): a mint
+              // failure is transient, not a verdict — the call can
+              // finalize lead_creation_failed (outside the automatic retry
+              // lane) and a retire here would permanently delete
+              // booked/completed history with no definitive rejection.
+              // When a later pass re-attributes, provenance recovery moves
+              // the row. preserveFormerLeadId (pre-push P1 r18): the
+              // lead_creation_failed retry restamps with no
+              // preSettleStampedLeadId — the breadcrumb keeps the former
+              // lead recoverable for the legacy-blocker check.
+              if (currentStampedLeadId) await settleClear({ mode: 'keep', preserveFormerLeadId: true });
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
-              // pointing at a different lead must not survive.
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+              // pointing at a different lead must not survive. The call's
+              // linkage MOVED: its funnel row transfers to the final lead,
+              // stages intact (codex P0, PR #3303).
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+                maintenanceFormerLeadId = currentStampedLeadId;
+              }
             } else if (phone) {
-              // Retry GAINED a phone and selected a phone-linked lead: its
-              // linkage is the phone, not the stamp — a stale stamp pointing
-              // at a different lead must not survive (audit P1 r22); a stamp
-              // already pointing at this lead stays accurate.
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+              // Phone-bearing final lead not carrying this call's sid.
+              // Since the root fix the in-loop stamp transaction already
+              // settled-and-restamped this case (stamp == leadId here), so
+              // this branch is a BACKSTOP for passes that reached
+              // maintenance without stamping: a stale stamp pointing at a
+              // different lead must not survive (audit P1 r22); a stamp
+              // already pointing at this lead stays accurate. The funnel row
+              // follows the moved linkage.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                await settleClear({ mode: 'transfer', transferToLeadId: leadId });
+                maintenanceFormerLeadId = currentStampedLeadId;
+              }
             }
-            phoneLessLinkagePending = false;
+            leadLinkagePending = false;
+          }
+
+          // Former-lead linkage reconciliation for EVERY successful
+          // replacement linkage, not only stamped ones (codex P1 r18): a
+          // standalone keep-settle persisted attribution_former_lead_id,
+          // and only the in-loop stamp path consumed it — a retry that
+          // GAINED a phone (or selected a sid-linked lead) settles
+          // stamp-less, skipped the former lead's legacy-blocker check and
+          // the pending-transfer marker, and runCallPpcAttribution then
+          // inserted a SECOND row for the new lead while the former lead's
+          // unresolved row stood. Also runs after a live-stamp maintenance
+          // TRANSFER, whose reconcile outcome clearStampAndRestoreLead
+          // cannot surface: a 'none' there with a stranded legacy row is
+          // the same double-count. Idempotent — a breadcrumb the stamp
+          // transaction already consumed reads back cleared under the lock
+          // and the block no-ops. Gated on a SUCCESSFUL linkage (leadId):
+          // a lead-less exit keeps the breadcrumb for the next retry, by
+          // design. Cheap pre-check on claim-time metadata only decides
+          // whether to open the transaction; the authoritative breadcrumb
+          // is re-read fenced under the lock.
+          const claimTimeBreadcrumb = (() => {
+            try {
+              const cmd = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+              return cmd.attribution_former_lead_id ? String(cmd.attribution_former_lead_id) : null;
+            } catch { return null; }
+          })();
+          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb)) {
+            try {
+              const recon = await reconcileFormerLeadLinkage({
+                call,
+                procToken,
+                callSid,
+                leadId,
+                transferredFormerLeadId: maintenanceFormerLeadId,
+                leadSourceRow,
+                extracted,
+                customerId,
+              });
+              if (recon.conflictRetired) attributionConflictRetired = true;
+            } catch (reconErr) {
+              if (reconErr.abortProcessing) throw reconErr;
+              // REQUIRED reconciliation — swallowing this would finalize
+              // the call with an unconsumed breadcrumb AND fire the funnel
+              // write, the exact double-count this block closes. Same
+              // retry lane as the settle failures above.
+              const wrapped = new Error(`former-lead linkage reconciliation failed: ${reconErr.code || reconErr.name || 'db_error'}`);
+              wrapped.abortProcessing = true;
+              throw wrapped;
+            }
           }
 
           // Log AI triage activity — gated on the enrichment write landing, so
@@ -9240,7 +9999,7 @@ const CallRecordingProcessor = {
         // between the reuse decision and the maintenance block would
         // otherwise finalize with unsettled linkage (audit P1 r21).
         if (leadErr.abortProcessing) throw leadErr;
-        if (phoneLessLinkagePending) {
+        if (leadLinkagePending) {
           // Sanitized cause only — enrichment DB errors can echo the failing
           // row's name/email/address, and the outer catch logs this message
           // with its stack (codex P1 r15b).
@@ -9259,15 +10018,52 @@ const CallRecordingProcessor = {
         await runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
-    } else if (priorStampedLeadId) {
-      // The retry was VETOED out of lead creation (non-lead nature /
-      // existing-customer stage) but an earlier attempt stamped a lead —
-      // the stamp must not survive a non-lead verdict, and the lead's prior
-      // summary comes back with the clear, in one fenced transaction (audit
-      // P1 r22/r18/r19). abortProcessing reaches the outer
-      // extraction_failed guard directly.
+    } else {
+      // Lead creation skipped. THREE very different reasons live here
+      // (pre-push P0 r14, narrowed P0 r8):
+      //   - DEFINITIVE content rejection (wrong_number call_type, or the
+      //     V2 spam/wrong-number flag): the call was never a prospect at
+      //     all — prior attribution is fraudulent, so it retires at
+      //     finalization, armed REGARDLESS of stamp presence (a
+      //     sid-linked call has a provenanced row but no stamp; P1 r13),
+      //     deferred to the final fenced status write where the verdict
+      //     becomes durable (P0 r12).
+      //   - ORDINARY non-sales classification (existing-customer
+      //     scheduling/service, billing, complaint, a bare
+      //     is_lead=false): no NEW lead is created, but a force-reprocess
+      //     of a valid historical call must NEVER delete the original
+      //     inquiry's booked/completed revenue because the model now
+      //     files the transcript under service chatter. Stamp, lead, and
+      //     funnel row all stand — mirrors the V2 veto's own
+      //     definitive-rejection gate.
+      //   - LIFECYCLE skip (the caller's prospect record has since
+      //     advanced to won/active_customer): the ORIGINAL inquiry and its
+      //     booked/completed revenue are still perfectly valid.
+      const definitiveContentRejection = nonLeadCall
+        && (v2VetoDefinitiveRejection
+          || String(extracted?.call_type || '').trim().toLowerCase() === 'wrong_number');
+      if (definitiveContentRejection) deferredNonLeadAttributionRetire = true;
+      // The stamp settle is gated the SAME way (pre-push P0 r15/r8): a
+      // cleared stamp reads to the bridge's repoint reconciliation as a
+      // settled unlink, which would retire the exact funnel row the
+      // retire-gate above just preserved — so only a definitive rejection
+      // clears it. Lifecycle skips and ordinary non-sales classifications
+      // leave the stamp, the lead's state, and the funnel row standing.
+      if (definitiveContentRejection && priorStampedLeadId) {
+      // The retry was VETOED out of lead creation but an earlier attempt
+      // stamped a lead — the stamp must not survive a non-lead verdict,
+      // and the lead's prior summary comes back with the clear, in one
+      // fenced transaction (audit P1 r22/r18/r19). abortProcessing
+      // reaches the outer extraction_failed guard directly. 'keep': the
+      // retire rides finalization, not this settle (pre-push P0 r12).
       try {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid);
+        // preserveFormerLeadId (pre-push P1 r18, same class as the
+        // pre-stamp settle): this standalone clear commits long before
+        // the fenced final verdict — if later work fails, the retry
+        // would claim an extraction_failed call with neither stamp nor
+        // breadcrumb, and a subsequent VALID retry repointing to a new
+        // lead would skip the legacy-blocker check and double-count.
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep', preserveFormerLeadId: true });
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
           lost.abortProcessing = true;
@@ -9278,6 +10074,7 @@ const CallRecordingProcessor = {
         const wrapped = new Error(`call→lead link clear failed (non-lead path): ${clearErr.code || clearErr.name || 'db_error'}`);
         wrapped.abortProcessing = true;
         throw wrapped;
+      }
       }
     }
 
@@ -11301,6 +12098,7 @@ const CallRecordingProcessor = {
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
                   smsRan = true;
+                  let confirmationRearmed = false;
                   // SMS leg held (implied consent, no consented recipient):
                   // skip only the primary text — the channel email leg and
                   // the gated fan-out/email-only legs below still run.
@@ -11321,6 +12119,39 @@ const CallRecordingProcessor = {
                     });
                   const primaryOk = !(sendResult.blocked || sendResult.sent === false);
                   if (!primaryOk) {
+                    // Send-window hold: this after-hours phone booking
+                    // registered its reminder with sendConfirmation:false
+                    // (this path owns the confirmation), so nothing would
+                    // retry a held text and the customer never learns their
+                    // visit is booked. Re-arm confirmation_sent so the
+                    // 15-minute stranded-confirmation sweep delivers the
+                    // standard confirmation at the 8:00 AM window open —
+                    // same handoff as the estimate-accept flow.
+                    if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
+                      try {
+                        const rearmed = await db('appointment_reminders')
+                          .where({ scheduled_service_id: scheduledServiceId })
+                          .where({ cancelled: false })
+                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                        if (rearmed > 0) {
+                          // The sweep's canonical confirmation fans out to
+                          // EVERY appointment contact — the secondary loop
+                          // below must not also queue held copies, or those
+                          // contacts get both at 8:00 AM. ONLY when a row
+                          // actually re-armed: reminder registration is
+                          // best-effort (registerScheduleSideEffects
+                          // swallows its failure), so a 0-row update means
+                          // NO sweep row owns delivery and the secondary
+                          // rail must stay active.
+                          confirmationRearmed = true;
+                          logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
+                        } else {
+                          logger.warn(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) but NO reminder row to re-arm — held secondaries will queue individually`);
+                        }
+                      } catch (rearmErr) {
+                        logger.error(`[call-proc] confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+                      }
+                    }
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
                     appointmentResult = {
                       smsSent: false,
@@ -11412,7 +12243,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
-                        await sendCustomerMessage({
+                        const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
                           channel: 'sms',
@@ -11428,7 +12259,55 @@ const CallRecordingProcessor = {
                             appointment_contact_role: contact.role,
                           },
                         });
-                        logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt
+                          && confirmationRearmed) {
+                          // Primary was held too and the confirmation sweep
+                          // was successfully re-armed — its 8:00 AM canonical
+                          // send fans out to every appointment contact, so a
+                          // queued copy here would double-text this contact.
+                          logger.info(`[call-proc] held ${contact.role} confirmation NOT queued — re-armed sweep owns delivery to all contacts`);
+                        } else if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt) {
+                          // The primary confirmation reached Twilio before the
+                          // 20:00 cutoff but THIS contact's send crossed it —
+                          // re-arming the whole confirmation would duplicate
+                          // the delivered primary, so persist only the held
+                          // secondary on the scheduled-SMS rail. NO
+                          // refresh_customer_phone: this row belongs to the
+                          // CONTACT's phone; a send-time swap to the account
+                          // holder's number would misdeliver. The reprocess
+                          // dedupe above also matches this queued row (same
+                          // phone/type/body), so a re-run can't double-queue.
+                          try {
+                            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                            await db('sms_log').insert({
+                              customer_id: customerId,
+                              direction: 'outbound',
+                              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                              to_phone: contact.phone,
+                              message_body: contactBody,
+                              status: 'scheduled',
+                              scheduled_for: new Date(contactResult.nextAllowedAt),
+                              message_type: 'confirmation',
+                              metadata: JSON.stringify({
+                                entry_point: 'call_booking_contact_confirmation_deferred',
+                                scheduled_service_id: scheduledServiceId,
+                                appointment_contact_role: contact.role,
+                                original_block_code: contactResult.code,
+                                replay_purpose: 'appointment_confirmation',
+                                resolve_from_by_customer: true,
+                              }),
+                            });
+                            logger.info(`[call-proc] Appointment SMS to ${contact.role} held outside the 8AM-8PM ET send window — queued for ${contactResult.nextAllowedAt}`);
+                          } catch (queueErr) {
+                            logger.error(`[call-proc] held contact-confirmation requeue failed for ${contact.role} (customer ${customerId}): ${queueErr.message}`);
+                          }
+                        } else if (!contactResult.sent) {
+                          logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
+                        } else {
+                          logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        }
                       }
                       // Email-only service contacts never appear in the SMS
                       // contact list (getAppointmentContacts is phone-based)
@@ -12218,19 +13097,214 @@ const CallRecordingProcessor = {
       createdCustomerFromCall,
     });
 
-    const finalized = await db('call_log')
-      .where({ id: call.id })
-      .where('processing_token', procToken)
-      .update({
-        processing_status: finalStatus,
-        processing_token: null,
-        processing_started_at: null,
-        // Address unverifiable / caller-not-owner / missing surname, or a
-        // customer-less recovery lead that failed to persist → open the call for
-        // human review instead of letting it look fully processed.
-        ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
-        updated_at: new Date(),
-      });
+    const finalized = await db.transaction(async (trx) => {
+      const written = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: finalStatus,
+          processing_token: null,
+          // Address unverifiable / caller-not-owner / missing surname, or a
+          // customer-less recovery lead that failed to persist → open the call for
+          // human review instead of letting it look fully processed.
+          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
+          updated_at: new Date(),
+        });
+      // The non-lead verdict's attribution retire becomes durable HERE,
+      // atomically with the final status (pre-push P0 r12) — never on the
+      // earlier settle, whose pass could still have failed into a retry.
+      if (written > 0 && !deferredNonLeadAttributionRetire && !isNonLeadCallContent(extracted)) {
+        // A successful non-rejecting LEAD pass SUPERSEDES a previous
+        // no-attribution verdict (pre-push P1 r15): without clearing the
+        // marker, the bridge would never attribute the corrected call —
+        // shouldRetryLeadAttribution exits on it forever. An ordinary
+        // non-sales classification (pre-push P0 r8) is NOT such a
+        // correction — it validates no attribution, so it must not
+        // reopen a definitively rejected call to the bridge.
+        {
+          // The LIVE row, not the in-memory snapshot: the repair decision
+          // below reads linkage state this pass may have just rewritten.
+          const liveRow = await trx('call_log')
+            .where({ id: call.id })
+            .first('metadata', 'twilio_call_sid', 'to_phone');
+          // ONLY the parse is guarded (codex P1 r21). Every database
+          // statement below must PROPAGATE: a failed statement has already
+          // aborted this transaction, so swallowing it would let the
+          // callback return `written` and report a finalized call whose
+          // status write, token clear and repair were all rolled back —
+          // the same silent-rollback trap the attribution write refuses at
+          // the runCallPpcAttribution site. A throw here lands in the
+          // outer `catch (procErr)` extraction_failed retry lane.
+          let mdRaw = null;
+          try {
+            mdRaw = typeof liveRow?.metadata === 'string'
+              ? JSON.parse(liveRow.metadata)
+              : (liveRow?.metadata || {});
+          } catch { mdRaw = null; /* unparseable metadata: leave the marker, conservative */ }
+          if (mdRaw && mdRaw.no_attribution) {
+            // REPAIR, not just forgiveness (codex P1 r20): the earlier
+            // rejection retired this call's funnel row, and when THIS pass
+            // created no lead (shouldCreateLead false — e.g. the customer
+            // has since advanced past the lead-pipeline stages)
+            // runCallPpcAttribution is still its default no-op. A
+            // bridge-target call gets a later rescan; a dedicated/organic
+            // one never does, so clearing the marker alone would drop the
+            // corrected inquiry's booked/completed revenue permanently.
+            // Arm the SAME durable marker the repoint lane uses — the
+            // transfer sweep already locks leads → call_log, re-verifies
+            // the target, and completes exactly this write.
+            let repairPayload = null;
+            // A resolved leadId does NOT mean the repair is unnecessary
+            // (codex P1 r26): the rejection demoted this call's row to
+            // legacy, so runCallPpcAttribution refuses it as
+            // 'unprovenanced_row' and writes nothing. Clearing the verdict
+            // and its recorded lead ids here would then destroy the only
+            // evidence of what to reclaim. Arm the marker in BOTH cases —
+            // the sweep's repair branch re-points the demoted row — using
+            // this pass's own lead when it has one.
+            if (!mdRaw.attribution_transfer_pending) {
+              // The lead the REJECTION itself recorded is authoritative
+              // (codex P1 r21): a lead phone-REUSED before the root fix
+              // carries neither this call's sid nor a stamp (stampThisPass
+              // required !phone until then), so for those legacy calls
+              // stamp/sid resolution alone silently finds no target —
+              // exactly the linkage mode this repair exists to rescue.
+              // Post-fix phone reuse stamps, so the mdRaw.lead_id arm
+              // below now resolves for it too.
+              // Only an unambiguous, still-live record is used; anything
+              // else falls through to the durable-linkage arms.
+              const recordedLeadIds = Array.isArray(mdRaw.no_attribution_lead_ids)
+                ? [...new Set(mdRaw.no_attribution_lead_ids.filter(Boolean).map(String))]
+                : [];
+              let target = leadId ? String(leadId) : null;
+              if (!target && recordedLeadIds.length === 1) {
+                const recordedLead = await trx('leads')
+                  .where({ id: recordedLeadIds[0] })
+                  .whereNull('deleted_at')
+                  .first('id');
+                if (recordedLead) target = String(recordedLead.id);
+              }
+              if (!target && mdRaw.lead_id) target = String(mdRaw.lead_id);
+              if (!target && liveRow?.twilio_call_sid) {
+                // `leads.twilio_call_sid` is NOT unique, and this query is
+                // not the processor's authoritative newest-first
+                // resolution — an arbitrary pick would move the corrected
+                // call's history onto the wrong lead. Require a UNIQUE
+                // live match and otherwise fail closed to a plain clear
+                // (codex P1 r21).
+                const sidLeads = await trx('leads')
+                  .where({ twilio_call_sid: liveRow.twilio_call_sid })
+                  .whereNull('deleted_at')
+                  .limit(2)
+                  .select('id');
+                if (sidLeads.length === 1) target = String(sidLeads[0].id);
+              }
+              if (target) {
+                const { row: repairSource } = await resolveCallLeadSource({
+                  dbc: trx,
+                  toPhone: liveRow.to_phone,
+                  preferReferral: !!referrerNameFromExtracted(extracted),
+                });
+                const repairAttr = repairSource
+                  ? require('./ads/call-attribution').attributionForSourceType(repairSource.source_type)
+                  : null;
+                // Bridge-target numbers are excluded exactly as the
+                // primary writer excludes them — the bridge owns their
+                // attribution and rescans on its own schedule.
+                const repairIsBridge = repairSource
+                  && require('./ads/google-call-bridge').isBridgeTargetNumber(repairSource.twilio_phone_number);
+                if (repairAttr && !repairIsBridge) {
+                  repairPayload = {
+                    to_lead_id: target,
+                    lead_source: repairAttr.leadSource,
+                    is_paid: repairAttr.isPaid,
+                    detail: repairSource.name || 'inbound call',
+                    service_interest: extracted.matched_service || extracted.requested_service || null,
+                    repair_of_rejection: true,
+                  };
+                  // The EXACT row the rejection demoted on this lead
+                  // (codex P1 r32) — the sweep's reclaim is conditioned
+                  // on this identity, never on "some legacy row on the
+                  // lead": a reused lead's pre-migration or web
+                  // acquisition row is unprovenanced too, and seizing it
+                  // overwrites another acquisition's owner and
+                  // dimensions. No recorded demote on this lead means
+                  // there is nothing of this call's to reclaim.
+                  const demotedRecorded = Array.isArray(mdRaw.no_attribution_demoted_rows)
+                    ? mdRaw.no_attribution_demoted_rows.find(
+                      (d) => d && d.id && String(d.lead_id) === String(target),
+                    )
+                    : null;
+                  if (demotedRecorded) repairPayload.reclaim_row_id = String(demotedRecorded.id);
+                }
+              }
+            }
+            await trx('call_log').where({ id: call.id }).update({
+              metadata: repairPayload
+                ? db.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows', '{attribution_transfer_pending}', ?::jsonb, true)",
+                  [JSON.stringify(repairPayload)],
+                )
+                : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution' - 'no_attribution_lead_ids' - 'no_attribution_demoted_rows'"),
+            });
+          }
+        }
+      }
+      if (written > 0 && deferredNonLeadAttributionRetire) {
+        // WHICH leads this rejection is about to strip, captured BEFORE
+        // the retire clears the provenance that names them (codex P1 r21).
+        // A phone-REUSED lead carries neither this call's sid nor a stamp,
+        // so the verdict itself is the only place that still knows the
+        // answer — without it a later corrected pass cannot tell what to
+        // repair. Reassigned-to-successor rows are recorded too and cost
+        // nothing: the repair's write then refuses as 'other_call' (the
+        // lead is counted once by design) and the sweep clears the marker.
+        const retiredLeadIds = [...new Set(
+          (await trx('ad_service_attribution')
+            .where({ source_call_id: call.id })
+            .whereNotNull('lead_id')
+            .select('lead_id'))
+            .map((r) => String(r.lead_id)),
+        )];
+        // WHICH rows the retire DEMOTED to legacy, by exact id (codex P1
+        // r32): a lead id alone is not enough for the later reclaim — a
+        // reused lead can carry OTHER unprovenanced rows (pre-migration,
+        // web acquisition), and "some legacy row on the lead" seized an
+        // unrelated acquisition's row and overwrote its owner and
+        // dimensions. Only a row this rejection itself demoted is provably
+        // this call's history.
+        const demotedRows = [];
+        await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id, { demoted: demotedRows });
+        // Durable no-attribution verdict, same transaction (pre-push P1
+        // r14): the google bridge would otherwise re-join this call's
+        // sid-linked lead on its next scan and recreate the row just
+        // retired. Spam/voicemail terminals are self-evident from
+        // processing_status; the non-lead verdict finalizes 'processed'
+        // and needs this marker.
+        await trx('call_log')
+          .where({ id: call.id })
+          .update({
+            metadata: (() => {
+              if (!retiredLeadIds.length) {
+                return db.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
+                );
+              }
+              if (!demotedRows.length) {
+                return db.raw(
+                  "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true)",
+                  [JSON.stringify(retiredLeadIds)],
+                );
+              }
+              return db.raw(
+                "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true), '{no_attribution_lead_ids}', ?::jsonb, true), '{no_attribution_demoted_rows}', ?::jsonb, true)",
+                [JSON.stringify(retiredLeadIds), JSON.stringify(demotedRows)],
+              );
+            })(),
+          });
+      }
+      return written;
+    });
     if (finalized === 0) {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
@@ -12306,7 +13380,6 @@ const CallRecordingProcessor = {
             processing_status: 'extraction_failed',
             extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
-            processing_started_at: null,
             updated_at: new Date(),
           }).returning(['extraction_attempts']);
         if (!releasedRows.length) {
@@ -12624,6 +13697,7 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  reconcileFormerLeadLinkage,
   recheckCallBookingConflicts,
   scrubTranscriptArtifacts,
   scrubStructuredTranscript,
@@ -12668,11 +13742,16 @@ CallRecordingProcessor._test = {
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
   applySameCallLeadEligibility,
+  clearStampAndRestoreLead,
   dropFilledLeadColumns,
   reaffirmedFilledLeadFields,
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
+  deriveStampLinkAuthority,
   parseStampedLeadId,
+  parseStampedLeadLink,
+  phoneReuseStillValidOnLockedRow,
+  shouldStampCallLeadLinkage,
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,

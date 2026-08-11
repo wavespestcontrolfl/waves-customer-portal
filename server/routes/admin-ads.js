@@ -387,9 +387,14 @@ router.post('/call-bridge/apply', requireAdmin, async (req, res, next) => {
     const { runExclusive } = require('../utils/cron-lock');
     const periodDays = parseInt(String(req.body.period || '30d').replace('d', ''), 10) || 30;
     const limit = parseInt(req.body.limit, 10) || 200;
+    // recordHealth: false (codex P2, PR #3303 r17) — the lease is shared
+    // with the 6:20 cron for SERIALIZATION only. This manual run executes
+    // just applyBridge, so letting it write job_health would clear the
+    // combined job's last_error/consecutive_failures after a partial
+    // success while the organic fallback and transfer sweep stay stalled.
     const result = await runExclusive('google-call-bridge-organic', () => (
       getGoogleCallBridge().applyBridge({ days: periodDays, limit })
-    ));
+    ), { recordHealth: false });
     if (result?.skipped && result?.reason) {
       return res.status(409).json({ error: 'Call bridge is currently running (daily cron or another apply) — try again in a minute.' });
     }

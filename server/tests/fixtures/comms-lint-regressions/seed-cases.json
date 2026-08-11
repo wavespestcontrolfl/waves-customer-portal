@@ -1,0 +1,215 @@
+{
+  "_readme": "Permanent regression corpus for comms-lint. Every rule miss found in a sweep or review gets appended here with provenance and NEVER removed — the suite only grows. NEVER paste a real customer message verbatim: customer PII (names, addresses, phones, account details) must not enter the repo. Reconstruct each case with placeholder names, preserving only the policy-triggering phrasing, and say so in provenance.",
+  "cases": [
+    {
+      "name": "per-visit wording on recurring pricing",
+      "text": "Your quarterly plan is $117 per visit, billed after each service.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "reconstructed — 2026-07-23 estimate-copy sweep (#2965/6/8): recurring is billed per application, never per visit"
+    },
+    {
+      "name": "commercial proposal surface exempt from per-application wording",
+      "text": "Service is $250 per visit under the commercial agreement.",
+      "context": { "channel": "sms", "audience": "customer", "commercialProposal": true },
+      "expect": { "pass": true },
+      "provenance": "AGENTS.md: commercial PROPOSALS are exempt from the per-application phrasing rule — the flag is surface-asserted by proposal renderers, never derived from the account (codex #3348 x3)"
+    },
+    {
+      "name": "emoji in customer text",
+      "text": "See you tomorrow at 10am! 🐜",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["no-emoji"] },
+      "provenance": "owner ruling 2026-08-10: zero emojis in customer messages, ever"
+    },
+    {
+      "name": "url shortener in sms",
+      "text": "Pay here: bit.ly/waves-pay",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["no-url-shortener", "portal-link-scheme"] },
+      "provenance": "A2P 10DLC registration is non-resubmittable; shorteners are an instant-loss class. Also fails the link-scheme rule since psl validation (codex #3348): a bare bit.ly is a scheme-less third-party host too"
+    },
+    {
+      "name": "portal link must go bare in sms",
+      "text": "You can see your balance at https://portal.wavespestcontrol.com anytime.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
+      "provenance": "2026-08-01 SMS link-scheme ruling: portal links drop https://, third-party links keep it"
+    },
+    {
+      "name": "bare g.page loses its scheme",
+      "text": "We would love a review: g.page/r/waves-review",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
+      "provenance": "2026-08-01 SMS link-scheme ruling — g.page KEEPS https://"
+    },
+    {
+      "name": "review link with scheme passes",
+      "text": "We would love a review: https://g.page/r/waves-review",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": true },
+      "provenance": "correct third-party link form"
+    },
+    {
+      "name": "re-entry described as safe",
+      "text": "Once the treatment dries it is completely safe for your pets and kids to go back on the lawn.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["reentry-language"] },
+      "provenance": "reconstructed — site-compliance sweep class 2026-07-11: re-entry is never described as safe"
+    },
+    {
+      "name": "EPA-approved is banned wording",
+      "text": "All our products are EPA-approved and applied by licensed technicians.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["reentry-language"] },
+      "provenance": "AGENTS.md compliance language: EPA-registered/EPA-exempt is the REQUIRED wording, EPA-approved is banned (seed originally encoded the inverted rule; corrected pre-merge per Codex pre-push review 2026-08-11)"
+    },
+    {
+      "name": "EPA-registered is the required wording",
+      "text": "All our products are EPA-registered and applied per the label.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": true },
+      "provenance": "AGENTS.md compliance language: EPA-registered/EPA-exempt is the correct form"
+    },
+    {
+      "name": "sanctioned conditional idiom passes",
+      "text": "The lawn is safe once it's fully dry, and the tech will confirm timing before leaving.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": true },
+      "provenance": "AGENTS.md approved idiom: \"safe once dry\" WITH the technician confirming timing — both parts required"
+    },
+    {
+      "name": "fixed drying figure is banned",
+      "text": "Keep pets off the treated lawn for 30 minutes while it dries.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["reentry-language"] },
+      "provenance": "AGENTS.md compliance language: never a fixed re-entry/drying figure — the tech confirms timing on site (seed replaced pre-merge per Codex pre-push review 2026-08-11: the original neutral-instruction case carried \"about an hour to dry\", itself a violation)"
+    },
+    {
+      "name": "curly apostrophe flips encoding",
+      "text": "We’ll see you tomorrow between 10 and noon, and the tech will text when heading your way.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["plain-punctuation"] },
+      "provenance": "house-voice punctuation rule: one typographic character silently doubles segment count (UCS-2)"
+    },
+    {
+      "name": "three-segment message over the limit",
+      "text": "Hello! Here is everything about your new plan. Your Healthy Home Starter includes an initial deep treatment inside and out, then recurring exterior applications every other month with free re-services between visits if anything shows up. You pay per application, never per month, and you can pause or cancel anytime. The initial visit runs about 45 minutes and covers baseboards, entry points, garage, eaves, and the yard perimeter. Reply here with any questions about scheduling.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["sms-segment-limit"] },
+      "provenance": "reconstructed — the plans-invite template was the only 3-segment template in prod (fixed in #3343)"
+    },
+    {
+      "name": "stop line on transactional message",
+      "text": "Your appointment is confirmed for Tuesday 10am. Reply STOP to opt out.",
+      "context": { "channel": "sms", "audience": "customer", "stopExpected": false },
+      "expect": { "pass": false, "rules": ["stop-line-policy"] },
+      "provenance": "#3343 owner directive 2026-08-10: transactional SMS to known customers carries no STOP tail"
+    },
+    {
+      "name": "missing stop line on first-touch",
+      "text": "Hi, this is Waves Pest Control returning your call about a quote.",
+      "context": { "channel": "sms", "audience": "customer", "stopExpected": true },
+      "expect": { "pass": false, "rules": ["stop-line-policy"] },
+      "provenance": "#3343 keep-list: first-touch/compliance classes keep their opt-out line (CTIA)"
+    },
+    {
+      "name": "boilerplate closer",
+      "text": "Your service is scheduled for Friday. Questions or requests? Reply to this message.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["no-signoff-boilerplate"] },
+      "provenance": "house-voice v9 change: dropped the mandatory closer boilerplate; the message just ends"
+    },
+    {
+      "name": "wrong company name",
+      "text": "Thanks from all of us at Waves Lawn & Pest.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["company-name"] },
+      "provenance": "standing rule: the company is \"Waves Pest Control\", never \"Waves Lawn & Pest\""
+    },
+    {
+      "name": "typical clean confirmation",
+      "text": "Hello Sarah! You're confirmed for Tuesday between 10am and noon. Marcus will text when he's on the way.",
+      "context": { "channel": "sms", "audience": "customer", "stopExpected": false },
+      "expect": { "pass": true },
+      "provenance": "the target form: greeting, answer, done — one exclamation, one segment, no tail"
+    },
+    {
+      "name": "two-segment disclosure message passes",
+      "text": "Hello Dan! Your termite inspection is set for Thursday 8-10am. Please clear access to the garage walls and water heater closet, secure pets, and plan for the tech to be on site about an hour. The written report follows the same day by email with photos of anything we find.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": true },
+      "provenance": "owner ruling 2026-08-01: 2 segments is fine — prep/disclosure content earns the length"
+    },
+    {
+      "name": "slash form of per-visit pricing",
+      "text": "Your quarterly plan comes to $117/visit after the initial.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: only whitespace-separated \"per visit\" was caught — the slash and hyphen price forms say the same forbidden thing"
+    },
+    {
+      "name": "hyphenated per-visit wording",
+      "text": "Recurring service is billed at a flat per-visit rate.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: only whitespace-separated \"per visit\" was caught — the slash and hyphen price forms say the same forbidden thing"
+    },
+    {
+      "name": "dollar-anchored each-visit pricing",
+      "text": "The quarterly plan works out to $117 each visit.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: each/every-visit price forms say the same forbidden unit; monetary anchor keeps scheduling prose (\"we text before each visit\") clean"
+    },
+    {
+      "name": "spelled-out dollars each visit",
+      "text": "That comes to 117 dollars each visit after the first one.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: the monetary anchor covers $, USD, dollars, and bucks — a spelled-out amount is the same forbidden price unit"
+    },
+    {
+      "name": "STOP-to-unsubscribe tail on transactional message",
+      "text": "Your service is confirmed for Thursday. STOP to unsubscribe.",
+      "context": { "channel": "sms", "audience": "customer", "stopExpected": false },
+      "expect": { "pass": false, "rules": ["stop-line-policy"] },
+      "provenance": "2026-08-11 codex round on #3348: the detector only knew reply/text/txt STOP — purpose-form tails are the same unwanted line on the #3343 transactional class"
+    },
+    {
+      "name": "plan total on a non-monthly account",
+      "text": "The quarterly plan comes out to $117/mo if that helps compare.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false },
+      "expect": { "pass": false, "rules": ["no-plan-total"] },
+      "provenance": "2026-08-11 codex round on #3348: owner rule re-affirmed 2026-07-23 — no combined plan totals in customer copy; monthly-billed legacy plans keep /mo (lane caller-asserted)"
+    },
+    {
+      "name": "adjectival plan total on a non-monthly account",
+      "text": "The lawn program runs $117 monthly if you keep it going.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false },
+      "expect": { "pass": false, "rules": ["no-plan-total"] },
+      "provenance": "2026-08-11 codex round on #3348: '$117 monthly' and '117 dollars per month' present the same flat monthly spread the rule bans"
+    },
+    {
+      "name": "annual prepay customer hears the yearly total",
+      "text": "Your annual prepay of $1,404/yr is already covered through March.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false, "billingMode": "annual_prepay" },
+      "expect": { "pass": true },
+      "provenance": "2026-08-11 codex round on #3348: invoice/prepay surfaces are exempt from the plan-total rule — a prepay customer legitimately hears what they already paid"
+    },
+    {
+      "name": "monthly member hears their real dues",
+      "text": "Your membership dues are $98.50/mo, same as always.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": true },
+      "expect": { "pass": true },
+      "provenance": "2026-08-11: the monthly lane is the ONE case a plan price may be spoken (codex #3128 r6/r9 lineage)"
+    },
+    {
+      "name": "bare third-party host beyond g.page",
+      "text": "You can also find us on yelp.com if that is easier.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
+      "provenance": "2026-08-11 codex round on #3348: the scheme rule covered only g.page — any bare third-party host skips the preview"
+    }
+  ]
+}

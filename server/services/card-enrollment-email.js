@@ -287,7 +287,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       if (feeDisclosure && Number(feeDisclosure.feeAmount) > 0) {
         const fee = Number(feeDisclosure.feeAmount);
         const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${Number(feeDisclosure.windowHours)} hours before your visit. Rescheduling is always free.`;
+        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${Number(feeDisclosure.windowHours)} hours before your visit. Rescheduling is always free, though a reschedule made within ${Number(feeDisclosure.windowHours)} hours doesn't reset the cancellation window.`;
       }
     } else {
       // Legacy derivation for callers without a frozen snapshot.
@@ -299,7 +299,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
           // The enforced window is part of the disclosure (Codex #3153 r3 P0)
           // — same derived hours the /secure page states and stamps.
           const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
-          cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+          cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`;
         }
       } catch (feeErr) {
         logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);
@@ -351,7 +351,7 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
     const hold = await db('estimate_card_holds')
       .where({ estimate_id: estimateId, status: 'held' })
       .orderBy('created_at', 'desc')
-      .first('no_show_fee_amount', 'cancel_window_hours', 'stripe_payment_method_id');
+      .first('no_show_fee_amount', 'cancel_window_hours', 'stripe_payment_method_id', 'sticky_window_disclosed');
     if (!hold) {
       logger.info(`[card-enrollment-email] no held row for estimate ${estimateId}; skipping card-hold confirmation`);
       return null;
@@ -363,8 +363,16 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
       : null;
     const fee = Number(hold.no_show_fee_amount);
     const windowHours = Number(hold.cancel_window_hours);
+    // The reset sentence follows the row's own consent marker (pre-push r8
+    // P1): a sticky-marked hold stays chargeable after an inside-window
+    // reschedule, so its written confirmation must say so — while a legacy
+    // hold keeps the wording it accepted (enforcement never sticky-charges
+    // it). Same accepted-copy sentence as the estimate accept UI.
+    const stickySentence = hold.sticky_window_disclosed
+      ? ' Rescheduling is free but doesn\'t reset the cancellation window.'
+      : '';
     const feeLine = Number.isFinite(fee) && fee > 0 && Number.isFinite(windowHours) && windowHours > 0
-      ? `A $${fee.toFixed(2)} fee applies only if you cancel within ${windowHours} hours of your visit or we cannot get access.`
+      ? `A $${fee.toFixed(2)} fee applies only if you cancel within ${windowHours} hours of your visit or we cannot get access.${stickySentence}`
       : 'No fee applies unless we cannot complete your visit.';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'cardhold.confirmation',

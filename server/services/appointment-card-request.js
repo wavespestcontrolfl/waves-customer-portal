@@ -140,7 +140,11 @@ function cancelFeeLine() {
   // labels (e.g. "Quarterly Pest Control") the longer clause pushed rendered
   // plan-choice invites to a 4th segment (Codex #3077 r2). The /secure page
   // and email keep the fuller sentence.
-  return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
+  // Trailing-space clause (owner spacing pass 2026-08-11): the templates
+  // place {cancel_fee_line} directly before the card-security sentence so
+  // the two disclosures share one line; '' when the fee is off must leave
+  // that line starting cleanly at "We never".
+  return feeText ? `${feeText} fee only for last-minute cancels or no-shows. ` : '';
 }
 
 // ONE coherent read of the fee disclosure (Codex #3153 r4 P1): the note in
@@ -161,7 +165,7 @@ function readCancelFeeDisclosure() {
     return {
       feeAmount,
       windowHours,
-      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`,
+      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window.`,
     };
   } catch (err) {
     logger.warn(`[appt-card-request] fee disclosure unavailable — omitting: ${err.message}`);
@@ -188,7 +192,14 @@ function frozenFeeNoteForRow(request) {
   const windowHours = Number(request?.cancel_window_hours);
   if (!(fee > 0) || !(windowHours > 0)) return null;
   const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+  // The reset sentence follows the row's own consent marker (pre-push r8
+  // P1): a legacy row (sticky_window_disclosed=false) never accepted the
+  // sticky rule and enforcement never sticky-charges it — its secured
+  // render must repeat the terms it accepted, not the current copy.
+  const stickyClause = request?.sticky_window_disclosed
+    ? `, though a reschedule made within ${windowHours} hours doesn't reset the cancellation window`
+    : '';
+  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free${stickyClause}.`;
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -233,6 +244,11 @@ async function planInviteApplies(visitId, request = null) {
     return false;
   }
 }
+
+// Recipient identity for deferred rows (last-10 comparison, refresh vs
+// freeze) lives in services/messaging/deferred-recipient-identity.js — a
+// single owner for the rule so bearer links can't diverge between the
+// secure-card and estimate paths.
 
 // Check 1 — policy exemption. Payer check fails toward EXEMPT (never risk
 // securing the homeowner's card for invoices that route to a third-party
@@ -656,6 +672,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         purpose: 'card_request',
         customerId: visit.customer_id,
         identityTrustLevel: 'phone_matches_customer',
+        // trigger 'admin' = the schedule page's explicit "request card"
+        // click; every other trigger (previsit sweep, call pipeline,
+        // outbound confirm, booking) is automation and stays fenced by
+        // the send window.
+        ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
         metadata: {
           scheduled_service_id: visit.id,
           trigger,
@@ -673,7 +694,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return skip('send_outcome_uncertain');
     }
     if (!result?.sent) {
-      if (result?.retryable || result?.deferred) {
+      // blocked:true is a VALIDATOR stop — the pipeline never reached the
+      // provider, so the outcome is definitive even when the result also
+      // advertises deferral timing (the send-window block returns
+      // retryable/deferred/nextAllowedAt for callers that self-reschedule).
+      // Only a provider-phase retryable result is genuinely ambiguous.
+      if ((result?.retryable || result?.deferred) && !result?.blocked) {
         // AMBIGUOUS provider outcome (Codex #2771 r7): the Twilio adapter
         // classifies timeouts/5xx/429 as retryable non-sent results — the
         // provider may already have accepted the message. Same rule as the
@@ -683,6 +709,75 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         logger.error(`[appt-card-request] send outcome RETRYABLE-ambiguous for visit ${visit.id} — keeping the one-text claim (${result?.code || 'no_code'})`);
         await markSendOutcome();
         return skip('send_outcome_uncertain');
+      }
+      // Send-window hold: the one-shot automation triggers
+      // (ai_call_pipeline, outbound_review_confirm, booking) never retry,
+      // and the previsit backstop is independent — a released claim here
+      // would just drop the card request. Queue the exact link SMS on the
+      // scheduled rail; the ONE-TEXT claim stays consumed (the queued row
+      // now owns the single bearer-link text — releasing would let a later
+      // trigger double-text) and the maybe-sent marker is stamped so the
+      // stale-claim lease can't re-text either. The registry's recheck
+      // suppresses if the card gets captured or the visit dies overnight,
+      // and its onTerminal releases the stamp-guarded claim + owned row so
+      // a later trigger can retry.
+      if (result?.code === 'QUIET_HOURS_HOLD' && result?.deferred && result?.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          const { recipientRefreshStamp } = require('./messaging/deferred-recipient-identity');
+          const recipientStamp = await recipientRefreshStamp({
+            customerId: visit.customer_id,
+            recipientPhone: smsTo,
+            customerRow: customer || null,
+            label: 'appt-card-request',
+          });
+          await db('sms_log').insert({
+            customer_id: visit.customer_id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: smsTo,
+            message_body: body,
+            status: 'scheduled',
+            scheduled_for: new Date(result.nextAllowedAt),
+            message_type: usedTemplateKey,
+            metadata: JSON.stringify({
+              entry_point: 'appointment_card_request_deferred',
+              scheduled_service_id: visit.id,
+              trigger,
+              original_block_code: result.code,
+              replay_purpose: 'card_request',
+              // Refresh-vs-freeze is decided by the SHARED classifier
+              // (codex r23) so the secure-card link and the estimate links
+              // can never diverge on phone normalization or lookup-failure
+              // behavior. The rule it encodes is the one this path has
+              // always needed: an explicit recipientPhone (the consented
+              // inbound caller when the saved customer phone is a
+              // spouse/alternate slot, Codex #2771) is a per-send recipient
+              // DECISION, and swapping it for customers.phone at replay
+              // would text the bearer link to a different person than the
+              // immediate path chose. The frozen number still passes the
+              // full send-time validator chain (opt-out, suppressions,
+              // line type) at replay.
+              ...recipientStamp,
+              resolve_from_by_customer: true,
+              card_claim_stamp: stamp.toISOString(),
+              // For the finalize's email twin (both-channels rule). The
+              // body above already carries the tokenized link, so the
+              // metadata copy adds no new exposure.
+              card_secure_url: secureUrl,
+              card_template_key: usedTemplateKey,
+              // Token only when THIS call owns the pending row (the body
+              // already carries the tokenized link, so no new exposure);
+              // a reused /book row must never be deleted by onTerminal.
+              ...(reuseToken ? {} : { card_row_token: token }),
+            }),
+          });
+          await markSendOutcome();
+          logger.info(`[appt-card-request] card-link SMS for visit ${visit.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+          return skip('send_deferred_window');
+        } catch (queueErr) {
+          logger.error(`[appt-card-request] held card-link requeue failed for visit ${visit.id}: ${queueErr.message} — releasing for a later trigger`);
+        }
       }
       // A definitive not-sent RESULT (policy block, hard provider
       // rejection): the text never left, so the claim and the fresh
@@ -696,60 +791,16 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // BOTH channels). Strictly after a CONFIRMED-dispatched text — the
     // uncertain/blocked paths above send nothing on either channel, so the
     // email can never outrun the one-text rails or reach a visit the
-    // funnel skipped. Best-effort fire-and-forget: the gate being off, no
-    // email on file, or a SendGrid failure never changes the funnel result.
+    // funnel skipped. (The window-held path is the one exception: its
+    // queued SMS row owns the text, and the deferred-replay finalize runs
+    // this same helper after that SMS delivers.) Best-effort
+    // fire-and-forget: the gate being off, no email on file, or a
+    // SendGrid failure never changes the funnel result.
     try {
-      const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
-      // The EMAIL's disclosed fee terms become another monotonic bound on
-      // the row BEFORE the email leaves (Codex #3153 r21 P1): a config
-      // change between this invitation and the customer's later /secure
-      // render must never let the row enforce wider/higher terms than the
-      // invitation stated. If the stamp cannot be persisted, the email
-      // omits the fee sentence entirely — never a term we didn't freeze.
-      let emailFeeDisclosure = readCancelFeeDisclosure();
-      if (emailFeeDisclosure) {
-        try {
-          const stampedRows = await db('appointment_card_requests')
-            .where({ scheduled_service_id: visit.id, status: 'pending' })
-            .update({
-              no_show_fee_amount: db.raw(
-                'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
-                [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
-              ),
-              cancel_window_hours: db.raw(
-                'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
-                [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
-              ),
-              updated_at: new Date(),
-            });
-          if (stampedRows !== 1) {
-            // The row left 'pending' between our read and this stamp
-            // (Codex #3153 r22 P1) — the email must not state terms the
-            // row is not bound by. Omit the sentence entirely.
-            logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
-            emailFeeDisclosure = null;
-          }
-        } catch (stampErr) {
-          logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
-          emailFeeDisclosure = null;
-        }
-      }
-      sendAutopaySetupInvitation({
-        customerId: visit.customer_id,
-        scheduledServiceId: visit.id,
-        serviceType: visit.service_type || 'service',
-        dateLine: dateLineFor(visit.scheduled_date),
-        secureUrl,
-        feeDisclosure: emailFeeDisclosure,
-        // The email variant follows the copy that ACTUALLY went out on the
-        // SMS leg — not the raw probe — so the two legs of one invite can
-        // never contradict each other (base SMS's unconditional "only
-        // charged after service" next to a prepay pitch). Activating the
-        // SMS variant in /admin templates is the single copy lever.
-        planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY,
-      }).catch((emailErr) => {
-        logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
-      });
+      runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
+        .catch((emailErr) => {
+          logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
+        });
     } catch (emailErr) {
       logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
     }
@@ -759,6 +810,90 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     logger.error(`[appt-card-request] request failed for visit ${scheduledServiceId}: ${err.message}`);
     return skip(`error:${err.message}`);
   }
+}
+
+// Email twin of the secure-card invite, shared by the immediate path
+// (fire-and-forget above) and the deferred-replay finalize (after the
+// window-held SMS delivers the next morning) so both channels always
+// travel together. The EMAIL's disclosed fee terms become another
+// monotonic bound on the row BEFORE the email leaves (Codex #3153 r21
+// P1): a config change between this invitation and the customer's later
+// /secure render must never let the row enforce wider/higher terms than
+// the invitation stated. If the stamp cannot be persisted — or the row
+// left 'pending' between read and stamp (Codex #3153 r22 P1) — the email
+// omits the fee sentence entirely; never a term we didn't freeze.
+async function runInvitationEmailLeg({ visit, secureUrl, planChoice }) {
+  const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
+  let emailFeeDisclosure = readCancelFeeDisclosure();
+  if (emailFeeDisclosure) {
+    try {
+      const stampedRows = await db('appointment_card_requests')
+        .where({ scheduled_service_id: visit.id, status: 'pending' })
+        .update({
+          no_show_fee_amount: db.raw(
+            'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+            [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
+          ),
+          cancel_window_hours: db.raw(
+            'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+            [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
+          ),
+          // Deliberately NO sticky marker write here either (Codex
+          // #3342 r5 P1) — the marker is consent-time-only, written by
+          // finishVerifiedSecureCapture from the completing tab's echo.
+          updated_at: new Date(),
+        });
+      if (stampedRows !== 1) {
+        // The row left 'pending' between our read and this stamp
+        // (Codex #3153 r22 P1) — the email must not state terms the
+        // row is not bound by. Omit the sentence entirely.
+        logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
+        emailFeeDisclosure = null;
+      }
+    } catch (stampErr) {
+      logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
+      emailFeeDisclosure = null;
+    }
+  }
+  await sendAutopaySetupInvitation({
+    customerId: visit.customer_id,
+    scheduledServiceId: visit.id,
+    serviceType: visit.service_type || 'service',
+    dateLine: dateLineFor(visit.scheduled_date),
+    secureUrl,
+    feeDisclosure: emailFeeDisclosure,
+    // The email variant follows the copy that ACTUALLY went out on the
+    // SMS leg — not the raw probe — so the two legs of one invite can
+    // never contradict each other (base SMS's unconditional "only
+    // charged after service" next to a prepay pitch). Activating the
+    // SMS variant in /admin templates is the single copy lever.
+    planChoice,
+  });
+}
+
+// Deferred-replay finalize for `appointment_card_request_deferred`: the
+// queued card-link SMS just delivered, so the owner's both-channels rule
+// now owes the email twin. Best-effort with the same contract as the
+// immediate path's fire-and-forget — an email failure never unwinds the
+// replay settlement, so this reports ok:true unconditionally (no durable
+// retry rail; the inline path has none either). Rows queued before the
+// secure-url metadata existed skip quietly.
+async function sendDeferredInvitationEmailLeg(meta = {}) {
+  try {
+    if (!meta.scheduled_service_id || !meta.card_secure_url) return { ok: true };
+    const visit = await db('scheduled_services')
+      .where({ id: meta.scheduled_service_id })
+      .first('id', 'customer_id', 'service_type', 'scheduled_date');
+    if (!visit) return { ok: true };
+    await runInvitationEmailLeg({
+      visit,
+      secureUrl: meta.card_secure_url,
+      planChoice: meta.card_template_key === PLAN_TEMPLATE_KEY,
+    });
+  } catch (emailErr) {
+    logger.warn(`[appt-card-request] deferred invitation email leg failed for visit ${meta.scheduled_service_id}: ${emailErr.message}`);
+  }
+  return { ok: true };
 }
 
 // ── /secure/:token capture lifecycle (card-on-file spec §3 Phase 5.2) ──
@@ -833,12 +968,55 @@ async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason 
   } catch (e) { logger.warn(`[appt-card-request] capture review alert failed: ${e.message}`); }
 }
 
+// Records the browser's attested disclosure echo on a row the WEBHOOK
+// completed — the webhook tail carries no echo and stamps non-sticky, so
+// the confirming tab's later/racing POST is the only consent artifact.
+// Shared by BOTH webhook-first interleavings (Codex #3342 r9 P1): the row
+// already completed at the browser's initial read, AND the webhook winning
+// between that read and the browser's pending→completing claim. The echo
+// is pinned to the SAME SetupIntent the row completed with (proof this is
+// the confirming tab), never applied to satisfied rows (no fee disclosure
+// at all). ok:false (consent_echo_failed) means the caller must NOT ack —
+// the client keeps its 3DS params on the NACK and a reload retries the
+// idempotent /complete.
+async function recordWebhookFirstConsentEcho({ row, setupIntentId, disclosureVersion }) {
+  if (
+    row?.status !== 'completed'
+    || disclosureVersion !== STICKY_DISCLOSURE_VERSION
+    || !setupIntentId
+    || row.stripe_setup_intent_id !== setupIntentId
+    || !row.fee_agreed_at
+    || row.sticky_window_disclosed
+  ) return { ok: true };
+  try {
+    const upgraded = await db('appointment_card_requests')
+      .where({ id: row.id, status: 'completed', stripe_setup_intent_id: setupIntentId })
+      .update({ sticky_window_disclosed: true, updated_at: new Date() });
+    if (upgraded !== 1) {
+      logger.warn(`[appt-card-request] webhook-first consent echo matched ${upgraded} rows for request ${row.id} — not acking`);
+      return { ok: false, code: 'consent_echo_failed' };
+    }
+  } catch (err) {
+    logger.warn(`[appt-card-request] webhook-first consent echo record failed for request ${row.id}: ${err.message}`);
+    return { ok: false, code: 'consent_echo_failed' };
+  }
+  return { ok: true };
+}
+
 // POST /secure/:token completion. Verify live, then the shared completion
 // tail below.
-async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null }) {
+async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
   if (request.status === 'completed' || request.status === 'satisfied') {
+    // Webhook-first race (Codex #3342 r7 P1): when setup_intent.succeeded
+    // beats the browser's POST, the webhook tail stamped fee_agreed_at with
+    // sticky=false (no echo available). The browser's echo is the
+    // AUTHORITATIVE consent artifact — record it idempotently, pinned to
+    // the SAME SetupIntent this row completed with (proof it is the
+    // confirming tab), never on satisfied rows (no fee disclosure at all).
+    const echo = await recordWebhookFirstConsentEcho({ row: request, setupIntentId, disclosureVersion });
+    if (!echo.ok) return echo;
     return { ok: true, alreadyCompleted: true };
   }
 
@@ -850,6 +1028,7 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
     setupIntentId: verified.setupIntentId,
     ip,
     userAgent,
+    disclosureVersion,
   });
 }
 
@@ -904,7 +1083,18 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
 // enrolling the wrong party); the SetupIntent stays succeeded at Stripe,
 // so a retry (page re-POST or webhook redelivery) completes once the
 // payer state is readable.
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null }) {
+// The completing tab's attested disclosure version — the ONLY writer of the
+// sticky-window policy marker on this rail (Codex #3342 r5 P1): render-time
+// seeding was removable poison during a rolling deploy (a new worker's seed
+// survives an old worker's later old-copy render), so the enforceable bit is
+// written atomically WITH fee_agreed_at from the echo of the tab that
+// actually consented. The webhook completion backstop carries no echo and
+// stamps non-sticky — the browser died, so nothing stronger is provable.
+// Keep the literal in lockstep with CARD_HOLD_STICKY_DISCLOSURE_VERSION in
+// estimate-card-holds.js.
+const STICKY_DISCLOSURE_VERSION = 'sticky_v1';
+
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
     .first('id', 'status', 'scheduled_date', 'estimated_price');
@@ -972,8 +1162,20 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     : claimQuery.where({ selected_plan: request.selected_plan });
   let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
   if (claimed !== 1) {
-    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status', 'updated_at');
-    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+    const fresh = await db('appointment_card_requests').where({ id: request.id })
+      .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed');
+    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') {
+      // The webhook won BETWEEN this call's initial read (still pending)
+      // and the claim above (Codex #3342 r9 P1) — its completion tail
+      // carried no echo and stamped non-sticky, and the initial-read
+      // recovery in completeSecureCardCapture never saw a completed row.
+      // Record the browser's echo here too, or this interleaving silently
+      // keeps the reschedule-then-cancel dodge. The webhook caller passes
+      // no disclosureVersion, so this is a no-op on that path.
+      const echo = await recordWebhookFirstConsentEcho({ row: fresh, setupIntentId, disclosureVersion });
+      if (!echo.ok) return echo;
+      return { ok: true, alreadyCompleted: true };
+    }
     // Stale-claim lease (Codex #2771 r4): a worker killed between the
     // claim and the completed/revert write strands the row 'completing'
     // forever, and both retry paths would spin on completion_in_progress.
@@ -1099,7 +1301,13 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       const disclosed = await db('appointment_card_requests')
         .where({ id: request.id })
         .first('no_show_fee_amount');
-      if (Number(disclosed?.no_show_fee_amount) > 0) frozenFeeTerms.fee_agreed_at = new Date();
+      if (Number(disclosed?.no_show_fee_amount) > 0) {
+        frozenFeeTerms.fee_agreed_at = new Date();
+        // Sticky marker rides ONLY with consent, from the completing tab's
+        // own echo — a missing/legacy echo (old bundle, webhook backstop)
+        // stamps non-sticky. See STICKY_DISCLOSURE_VERSION above.
+        frozenFeeTerms.sticky_window_disclosed = disclosureVersion === STICKY_DISCLOSURE_VERSION;
+      }
     } catch (err) {
       logger.warn(`[appt-card-request] disclosed-terms read failed for request ${request.id} — completing without fee consent stamp: ${err.message}`);
     }
@@ -1153,6 +1361,14 @@ async function loadSecureCardPageData(token) {
     windowDisplay: visit?.window_display || null,
     cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
   };
+  // Echo token for the completing tab: attached ONLY to the pending 'ready'
+  // return below — the one state that renders the card-consent form — never
+  // to base (Codex #3342 r8 P1). A secured/closed payload that carried it
+  // would be cached by the client's sessionStorage latch, and a replayed
+  // 3DS return could then upgrade a non-sticky webhook/legacy completion to
+  // sticky_window_disclosed=true from a disclosure shown only AFTER consent.
+  const readyEcho = visitPriced && feeDisclosure
+    ? { stickyDisclosureVersion: STICKY_DISCLOSURE_VERSION } : {};
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
   // already succeeded and the page POST or webhook holds the completion
@@ -1345,6 +1561,11 @@ async function loadSecureCardPageData(token) {
         'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
         [feeDisclosure.windowHours, feeDisclosure.windowHours],
       );
+      // Deliberately NO sticky marker write at render (Codex #3342 r5 P1):
+      // render-time seeding poisons rows during a rolling deploy (a new
+      // worker's seed survives an old worker's later old-copy render). The
+      // marker is written ONLY at completion, from the consenting tab's
+      // attested echo — see finishVerifiedSecureCapture.
     } else {
       disclosure.no_show_fee_amount = null;
       disclosure.cancel_window_hours = 0;
@@ -1423,6 +1644,7 @@ async function loadSecureCardPageData(token) {
   return {
     state: 'ready',
     ...base,
+    ...readyEcho,
     clientSecret: intent.clientSecret,
     setupIntentId: intent.setupIntentId,
     ...(planContext ? { planContext } : {}),
@@ -1993,7 +2215,41 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
       return { handled: false, released: false, reason: 'charge_review' };
     }
   }
-  if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
+  // Sticky window (owner ruling 2026-08-10, shared with the card-hold rail):
+  // outside the CURRENT slot's window, the cancel is still a late cancel if
+  // a customer-initiated reschedule was itself made inside the window —
+  // rebooker's in-place date overwrite must not reset the clock. This rail's
+  // r19 posture applies to the lookup: a FAILED read must not fall through
+  // to the terminal free-release stamp below, so it parks review instead.
+  const inWindow = !!start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  // Sticky evidence applies ONLY to a LIVE current slot: a start already
+  // past the cancellation grace keeps its free release (the visit came and
+  // went undelivered — day-later cleanup must never bill), mirroring the
+  // card-hold rail's guard.
+  const { CARD_HOLD_POST_START_GRACE_MS: STICKY_GRACE_MS } = require('./estimate-card-holds');
+  const liveStartDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const liveStartMs = liveStartDate && !Number.isNaN(liveStartDate.getTime()) ? liveStartDate.getTime() : null;
+  const startLive = liveStartMs != null && (liveStartMs - now.getTime()) > -STICKY_GRACE_MS;
+  let sticky = null;
+  // sticky_window_disclosed (migration 20260810000040): only rows whose
+  // consent surface stated the sticky rule may be charged on its strength.
+  // Enforcement gate checked HERE (the helper is ungated so reminder copy
+  // can see evidence while dark).
+  if (!inWindow && startLive && request.sticky_window_disclosed && isApptCardFeeRailEnabled()) {
+    try {
+      const { findStickyLateReschedule, isStickyCancelWindowEnabled } = require('./estimate-card-holds');
+      sticky = !isStickyCancelWindowEnabled() ? null : await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
+        notBefore: request.fee_agreed_at,
+        currentStart: liveStartDate,
+      });
+    } catch (err) {
+      logger.error(`[appt-card-request] sticky-window lookup for cancel FAILED — unresolved, parking review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
+    }
+  }
+  if (inWindow || sticky) {
     const chargeResult = await chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
     // Normalized for cancellation callers (Codex #3153 r17 P1): unresolved
     // charge outcomes (parked review, or a definite decline whose reverted
@@ -2107,7 +2363,38 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
     return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
   }
-  const feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  let feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  const { CARD_HOLD_POST_START_GRACE_MS: PREVIEW_GRACE_MS } = require('./estimate-card-holds');
+  const previewStartMs = start ? new Date(start).getTime() : NaN;
+  const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -PREVIEW_GRACE_MS;
+  if (!feeApplies && isApptCardFeeRailEnabled() && previewStartLive && request.sticky_window_disclosed) {
+    // Sticky window — the preview must agree with the cancellation handler
+    // (same enforcement gate, same evidence). A THROWN lookup is
+    // unresolved, not fee-free (same posture as the time-resolution catch
+    // above): the cancel path parks review on the same failure, so the
+    // prompt must surface the waiver choice.
+    try {
+      const { findStickyLateReschedule, isStickyCancelWindowEnabled } = require('./estimate-card-holds');
+      feeApplies = !isStickyCancelWindowEnabled() ? false : !!(await findStickyLateReschedule({
+        scheduledServiceId,
+        isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
+        notBefore: request.fee_agreed_at,
+        currentStart: previewStartLive ? new Date(previewStartMs) : null,
+      }));
+      if (feeApplies) {
+        // Card removal is revocation on the charge path — the preview must
+        // agree (Codex #3342 r5 P2): a removed card means the charge leg
+        // closes released, so no fee prompt.
+        const pmRow = await db('payment_methods')
+          .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+          .first('id');
+        if (!pmRow) feeApplies = false;
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
+      return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
+    }
+  }
   return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
 }
 
@@ -2671,6 +2958,9 @@ module.exports = {
   settleAppointmentNoShowFee,
   resettleAppointmentFeeFromPi,
   isWithinApptCancelWindow,
+  sendDeferredInvitationEmailLeg,
+  resolveExemption,
+  LIVE_VISIT_STATUSES,
   _test: {
     dateLineFor,
     resolveExemption,
