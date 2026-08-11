@@ -230,7 +230,9 @@ describe('recordAmbiguousBridgeCalls', () => {
     const asaRead = builders.find((b) => b._table === 'ad_service_attribution as asa');
     expect(asaRead._wheres).toContainEqual(['whereIn', 'asa.lead_id', ['lead-7']]);
     expect(asaRead._wheres).toContainEqual(['whereIn', 'l.lead_source_id', ['src-1']]);
-    expect(asaRead._wheres).toContainEqual(['whereNull', 'asa.source_call_id']);
+    // Provenance discriminator lives in the interimProvenance group (NULL
+    // OR borrowed non-bridged — pinned below).
+    expect(asaRead._wheres.some(([m, fn]) => m === 'where' && typeof fn === 'function' && fn.name === 'interimProvenance')).toBe(true);
     ['asa.gclid', 'asa.wbraid', 'asa.gbraid', 'asa.fbclid', 'asa.fbc', 'asa.utm_campaign', 'asa.utm_term']
       .forEach((col) => expect(asaRead._wheres).toContainEqual(['whereNull', col]));
     expect(asaRead._wheres).toContainEqual(['where', 'asa.created_at', '>', '2026-08-10T09:00:00Z']);
@@ -239,6 +241,18 @@ describe('recordAmbiguousBridgeCalls', () => {
       && b._wheres.some(([m]) => m === 'forUpdate'));
     expect(leadLock).toBeTruthy();
     expect(leadLock._wheres).toContainEqual(['whereIn', 'id', ['lead-7']]);
+    // BORROWED provenance is retired too (codex P1 GH r7): the sweep's
+    // organic write on a phone-reused lead resolves the lead's ORIGINAL
+    // sid call as provenance, so the interim predicate accepts NULL OR
+    // non-bridged provenance — only a live paid claim protects a row.
+    const asaRead2 = builders.find((b) => b._table === 'ad_service_attribution as asa');
+    const provArm = asaRead2._wheres.find(([m, fn]) => m === 'where' && typeof fn === 'function' && fn.name === 'interimProvenance');
+    expect(provArm).toBeTruthy();
+    const src2 = require('fs').readFileSync(require('path').join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
+    const interim = src2.split('function interimProvenance')[1].slice(0, 600);
+    expect(interim).toMatch(/whereNull\('asa\.source_call_id'\)/);
+    expect(interim).toMatch(/orWhereNotExists\(function bridgedProvenanceCall\(\)/);
+    expect(interim).toMatch(/whereNotNull\('clb\.google_ads_call_resource_name'\)/);
   });
 
   test('an OPEN row (locked but never resolved) retires nothing — no interim write can exist under a live hold', async () => {

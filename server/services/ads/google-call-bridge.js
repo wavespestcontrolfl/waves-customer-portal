@@ -1786,19 +1786,23 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
           retired += await retireCallAttributionRow(trx, callId, leadId);
         }
         // SNAPSHOT arm (pre-push audit P1 r6): a PHONE-linked lead's
-        // interim organic row carries NO provenance — the provenance
-        // resolver deliberately has no phone arm (r25) — so the
-        // provenanced retire above cannot see it. On a snapshotted
-        // BRIDGE-TARGET lead, every other NULL-provenance writer is out:
+        // interim organic row does not carry THIS call's provenance — the
+        // provenance resolver deliberately has no phone arm (r25), and
+        // when the reused lead kept its ORIGINAL call's sid the resolver
+        // borrows THAT provenance instead (codex P1, r7 GH round) — so
+        // the exact-call retire above cannot see it either way. On a
+        // snapshotted BRIDGE-TARGET lead, every other writer of a
+        // marker-free row born AFTER this record resolved is out:
         // call-time attribution and claim-time backfill both suppress
-        // bridge-target calls/leads, and web rows carry click/UTM markers
+        // bridge-target calls/leads, web rows carry click/UTM markers
         // (the same discriminators recordCallPpcAttribution's own
-        // web_attributed guard reads). A marker-free NULL-provenance row
-        // born AFTER this record resolved can therefore only be the
-        // unclaimed sweep's interim write. History-free rows delete (the
-        // lead returns to held/unattributed); a row that accumulated
-        // stage/revenue stays as permanently-conservative legacy — the
-        // identical end-state the provenanced arm's demote produces.
+        // web_attributed guard reads), and a paid claim's row is guarded
+        // by its call's live bridge evidence below. What remains can only
+        // be the unclaimed sweep's interim write. History-free rows
+        // delete (the lead returns to held/unattributed); a row that
+        // accumulated stage/revenue stays as permanently-conservative
+        // legacy — the identical end-state the provenanced arm's demote
+        // produces.
         // REOPENS ONLY, deliberately: the born-after-resolution bound is
         // what proves the row is the sweep's post-lift write. A first
         // sighting has no such anchor, and an unanchored NULL-provenance
@@ -1816,7 +1820,26 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
           .join('leads as l', 'l.id', 'asa.lead_id')
           .whereIn('asa.lead_id', snapLeadIds)
           .whereIn('l.lead_source_id', bridgeSourceIds)
-          .whereNull('asa.source_call_id')
+          // NULL provenance OR BORROWED provenance (codex P1, r7 GH
+          // round): the sweep's organic write on a phone-reused lead
+          // resolves the lead's ORIGINAL sid call as provenance — not the
+          // ambiguous call that reused it — so the exact-call retirement
+          // misses it and a NULL-only filter here did too. A row whose
+          // provenance points at a call WITHOUT the durable paid claim is
+          // still the sweep's own post-resolution write (call-time
+          // attribution and backfill stay suppressed for bridge-target
+          // leads); a paid claim's row is protected by its call's live
+          // bridge evidence — the same guard the reconcile loop applies.
+          // retireRowPreservingHistory handles both shapes: history-free
+          // rows delete, history-bearing rows demote to legacy.
+          .where(function interimProvenance() {
+            this.whereNull('asa.source_call_id')
+              .orWhereNotExists(function bridgedProvenanceCall() {
+                this.select(1).from('call_log as clb')
+                  .whereRaw('clb.id = asa.source_call_id')
+                  .whereNotNull('clb.google_ads_call_resource_name');
+              });
+          })
           .whereNull('asa.gclid')
           .whereNull('asa.wbraid')
           .whereNull('asa.gbraid')
