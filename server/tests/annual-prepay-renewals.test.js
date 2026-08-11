@@ -565,6 +565,50 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
+      services: [query({ first: undefined })],
+      notifications: [query({ first: undefined })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-nocat',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      reason: 'palm_catalog_missing',
+    });
+  });
+
+  test('the palm catalog check runs BEFORE the term-end slide persists (codex r17 pre-push P1)', () => {
+    // A deferred run must not extend the coverage window — repeated
+    // deferrals would re-apply the payment lag on every refresh and
+    // postpone renewal indefinitely.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/annual-prepay-renewals.js'), 'utf8');
+    const palmCheck = src.indexOf("palm_injection_semiannual");
+    const slidePersist = src.indexOf('// Persist the slid coverage window');
+    expect(palmCheck).toBeGreaterThan(-1);
+    expect(slidePersist).toBeGreaterThan(-1);
+    expect(palmCheck).toBeLessThan(slidePersist);
+  });
+
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
     const columnQuery = query({
       columnInfo: {

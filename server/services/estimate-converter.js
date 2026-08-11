@@ -2573,6 +2573,23 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
 // palm_injection_semiannual is absent (rolled-back migration, broken env)
 // the series must NOT be created; the unit routes to manual scheduling
 // with an admin bell. Fire-and-forget, never blocks the accept.
+// The reserved-slot path ABORTS the acceptance instead (codex r17 pre-push
+// P0): there a palm parent row already exists — skip+bell would leave a
+// completable visit whose (possibly stale one-time) identity invoices
+// against the billed recurring plan. Same operational-422 shape as the
+// ANNUAL_PREPAY_* refusals; the caller's transaction rolls the whole
+// acceptance back.
+function palmCatalogMissingError() {
+  const err = new Error(
+    'The recurring palm catalog row (palm_injection_semiannual) is unavailable, so this palm program cannot be scheduled or billed correctly — restore the catalog row (migration 20260811000010) and retry, or convert manually.'
+  );
+  err.code = 'PALM_RECURRING_CATALOG_MISSING';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  return err;
+}
+
 function notifyPalmCatalogMissing(estimateId, customerId, context) {
   logger.error(`[estimate-converter] palm_injection_semiannual catalog row unavailable — ${context} for estimate ${estimateId} routed to manual scheduling (fail closed)`);
   try {
@@ -4072,19 +4089,24 @@ const EstimateConverter = {
                       reservedStart.service_id = catalogRow.id;
                     }
                     // Palm follow-ups never seed without the recurring
-                    // identity (codex r15 pre-push P0): every seeded child
-                    // copies the parent's id — a missing row would seed the
-                    // whole series onto the one-time posture. The reserved
-                    // first visit (the customer's committed slot) stays;
-                    // only the series routes to manual scheduling.
+                    // identity (codex r15 pre-push P0), and skipping the
+                    // series is NOT enough here (codex r17 pre-push P0):
+                    // the reserved parent already exists — possibly
+                    // carrying the stale one-time palm_injection id an
+                    // adoption preserved — and completing it would invoice
+                    // one-time work against the billed recurring plan.
+                    // ABORT the acceptance (operational 422): the whole
+                    // conversion rolls back with the caller's transaction,
+                    // so no completable palm visit is left behind.
                     if (!catalogRow && reservedCatalogKey === 'palm_injection_semiannual') {
-                      return { palmCatalogMissing: true };
+                      throw palmCatalogMissingError();
                     }
                   } catch (relinkErr) {
-                    logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
                     // Unknown identity state = fail closed for palm too.
+                    if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;
+                    logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
                     if (reservedCatalogKey === 'palm_injection_semiannual') {
-                      return { palmCatalogMissing: true };
+                      throw palmCatalogMissingError();
                     }
                   }
                 }
@@ -4104,9 +4126,7 @@ const EstimateConverter = {
               });
               return { seedResult };
             });
-            if (outcome.palmCatalogMissing) {
-              notifyPalmCatalogMissing(estimateId, customerId, 'reserved palm series seeding');
-            } else if (outcome.kept) {
+            if (outcome.kept) {
               logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${reservedStart.service_type}" (series ${outcome.kept.id}) — reserved visit ${reservedStart.id} kept, duplicate follow-up series skipped`);
               try {
                 await database('activity_log').insert({
@@ -4129,6 +4149,10 @@ const EstimateConverter = {
             }
           }
         } catch (seedErr) {
+          // The palm identity abort must surface — swallowing it would
+          // complete the acceptance around the very rollback it exists to
+          // force (codex r17 pre-push P0).
+          if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;
           logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
         }
       }

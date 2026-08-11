@@ -603,12 +603,16 @@ describe('the series creators consume the guard (source guards)', () => {
     // Reserved-bundle promotion: same skip before the standalone insert.
     expect(converterSrc).toContain("if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {");
     expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion')");
-    // Reserved relink: a missing row (or failed lookup) aborts the seeding
-    // step BEFORE follow-ups copy the parent's identity; the customer's
-    // reserved first visit stays.
-    expect((converterSrc.match(/return \{ palmCatalogMissing: true \};/g) || []).length).toBe(2);
-    expect(converterSrc).toContain('if (outcome.palmCatalogMissing) {');
-    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'reserved palm series seeding')");
+    // Reserved path: a missing row (or failed lookup) ABORTS the
+    // acceptance (codex r17 pre-push P0) — the reserved parent already
+    // exists, possibly carrying the stale one-time id, so skip+bell would
+    // leave a completable visit that invoices against the billed plan.
+    // The operational 422 must escape the follow-up catch, or the
+    // acceptance completes around the rollback it forces.
+    expect(converterSrc).toContain('function palmCatalogMissingError()');
+    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(2);
+    expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
+    expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
   });
 
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {

@@ -656,35 +656,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     firstVisitWindowStart = null;
   }
 
-  // Persist the slid coverage window BEFORE seeding, so the seeded tail is
-  // in-window for every downstream consumer (attachScheduledServices,
-  // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
-  // the same lag). The in-memory term is mutated too: refreshTermSnapshot
-  // passes this same object to the attach/stamp steps that follow.
-  if (effectiveTermEnd !== termEnd) {
-    await conn('annual_prepay_terms')
-      .where({ id: term.id })
-      .update({ term_end: effectiveTermEnd, updated_at: new Date() });
-    term.term_end = effectiveTermEnd;
-    logger.warn(`[annual-prepay] term ${term.id} paid ${anchorLagDays} day(s) after its anchor — coverage window slid to ${effectiveTermEnd} so all ${coverageVisitCount} sold visits stay in-window`);
-  }
-  // With the window sliding on shift, a shortfall can only mean a deliberately
-  // short custom term — pre-existing behavior, surfaced for the operator.
-  if (targetDates.length < coverageVisitCount) {
-    logger.warn(`[annual-prepay] term ${term.id} only ${targetDates.length} of ${coverageVisitCount} sold visits fit between ${firstTargetDate} and ${dateOnly(term.term_end)} — term needs extending or the remaining visits need manual scheduling`);
-    await fileCoverageException(term, 'coverage_shortfall',
-      `Only ${targetDates.length} of ${coverageVisitCount} paid visits fit inside the coverage window (through ${dateOnly(term.term_end)}). Extend the term or schedule the remaining visit(s) manually.`);
-  }
-  // The operator promised a date that had already passed by the time payment
-  // landed. The series moved forward instead of seeding a visit that can't be
-  // serviced, but somebody has to tell the customer the new date.
-  const promisedFirstVisit = dateOnly(term?.first_visit_date);
-  if (promisedFirstVisit && firstTargetDate && promisedFirstVisit < today && firstTargetDate !== promisedFirstVisit) {
-    logger.warn(`[annual-prepay] term ${term.id} promised first visit ${promisedFirstVisit} had already passed at payment (${today}) — coverage starts ${firstTargetDate} instead; customer needs the new date`);
-    await fileCoverageException(term, 'date_passed',
-      `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
-  }
-
   // Payment-seeded PALM visits must carry the recurring catalog identity
   // (codex #3349 r14 P1): a bare service_type 'Palm Injection' misfiles at
   // completion — the exact-name lookup misses and the unique short-name
@@ -692,8 +663,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // visit would get one-time billing and the token-only portal posture.
   // Mirror the converter/admin identity link (seedingFamilyKey handles the
   // Palmetto substring trap); IDENTITY ONLY — duration stays the 60-minute
-  // slot default above, never the catalog row's. Fail-soft: a missing row
-  // (migration rolled back) seeds without identity exactly as before.
+  // slot default, never the catalog row's. Runs BEFORE the term-end slide
+  // persists (codex r17 pre-push P1): a deferred run must not extend the
+  // coverage window — repeated deferrals would otherwise re-apply the
+  // payment lag on every refresh and postpone renewal indefinitely.
   let coverageCatalogServiceId = null;
   let coverageCatalogKey = null;
   let staleOneTimePalmId = null;
@@ -753,6 +726,36 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         };
       }
     }
+  }
+
+
+  // Persist the slid coverage window BEFORE seeding, so the seeded tail is
+  // in-window for every downstream consumer (attachScheduledServices,
+  // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
+  // the same lag). The in-memory term is mutated too: refreshTermSnapshot
+  // passes this same object to the attach/stamp steps that follow.
+  if (effectiveTermEnd !== termEnd) {
+    await conn('annual_prepay_terms')
+      .where({ id: term.id })
+      .update({ term_end: effectiveTermEnd, updated_at: new Date() });
+    term.term_end = effectiveTermEnd;
+    logger.warn(`[annual-prepay] term ${term.id} paid ${anchorLagDays} day(s) after its anchor — coverage window slid to ${effectiveTermEnd} so all ${coverageVisitCount} sold visits stay in-window`);
+  }
+  // With the window sliding on shift, a shortfall can only mean a deliberately
+  // short custom term — pre-existing behavior, surfaced for the operator.
+  if (targetDates.length < coverageVisitCount) {
+    logger.warn(`[annual-prepay] term ${term.id} only ${targetDates.length} of ${coverageVisitCount} sold visits fit between ${firstTargetDate} and ${dateOnly(term.term_end)} — term needs extending or the remaining visits need manual scheduling`);
+    await fileCoverageException(term, 'coverage_shortfall',
+      `Only ${targetDates.length} of ${coverageVisitCount} paid visits fit inside the coverage window (through ${dateOnly(term.term_end)}). Extend the term or schedule the remaining visit(s) manually.`);
+  }
+  // The operator promised a date that had already passed by the time payment
+  // landed. The series moved forward instead of seeding a visit that can't be
+  // serviced, but somebody has to tell the customer the new date.
+  const promisedFirstVisit = dateOnly(term?.first_visit_date);
+  if (promisedFirstVisit && firstTargetDate && promisedFirstVisit < today && firstTargetDate !== promisedFirstVisit) {
+    logger.warn(`[annual-prepay] term ${term.id} promised first visit ${promisedFirstVisit} had already passed at payment (${today}) — coverage starts ${firstTargetDate} instead; customer needs the new date`);
+    await fileCoverageException(term, 'date_passed',
+      `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
   }
 
   const buildInsert = (scheduledDate, windowStart) => {
