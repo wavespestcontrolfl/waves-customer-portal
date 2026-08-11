@@ -735,6 +735,62 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   }
 
 
+  // Shared palm identity backfill (codex r15/r16/r17/r18 rounds): rows
+  // the seeder matched or adopted still resolve the ONE-TIME catalog row
+  // at completion when they are name-only (NULL service_id, no foreign
+  // snapshot) or carry the KNOWN stale one-time palm id/snapshot — both
+  // retarget to the recurring identity, mirroring the converter's
+  // reserved-parent relink. A row whose id/snapshot records a DIFFERENT
+  // durable identity was a deliberate booking and stays untouched.
+  const backfillPalmIdentity = async (rows, label) => {
+    try {
+      const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
+      const retargetable = (row) => row && row.id
+        && (
+          (!row.service_id && (!row.service_key_snapshot || oneTimePalmSnapshot(row)))
+          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId)
+        );
+      const backfillIds = rows.filter(retargetable).map((row) => row.id);
+      if (backfillIds.length) {
+        const patch = { service_id: coverageCatalogServiceId };
+        if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
+        await conn('scheduled_services')
+          .whereIn('id', backfillIds)
+          .where(function retargetScope() {
+            this.whereNull('service_id');
+            if (staleOneTimePalmId) this.orWhere('service_id', staleOneTimePalmId);
+          })
+          .update(patch);
+      }
+      return true;
+    } catch (err) {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage identity backfill (${label}) FAILED: ${err.message}`);
+      return false;
+    }
+  };
+
+  // Phase-1 identity backfill — matched/adopted EXISTING rows, BEFORE any
+  // seeding or slide persistence (codex r18 pre-push P0): deferring here
+  // creates nothing, so the refresh hard-stop leaves no correctly-seeded
+  // visit unstamped. Failure files the durable exception and defers; the
+  // next idempotent term refresh retries the whole sequence.
+  if (coverageCatalogServiceId && cols.service_id) {
+    const existingOk = await backfillPalmIdentity(existingRows, 'matched-existing');
+    if (!existingOk) {
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'Adopted palm coverage visits could not be linked to the recurring catalog identity — until the next term refresh succeeds, their completions would bill as one-time work. Re-save the term to retry, or link the visits to Semiannual Palm Injection manually.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — the slide has not persisted yet.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_identity_backfill_failed',
+      };
+    }
+  }
+
   // Persist the slid coverage window BEFORE seeding, so the seeded tail is
   // in-window for every downstream consumer (attachScheduledServices,
   // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
@@ -1083,59 +1139,25 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
   }
 
-  // Identity BACKFILL for adopted/matched palm coverage rows (codex #3349
-  // r15 pre-push P1 + r16 P1): buildInsert stamps only NEW rows, but a
-  // visit the seeder matched (existingRows) or adopted under the occupancy
-  // lock still resolves the ONE-TIME catalog row at completion — whether
-  // it is name-only (NULL service_id) or a legacy adoption carrying the
-  // one-time palm_injection id (estimate-public preserves ids on
-  // adoption, and completion trusts the id first). Both are retargeted in
-  // this definitively semiannual coverage context, mirroring the
-  // converter's reserved-parent relink. Any OTHER explicit id was a
-  // deliberate booking and stays untouched. Fail-soft, like the stamps
-  // above.
-  if (coverageCatalogServiceId && cols.service_id) {
-    try {
-      // A row whose service_key_snapshot already records a DIFFERENT
-      // durable identity is not name-only (codex r17 pre-push P1) — only
-      // rows with no identity evidence at all, or whose id/snapshot
-      // explicitly names the KNOWN one-time palm row, are retargeted.
-      const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
-      const retargetable = (row) => row && row.id
-        && (
-          (!row.service_id && (!row.service_key_snapshot || oneTimePalmSnapshot(row)))
-          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId)
-        );
-      const backfillIds = [...existingRows, ...adoptedConcurrentRows]
-        .filter(retargetable)
-        .map((row) => row.id);
-      if (backfillIds.length) {
-        const patch = { service_id: coverageCatalogServiceId };
-        if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
-        await conn('scheduled_services')
-          .whereIn('id', backfillIds)
-          .where(function retargetScope() {
-            this.whereNull('service_id');
-            if (staleOneTimePalmId) this.orWhere('service_id', staleOneTimePalmId);
-          })
-          .update(patch);
-      }
-    } catch (err) {
-      // FAIL CLOSED (codex r17 pre-push P1): reporting success here would
-      // let coverage processing continue while adopted visits keep the
-      // one-time identity — the exact wrong-billing posture this backfill
-      // exists to prevent. Durable, deduped exception + deferred result;
-      // the next idempotent term refresh retries the backfill.
-      logger.error(`[annual-prepay] term ${term.id}: palm coverage identity backfill FAILED (${err.message}) — filing coverage exception`);
+  // Phase-2 identity backfill — CONCURRENT adoptions only (codex r18
+  // pre-push P0): rows adopted under the occupancy lock mid-loop are not
+  // known before seeding. A failure here must NOT hard-stop the refresh —
+  // the newly inserted visits carry the correct identity and must still
+  // be prepaid-stamped, or completion would invoice a prepaid customer.
+  // The unresolved adopted row is quarantined operationally via the
+  // durable coverage exception instead.
+  if (coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
+    const concurrentOk = await backfillPalmIdentity(adoptedConcurrentRows, 'concurrent-adoption');
+    if (!concurrentOk) {
       await fileCoverageException(term, 'palm_identity_backfill_failed',
-        'Adopted palm coverage visits could not be linked to the recurring catalog identity — until the next term refresh succeeds, their completions would bill as one-time work. Re-save the term to retry, or link the visits to Semiannual Palm Injection manually.');
+        'A concurrently-adopted palm visit could not be linked to the recurring catalog identity — its completion would bill as one-time work. Link the visit to Semiannual Palm Injection manually, or re-save the term to retry.');
       return {
         createdCount: createdRows.length,
         targetDates,
         existingCount: existingRows.length,
         createdRows,
         effectiveTermEnd,
-        reason: 'palm_identity_backfill_failed',
+        reason: 'palm_concurrent_backfill_failed',
       };
     }
   }
@@ -1959,9 +1981,13 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     // A palm-identity deferral is a HARD STOP for this refresh (codex r18
     // pre-push P1): attaching and prepay-stamping adopted visits while
     // their identity is still the one-time palm row would hand them the
-    // one-time billing posture the deferral exists to prevent. The
-    // deferral already filed a durable coverage exception; the next
-    // idempotent refresh retries the full sequence.
+    // one-time billing posture the deferral exists to prevent. Both hard
+    // reasons defer BEFORE any visit is created, so no correctly-seeded
+    // row is left unstamped by stopping here (codex r18 pre-push P0).
+    // 'palm_concurrent_backfill_failed' deliberately does NOT stop: the
+    // newly inserted visits carry the correct identity and must be
+    // stamped; the one unresolved adopted row is quarantined via its
+    // durable coverage exception instead.
     const palmDeferred = ensured?.reason === 'palm_catalog_missing'
       || ensured?.reason === 'palm_identity_backfill_failed';
     if (!palmDeferred) {

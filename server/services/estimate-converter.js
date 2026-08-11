@@ -586,6 +586,13 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const key = recurringServiceKey(line);
     const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute) continue;
+    // Sentinel cadences never become a schedulable standalone program
+    // (codex r18 pre-push P1): persisted as `frequency`, downstream
+    // inference ignores the token and derives quarterly from the rewritten
+    // catalog name — a contradictory/unreadable source line would silently
+    // seed a quarterly series. The line stays in `remaining` for the
+    // normal per-line path instead.
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(line))) continue;
     remaining.splice(i, 1);
     // A recurring LINE covering this program also consumes any duplicate
     // supplement below — legacy payloads can carry rodent bait in BOTH
@@ -604,6 +611,9 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const key = recurringServiceKey(supplement);
     const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute || consumedSupplementKeys.has(key)) continue;
+    // Same sentinel guard as the line branch above (supplements carry no
+    // cadence fields today, but the rewrite must never persist one).
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(supplement))) continue;
     consumedSupplementKeys.add(key);
     standalone.push({
       catalogServiceKey: standaloneRoute.catalogServiceKey,
@@ -2832,6 +2842,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const cadenceField = explicitCadenceFieldForService(svc);
     if (isCommercialRecurringLine(svc)
       || visitCountFieldsConflict(svc)
+      // Populated-but-invalid counts are malformed data, not legacy
+      // count-less rows (codex r18 pre-push P1, matching the palm guard):
+      // { frequency: 'bi_monthly', visitsPerYear: 0 } seeds no series but
+      // would record bimonthly coverage and payment-time seeds 6 visits.
+      || visitCountFieldsInvalid(svc)
       || (visits != null && LAWN_VISITS_PATTERNS[visits] !== inferred)
       || (cadenceField && cadenceField !== inferred)) return PREPAY_COVERAGE_INVALID;
   }

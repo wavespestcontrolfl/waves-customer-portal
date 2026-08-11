@@ -489,7 +489,7 @@ describe('annual prepay renewal helpers', () => {
     const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
     const backfillUpdate = query({});
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), childInsert, backfillUpdate],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
       services: [
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
