@@ -574,6 +574,19 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection' }, serviceIndex)?.service_key).toBe('palm_injection');
     // An explicit serviceKey selection still wins outright.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection');
+    // INVALID-but-recurring palm data fails closed to NO match (codex r16
+    // pre-push P0): contradictory cadence and conflicting counts are not
+    // definitively one-time — the one-time profile would invoice work
+    // billed as a recurring plan.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2, visits: 4 }, serviceIndex)).toBeFalsy();
+    // 'Palmetto…' labels reach this branch via the bare /palm/ substring
+    // but are NOT palm — they keep their normal matching path.
+    const palmettoIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 3, service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)', short_name: 'Pest Quarterly' },
+    ]);
+    expect(serviceCatalogMatch({ name: 'Pest Initial Palmetto Knockdown', frequency: 'quarterly', visitsPerYear: 4 }, palmettoIndex)?.service_key).toBe('pest_general_quarterly');
     // FAIL CLOSED when the semiannual row is missing (codex r15 pre-push
     // P0): a detected 2x palm line stays UNMATCHED — never the one-time
     // row, whose typed completion would invoice the already-billed

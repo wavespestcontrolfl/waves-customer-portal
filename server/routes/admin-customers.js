@@ -329,7 +329,11 @@ function serviceCatalogMatch(line, serviceIndex) {
   // stays candidate #1 ahead of this, mirroring the seasonal-mosquito rule.
   if (!explicitKey && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
-      const { converterFollowUpSeedingPattern } = require('../services/estimate-converter');
+      const {
+        converterFollowUpSeedingPattern, seedingFamilyKey,
+        visitsPerYearForRecurringService, visitCountFieldsConflict,
+        explicitCadenceFieldForService,
+      } = require('../services/estimate-converter');
       const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
       if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
         // FAIL CLOSED (codex #3349 r15 pre-push P0): a detected semiannual
@@ -341,6 +345,26 @@ function serviceCatalogMatch(line, serviceIndex) {
         return serviceIndex.byKey.get(normalizeServiceKey('palm_injection_semiannual'))
           || serviceIndex.byName.get(normalizeServiceKey('palm_injection_semiannual'))
           || null;
+      }
+      // A REAL palm line with recurring EVIDENCE that did not resolve a
+      // valid semiannual program — contradictory ({ frequency: 'monthly',
+      // visitsPerYear: 2 }), conflicting, unrecognized, or commercial data
+      // — also fails closed (codex r16 pre-push P0): it is not
+      // definitively one-time, and the one-time completion profile would
+      // invoice work billed as a recurring plan. Only definitively
+      // one-application (1 visit) or cadence-less+count-less lines keep
+      // the one-time match. seedingFamilyKey gates this to real palm —
+      // 'Palmetto…' labels (here via the bare /palm/ substring) classify
+      // palm_substring_mismatch and keep their normal matching path.
+      if (seedingFamilyKey(line || {}, { service_type: lineName }) === 'palm_injection') {
+        const visits = visitsPerYearForRecurringService(line || {});
+        const recurringEvidence = visitCountFieldsConflict(line || {})
+          || (visits != null && visits > 1)
+          || !!explicitCadenceFieldForService(line || {});
+        if (recurringEvidence) {
+          logger.warn(`[admin-customers] palm line has recurring evidence but no valid semiannual resolution — leaving unmatched (fail closed)`);
+          return null;
+        }
       }
     } catch (resolveErr) {
       // Resolver UNCERTAINTY also fails closed for REAL palm lines (codex
