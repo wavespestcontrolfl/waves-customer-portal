@@ -415,6 +415,35 @@ describe('POST /admin/communications/reschedule-link', () => {
     });
   });
 
+  // Owner directive 2026-08-01 (sms-link-policy.js): owned portal hosts go
+  // bare in SMS. Composer inserts never pass through getTemplate's strip, so
+  // the endpoint strips before responding. The 200 test above pins the other
+  // side of the rule — a third-party host (wvs.example) keeps its scheme.
+  test('portal-host links come back scheme-less for the SMS composer', async () => {
+    const customers = soloCustomer();
+    const services = makeServicesBuilder([[{
+      id: 'svc-1',
+      customer_id: CUSTOMER_UUID,
+      scheduled_date: '2099-08-04',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+      service_type: 'lawn care',
+      status: 'confirmed',
+    }]]);
+    wireDb({ customers, services });
+    buildRescheduleLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/l/7ay5574wxa',
+      line: 'Reschedule here: https://portal.wavespestcontrol.com/l/7ay5574wxa\n\n',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.url).toBe('portal.wavespestcontrol.com/l/7ay5574wxa');
+      expect(body.line).toBe('Reschedule here: portal.wavespestcontrol.com/l/7ay5574wxa\n\n');
+    });
+  });
+
   test('the recipient first name rides the response for the greeting prefill (both resolution paths)', async () => {
     const visit = {
       id: 'svc-1',
