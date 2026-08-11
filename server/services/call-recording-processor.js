@@ -2286,7 +2286,36 @@ function parseStampedLeadId(call) {
   } catch { return null; }
 }
 
-// The lead columns the phone-less reuse enrichment can mutate — snapshotted
+// Decides whether THIS pass writes the durable call→lead stamp
+// (call_log.metadata.lead_id + rollback ledgers + ordering marker).
+//
+// ROOT FIX (owner ruling 2026-08-11): phone-bearing reuse stamps too.
+// findReusableCallLead links a phone-bearing call to an existing lead
+// without touching the lead's sid, so the association used to be
+// reconstructable only by phone matching — the approximation five
+// #3347-era review findings traced their residual holes to (mutable
+// phones, later distinct same-number leads, post-window reprocessing).
+// With the stamp the linkage is durable, and the bridge/sweep phone
+// arms become transitional coverage for pre-fix legacy calls only.
+//
+// Arm 1 (fresh stamp): ANY reuse of a lead that does not carry this
+// call's own sid. The same-sid exclusion is what keeps the standing
+// invariant true — stamps are only ever written for different-sid
+// leads (a same-sid row IS this call's own insert; the sid is its
+// durable linkage). Race-recovered rows are freshly minted with this
+// call's sid, so they self-link the same way.
+// Arm 2 (re-stamp): a retry whose current stamp already points at the
+// final lead refreshes the ledgers in the same fenced transaction as
+// its writes — including a retry that GAINED a phone but is enriching
+// the lead its earlier attempt stamped (codex P1 r22), or a lost
+// rejection would be unable to CAS-restore this pass's mutations.
+function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid, leadId, currentStampedLeadId }) {
+  return (!!existingLead && !raceRecovered
+    && !(callTwilioSid && existingLead.twilio_call_sid === callTwilioSid))
+    || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
+}
+
+// The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
 // later attempt rejects the call. One list so the stamp and the restore can
 // never drift.
@@ -8239,7 +8268,7 @@ const CallRecordingProcessor = {
     // lookup: a transient findReusableCallLead failure on a stamped retry
     // would otherwise finalize with the old stamp unrevalidated (codex P1
     // r14).
-    let phoneLessLinkagePending = !!priorStampedLeadId;
+    let leadLinkagePending = !!priorStampedLeadId;
     // Assigned inside the try once the lead source resolves; declared out
     // here so the section catch can run it on a benign failure (codex P2).
     // The default no-op keeps pre-lead-source failures safe.
@@ -8286,10 +8315,17 @@ const CallRecordingProcessor = {
         const sameCallLeadReuse = !!(existingLead
           && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
             || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
-        // A fresh phone-less insert with no prior stamp self-links via its
-        // own sid at insert time — phone-less REUSE puts linkage state in
+        // A fresh insert with no prior stamp self-links via its own sid at
+        // insert time — REUSE of a different-sid lead puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
-        if (!phone && existingLead) phoneLessLinkagePending = true;
+        // Phone-bearing reuse included: since the durable-linkage root fix
+        // it stamps exactly like phone-less reuse, so its failures must
+        // escalate to the retry lane the same way. A same-sid reuse is this
+        // call's own row — the sid is the durable linkage, no stamp needed.
+        if (existingLead
+          && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)) {
+          leadLinkagePending = true;
+        }
         // The stamp as it stands NOW — updated when the in-loop stamp+write
         // transaction runs, so the post-loop maintenance reconciles the
         // ACTUAL stamp, not the one from processing start.
@@ -8872,8 +8908,9 @@ const CallRecordingProcessor = {
                 );
               }
             }
-            // Phone-less reuse of a different-sid lead: the rollback
-            // snapshot (prior + written values) must be DURABLE BEFORE the
+            // Reuse of a different-sid lead (phone-bearing or phone-less —
+            // both stamp since the root fix): the rollback snapshot
+            // (prior + written values) must be DURABLE BEFORE the
             // lead mutation commits — the stamp and the enrichment write
             // run in ONE transaction (audit P1 r20: a crash between them
             // left the lead mutated with no rollback state, and a retry
@@ -8893,9 +8930,13 @@ const CallRecordingProcessor = {
             // stamp can never point at it; the sid-match exclusion cannot
             // co-occur with a stamp either (stamps are only ever written
             // for different-sid leads).
-            const stampThisPass = (!phone && existingLead && !raceRecovered
-              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid))
-              || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
+            const stampThisPass = shouldStampCallLeadLinkage({
+              existingLead,
+              raceRecovered,
+              callTwilioSid: call.twilio_call_sid,
+              leadId,
+              currentStampedLeadId,
+            });
             if (stampThisPass) {
               // A prior stamp pointing at a DIFFERENT lead must be settled
               // (cleared + its lead's state restored) BEFORE the
@@ -9280,6 +9321,43 @@ const CallRecordingProcessor = {
                 sameCallOwnershipRejected = true;
               }
             }
+            if (!enriched && !sameCallLeadReuse && phone && existingLead && !raceRecovered
+              && leadId && currentStampedLeadId === String(leadId)) {
+              // Stamped phone-bearing reuse whose guarded write landed 0
+              // rows: beyond the row id, the plain phone write carries only
+              // the customer-ownership backstop, so 0 rows means the lead
+              // was claimed by a DIFFERENT customer between lookup and
+              // write (or the row vanished). Before the root fix this pass
+              // finalized with leadId still pointing at the foreign row —
+              // now that the stamp is durable state it must not survive
+              // pointing there either. Re-check the write's own predicate
+              // and drop the association when it no longer holds; the
+              // maintenance block below then settles the stamp via its
+              // lead-less branch and the Needs Review card surfaces the
+              // call. Fail closed on an unverifiable re-read, same doctrine
+              // as the same-call check above. Eligibility here is the PHONE
+              // path's own, NOT applySameCallLeadEligibility — a
+              // customer-less phone caller may legitimately reuse a claimed
+              // lead (phone is strong identity), so only the ownership
+              // backstop the write itself ran under applies.
+              let stillOurs = null;
+              let verified = true;
+              try {
+                let recheck = db('leads').where({ id: leadId });
+                if (customerId) {
+                  recheck = recheck.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+                }
+                stillOurs = await recheck.first('id');
+              } catch (eligErr) {
+                verified = false;
+                logger.warn(`[call-proc] phone-reuse ownership re-read failed: ${eligErr.code || eligErr.name || 'db_error'}`);
+              }
+              if (!verified || !stillOurs) {
+                logger.warn(`[call-proc] phone-reused lead ${leadId} ${verified ? 'was claimed by another customer' : 'ownership unverifiable'} — dropping the association for ${maskSid(callSid)}`);
+                leadId = null;
+                sameCallOwnershipRejected = true;
+              }
+            }
             if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
               // sameCallLeadReuse is EXCLUDED from the remint (codex P2
               // r16): a same-call row claimed between the lookup and the
@@ -9387,7 +9465,10 @@ const CallRecordingProcessor = {
           // breadcrumb-consumption block after the settle owns that check
           // (codex P1 r18).
           let maintenanceFormerLeadId = null;
-          // Call→lead linkage maintenance for the phone-less path, WITHOUT
+          // Call→lead linkage maintenance for every stamped linkage
+          // (phone-less always; phone-bearing whenever a stamp is or was
+          // in play — a stamp-less phone-bearing fresh insert self-links
+          // via its sid and needs nothing here), WITHOUT
           // rolling the lead's twilio_call_sid (rolling it destroyed the
           // older call's identity — audit P1 r16): a reused lead keeps its
           // ORIGINAL call's sid, so this call's association lives in
@@ -9450,9 +9531,12 @@ const CallRecordingProcessor = {
                 maintenanceFormerLeadId = currentStampedLeadId;
               }
             } else if (phone) {
-              // Retry GAINED a phone and selected a phone-linked lead: its
-              // linkage is the phone, not the stamp — a stale stamp pointing
-              // at a different lead must not survive (audit P1 r22); a stamp
+              // Phone-bearing final lead not carrying this call's sid.
+              // Since the root fix the in-loop stamp transaction already
+              // settled-and-restamped this case (stamp == leadId here), so
+              // this branch is a BACKSTOP for passes that reached
+              // maintenance without stamping: a stale stamp pointing at a
+              // different lead must not survive (audit P1 r22); a stamp
               // already pointing at this lead stays accurate. The funnel row
               // follows the moved linkage.
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
@@ -9460,7 +9544,7 @@ const CallRecordingProcessor = {
                 maintenanceFormerLeadId = currentStampedLeadId;
               }
             }
-            phoneLessLinkagePending = false;
+            leadLinkagePending = false;
           }
 
           // Former-lead linkage reconciliation for EVERY successful
@@ -9766,7 +9850,7 @@ const CallRecordingProcessor = {
         // between the reuse decision and the maintenance block would
         // otherwise finalize with unsettled linkage (audit P1 r21).
         if (leadErr.abortProcessing) throw leadErr;
-        if (phoneLessLinkagePending) {
+        if (leadLinkagePending) {
           // Sanitized cause only — enrichment DB errors can echo the failing
           // row's name/email/address, and the outer catch logs this message
           // with its stack (codex P1 r15b).
@@ -12849,10 +12933,13 @@ const CallRecordingProcessor = {
             // this pass's own lead when it has one.
             if (!mdRaw.attribution_transfer_pending) {
               // The lead the REJECTION itself recorded is authoritative
-              // (codex P1 r21): a phone-REUSED lead carries neither this
-              // call's sid nor a stamp — stampThisPass requires !phone —
-              // so stamp/sid resolution alone silently found no target for
+              // (codex P1 r21): a lead phone-REUSED before the root fix
+              // carries neither this call's sid nor a stamp (stampThisPass
+              // required !phone until then), so for those legacy calls
+              // stamp/sid resolution alone silently finds no target —
               // exactly the linkage mode this repair exists to rescue.
+              // Post-fix phone reuse stamps, so the mdRaw.lead_id arm
+              // below now resolves for it too.
               // Only an unambiguous, still-live record is used; anything
               // else falls through to the durable-linkage arms.
               const recordedLeadIds = Array.isArray(mdRaw.no_attribution_lead_ids)
@@ -13430,6 +13517,7 @@ CallRecordingProcessor._test = {
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,
+  shouldStampCallLeadLinkage,
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,

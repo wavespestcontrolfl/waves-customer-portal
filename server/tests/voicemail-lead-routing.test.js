@@ -26,7 +26,7 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const policy = require('../services/messaging/policy');
 
-const { hasWorkableLeadSignal, findReusableCallLead } = CallRecordingProcessor._test;
+const { hasWorkableLeadSignal, findReusableCallLead, shouldStampCallLeadLinkage } = CallRecordingProcessor._test;
 
 describe('hasWorkableLeadSignal voicemail waiver', () => {
   const PHONE = '+19415550101';
@@ -683,5 +683,90 @@ describe('reaffirmedFilledLeadFields — sequential restatement (raw extraction 
     // though the lead carries values there.
     expect(out).not.toHaveProperty('phone');
     expect(out).not.toHaveProperty('address');
+  });
+});
+
+describe('shouldStampCallLeadLinkage — durable stamp on EVERY different-sid reuse (root fix)', () => {
+  // Before the 2026-08-11 root fix the fresh-stamp arm required !phone:
+  // a phone-bearing call reusing an existing lead left NO durable
+  // call→lead record (findReusableCallLead does not touch the lead's
+  // sid), and every consumer reconstructed the association by phone
+  // matching — the approximation behind five #3347-era findings.
+  const REUSED = { id: 'lead-r', twilio_call_sid: 'CA-original' };
+
+  test('phone-bearing reuse of a different-sid lead STAMPS (the root fix)', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-r',
+      currentStampedLeadId: null,
+    })).toBe(true);
+  });
+
+  test('phone-less reuse of a different-sid lead still stamps (unchanged)', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-r',
+      currentStampedLeadId: null,
+    })).toBe(true);
+  });
+
+  test('same-sid reuse never stamps — the sid IS the durable linkage', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: { id: 'lead-own', twilio_call_sid: 'CA-this-call' },
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-own',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('a race-recovered mint never takes a fresh stamp — it self-links via its own sid', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: true,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-fresh-mint',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('a fresh insert (no reuse, no prior stamp) never stamps', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: null,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-new',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('re-stamp arm: a retry whose stamp already points at the final lead refreshes the ledgers', () => {
+    // Including a retry that GAINED a phone (codex P1 r22) — existingLead
+    // may be the SAME-SID row here and the fresh arm stays false, but the
+    // re-stamp arm must still fire so this pass's writes enter the fenced
+    // ledgers and a later rejection can CAS-restore them.
+    expect(shouldStampCallLeadLinkage({
+      existingLead: { id: 'lead-own', twilio_call_sid: 'CA-this-call' },
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-own',
+      currentStampedLeadId: 'lead-own',
+    })).toBe(true);
+  });
+
+  test('a stale stamp pointing at a DIFFERENT lead does not trigger the re-stamp arm', () => {
+    // The pre-settle path owns that case: the old stamp settles first, then
+    // the fresh arm (different-sid reuse) decides the replacement.
+    expect(shouldStampCallLeadLinkage({
+      existingLead: null,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-new',
+      currentStampedLeadId: 'lead-elsewhere',
+    })).toBe(false);
   });
 });
