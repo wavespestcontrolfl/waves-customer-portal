@@ -3221,6 +3221,10 @@ const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['�
 const TIMING_LEFT_ALLOW_SRC = "(?:the|a|their|your|its|that|this|exact|precise|right|proper|confirms?|confirmed|verif(?:y|ies|ied)|advises?|advised|on|know|knows|re-?entry|entry|dry(?:ing)?|safety|safe|return)";
 const TIMING_GAP_SRC = "(?:(?!\\b(?:re-?ent\\w+|dry\\w*|safe|return\\w*)\\b)[^.!?\\n]){0,30}?";
 const TIMING_OBJ_SRC = `(?<!\\b(?!${TIMING_LEFT_ALLOW_SRC}\\b)[a-z][a-z-]*[\\s-])timing`
+  // A scheduling noun within a short left window (spanning possessives and
+  // up to two modifiers) is appointment timing even when the adjacent word
+  // is allowlisted: "the next visit's precise timing" (Codex #3348 r7).
+  + "(?<!\\b(?:visit|appointment|arrival|estimate|quote|call|service|application|route|billing)(?:['’]s)?[\\s-](?:[a-z][a-z-]*[\\s-]){0,2}timing)"
   + `(?!\\s+(?:of|for)\\b(?![^.!?\\n]{0,40}?\\b(?:re-?ent\\w+|dry\\w*|safe\\b|return\\w*)\\b))`
   + `(?!${TIMING_GAP_SRC}\\b(?:next|upcoming)\\s+(?:visit|appointment|arrival|application|service)\\b)`
   + `(?!${TIMING_GAP_SRC}\\b(?:visit|appointment|arrival|estimate|quote|call|service|application)\\b(?![^.!?\\n]{0,60}?\\b(?:dry\\w*|re-?ent\\w+|safe\\b|return\\w*)\\b))`;

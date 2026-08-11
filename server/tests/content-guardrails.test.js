@@ -3094,6 +3094,7 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
       'The treatment is safe once dry. The technician will confirm the route timing for tomorrow.',
       'The treatment is safe once dry. The technician will confirm the billing timing.',
       'The treatment is safe once dry. The technician will confirm the timing for tomorrow.',
+      "The treatment is safe once dry. The technician will confirm the next visit's precise timing.",
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
