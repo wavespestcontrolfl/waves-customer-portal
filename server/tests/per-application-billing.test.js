@@ -206,6 +206,18 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     const fourVisits = { service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 4 };
     expect(converterFollowUpSeedingPattern(fourVisits, { service_type: 'Palm Injection' }, 'quarterly')).toBe(null);
   });
+
+  test('an explicit cadence FIELD beats the forced rule — contradictory data declines, explicit semiannual still seeds (codex r4 P1)', () => {
+    // monthly + 2 visits is contradictory: normal validation must decline
+    // it to office scheduling, never override to semiannual.
+    const contradictory = { service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(contradictory, { service_type: 'Palm Injection' }, null)).toBe(null);
+    expect(converterFollowUpSeedingPattern({ ...contradictory, frequency: 'quarterly' }, { service_type: 'Palm Injection' }, null)).toBe(null);
+    // An explicit semiannual field takes the normal inference path and
+    // still resolves — the force is only for cadence-less builder lines.
+    const explicit = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(explicit, { service_type: 'Palm Injection' }, null)).toBe('semiannual');
+  });
 });
 
 describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27)', () => {

@@ -322,10 +322,19 @@ const STANDALONE_SUPPLEMENT_ROUTES = {
 // "pest defaults to quarterly" must not bypass the cadence gate for a
 // legacy monthly program (Codex P2), and the accept-level billing fallback
 // must not override an explicit 4x/6x line (pre-push P1).
-function explicitServiceCadence(svc = {}) {
-  const fromFields = [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
+// The FIELD-level cadence only — no visits/name inference. The palm forced
+// rule needs exactly this distinction: a builder 2-visit palm line with no
+// frequency field must still force semiannual, while a line whose FIELD
+// contradicts (monthly/quarterly + 2 visits) must fall through to normal
+// validation and decline (codex #3349 r4 P1).
+function explicitCadenceFieldForService(svc = {}) {
+  return [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
-    .find(Boolean);
+    .find(Boolean) || null;
+}
+
+function explicitServiceCadence(svc = {}) {
+  const fromFields = explicitCadenceFieldForService(svc);
   if (fromFields) return fromFields;
   const visits = visitsPerYearForRecurringService(svc);
   if (visits) return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
@@ -2400,11 +2409,14 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // (estimate-public upsertSupplement 'palm_injection'), so generic
   // inference would resolve the accepted PLAN's fallback frequency
   // (quarterly/monthly/…) and the semiannual gate would reject it —
-  // seeding nothing (codex #3349 P1). Two palm applications a year has
-  // exactly one cadence; force it ahead of inference, mirroring the
-  // seasonal-mosquito rule above.
+  // seeding nothing (codex #3349 P1). Force semiannual ONLY when the line
+  // carries no cadence field of its own (codex r4 P1): an explicit
+  // frequency — semiannual included — takes the normal inference +
+  // validation path, so contradictory data (monthly + 2 visits) declines
+  // to office scheduling instead of being overridden.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
-    && visitsPerYearForRecurringService(svc) === 2) {
+    && visitsPerYearForRecurringService(svc) === 2
+    && !explicitCadenceFieldForService(svc)) {
     return 'semiannual';
   }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -2434,9 +2446,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // ruling 2026-08-11): a builder palm line has no frequency field, so raw
   // inference would record the plan's fallback cadence on the prepay term
   // while the actual series seeds semiannual — the payment-time coverage
-  // refresh would then seed mismatched visits over the real series.
+  // refresh would then seed mismatched visits over the real series. Same
+  // cadence-field restriction as the seeding rule (codex r4 P1).
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
-    && visitsPerYearForRecurringService(svc) === 2) {
+    && visitsPerYearForRecurringService(svc) === 2
+    && !explicitCadenceFieldForService(svc)) {
     return 'semiannual';
   }
   return RecurringAppointmentSeeder.inferRecurringPattern({
