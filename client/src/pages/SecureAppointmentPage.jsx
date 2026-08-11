@@ -217,9 +217,26 @@ export default function SecureAppointmentPage() {
           // r8 P1): /complete is the sole writer of the webhook-first
           // consent echo, and it is idempotent — keeping the params on a
           // failed POST means a reload retries the recording instead of
-          // silently losing the disclosed sticky window.
+          // silently losing the disclosed sticky window. The retryable
+          // consent_echo_failed NACK is retried IN PAGE (pre-push r9 P1):
+          // the page renders secured either way (the card IS saved), so a
+          // customer has no reason to reload — waiting for one would make
+          // the kept params decorative. If the retries exhaust, the
+          // server's refresh instruction surfaces on the secured card.
           let completed = false;
-          try { await complete(redirectIntent); completed = true; } catch { /* fall through to page state */ }
+          for (let attempt = 0; attempt < 3 && !completed && !cancelled; attempt += 1) {
+            try {
+              await complete(redirectIntent);
+              completed = true;
+            } catch (err) {
+              if (err?.code !== 'consent_echo_failed') break; // other errors: fall through to page state
+              if (attempt === 2) {
+                if (!cancelled) setError(err.message || 'Your card is saved — please refresh this page.');
+                break;
+              }
+              await new Promise((resolve) => { setTimeout(resolve, 1500 * (attempt + 1)); });
+            }
+          }
           if (!cancelled && completed) {
             const cleaned = new URLSearchParams(searchParams);
             ['setup_intent', 'setup_intent_client_secret', 'redirect_status'].forEach((k) => cleaned.delete(k));
@@ -391,6 +408,12 @@ export default function SecureAppointmentPage() {
             <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
               {data.cancelFeeNote}
             </p>
+          ) : null}
+          {/* Exhausted consent-echo retries (pre-push r9 P1): the card is
+              saved, but the fee-terms recording needs one more /complete —
+              tell the customer to refresh (the kept 3DS params retry it). */}
+          {error ? (
+            <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
           <ContactRow />
