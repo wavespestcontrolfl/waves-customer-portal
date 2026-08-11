@@ -94,6 +94,11 @@ function formatInches(value) {
   return String(Math.round(n * 100) / 100);
 }
 
+function roundHundredth(value) {
+  const n = numberOrNull(value);
+  return n == null ? null : Math.round(n * 100) / 100;
+}
+
 // The Sunday that closed out the last COMPLETED Mon–Sun week, as YYYY-MM-DD
 // in ET. The cron fires Monday morning, so that's "yesterday"; a manual run on
 // any other weekday still resolves to the same most-recent completed week
@@ -330,9 +335,18 @@ function buildWeeklyEmailDecision({
     : (reason === 'deficit' || reason === 'balanced_dry_forecast') ? TEMPLATE_ADD_WATER
       : TEMPLATE_ON_TRACK; // 'balanced' and 'deficit_rain_forecast'
 
-  const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const grassLabel = customerGrassLabel(grassType);
   const rain = formatInches(rainfallInches7d);
+
+  // Printed water math must add up EXACTLY as displayed — a customer checked
+  // (2026-08-10): the email said 2.69" + 1.5" = 4.25" because the total came
+  // from the advice engine's quarter-rounded appliedInchesPerWeek. The engine
+  // keeps its quarter-inch rounding for banding/status; the PRINTED total is
+  // the sum of the printed components, and the printed difference is the
+  // printed total minus the printed target.
+  const rainDisplayNum = roundHundredth(rainfallInches7d) ?? 0;
+  const totalDisplayNum = roundHundredth(rainDisplayNum + roundHundredth(effectiveInches));
+  const differenceDisplayNum = roundHundredth(Math.abs(totalDisplayNum - advice.recommendedInchesPerWeek));
 
   // A schedule we were told by a technician, not one the customer entered.
   // The advice templates would misattribute it and hand a hand-watering
@@ -340,9 +354,9 @@ function buildWeeklyEmailDecision({
   // source-neutral copy that asks them to confirm it instead (codex r2 P2).
   if (scheduleSource !== 'portal') {
     const scheduleFmt = formatInches(effectiveInches);
-    const totalFmt = formatInches(advice.appliedInchesPerWeek);
+    const totalFmt = formatInches(totalDisplayNum);
     const targetFmt = formatInches(advice.recommendedInchesPerWeek);
-    const diffFmt = formatInches(differential);
+    const diffFmt = formatInches(differenceDisplayNum);
     // Keyed on the measured status only — no forecast rerouting here, since
     // the neutral copy never prescribes an action for the week ahead.
     const neutralLead = advice.status === 'surplus'
@@ -379,7 +393,7 @@ function buildWeeklyEmailDecision({
   // The RESOLVED schedule, not the raw prefs column — the copy must quote
   // the same number the advice was computed from (codex #3138 r1 P2).
   const irrigationFmt = formatInches(effectiveInches);
-  const total = formatInches(advice.appliedInchesPerWeek);
+  const total = formatInches(totalDisplayNum);
   const target = formatInches(advice.recommendedInchesPerWeek);
 
   // Lead sentence for the on-track and add-water templates — the situations
@@ -392,7 +406,7 @@ function buildWeeklyEmailDecision({
   } else if (reason === 'deficit_rain_forecast') {
     summaryLine = `Last week ran a touch light (${total}" against the ${target}" your ${grassLabel} needs), but with about ${formatInches(forecast)}" of rain in this week's forecast, your current schedule has it covered.`;
   } else if (reason === 'deficit') {
-    summaryLine = `Rain was light near your home last week (${rain}"), so with your irrigation schedule (${irrigationFmt}" per week) your lawn got about ${total}" of water — roughly ${formatInches(differential)}" short of the ${target}" your ${grassLabel} needs this time of year.`;
+    summaryLine = `Rain was light near your home last week (${rain}"), so with your irrigation schedule (${irrigationFmt}" per week) your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`;
   } else if (reason === 'balanced_dry_forecast') {
     const projectedShortfall = formatInches(Math.round(Math.abs(projectedDifferential) * 4) / 4);
     summaryLine = `Last week landed right on target (${total}"), but rain did part of the work. With little rain in this week's forecast, your current schedule (${irrigationFmt}" per week) would come up about ${projectedShortfall}" short of the ${target}" your ${grassLabel} needs — a small bump this week will cover it.`;
@@ -406,7 +420,7 @@ function buildWeeklyEmailDecision({
     irrigation_inches: irrigationFmt,
     total_inches: total,
     target_inches: target,
-    difference_inches: formatInches(differential),
+    difference_inches: formatInches(differenceDisplayNum),
     ...(summaryLine ? { summary_line: summaryLine } : {}),
     // The forecast-rerouted cases explain the forecast in their summary_line —
     // a second forecast sentence would repeat it.

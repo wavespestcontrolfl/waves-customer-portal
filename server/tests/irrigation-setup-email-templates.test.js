@@ -143,7 +143,7 @@ describe('irrigation setup email template seeds', () => {
       expect(decision.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
       expect(decision.reason).toBe('confirm_surplus');
       expect(decision.payload.schedule_inches).toBe('1');
-      expect(decision.payload.total_inches).toBe('3');
+      expect(decision.payload.total_inches).toBe('3.1');
     });
 
     test('an assessment reading routes to CONFIRM when nothing else exists', () => {
