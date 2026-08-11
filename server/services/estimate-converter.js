@@ -3576,6 +3576,19 @@ const EstimateConverter = {
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
             }
+            // Promoted lawn/palm parents get the converter FAMILY duration
+            // (codex r7 P2): the identity-only skip above correctly refuses
+            // the lawn catalog's contradictory 45-minute default, but a
+            // null parent duration makes scheduling/dispatch readers
+            // disagree (30/45/window-span) while the seeded children get 60
+            // via seedRecurringFollowUpsForParent. Fill-only — an explicit
+            // duration already on the row wins.
+            if (!standaloneRow.estimated_duration_minutes) {
+              const familyDuration = durationMinutesForRecurringService(
+                unit.service, null, { service_type: standaloneRow.service_type },
+              );
+              if (familyDuration) standaloneRow.estimated_duration_minutes = familyDuration;
+            }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
             // holding an active bait-station series would get a second
@@ -4271,6 +4284,7 @@ const EstimateConverter = {
           let coverageVisitCount;
           let coverageCadence;
           let seasonalPrepayCoverageUnsupported = false;
+          let palmPrepayCoverageInvalid = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
             // created the coverage series with the BOOKED service_type/cadence
@@ -4296,6 +4310,16 @@ const EstimateConverter = {
               // raw inferred cadence here would diverge from the real series.
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
+            } else if (cadence == null
+              && RecurringAppointmentSeeder.serviceKeyFor(coverageSvc) === 'palm_injection') {
+              // Palm validation refused the cadence (contradictory visit
+              // count or a commercial line). Falling through would set
+              // coverageVisitCount with an undefined cadence, and
+              // annual-prepay-renewals' inferCoverageCadence would turn the
+              // 2-visit count back into semiannual — seeding the very
+              // series the validation rejected (codex #3349 r7 P1). Fail
+              // closed like the seasonal case.
+              palmPrepayCoverageInvalid = true;
             } else {
               // Visits/year: prefer the line's explicit count (the series' own
               // source); else map from cadence. Values mirror inferCoverageCadence
@@ -4363,6 +4387,16 @@ const EstimateConverter = {
                 `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
               );
               err.code = 'ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED';
+              err.isOperational = true;
+              err.status = 422;
+              err.statusCode = 422;
+              throw err;
+            }
+            if (palmPrepayCoverageInvalid) {
+              const err = new Error(
+                'Annual prepay can\'t be created for this palm program — its cadence and visit count disagree (or it is a commercial line), so the converter refused to seed it. Fix the line\'s cadence or bill the prepay manually.'
+              );
+              err.code = 'ANNUAL_PREPAY_PALM_COVERAGE_INVALID';
               err.isOperational = true;
               err.status = 422;
               err.statusCode = 422;
