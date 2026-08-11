@@ -2250,6 +2250,18 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'monthly') return visits === 12;
     return false;
   }
+  // Palm Injection (owner ruling 2026-08-11): sold as a semiannual recurring
+  // program — 2 visits/year — or as a one-time (one-time lines never reach
+  // recurring seeding). Semiannual is unambiguous by definition (unlike the
+  // lawn monthly-billing trap above), so a quote-based line without an
+  // explicit visit count may still seed; any other cadence on the row is a
+  // stray and declines to office scheduling. Palm stays excluded from
+  // WaveGuard tier counting (see determineTier) — that is a separate rule.
+  if (key === 'palm_injection') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'semiannual') return visits == null || visits === 2;
+    return false;
+  }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
   // plan booked its FIRST visit and never created the rest — the customer was
   // billed monthly for a series they did not get. Same failure the T&S audit

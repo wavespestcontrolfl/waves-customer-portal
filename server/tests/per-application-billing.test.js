@@ -163,6 +163,33 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
   });
 });
 
+describe('supportsConverterFollowUpSeeding — palm injection series (owner ruling 2026-08-11)', () => {
+  const { supportsConverterFollowUpSeeding, converterFollowUpSeedingPattern } = EstimateConverter;
+  const semiannualLine = { name: 'Palm Injection Program', service: 'palm_injection', frequency: 'semiannual', visits: 2, visitsPerYear: 2 };
+
+  test('semiannual 2x seeds its series', () => {
+    expect(supportsConverterFollowUpSeeding(semiannualLine, {}, 'semiannual')).toBe(true);
+  });
+
+  test('cadence resolves end-to-end from the accepted line, parent row keyed by service_type', () => {
+    expect(converterFollowUpSeedingPattern(semiannualLine, { service_type: 'Palm Injection' }, null)).toBe('semiannual');
+  });
+
+  test('quote-based line without an explicit visit count still seeds — semiannual is unambiguous', () => {
+    const noVisits = { name: 'Palm Injection Program', service: 'palm_injection', frequency: 'semiannual' };
+    expect(supportsConverterFollowUpSeeding(noVisits, {}, 'semiannual')).toBe(true);
+  });
+
+  test('a visit count that contradicts the cadence declines rather than guesses', () => {
+    expect(supportsConverterFollowUpSeeding({ ...semiannualLine, visits: 4, visitsPerYear: 4 }, {}, 'semiannual')).toBe(false);
+  });
+
+  test('a stray non-semiannual cadence declines to office scheduling', () => {
+    expect(supportsConverterFollowUpSeeding({ ...semiannualLine, frequency: 'monthly' }, {}, 'monthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding(semiannualLine, {}, 'quarterly')).toBe(false);
+  });
+});
+
 describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27)', () => {
   const { supportsConverterFollowUpSeeding, converterFollowUpSeedingPattern } = EstimateConverter;
   const SEASONAL = 'seasonal_feb_oct';
