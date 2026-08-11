@@ -67,7 +67,7 @@ const router = require('../routes/admin-dispatch');
 const { reentryEditPlan, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
-const { SERVICE_LINE_CONFIGS } = require('../services/service-report/service-line-configs');
+const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
@@ -83,6 +83,34 @@ describe('service-line advisory defaults', () => {
     expect(SERVICE_LINE_CONFIGS.pest.advisoryDefaults).toMatchObject({
       exterior_reentry_min: 30,
       interior_reentry_min: 30,
+    });
+  });
+
+  // Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
+  // re-entry window on both sides instead of the pest line's 30 minutes.
+  test('cockroach-family service types default to 120 min on BOTH sides', () => {
+    for (const type of [
+      'Cockroach Control',
+      'German Roach Knockdown',
+      'Native Roach Knockdown',
+      'Palmetto Bug Treatment', // legacy pre-rename naming
+      'German Roach Cleanout',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 120,
+        interior_reentry_min: 120,
+      });
+    }
+  });
+
+  test('non-cockroach types keep their line defaults', () => {
+    expect(getAdvisoryDefaults('Quarterly Pest Control')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 30,
+    });
+    expect(getAdvisoryDefaults('Lawn Care')).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 0,
     });
   });
 });

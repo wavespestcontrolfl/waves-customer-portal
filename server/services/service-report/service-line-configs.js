@@ -214,6 +214,36 @@ function getServiceLineConfig(serviceLineOrType) {
   return SERVICE_LINE_CONFIGS[key] || SERVICE_LINE_CONFIGS.pest;
 }
 
+// Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
+// re-entry window instead of the pest line's 30 minutes. Covers the whole
+// family — cockroach control, German/native roach knockdowns and cleanouts,
+// plus legacy "palmetto" service names (palmetto = native roach; the bare
+// \bpalmetto\b token already maps to the pest line in detectServiceLine).
+// Exterior stays subject to the product-REI max at completion, which can
+// only raise it further; per-visit corrections still go through the admin
+// re-entry edit (PATCH /admin/dispatch/:serviceId/reentry).
+const COCKROACH_SERVICE_TYPE_RE = /\b(?:cock)?roach(?:es)?\b|\bpalmetto\b/i;
+const COCKROACH_REENTRY_MIN = 120;
+
+function isCockroachServiceType(serviceType) {
+  return COCKROACH_SERVICE_TYPE_RE.test(String(serviceType || ''));
+}
+
+// Advisory defaults for a visit, keyed by the raw service TYPE (not the
+// line id) so the cockroach override can fire. Non-cockroach types return
+// their line's defaults unchanged.
+function getAdvisoryDefaults(serviceType) {
+  const config = getServiceLineConfig(serviceType);
+  if (config.id === 'pest' && isCockroachServiceType(serviceType)) {
+    return {
+      ...config.advisoryDefaults,
+      exterior_reentry_min: COCKROACH_REENTRY_MIN,
+      interior_reentry_min: COCKROACH_REENTRY_MIN,
+    };
+  }
+  return config.advisoryDefaults;
+}
+
 // Rodent-program companion services whose names carry no rodent token, so
 // detectServiceLine alone can't claim them ("Exclusion Service",
 // "Sanitation & Cleanup"). Used by the rodent report's next-visit pick —
@@ -234,6 +264,8 @@ module.exports = {
   SERVICE_LINE_IDS,
   SERVICE_LINE_CONFIGS,
   isRodentAdjacentServiceType,
+  isCockroachServiceType,
+  getAdvisoryDefaults,
   detectServiceLine,
   getServiceLineConfig,
 };
