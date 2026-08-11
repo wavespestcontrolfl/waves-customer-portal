@@ -1401,7 +1401,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // it through mergeRecordNotesKeys instead.
     expect((source.match(/structured_notes: serializeJsonb\(/g) || []).length).toBe(5);
     // And the converted side-effect writers all go through the merge helper.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(11);
+    // (12th site: the #3344 r5 SCHEDULED_PRICE_MOVED catch restamps the
+    // frozen backfillMintAmountCents through the merge helper too.)
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(12);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

@@ -38,8 +38,14 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     expect(dispatchSource).toMatch(/pending_setup_fee: parentRow\.pending_setup_fee, updated_at: parentRow\.updated_at \}\)\s*\n\s*\.update\(\{ updated_at: new Date\(\) \}\)/);
   });
 
-  test('a successful mint retires the claim; the clear is guarded on the exact negative marker', () => {
-    expect(dispatchSource).toMatch(/\.where\(\{ id: secureSetupFee\.parentId, pending_setup_fee: -secureSetupFee\.amount \}\)\s*\n\s*\.update\(\{ pending_setup_fee: null/);
+  test('a successful mint retires the claim ONLY when the fee line rode the invoice; the clear is guarded on the exact negative marker', () => {
+    // Adopted-invoice hole (#3344 r7-round pre-push): a completion that
+    // ADOPTS a concurrent invoice the fee never rode must RESTORE the claim
+    // positive (orphan recovery re-mints it on the next completion), never
+    // silently retire it unbilled. Both branches stay guarded on the exact
+    // negative marker so a raced/duplicate clear writes nothing.
+    expect(dispatchSource).toMatch(/const feeRode = JSON\.stringify\(invoice\?\.line_items \|\| ''\)\s*\n\s*\.toLowerCase\(\)\.includes\('one-time setup fee'\);/);
+    expect(dispatchSource).toMatch(/\.where\(\{ id: secureSetupFee\.parentId, pending_setup_fee: -secureSetupFee\.amount \}\)\s*\n\s*\.update\(feeRode\s*\n\s*\? \{ pending_setup_fee: null, updated_at: new Date\(\) \}\s*\n\s*: \{ pending_setup_fee: secureSetupFee\.amount, updated_at: new Date\(\) \}\);/);
   });
 
   test('the claimed fee rides the SAME completion mint as its own line', () => {
