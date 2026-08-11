@@ -357,6 +357,12 @@ async function markBookingForInspectionCredit(trx, {
   // other surface keeps first-write-wins (ignore), because there the first
   // event IS the booking moment.
   restamp = false,
+  // Explicit booking moment (Codex #3361 r16 P1): a RETRY of a failed
+  // earlier marker (the legacy-completion activation belt) passes the
+  // original instant so the retry cannot shift the ordering evidence a
+  // boundary-adjacent offer compares against. Omitted = call time, the
+  // existing contract for every first-attempt surface.
+  bookedAt = null,
 } = {}) {
   // Deliberately UNGATED (Codex #3178 r5 P0): the event is just a fact
   // ("this customer booked"), costs nothing, and grants no money on its
@@ -368,12 +374,13 @@ async function markBookingForInspectionCredit(trx, {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId,
     source: source ? String(source).slice(0, 40) : null,
-    // The BOOKING moment, frozen at call time (Codex #3178 r26 P2): the
+    // The BOOKING moment, frozen at call time (Codex #3178 r26 P2) — or the
+    // caller's explicit original instant on a retry (r16 above): the
     // post-commit retry reuses this row, and letting the DB default stamp
     // the RETRY time would shift the ordering evidence — a booking made
     // just inside the offer deadline whose marker recovered after the
     // boundary would compare the wrong instant and lose its credit.
-    created_at: new Date(),
+    created_at: bookedAt ? new Date(bookedAt) : new Date(),
   };
   try {
     await trx.transaction(async (sp) => {

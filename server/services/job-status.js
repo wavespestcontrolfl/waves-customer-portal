@@ -320,6 +320,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // Set inside doWrites when this transition touches a legacy
   // outbound-review row; read by the post-commit activation runner.
   let legacyOutboundActivationNeeded = false;
+  // The completion instant frozen when the in-trx evidence write ran —
+  // threaded through the post-commit retry so a marker retry cannot shift
+  // the ordering evidence (Codex #3361 r16 P1).
+  let legacyCompletionEvidenceMoment = null;
 
   async function doWrites(t) {
     // Legacy outbound-review rows (created PENDING before the 2026-08-11
@@ -361,11 +365,17 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       // Best-effort: an evidence hiccup never blocks the completion; the
       // hook's own idempotent marker call is the belt.
       if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
+        // Frozen ONCE and threaded through the post-commit retry (Codex
+        // #3361 r16 P1): a failed marker queues its outbox with this same
+        // instant, and the hook's belt retry passes it too, so whichever
+        // write wins carries the true completion moment.
+        legacyCompletionEvidenceMoment = new Date();
         try {
           await require('./inspection-credit').markBookingForInspectionCredit(t, {
             customerId: legacyRow.customer_id,
             scheduledServiceId: jobId,
             source: 'phone_call',
+            bookedAt: legacyCompletionEvidenceMoment,
           });
         } catch (evidenceErr) {
           logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
@@ -791,7 +801,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     void (async () => {
       try {
         const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
-        await activateLegacyOutboundReviewRowIfNeeded(db, jobId, 'job-status-legacy-activation');
+        await activateLegacyOutboundReviewRowIfNeeded(db, jobId, 'job-status-legacy-activation', {
+          evidenceBookedAt: legacyCompletionEvidenceMoment,
+        });
       } catch (e) {
         logger.warn(`[job-status] legacy outbound activation failed for ${jobId}: ${e.message}`);
       }

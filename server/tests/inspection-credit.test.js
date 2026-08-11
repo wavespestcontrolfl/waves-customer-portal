@@ -903,14 +903,16 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).not.toContain('no-show invoice void sweep failed');
   });
 
-  it('booking evidence freezes its moment at call time, not at retry time (r26 P2)', () => {
+  it('booking evidence freezes its moment at call time, not at retry time (r26 P2, r16 carry-through)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // The post-commit retry reuses eventRow; a DB-default created_at would
     // stamp the RETRY time and shift the ordering evidence past a deadline
-    // the booking actually beat.
+    // the booking actually beat. PR #3361 r16 lets an explicit RETRY caller
+    // pass the ORIGINAL instant (bookedAt) — same invariant, one level up:
+    // the moment is frozen once and every write carries it.
     const fnAt = source.indexOf('async function markBookingForInspectionCredit');
     const rowAt = source.indexOf('const eventRow = {', fnAt);
-    const frozenAt = source.indexOf('created_at: new Date(),', rowAt);
+    const frozenAt = source.indexOf('created_at: bookedAt ? new Date(bookedAt) : new Date(),', rowAt);
     const tryAt = source.indexOf('try {', fnAt);
     expect(frozenAt).toBeGreaterThan(rowAt);
     expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt

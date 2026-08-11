@@ -157,6 +157,11 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       source: 'phone_call',
+      // On the legacy-completion retry, reuse the instant the failed
+      // in-trx write froze (its outbox carries the same one) so the retry
+      // cannot shift the offer-boundary ordering (Codex #3361 r16 P1);
+      // null = call time, the ordinary confirm contract.
+      bookedAt: opts.evidenceBookedAt || null,
     });
     // Fast redemption too, mirroring the admin-schedule/self-book paths
     // (Codex #3178 r26 P2): confirmation is the booking moment, and a
@@ -327,7 +332,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
  *
  * @returns {Promise<boolean>} true when THIS call performed the activation
  */
-async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation') {
+async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation', opts = {}) {
   try {
     const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
     const row = await db('scheduled_services')
@@ -371,6 +376,10 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // guarded UPDATE below still keeps the stamp itself at-most-once.
     const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag, {
       suppressCardAskWithoutClearance: true,
+      // The completion instant a failed in-trx evidence write froze — the
+      // belt marker retry must carry it, not a fresh now() (Codex #3361
+      // r16 P1).
+      evidenceBookedAt: opts.evidenceBookedAt || null,
     });
     if (!coreLegsOk) {
       logger.warn(`[${routeTag}] legacy outbound activation for ${serviceId}: a core hook leg failed — leaving unstamped so the next touch retries`);
