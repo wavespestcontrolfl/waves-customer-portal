@@ -156,9 +156,16 @@ describe('lintComms mechanics', () => {
     }
   });
 
-  it('does not match a TLD inside a longer word', () => {
-    const r = lintComms('Join the yelp.community discussion group', { channel: 'sms', audience: 'customer' });
-    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+  it('extracts the complete host and validates it against the public-suffix list', () => {
+    // .community is a real TLD: the whole host flags, never a truncated
+    // yelp.com prefix.
+    const community = lintComms('Join the yelp.community discussion group', { channel: 'sms', audience: 'customer' });
+    const hit = community.failures.find((f) => f.rule === 'portal-link-scheme');
+    expect(hit).toBeDefined();
+    expect(hit.reason).toContain('yelp.community');
+    // Modern TLDs the old curated list missed are covered by psl.
+    const dev = lintComms('See example.dev for the docs', { channel: 'sms', audience: 'customer' });
+    expect(dev.failures.map((f) => f.rule)).toContain('portal-link-scheme');
   });
 
   it('flags dollar-anchored each/every visit forms but not scheduling prose', () => {

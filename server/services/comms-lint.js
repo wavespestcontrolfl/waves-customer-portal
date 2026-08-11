@@ -79,9 +79,8 @@ function findShortenerHost(text) {
 // direction-specific: hosts on the canonical schemeless list (shared with
 // the SMS template renderer via sms-link-policy.js) plus own-domain hosts
 // go bare; every third-party link keeps https:// (a bare host won't
-// preview). The TLD list is deliberately curated — a false positive on
-// prose ("no.problem") costs more than a missed exotic TLD nothing we
-// send uses.
+// preview). Host validity is checked against the public-suffix list —
+// see the psl note below.
 const { SCHEMELESS_SMS_HOSTS, normalizeForLinkCheck } = require('./messaging/sms-link-policy');
 function isBareExemptHost(host) {
   const h = String(host || '').toLowerCase();
@@ -100,13 +99,17 @@ const SCHEMED_PORTAL_RE = new RegExp(
   `https?://(${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})(?![-a-z0-9]|\\.[a-z0-9])`,
   'i'
 );
-const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app', 'edu', 'gov', 'mil'];
+// Host validity comes from the public-suffix list (psl — the dependency
+// rain-out's link guard already uses), not a hand-curated TLD list: it
+// accepts every real TLD (.dev, .ai, ccTLDs) while still rejecting prose
+// tokens ("no.problem", "today.come", "e.g") whose tails are not suffixes.
+const psl = require('psl');
 // Generic maximal dotted-host run, no TLD filter and no left-boundary
 // class: prose punctuation glued to a link ("See:yelp.com", "[yelp.com]")
 // must not hide it, and the exemption below must see the COMPLETE hostname
 // — a TLD-anchored match stops at ".com" and would exempt
-// portal.wavespestcontrol.com.evil.xyz as ours. TLD curation happens after
-// extraction.
+// portal.wavespestcontrol.com.evil.xyz as ours. Public-suffix validation
+// happens after extraction.
 const BARE_HOST_RUN_RE = /(?:[a-z0-9][a-z0-9-]*\.)+[a-z0-9][a-z0-9-]*/g;
 
 /** First bare (scheme-less) third-party host in the text, or null. */
@@ -129,8 +132,7 @@ function findBareThirdPartyHost(text) {
       || host.startsWith('wavespestcontrol.com.')
       || host.includes('.wavespestcontrol.com.')) return m[0];
     if (isBareExemptHost(host)) continue;
-    const tld = host.slice(host.lastIndexOf('.') + 1);
-    if (BARE_HOST_TLDS.includes(tld)) return m[0];
+    if (psl.isValid(host)) return m[0];
   }
   return null;
 }
@@ -162,7 +164,7 @@ const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)\s*(?:[.!]|$|anyti
  * A non-null reason is a FAIL with that one-line explanation.
  *
  * Context: { channel: 'sms'|'email'|'web', audience: 'customer'|'internal',
- *   commercial?: bool, stopExpected?: bool|undefined }
+ *   commercialProposal?: bool, stopExpected?: bool|undefined }
  * Rules whose precondition the caller can't assert (e.g. stopExpected
  * unknown) are skipped, never guessed.
  */
@@ -198,7 +200,7 @@ const RULES = [
   },
   {
     name: 'per-application-wording',
-    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial,
+    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercialProposal,
     // "per visit"/"per-visit" is intrinsically price-unit phrasing and always
     // forbidden. "each/every/a visit" is ordinary scheduling language ("we
     // text before each visit"), so those forms only count as price units when
@@ -207,7 +209,7 @@ const RULES = [
     // keeps URL paths from matching.
     check: (text) => (
       /\bper[\s-]+visit\b|\d\s*\/\s*visit\b|(?:\$\s*|\busd\s+)\d[\d.,]*\s+(?:each|every|a)\s+visit\b|\b\d[\d.,]*\s*(?:dollars?|bucks?)\s+(?:each|every|a)\s+visit\b/i.test(text)
-        ? 'says "per visit" — recurring pricing is always "per application" (commercial accounts exempt)'
+        ? 'says "per visit" — recurring pricing is always "per application" (commercial proposals exempt)'
         : null),
   },
   {
@@ -220,7 +222,7 @@ const RULES = [
     // but never a fabricated monthly spread. Commercial proposals are
     // exempt entirely. Only checkable when the caller can assert the
     // billing lane; unknown skips, never guesses.
-    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial
+    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercialProposal
       && typeof ctx.monthlyBilled === 'boolean',
     check: (text, ctx) => {
       // Amount: $117 / USD 117 / 117 dollars / 117 bucks. Unit: /mo, "per

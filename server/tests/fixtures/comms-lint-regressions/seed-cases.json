@@ -9,11 +9,11 @@
       "provenance": "reconstructed — 2026-07-23 estimate-copy sweep (#2965/6/8): recurring is billed per application, never per visit"
     },
     {
-      "name": "commercial account exempt from per-application wording",
+      "name": "commercial proposal surface exempt from per-application wording",
       "text": "Service is $250 per visit under the commercial agreement.",
-      "context": { "channel": "sms", "audience": "customer", "commercial": true },
+      "context": { "channel": "sms", "audience": "customer", "commercialProposal": true },
       "expect": { "pass": true },
-      "provenance": "owner ruling: commercial accounts are exempt from the per-application phrasing rule"
+      "provenance": "AGENTS.md: commercial PROPOSALS are exempt from the per-application phrasing rule — the flag is surface-asserted by proposal renderers, never derived from the account (codex #3348 x3)"
     },
     {
       "name": "emoji in customer text",
@@ -26,8 +26,8 @@
       "name": "url shortener in sms",
       "text": "Pay here: bit.ly/waves-pay",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": false, "rules": ["no-url-shortener"] },
-      "provenance": "A2P 10DLC registration is non-resubmittable; shorteners are an instant-loss class"
+      "expect": { "pass": false, "rules": ["no-url-shortener", "portal-link-scheme"] },
+      "provenance": "A2P 10DLC registration is non-resubmittable; shorteners are an instant-loss class. Also fails the link-scheme rule since psl validation (codex #3348): a bare bit.ly is a scheme-less third-party host too"
     },
     {
       "name": "portal link must go bare in sms",
