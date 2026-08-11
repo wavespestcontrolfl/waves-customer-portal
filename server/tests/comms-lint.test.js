@@ -84,6 +84,11 @@ describe('lintComms mechanics', () => {
     expect(plain.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('decodes multibyte percent-encoded unicode before folding', () => {
+    const r = lintComms('Book at https://bit%EF%BC%8Ely/x today', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');
+  });
+
   it('counts segments on the normalized body the send path dispatches', () => {
     const body = `We’ll be out Friday between 10 and noon. ${'a'.repeat(100)}`;
     const r = lintComms(body, { channel: 'sms', audience: 'customer' });

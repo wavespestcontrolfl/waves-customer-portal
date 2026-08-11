@@ -22,18 +22,27 @@ const SCHEMELESS_SMS_HOSTS = [
 // (codex PR P1, originally in rain-out.js — moved here so every SMS link
 // check shares one canonicalizer). NFKC fold, unicode dot forms → '.',
 // zero-width chars stripped, then bounded percent-decode.
-function normalizeForLinkCheck(raw) {
-  let out = String(raw).normalize('NFKC');
+function foldLinkChars(s) {
+  let out = s.normalize('NFKC');
   out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
   out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
-  // Decode valid %XX escapes SELECTIVELY: decodeURIComponent over the whole
-  // body throws on any unrelated literal percent ("Save 50% today") and
-  // would abandon canonicalization entirely — one stray % must not disable
-  // the link checks (Codex #3348).
+  return out;
+}
+
+function normalizeForLinkCheck(raw) {
+  let out = foldLinkChars(String(raw));
+  // Decode CONTIGUOUS valid escape runs with decodeURIComponent so
+  // multibyte UTF-8 sequences (%EF%BC%8E = fullwidth dot) decode to the
+  // real character instead of byte-wise mojibake; a malformed run is kept
+  // verbatim, and an unrelated literal percent ("Save 50% today") never
+  // aborts canonicalization (Codex #3348 x2). The fold reapplies after
+  // each decode pass - a decoded fullwidth dot must still become '.'.
   for (let i = 0; i < 3; i++) {
-    const decoded = out.replace(/%([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    const decoded = out.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+      try { return decodeURIComponent(run); } catch { return run; }
+    });
     if (decoded === out) break;
-    out = decoded;
+    out = foldLinkChars(decoded);
   }
   return out;
 }
