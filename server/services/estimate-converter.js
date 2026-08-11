@@ -409,6 +409,21 @@ function visitCountFieldsConflict(svc = {}) {
   return new Set(values).size > 1;
 }
 
+// A POPULATED count alias that is not a positive number (0, negative,
+// non-numeric text) is malformed data, not an absent count (codex r18 P1):
+// the readers above discard it, so a { visitsPerYear: 0 } palm row would
+// otherwise read as a legacy count-less line and pass the `visits == null`
+// compatibility cases. Blank/undefined aliases stay "absent".
+function visitCountFieldsInvalid(svc = {}) {
+  return visitCountAliasValues(svc).some((value) => {
+    if (value === null || value === undefined) return false;
+    const raw = String(value).trim();
+    if (!raw) return false;
+    const num = Number(raw);
+    return !(Number.isFinite(num) && num > 0);
+  });
+}
+
 // The two invalid-cadence sentinels explicitCadenceFieldForService can
 // surface. They are deliberately truthy (forces stand down, ≠-checks
 // decline) but NEVER a schedulable cadence — any consumer that compares
@@ -2543,7 +2558,10 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (cadenceField && cadenceField !== 'semiannual') return false;
     if (visitCountFieldsConflict(svc)) return false;
     const visits = visitsPerYearForRecurringService(svc);
-    if (pattern === 'semiannual') return visits == null || visits === 2;
+    // The count-less compatibility case is for genuinely ABSENT counts
+    // (quote-based lines) — a populated-but-invalid count (0, text) is
+    // malformed data and declines (codex r18 P1).
+    if (pattern === 'semiannual') return (visits == null && !visitCountFieldsInvalid(svc)) || visits === 2;
     return false;
   }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
@@ -2765,7 +2783,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const visits = visitsPerYearForRecurringService(svc);
     const cadenceField = explicitCadenceFieldForService(svc);
     if (inferred !== 'semiannual'
-      || !(visits == null || visits === 2)
+      || !((visits == null && !visitCountFieldsInvalid(svc)) || visits === 2)
       || visitCountFieldsConflict(svc)
       || (cadenceField && cadenceField !== 'semiannual')
       || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;

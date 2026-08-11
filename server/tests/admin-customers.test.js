@@ -444,6 +444,11 @@ describe('admin customers route helpers', () => {
   });
 
   test('parses explicit recurring cadence before generic month and annual tokens', () => {
+    // Explicitly one-time spellings never fall to the recurring fallback
+    // (codex r18 P1): a one-time palm line prefilled 'quarterly' and the
+    // modal would create a quarterly series linked to the one-time row.
+    expect(cadenceFromEstimateLine({ frequency: 'one_time' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ frequency: 'One Time' }, 'quarterly')).toBe('one_time');
     expect(cadenceFromEstimateLine({ frequency: 'Bi-Monthly' }, 'quarterly')).toBe('bimonthly');
     expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
     expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');

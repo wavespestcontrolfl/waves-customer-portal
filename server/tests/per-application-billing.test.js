@@ -291,6 +291,19 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
   });
 
+  test('a POPULATED invalid visit count declines — never read as a legacy count-less line (codex r18 P1)', () => {
+    // { visitsPerYear: 0 } (or non-numeric text) is malformed data, not an
+    // absent count: the count-less compatibility case must not seed from it.
+    const zeroCount = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 0 };
+    expect(supportsConverterFollowUpSeeding(zeroCount, {}, 'semiannual')).toBe(false);
+    expect(EstimateConverter.annualPrepayCoverageCadence(zeroCount, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    const textCount = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visits: 'two' };
+    expect(supportsConverterFollowUpSeeding(textCount, {}, 'semiannual')).toBe(false);
+    // A genuinely ABSENT count still seeds (semiannual is unambiguous).
+    const absent = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual' };
+    expect(supportsConverterFollowUpSeeding(absent, {}, 'semiannual')).toBe(true);
+  });
+
   test('snake_case visit-count spellings count everywhere — reader AND conflict check (codex r15 pre-push P0)', () => {
     // A persisted { visits_per_year: 2 } palm line must seed its program;
     // treated as count-less it would decline to office scheduling and the

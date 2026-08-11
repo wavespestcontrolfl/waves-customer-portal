@@ -272,6 +272,14 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   // so a 6-week quote pre-filled the modal as quarterly and the prepay
   // cadence-match preflight downgraded the booking (codex P2). The caller
   // translates this to the scheduler's custom/42-day representation.
+  // Explicitly one-time spellings resolve 'one_time' — never the recurring
+  // fallback (codex r18 P1): a { frequency: 'one_time' } palm row in the
+  // recurring list kept its one-time catalog match (r17) but then
+  // prefilled cadence 'quarterly' here, and the modal trusts the server
+  // cadence ahead of billingType — saving would create a quarterly series
+  // linked to the one-time service. Vocabulary mirrors the converter's
+  // explicitlyOneTimeCadence.
+  if (['onetime', 'once', 'single'].includes(frequencyKey)) return 'one_time';
   if (frequencyKey.includes('every6week')) return 'every_6_weeks';
   if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
   if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
