@@ -179,6 +179,24 @@ exports.up = async function up(knex) {
     await recordState(knex, inserted);
     return;
   }
+  // A pre-existing same-key row with INVALID metadata BLOCKS the deploy
+  // (codex r18 pre-push P0, third pass): the converter and prepay
+  // coverage link recurring palm visits by KEY EXISTENCE alone (identity
+  // durability, deliberately ignoring activation), so a one-time or
+  // wrong-cadence row under this key would bill per-application work
+  // against the sold plan no matter what this migration skips. EXACT
+  // metadata required — blank frequency / null visit count would leave
+  // the catalog-cadence prefill falling back to quarterly (four billable
+  // applications on a two-application program). Rows this migration
+  // inserted always satisfy this (SERVICE literal above).
+  const rowIsRecurringSemiannual = service.billing_type === 'recurring'
+    && String(service.frequency || '').toLowerCase() === 'semiannual'
+    && Number(service.visits_per_year) === 2;
+  const preExistingRow = !inserted.services.some((entry) => entry && entry.key === SERVICE.service_key);
+  if (preExistingRow && !rowIsRecurringSemiannual) {
+    await recordState(knex, inserted);
+    throw new Error(`[palm-semiannual] pre-existing ${SERVICE.service_key} row is NOT a verified recurring/semiannual service (billing_type=${service.billing_type}, frequency=${service.frequency}, visits_per_year=${service.visits_per_year}) — recurring palm visits link this key by existence alone, so invalid metadata would bill per-application work against the sold plan. Fix or remove the row, then re-run the migration.`);
+  }
   // An admin-deactivated/archived row keeps its posture: attaching an
   // active auto_send profile would re-enable typed sends the admin turned
   // off. Explicitly-true only — NULL is_active reads as inactive in every
@@ -187,28 +205,6 @@ exports.up = async function up(knex) {
   // is_active: true.
   if (service.is_active !== true || service.is_archived === true) {
     console.warn(`[palm-semiannual] ${SERVICE.service_key}: services row is not explicitly active (or archived) — skipping profile (admin decision preserved)`);
-    await recordState(knex, inserted);
-    return;
-  }
-  // Same-key presence is NOT sufficient for healing (codex r18 pre-push
-  // P0): the converter treats this KEY as the semiannual recurring
-  // identity, so healing an auto-send profile onto a pre-existing row
-  // whose billing is one-time (or a non-semiannual cadence) would let a
-  // scheduled 2-visit series complete with per-application invoicing on
-  // top of the sold recurring/prepay plan. Only a verified
-  // recurring/semiannual row is healed; anything else fails closed with
-  // a loud warn for the operator. Rows this migration inserted always
-  // satisfy this (SERVICE literal above).
-  // EXACT metadata required (codex r18 pre-push P0, second pass): blank
-  // frequency / null visit count are not "close enough" — once healed,
-  // a bare semiannual selection derives its prefill cadence from THIS
-  // row's frequency, and a blank one falls back to quarterly (four
-  // billable applications on a two-application program).
-  const rowIsRecurringSemiannual = service.billing_type === 'recurring'
-    && String(service.frequency || '').toLowerCase() === 'semiannual'
-    && Number(service.visits_per_year) === 2;
-  if (!rowIsRecurringSemiannual) {
-    console.warn(`[palm-semiannual] ${SERVICE.service_key}: pre-existing row is not a verified recurring/semiannual service (billing_type=${service.billing_type}, frequency=${service.frequency}, visits_per_year=${service.visits_per_year}) — NOT healing a profile onto it (fail closed); review the row before selling the program`);
     await recordState(knex, inserted);
     return;
   }

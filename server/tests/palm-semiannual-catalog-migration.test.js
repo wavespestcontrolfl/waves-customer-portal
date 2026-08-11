@@ -208,32 +208,30 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(stateValue(db).profiles).toEqual([{ key: KEY, healed: true }]);
   });
 
-  test('up() NEVER heals a profile onto a pre-existing row that is not verified recurring/semiannual (codex r18 pre-push P0)', async () => {
-    // The converter treats this KEY as the recurring identity: healing an
-    // auto-send profile onto a one-time (or wrong-cadence) row would let
-    // a 2-visit series complete with per-application invoicing on top of
-    // the sold plan.
+  test('up() THROWS on a pre-existing row that is not verified recurring/semiannual — deploy blocked (codex r18 pre-push P0)', async () => {
+    // The converter and prepay coverage link recurring palm visits by KEY
+    // EXISTENCE alone, so an invalid row under this key would bill
+    // per-application work against the sold plan no matter what the
+    // migration skips — blocking the deploy is the only true fail-closed.
     const db = emptyDb();
     db.services.push({ id: 'admin-onetime', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'one_time', is_active: true });
-    await migration.up(fakeKnex(db));
+    await expect(migration.up(fakeKnex(db))).rejects.toThrow(/NOT a verified recurring\/semiannual/);
     expect(profileRow(db)).toBeUndefined();
 
     const db2 = emptyDb();
     db2.services.push({ id: 'admin-monthly', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', frequency: 'monthly', is_active: true });
-    await migration.up(fakeKnex(db2));
-    expect(db2.service_completion_profiles.find((r) => r.service_key === KEY)).toBeUndefined();
+    await expect(migration.up(fakeKnex(db2))).rejects.toThrow(/NOT a verified recurring\/semiannual/);
 
-    // Blank frequency / missing visit count are not close enough either
-    // (codex r18 pre-push P0): a healed bare row would prefill quarterly.
+    // Blank frequency / missing visit count are not close enough either:
+    // a healed bare row would prefill quarterly.
     const db3 = emptyDb();
     db3.services.push({ id: 'admin-bare', service_key: KEY, name: 'Adam Custom Palm Program', billing_type: 'recurring', is_active: true });
-    await migration.up(fakeKnex(db3));
-    expect(db3.service_completion_profiles.find((r) => r.service_key === KEY)).toBeUndefined();
+    await expect(migration.up(fakeKnex(db3))).rejects.toThrow(/NOT a verified recurring\/semiannual/);
   });
 
   test('up() skips the profile for a row an admin deactivated (posture preserved)', async () => {
     const db = emptyDb();
-    db.services.push({ id: 'admin-palm', service_key: KEY, name: 'Palm Program', is_active: false });
+    db.services.push({ id: 'admin-palm', service_key: KEY, name: 'Palm Program', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: false });
     await migration.up(fakeKnex(db));
     expect(profileRow(db)).toBeUndefined();
   });
@@ -356,7 +354,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     // Admin repurposes the retained UUID AND creates a fresh replacement
     // under the original key before the next roll-forward.
     db.services.find((r) => r.id === insertedId).service_key = 'admin_custom_palm';
-    db.services.push({ id: 'admin-replacement', service_key: KEY, name: 'Semiannual Palm Injection Service', is_active: true });
+    db.services.push({ id: 'admin-replacement', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
     await migration.up(fakeKnex(db));
     db.scheduled_services = [];
     await migration.down(fakeKnex(db));
@@ -404,7 +402,7 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     // Admin deletes our row and recreates the key under a new UUID,
     // keeping the marker-bearing profile.
     db.services = db.services.filter((r) => r.service_key !== KEY);
-    db.services.push({ id: 'admin-new-uuid', service_key: KEY, name: 'Semiannual Palm Injection Service', is_active: true });
+    db.services.push({ id: 'admin-new-uuid', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
     await migration.down(fakeKnex(db));
 
     // The replacement row keeps its typed completion behavior.
