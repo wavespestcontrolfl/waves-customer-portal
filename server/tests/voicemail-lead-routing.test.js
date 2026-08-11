@@ -26,7 +26,11 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const policy = require('../services/messaging/policy');
 
-const { hasWorkableLeadSignal, findReusableCallLead } = CallRecordingProcessor._test;
+const { hasWorkableLeadSignal, findReusableCallLead, shouldStampCallLeadLinkage } = CallRecordingProcessor._test;
+
+// findReusableCallLead returns { lead, matchedVia } — the identity tests
+// below assert the ROW; match provenance has its own describe.
+const findLead = async (db, args) => (await findReusableCallLead(db, args)).lead;
 
 describe('hasWorkableLeadSignal voicemail waiver', () => {
   const PHONE = '+19415550101';
@@ -171,7 +175,7 @@ describe('findReusableCallLead identity keys', () => {
 
   test('phone present: matches by phone only — email never becomes an identity key', async () => {
     const db = makeDb({ id: 'lead-1' });
-    const found = await findReusableCallLead(db, {
+    const found = await findLead(db, {
       phone: '+19415550101',
       email: 'shared@example.com',
       workableUnnamedLead: false,
@@ -183,7 +187,7 @@ describe('findReusableCallLead identity keys', () => {
 
   test('no phone: matches by lowercased trimmed email, unclaimed leads only', async () => {
     const db = makeDb({ id: 'lead-2', first_name: 'Pat', last_name: 'Sample' });
-    const found = await findReusableCallLead(db, {
+    const found = await findLead(db, {
       phone: null,
       email: '  PSample00005@Example.com ',
       firstName: 'Pat',
@@ -200,7 +204,7 @@ describe('findReusableCallLead identity keys', () => {
 
   test('no phone and no email: returns null without querying', async () => {
     const db = makeDb({ id: 'lead-3' });
-    const found = await findReusableCallLead(db, { phone: null, email: null });
+    const found = await findLead(db, { phone: null, email: null });
     expect(found).toBeNull();
     expect(db.calls.length).toBe(0);
   });
@@ -210,14 +214,14 @@ describe('findReusableCallLead identity keys', () => {
     // EMAIL_RE gate — the function itself must refuse a malformed capture, or
     // two calls both storing "unknown" would reuse each other's leads.
     const db = makeDb({ id: 'lead-junk' });
-    const found = await findReusableCallLead(db, { phone: null, email: 'unknown' });
+    const found = await findLead(db, { phone: null, email: 'unknown' });
     expect(found).toBeNull();
     expect(db.calls.length).toBe(0);
   });
 
   test('email match with a CONFLICTING stated name forces a fresh lead', async () => {
     const db = makeDb({ id: 'lead-4', first_name: 'Maria', last_name: 'Lopez' });
-    const found = await findReusableCallLead(db, {
+    const found = await findLead(db, {
       phone: null,
       email: 'shared@example.com',
       firstName: 'Pat',
@@ -229,7 +233,7 @@ describe('findReusableCallLead identity keys', () => {
 
   test('email match with a POSITIVELY corroborated first name is reusable (case-insensitive)', async () => {
     const sameName = makeDb({ id: 'lead-5', first_name: 'Pat', last_name: 'Sample' });
-    expect(await findReusableCallLead(sameName, {
+    expect(await findLead(sameName, {
       phone: null,
       email: 'shared@example.com',
       firstName: 'pat',
@@ -239,7 +243,7 @@ describe('findReusableCallLead identity keys', () => {
 
     // A missing last name on either side does not block a first-name match.
     const noLastName = makeDb({ id: 'lead-5b', first_name: 'Pat', last_name: null });
-    expect(await findReusableCallLead(noLastName, {
+    expect(await findLead(noLastName, {
       phone: null,
       email: 'shared@example.com',
       firstName: 'Pat',
@@ -253,7 +257,7 @@ describe('findReusableCallLead identity keys', () => {
     // DIFFERENT prospect — reusing would overwrite the first prospect's
     // extraction and swallow the second's new-lead surfacing.
     const namelessCandidate = makeDb({ id: 'lead-6', first_name: null, last_name: null });
-    expect(await findReusableCallLead(namelessCandidate, {
+    expect(await findLead(namelessCandidate, {
       phone: null,
       email: 'shared@example.com',
       firstName: 'Pat',
@@ -262,7 +266,7 @@ describe('findReusableCallLead identity keys', () => {
     })).toBeNull();
 
     const namelessCaller = makeDb({ id: 'lead-6b', first_name: 'Pat', last_name: 'Sample' });
-    expect(await findReusableCallLead(namelessCaller, {
+    expect(await findLead(namelessCaller, {
       phone: null,
       email: 'shared@example.com',
       firstName: null,
@@ -279,7 +283,7 @@ describe('findReusableCallLead identity keys', () => {
       { id: 'lead-maria', first_name: 'Maria', last_name: 'Lopez' },
       { id: 'lead-pat', first_name: 'Pat', last_name: 'Sample' },
     ]);
-    expect(await findReusableCallLead(db, {
+    expect(await findLead(db, {
       phone: null,
       email: 'shared@example.com',
       firstName: 'Pat',
@@ -295,7 +299,7 @@ describe('findReusableCallLead identity keys', () => {
     // duplicate on every retry.
     const own = { id: 'lead-own', first_name: null, last_name: null, twilio_call_sid: 'CA-retry-1' };
     const db = makeDb(own);
-    expect(await findReusableCallLead(db, {
+    expect(await findLead(db, {
       phone: null,
       email: 'shared@example.com',
       firstName: null,
@@ -312,7 +316,7 @@ describe('findReusableCallLead identity keys', () => {
     // same-call identity even though contact fields may have changed.
     const own = { id: 'lead-stamped', first_name: 'Pat', last_name: 'Sample', twilio_call_sid: 'CA-original-call' };
     const db = makeDb(own);
-    expect(await findReusableCallLead(db, {
+    expect(await findLead(db, {
       phone: null,
       email: 'different-now@example.com',
       firstName: null,
@@ -325,7 +329,7 @@ describe('findReusableCallLead identity keys', () => {
 
   test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
     const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
-    expect(await findReusableCallLead(db, {
+    expect(await findLead(db, {
       phone: '+19415550101',
       firstName: 'Pat',
       lastName: 'Sample',
@@ -388,7 +392,7 @@ describe('findReusableCallLead same-call SID branch applies ownership + lifecycl
 
   test('anonymous retry (unclaimedOnly) requires an UNCLAIMED sid row', async () => {
     const db = makeDb();
-    await findReusableCallLead(db, {
+    await findLead(db, {
       phone: null, email: 'a@b.com', firstName: 'Pat', callSid: 'CA-retry',
       unclaimedOnly: true, workableUnnamedLead: false,
     });
@@ -399,7 +403,7 @@ describe('findReusableCallLead same-call SID branch applies ownership + lifecycl
 
   test('workableUnnamedLead retry excludes terminal + converted sid rows', async () => {
     const db = makeDb();
-    await findReusableCallLead(db, {
+    await findLead(db, {
       phone: null, email: 'a@b.com', firstName: 'Pat', callSid: 'CA-retry',
       workableUnnamedLead: true,
     });
@@ -410,7 +414,7 @@ describe('findReusableCallLead same-call SID branch applies ownership + lifecycl
 
   test('a customer-attached retry scopes the sid row to that customer', async () => {
     const db = makeDb();
-    await findReusableCallLead(db, {
+    await findLead(db, {
       phone: '+19415550101', callSid: 'CA-retry',
       customerId: 'cust-1', workableUnnamedLead: false,
     });
@@ -683,5 +687,366 @@ describe('reaffirmedFilledLeadFields — sequential restatement (raw extraction 
     // though the lead carries values there.
     expect(out).not.toHaveProperty('phone');
     expect(out).not.toHaveProperty('address');
+  });
+});
+
+describe('shouldStampCallLeadLinkage — durable stamp on EVERY different-sid reuse (root fix)', () => {
+  // Before the 2026-08-11 root fix the fresh-stamp arm required !phone:
+  // a phone-bearing call reusing an existing lead left NO durable
+  // call→lead record (findReusableCallLead does not touch the lead's
+  // sid), and every consumer reconstructed the association by phone
+  // matching — the approximation behind five #3347-era findings.
+  const REUSED = { id: 'lead-r', twilio_call_sid: 'CA-original' };
+
+  test('phone-bearing reuse of a different-sid lead STAMPS (the root fix)', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-r',
+      currentStampedLeadId: null,
+    })).toBe(true);
+  });
+
+  test('phone-less reuse of a different-sid lead still stamps (unchanged)', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-r',
+      currentStampedLeadId: null,
+    })).toBe(true);
+  });
+
+  test('same-sid reuse never stamps — the sid IS the durable linkage', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: { id: 'lead-own', twilio_call_sid: 'CA-this-call' },
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-own',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('a race-recovered mint never takes a fresh stamp — it self-links via its own sid', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: REUSED,
+      raceRecovered: true,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-fresh-mint',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('a fresh insert (no reuse, no prior stamp) never stamps', () => {
+    expect(shouldStampCallLeadLinkage({
+      existingLead: null,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-new',
+      currentStampedLeadId: null,
+    })).toBe(false);
+  });
+
+  test('re-stamp arm: a retry whose stamp already points at the final lead refreshes the ledgers', () => {
+    // Including a retry that GAINED a phone (codex P1 r22) — existingLead
+    // may be the SAME-SID row here and the fresh arm stays false, but the
+    // re-stamp arm must still fire so this pass's writes enter the fenced
+    // ledgers and a later rejection can CAS-restore them.
+    expect(shouldStampCallLeadLinkage({
+      existingLead: { id: 'lead-own', twilio_call_sid: 'CA-this-call' },
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-own',
+      currentStampedLeadId: 'lead-own',
+    })).toBe(true);
+  });
+
+  test('a stale stamp pointing at a DIFFERENT lead does not trigger the re-stamp arm', () => {
+    // The pre-settle path owns that case: the old stamp settles first, then
+    // the fresh arm (different-sid reuse) decides the replacement.
+    expect(shouldStampCallLeadLinkage({
+      existingLead: null,
+      raceRecovered: false,
+      callTwilioSid: 'CA-this-call',
+      leadId: 'lead-new',
+      currentStampedLeadId: 'lead-elsewhere',
+    })).toBe(false);
+  });
+});
+
+describe('findReusableCallLead match provenance ({ lead, matchedVia })', () => {
+  // The guarded write inherits the eligibility of the ARM that selected the
+  // row (pre-push P1 r1+r2 on the durable-linkage root fix), so the lookup
+  // reports its own provenance — inferring it afterwards from id/phone
+  // equality misclassified both directions. Segment-aware mock: each
+  // database('leads') call starts a fresh predicate set, and ownership /
+  // identity predicates are interpreted so the arm fall-through is real.
+  const PHONE = '+19415550101';
+  const segmentDb = (rows) => (table) => {
+    const preds = [];
+    const builder = {};
+    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
+      builder[m] = (...a) => { preds.push([m, a]); return builder; };
+    }
+    const match = () => rows.filter((r) => preds.every(([m, a]) => {
+      if (m === 'where' && typeof a[0] === 'string' && a.length === 2) return String(r[a[0]] ?? '') === String(a[1]);
+      if (m === 'where' && a.length === 1 && a[0] && typeof a[0] === 'object') {
+        return Object.entries(a[0]).every(([k, v]) => String(r[k] ?? '') === String(v));
+      }
+      if (m === 'whereNull') return r[a[0]] == null;
+      if (m === 'whereRaw' && String(a[0]).includes('LOWER(TRIM(email))')) {
+        return String(r.email || '').trim().toLowerCase() === a[1][0];
+      }
+      if (m === 'whereRaw' && String(a[0]).includes('LOWER(TRIM(first_name))')) {
+        return String(r.first_name || '').trim().toLowerCase() === a[1][0];
+      }
+      return true; // grouped-callback ownership arm, orderBy, limit, other raw
+    }));
+    builder.first = async () => match()[0] || null;
+    builder.then = (resolve) => resolve(match());
+    return builder;
+  };
+
+  test('a customer-OWNED stamped row the phone re-selects reports matchedVia "phone" — retries stay idempotent', async () => {
+    // The root-fix regression (pre-push P1 r1): customer-less caller
+    // phone-reused a customer-owned lead, the fix stamped it. On retry the
+    // stamp arm REJECTS the owned row (anonymous same-call rows must be
+    // unclaimed) and the phone fallback re-finds it — the write must run
+    // the phone path's ownership rules, not the anonymous-strict set that
+    // 0-rows and drops a valid association.
+    const owned = { id: 'lead-r', customer_id: 'cust-9', phone: PHONE, twilio_call_sid: 'CA-original' };
+    const out = await findReusableCallLead(segmentDb([owned]), {
+      phone: PHONE,
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(out).toEqual({ lead: owned, matchedVia: 'phone' });
+  });
+
+  test('an UNCLAIMED stamped row reports matchedVia "same_call_stamp" — the write keeps the strict predicates its lookup enforced', async () => {
+    // Claim-race guard (pre-push P1 r2): a stamp-SELECTED row passed
+    // unclaimed-only eligibility, and the guarded write repeats exactly
+    // that — a customer claiming the row between lookup and write 0-rows
+    // instead of having this caller's extraction land on the fresh claim.
+    const unclaimed = { id: 'lead-r', customer_id: null, phone: PHONE, twilio_call_sid: 'CA-original' };
+    const out = await findReusableCallLead(segmentDb([unclaimed]), {
+      phone: PHONE,
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(out).toEqual({ lead: unclaimed, matchedVia: 'same_call_stamp' });
+  });
+
+  test('a PHONE-authorized stamp keeps its customer-owned lead on retry — even when the phone can no longer re-select it', async () => {
+    // The codex P2 scenario: first pass phone-reused + stamped a
+    // customer-owned lead (via 'phone'); the lead's number was then
+    // corrected away. The strict stamp arm used to reject the owned row
+    // and the phone fallback missed → duplicate mint + settled link. With
+    // the persisted authority the stamp arm keeps the phone path's
+    // ownership rules and the durable link holds.
+    const owned = { id: 'lead-r', customer_id: 'cust-9', phone: '+19415550777', twilio_call_sid: 'CA-original' };
+    const out = await findReusableCallLead(segmentDb([owned]), {
+      phone: PHONE, // caller's number no longer matches the corrected lead
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      stampedLeadVia: 'phone',
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(out).toEqual({ lead: owned, matchedVia: 'same_call_stamp' });
+
+    // A LEGACY stamp (no via) on the same shape stays strict — rejected.
+    const legacy = await findReusableCallLead(segmentDb([owned]), {
+      phone: PHONE,
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      stampedLeadVia: null,
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(legacy).toEqual({ lead: null, matchedVia: null });
+  });
+
+  test('the call\'s own sid row reports matchedVia "same_call_sid"', async () => {
+    const own = { id: 'lead-own', customer_id: null, phone: PHONE, twilio_call_sid: 'CA-this' };
+    const out = await findReusableCallLead(segmentDb([own]), {
+      phone: PHONE,
+      callSid: 'CA-this',
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(out).toEqual({ lead: own, matchedVia: 'same_call_sid' });
+  });
+
+  test('phone-less email corroborated match reports "email"; a total miss reports { lead: null, matchedVia: null }', async () => {
+    const candidate = { id: 'lead-e', customer_id: null, email: 'pat@example.com', first_name: 'Pat', last_name: null };
+    expect(await findReusableCallLead(segmentDb([candidate]), {
+      phone: null,
+      email: 'pat@example.com',
+      firstName: 'Pat',
+      lastName: null,
+      workableUnnamedLead: true,
+    })).toEqual({ lead: candidate, matchedVia: 'email' });
+
+    expect(await findReusableCallLead(segmentDb([]), {
+      phone: PHONE,
+      customerId: null,
+      workableUnnamedLead: false,
+    })).toEqual({ lead: null, matchedVia: null });
+  });
+});
+
+describe('phone-authorized stamps survive retries (codex P2 r1 on the root fix)', () => {
+  const { parseStampedLeadLink, applySameCallLeadEligibility } = CallRecordingProcessor._test;
+
+  const spy = () => {
+    const calls = [];
+    const q = {};
+    for (const m of ['where', 'whereNull', 'whereNotIn', 'orderBy', 'first']) {
+      q[m] = (...a) => { calls.push([m, a]); return q; };
+    }
+    q.calls = calls;
+    return q;
+  };
+
+  test('parseStampedLeadLink reads the stamp authority; legacy stamps parse as via null', () => {
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-1', lead_link_via: 'phone' } }))
+      .toEqual({ leadId: 'lead-1', via: 'phone' });
+    expect(parseStampedLeadLink({ metadata: JSON.stringify({ lead_id: 'lead-2', lead_link_via: 'email' }) }))
+      .toEqual({ leadId: 'lead-2', via: 'email' });
+    // Pre-fix stamps carry no via — strict treatment.
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-3' } }))
+      .toEqual({ leadId: 'lead-3', via: null });
+    // Junk via never widens eligibility.
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-4', lead_link_via: 'anything' } }))
+      .toEqual({ leadId: 'lead-4', via: null });
+    expect(parseStampedLeadLink({ metadata: null })).toEqual({ leadId: null, via: null });
+  });
+
+  test('a phone-authorized stamp relaxes ONLY the customer-less unclaimed rule', () => {
+    // The original phone linkage was allowed to target a customer-owned
+    // lead; its retry keeps those ownership rules instead of the
+    // anonymous-strict set that rejected the exact stamped lead and minted
+    // a duplicate.
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(false);
+  });
+
+  test('shared-phone ambiguity is NEVER relaxed by phone authority', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: true, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('email/legacy stamps keep the strict unclaimed rule', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: false,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('a resolved customer still scopes ownership to unclaimed-or-mine under phone authority', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: 'c1', unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'where' && typeof a[0] === 'function')).toBe(true);
+  });
+});
+
+describe('phoneReuseStillValidOnLockedRow — the phone arm revalidated under the row lock (codex P2 r1)', () => {
+  const { phoneReuseStillValidOnLockedRow } = CallRecordingProcessor._test;
+  const PHONE = '+19415550101';
+  const base = { id: 'lead-p', phone: PHONE, deleted_at: null, status: 'new', converted_at: null, customer_id: null };
+  const args = { phone: PHONE, customerId: null, unclaimedOnly: false, workableUnnamedLead: false };
+
+  test('a row still satisfying the selecting predicates passes', () => {
+    expect(phoneReuseStillValidOnLockedRow(base, args)).toBe(true);
+    // Ownership: a customer-owned row is fine for a customer-less caller —
+    // the phone path applies no ownership filter there.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, args)).toBe(true);
+  });
+
+  test('phone corrected away, soft-delete, or a vanished row revokes the reuse', () => {
+    expect(phoneReuseStillValidOnLockedRow({ ...base, phone: '+19415550999' }, args)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, deleted_at: new Date() }, args)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow(null, args)).toBe(false);
+  });
+
+  test('the workableUnnamedLead lifecycle trio is re-enforced', () => {
+    const workable = { ...args, workableUnnamedLead: true };
+    expect(phoneReuseStillValidOnLockedRow(base, workable)).toBe(true);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, status: 'won' }, workable)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, converted_at: new Date() }, workable)).toBe(false);
+  });
+
+  test('ownership arms mirror the phone branch exactly', () => {
+    // Shared-phone ambiguity: unclaimed only.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, { ...args, unclaimedOnly: true })).toBe(false);
+    // Customer-attached: unclaimed-or-mine.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, { ...args, customerId: 'cust-1' })).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-1' }, { ...args, customerId: 'cust-1' })).toBe(true);
+  });
+});
+
+describe('deriveStampLinkAuthority — authority from the selecting arm, never bare phone presence', () => {
+  const { deriveStampLinkAuthority } = CallRecordingProcessor._test;
+  const PHONE = '+19415550101';
+
+  test('phone-arm selection is phone authority (revalidated under the lock)', () => {
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'phone', priorStampedLeadVia: null,
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+  });
+
+  test('a NON-matching phone on an email-authorized stamp does NOT upgrade (the r4 P1)', () => {
+    // Spouse's callback number on a retry of an email-linked lead: the
+    // number never corroborated this linkage — upgrading from presence
+    // alone handed later customer-less retries the relaxed ownership rule.
+    expect(deriveStampLinkAuthority({
+      phone: '+19415550999', existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
+  });
+
+  test('stamp-selected rows corroborate via the locked lead\'s number or a phone the pass writes', () => {
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+    expect(deriveStampLinkAuthority({
+      phone: PHONE, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'email',
+      lockedLeadPhone: null, writesPhone: true,
+    })).toBe('phone');
+  });
+
+  test('prior phone authority survives a phone-less retry; legacy stamps stay strict', () => {
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: 'phone',
+      lockedLeadPhone: PHONE, writesPhone: false,
+    })).toBe('phone');
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'same_call_stamp', priorStampedLeadVia: null,
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
+  });
+
+  test('a fresh email-arm stamp records email', () => {
+    expect(deriveStampLinkAuthority({
+      phone: null, existingLeadVia: 'email', priorStampedLeadVia: null,
+      lockedLeadPhone: null, writesPhone: false,
+    })).toBe('email');
   });
 });
