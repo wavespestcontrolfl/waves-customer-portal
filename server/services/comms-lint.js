@@ -135,7 +135,10 @@ function smsSegmentCount(text) {
 // character list here would drift from it.
 const { findTypographicChar } = require('./messaging/gsm-normalize');
 
-const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
+// "Reply to this message" only counts as boilerplate in CLOSER position
+// (followed by end/punctuation or a courtesy tail) — "reply to this message
+// with the gate code" is a legitimate instruction, not a sign-off.
+const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)\s*(?:[.!,)]|$|if\s|with any|for any|anytime)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
 
 /**
  * Each rule: { name, applies(ctx) => bool, check(text, ctx) => reason|null }.
@@ -192,14 +195,19 @@ const RULES = [
   },
   {
     name: 'no-plan-total',
-    // Combined plan totals ("$X/mo" / "$X/yr") never appear in customer
-    // copy (owner rule re-affirmed 2026-07-23) — EXCEPT true monthly-billed
-    // legacy plans, where the dues figure IS their price, and commercial
-    // proposals. Only checkable when the caller can assert the billing lane
-    // (monthlyBilled === false); unknown skips, never guesses.
-    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial && ctx.monthlyBilled === false,
+    // Combined plan totals ("$X/mo" / "$X/yr" / "$X monthly") never appear
+    // in customer copy (owner rule re-affirmed 2026-07-23) — EXCEPT true
+    // monthly-billed legacy plans (the dues figure IS their price),
+    // commercial proposals, and the annual-prepay lane (invoice/prepay
+    // surfaces are exempt: a prepay customer legitimately hears the yearly
+    // total they already paid). Only checkable when the caller can assert
+    // the billing lane (monthlyBilled === false); unknown skips.
+    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial
+      && ctx.monthlyBilled === false && ctx.billingMode !== 'annual_prepay',
     check: (text) => {
-      const m = text.match(/(?:\$\s*|\busd\s+)\d[\d.,]*\s*(?:\/\s*|(?:per|a|each|every)\s+)(?:mo|month|yr|year)\b/i);
+      // Amount: $117 / USD 117 / 117 dollars / 117 bucks. Unit: /mo, "per
+      // month", "a year", or the adjectival "monthly"/"yearly"/"annually".
+      const m = text.match(/(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))(?:\s*\/\s*(?:mo|month|yr|year)\b|\s+(?:per|a|each|every)\s+(?:mo|month|yr|year)\b|\s+(?:monthly|yearly|annually)\b)/i);
       return m ? `quotes a combined plan total "${m[0].trim()}" — plan totals never appear in customer copy (monthly-billed legacy plans exempt)` : null;
     },
   },

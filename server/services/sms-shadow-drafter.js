@@ -970,6 +970,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       stopExpected: false,
       commercial: isCommercialProperty(customer),
       monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
+      // The plan-total rule exempts the annual-prepay lane (prepay messages
+      // legitimately state the yearly total already paid).
+      billingMode: billingLane?.mode,
     });
 
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically

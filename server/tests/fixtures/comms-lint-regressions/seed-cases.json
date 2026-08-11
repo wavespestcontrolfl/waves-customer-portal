@@ -184,6 +184,20 @@
       "provenance": "2026-08-11 codex round on #3348: owner rule re-affirmed 2026-07-23 — no combined plan totals in customer copy; monthly-billed legacy plans keep /mo (lane caller-asserted)"
     },
     {
+      "name": "adjectival plan total on a non-monthly account",
+      "text": "The lawn program runs $117 monthly if you keep it going.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false },
+      "expect": { "pass": false, "rules": ["no-plan-total"] },
+      "provenance": "2026-08-11 codex round on #3348: '$117 monthly' and '117 dollars per month' present the same flat monthly spread the rule bans"
+    },
+    {
+      "name": "annual prepay customer hears the yearly total",
+      "text": "Your annual prepay of $1,404/yr is already covered through March.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false, "billingMode": "annual_prepay" },
+      "expect": { "pass": true },
+      "provenance": "2026-08-11 codex round on #3348: invoice/prepay surfaces are exempt from the plan-total rule — a prepay customer legitimately hears what they already paid"
+    },
+    {
       "name": "monthly member hears their real dues",
       "text": "Your membership dues are $98.50/mo, same as always.",
       "context": { "channel": "sms", "audience": "customer", "monthlyBilled": true },

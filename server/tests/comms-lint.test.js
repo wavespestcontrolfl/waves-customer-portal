@@ -140,7 +140,7 @@ describe('lintComms mechanics', () => {
   });
 
   it('flags plan totals only when the lane positively says not-monthly', () => {
-    for (const msg of ['Your plan is $117/mo.', 'That works out to $1,404/yr.', 'It runs $98 per month.']) {
+    for (const msg of ['Your plan is $117/mo.', 'That works out to $1,404/yr.', 'It runs $98 per month.', 'The service is $117 monthly.', 'It comes to 117 dollars per month.', 'About $1,404 annually.']) {
       const fail = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: false });
       expect(fail.failures.map((f) => f.rule)).toContain('no-plan-total');
       const monthlyMember = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: true });
@@ -148,6 +148,19 @@ describe('lintComms mechanics', () => {
       const unknownLane = lintComms(msg, { channel: 'sms', audience: 'customer' });
       expect(unknownLane.checked).not.toContain('no-plan-total');
     }
+  });
+
+  it('exempts the annual-prepay lane from the plan-total rule', () => {
+    const r = lintComms('Your annual prepay is $1,404/yr, already covered.', { channel: 'sms', audience: 'customer', monthlyBilled: false, billingMode: 'annual_prepay' });
+    expect(r.checked).not.toContain('no-plan-total');
+    expect(r.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+  });
+
+  it('does not read a mid-message reply instruction as a sign-off closer', () => {
+    const r = lintComms('Please reply to this message with the gate code so the technician can enter.', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).not.toContain('no-signoff-boilerplate');
+    const closer = lintComms('All set for Friday. Reply to this message if you have any questions.', { channel: 'sms', audience: 'customer' });
+    expect(closer.failures.map((f) => f.rule)).toContain('no-signoff-boilerplate');
   });
 
   it('delegates typographic detection to the canonical GSM normalizer set', () => {
