@@ -586,7 +586,10 @@ describe('tech-reviewed AI report copy on rodent trapping', () => {
     expect(result.bodySource).toBe('technician_report');
   });
 
-  test('bait-station siblings are unchanged — the gauge body stays deterministic', () => {
+  // Summary template v5 (owner 2026-08-11): every gauge lane accepts the
+  // reviewed AI report copy, bait stations included — the drop was
+  // collective, not trapping-specific.
+  test('bait-station siblings accept the reviewed body on a non-zero gauge', () => {
     const result = buildTodaysResult({
       projectType: 'rodent_bait_station',
       reportTypeLabel: 'Rodent Bait Station Summary',
@@ -594,6 +597,20 @@ describe('tech-reviewed AI report copy on rodent trapping', () => {
       chips: ['Monitor for new activity'],
       activity: { score: 2 },
       visitSequence: 2,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).toContain(AI_BODY);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('bait-station zero state still keeps the owner-scoped template body', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_bait_station',
+      reportTypeLabel: 'Rodent Bait Station Summary',
+      values: { stations_checked: '4', bait_consumption: 'None — bait intact' },
+      chips: ['Monitor for new activity'],
+      activity: { score: 0 },
+      visitSequence: 1,
       technicianReportBody: AI_BODY,
     });
     expect(result.body).not.toContain(AI_BODY);

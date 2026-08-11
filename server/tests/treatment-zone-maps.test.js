@@ -132,6 +132,28 @@ describe('saveTreatmentZoneMap', () => {
     expect(openKnex.state.inserted.capture_mode).toBe(null);
   });
 
+  test('yard capture mode (mosquito outline) persists for a closed loop and drops to null when open (owner 2026-08-11)', async () => {
+    const closedKnex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: true,
+      captureMode: 'yard',
+      knex: closedKnex,
+    });
+    expect(closedKnex.state.inserted.capture_mode).toBe('yard');
+
+    const openKnex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: false,
+      captureMode: 'yard',
+      knex: openKnex,
+    });
+    expect(openKnex.state.inserted.capture_mode).toBe(null);
+  });
+
   test('interior capture mode persists for a closed 3+ point loop (owner 2026-07-29)', async () => {
     const knex = makeKnex();
     await saveTreatmentZoneMap({

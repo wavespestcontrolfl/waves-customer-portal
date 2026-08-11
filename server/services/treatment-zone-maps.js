@@ -147,17 +147,18 @@ async function saveTreatmentZoneMap({
     mask_s3_key: maskKey || (snapshotKey ? null : existing?.mask_s3_key || null),
     // 'lawn' (turf outline) vs 'lawn_highlight' (grass mask baked into the
     // snapshot — codex P1 #3075: the report must only claim "highlighted"
-    // when a highlight was actually saved) vs 'perimeter' (building spray
-    // trace) vs 'interior' (building footprint + interior wash, owner
+    // when a highlight was actually saved) vs 'yard' (mosquito outline —
+    // turf + landscape beds, owner 2026-08-11) vs 'perimeter' (building
+    // spray trace) vs 'interior' (building footprint + interior wash, owner
     // 2026-07-29) — anything else stores NULL, same as legacy rows (codex
-    // P1 #3038). Lawn modes and 'interior' are AREA claims: only a closed
-    // loop of 3+ points qualifies; open lawn traces downgrade to unlabeled
-    // and an open interior trace downgrades to 'perimeter' (still true of
-    // the line it draws) so the report never presents a line as a treated
-    // area (codex P2 #3038, mirrors the client gate).
+    // P1 #3038). Lawn/yard modes and 'interior' are AREA claims: only a
+    // closed loop of 3+ points qualifies; open lawn/yard traces downgrade
+    // to unlabeled and an open interior trace downgrades to 'perimeter'
+    // (still true of the line it draws) so the report never presents a
+    // line as a treated area (codex P2 #3038, mirrors the client gate).
     capture_mode: (() => {
-      const mode = ['lawn', 'lawn_highlight', 'perimeter', 'interior'].includes(captureMode) ? captureMode : null;
-      if ((mode === 'lawn' || mode === 'lawn_highlight') && (!closedLoop || points.length < 3)) return null;
+      const mode = ['lawn', 'lawn_highlight', 'yard', 'perimeter', 'interior'].includes(captureMode) ? captureMode : null;
+      if ((mode === 'lawn' || mode === 'lawn_highlight' || mode === 'yard') && (!closedLoop || points.length < 3)) return null;
       if (mode === 'interior' && (!closedLoop || points.length < 3)) return 'perimeter';
       return mode;
     })(),

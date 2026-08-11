@@ -33,12 +33,17 @@ const SCHEMA_VERSION = 2;
 // what tells fixtures and audits which generator produced a given row
 // (codex P2 on #3159).
 const COPY_MAP_VERSION = 3;
-// Summary template v4: rodent trapping joins the lanes that accept the
-// tech-reviewed AI report copy as the body (bodySource 'technician_report'),
-// and a declared setup visit composes setup wording instead of the re-check
-// story. v3 added the generic non-gauge default composition. Zero states and
-// every owner story still keep template copy in both.
-const SUMMARY_TEMPLATE_VERSION = 4;
+// Summary template v5: every gauge lane accepts the tech-reviewed AI report
+// copy as the body (bodySource 'technician_report'), not just rodent
+// trapping — cockroach, bed bug, the termite family, bait stations, and
+// wildlife trapping included (owner 2026-08-11: the cockroach report
+// "didn't render" the generated copy). The knockdown and one-time mosquito
+// story branches swap their body the same way, keeping their mandated
+// disclosure/follow-up sentences. Zero states, rodent exclusion/inspection,
+// flea, and tree & shrub still keep template copy.
+// v4 added rodent trapping + setup-visit wording; v3 added the generic
+// non-gauge default composition.
+const SUMMARY_TEMPLATE_VERSION = 5;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -2727,9 +2732,11 @@ function buildTodaysResult({
   visitSequence = 1,
   // Tech-reviewed AI report copy (the completion form's "Generate AI report"
   // output, parsed + banned-copy-screened by the complete route via
-  // technician-report-copy.js). The generic non-gauge default composition
-  // and rodent trapping use it — zero states and every other owner-specified
-  // story branch keep their approved wording.
+  // technician-report-copy.js). The generic non-gauge default composition,
+  // every gauge lane, and the knockdown/one-time-mosquito story branches use
+  // it — zero states and the remaining owner-specified story branches
+  // (rodent exclusion/inspection, flea, tree & shrub) keep their approved
+  // wording.
   technicianReportBody = null,
   // The tech confirmed the pre-submit reconciliation prompt
   // (GATE_REPORT_RECONCILE_PROMPT): the contradiction the matcher found
@@ -3048,10 +3055,19 @@ function buildTodaysResult({
         ? ' A follow-up visit is recommended — we will help you get it scheduled.'
         : ` Follow-up service is recommended in ${window}.`)
       : '';
+    // The tech's reviewed "Generate AI report" copy replaces only the
+    // intro/what-we-did portion (owner 2026-08-11); the mandated
+    // disclosure and follow-up sentences survive the swap — the German
+    // bait-cooperation guidance and the palmetto flush disclosure are
+    // owner-critical and carry in EVERY body. A cleared state keeps the
+    // template: the draft can predate a late flip to "None observed" and
+    // must never outrank the typed zero it predates.
+    const knockdownReportBody = !cleared ? technicianReportBody : null;
     return {
       headline,
-      body: `${intro} ${whatWeDid}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+      body: `${knockdownReportBody || `${intro} ${whatWeDid}`}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(knockdownReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3067,10 +3083,15 @@ function buildTodaysResult({
       };
     }
     if (['Light', 'Moderate', 'Heavy'].includes(level)) {
+      // The tech's reviewed "Generate AI report" copy becomes the body
+      // (owner 2026-08-11 — the one-time mosquito report dropped it). The
+      // "None observed" state above keeps the template: the draft can
+      // predate a late flip to zero and must never outrank it.
       return {
         headline: `Mosquito activity was ${level.toLowerCase()} today.`,
-        body: `${whatWeDid} ${nextStep}`,
+        body: `${technicianReportBody || whatWeDid} ${nextStep}`,
         nextStep,
+        ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
   }
@@ -3086,14 +3107,18 @@ function buildTodaysResult({
 
   if (indicator && activity && activity.score != null) {
     const noun = indicator.pestNoun;
-    // Rodent trapping honours the tech's reviewed "Generate AI report" copy
-    // the same way the generic default composition below does (owner
-    // 2026-08-02: the trapping report "isn't pulling in the Generate AI
-    // report" — the gauge branch silently dropped it). The headline stays
-    // deterministic and gauge-driven; only the body swaps, and only when a
-    // parsed, banned-copy-screened body exists. bodySource is stamped so the
+    // Every gauge lane honours the tech's reviewed "Generate AI report"
+    // copy the same way the generic default composition below does (owner
+    // 2026-08-02 for rodent trapping, owner 2026-08-11 for the rest — the
+    // cockroach report "didn't render" the generated copy, and the drop was
+    // collective across gauge lanes). The headline stays deterministic and
+    // gauge-driven; only the body swaps, and only when a parsed,
+    // banned-copy-screened body exists. bodySource is stamped so the
     // report's summary slot follows the same precedence every other typed
-    // report already uses (report-data.js).
+    // report already uses (report-data.js). Rodent exclusion and inspection
+    // keep their owner-ratified story wording (DECISIONS.md 2026-07-13) on
+    // every path, so their trend visits — which land in this branch — stay
+    // template too.
     //
     // The zero score is excluded HERE, not just in the zero-state branch
     // below — a repeat visit with a prior score always carries a trendWord,
@@ -3110,17 +3135,18 @@ function buildTodaysResult({
     // appended right after it. Falls back to the deterministic sentence,
     // which is always stage-correct because it is composed from the same
     // declaration.
-    const rawTrappingBody = projectType === 'rodent_trapping' && activity.score !== 0
+    const storyKeepsTemplate = projectType === 'rodent_exclusion' || projectType === 'rodent_inspection';
+    const rawGaugeBody = !storyKeepsTemplate && activity.score !== 0
       ? technicianReportBody
       : null;
     // Stage guard (setup only) AND count guard (both stages): the draft is
     // written before the tech's last edit to the typed fields, so it can
     // contradict the frozen findings on the stage OR on the numbers.
-    const trappingReportBody = rawTrappingBody
+    const gaugeReportBody = rawGaugeBody
       && (reconcileConfirmed
-        || (!(initialTrapSetup && setupContradictions(rawTrappingBody).length)
-          && !countContradictions(rawTrappingBody, values).length))
-      ? rawTrappingBody
+        || (!(initialTrapSetup && setupContradictions(rawGaugeBody).length)
+          && !countContradictions(rawGaugeBody, values).length))
+      ? rawGaugeBody
       : null;
     // One line of expectation-setting on a trap-setup visit: nothing has
     // been checked yet, so the customer is told what happens next instead of
@@ -3158,9 +3184,9 @@ function buildTodaysResult({
         // visitSequence > 1 with a resolved trendWord — and that is the
         // main case the selector exists for. Omitting the guidance here
         // dropped it from exactly the reports that needed it most.
-        body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
+        body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
         nextStep,
-        ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
+        ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
     if (activity.score === 0) {
@@ -3173,9 +3199,9 @@ function buildTodaysResult({
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
+      body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
       nextStep,
-      ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
+      ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 

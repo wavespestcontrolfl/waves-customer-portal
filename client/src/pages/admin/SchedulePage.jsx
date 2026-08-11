@@ -9870,9 +9870,14 @@ export function CompletionPanel({
   // building-perimeter workflow and store a spray barrier the report then
   // renders as a treated-lawn outline. Absent variant (gate off, other
   // feeds) keeps the isLawn heuristic.
+  // Mosquito traces the treated YARD — turf + landscape beds — with the
+  // outline workflow, saved as captureMode 'yard' (owner 2026-08-11: the
+  // mosquito report gets the lawn-style overlay with the bedding included).
+  const isMosquitoTrace =
+    detectServiceCategory(service.serviceType) === "mosquito";
   const traceOutlineMode = service.traceVariant
     ? service.traceVariant === "outline"
-    : isLawn;
+    : isLawn || isMosquitoTrace;
   // Lawn visits replace the Service Photos uploader with the turf photos from
   // the Lawn Assessment block — but only for a PURE lawn visit. A combined
   // visit (e.g. lawn + Tree & Shrub) carries a companion findings schema whose
@@ -14015,7 +14020,9 @@ export function CompletionPanel({
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  {traceOutlineMode ? "Outline the treated lawn" : "Trace where we sprayed"}
+                  {traceOutlineMode
+                    ? (isMosquitoTrace ? "Outline the treated yard" : "Outline the treated lawn")
+                    : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -14028,11 +14035,14 @@ export function CompletionPanel({
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
                     lawnMode={traceOutlineMode}
+                    yardMode={isMosquitoTrace}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
                   {traceOutlineMode
-                    ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
+                    ? (isMosquitoTrace
+                      ? "Auto-trace the yard — lawn and landscape beds — on the satellite photo; it renders as the treated-area outline on the customer report."
+                      : "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report.")
                     : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>
               </Field>

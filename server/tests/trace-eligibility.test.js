@@ -213,10 +213,12 @@ describe('classification behavior', () => {
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Source reduction'] },
     })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // Mosquito is yard geometry (owner 2026-08-11): outline overlay, same
+    // as lawn, with the landscape beds included in the traced boundary.
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Barrier treatment', 'Source reduction'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
     expect(resolveTraceEligibility({
       findingsType: 'one_time_lawn_treatment',
       typedValues: { work_completed: 'Inspection completed' },
@@ -275,7 +277,17 @@ describe('classification behavior', () => {
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Larvicide applied', 'Barrier treatment'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('mosquito programs are yard geometry — outline overlay with the beds included (owner 2026-08-11)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'mosquito_monthly' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
+    expect(resolveTraceEligibility({ serviceKey: 'mosquito_seasonal' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
+    // identity-less mosquito rows resolve the same geometry by name
+    expect(resolveTraceEligibility({ displayName: 'Mosquito Treatment — Backyard' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
   });
 
   test('tick control is yard geometry and survives its stale snapshot (round 10)', () => {

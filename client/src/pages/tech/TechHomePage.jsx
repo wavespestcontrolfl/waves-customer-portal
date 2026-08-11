@@ -777,10 +777,15 @@ export default function TechHomePage() {
           onClose={() => setZoneTarget(null)}
           /* Shared category detection (mirrors server service-normalizer) —
              a bare lawn|turf regex missed lawn jobs like Weed Control and
-             Dethatching (codex P1 #3038 r3). */
+             Dethatching (codex P1 #3038 r3). Mosquito uses the outline
+             workflow in YARD mode: the traced boundary is turf + landscape
+             beds, saved as captureMode 'yard' (owner 2026-08-11). */
           lawnMode={zoneTarget.traceVariant
             ? zoneTarget.traceVariant === 'outline'
-            : detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
+            : ['lawn', 'mosquito'].includes(
+              detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType)
+            )}
+          yardMode={detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'mosquito'}
         />
       )}
 

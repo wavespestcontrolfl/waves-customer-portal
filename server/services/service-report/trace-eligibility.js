@@ -44,8 +44,13 @@ const FINDINGS_TYPE_RULES = {
     captionKey: 'sprayPerimeter',
     requiresChipMatch: /^(?:insect treatment|disease \/ fungicide treatment|horticultural oil|foliar treatment|pre-emergent bed treatment)$/i,
   },
+  // Mosquito treats the YARD — turf plus the landscape/bedding areas where
+  // mosquitoes harbor — not a building barrier (owner 2026-08-11: same
+  // overlay as lawn, bedding areas included). Outline geometry, captured by
+  // the yard workflow (capture_mode 'yard': boundary trace, no turf-only
+  // highlight mask — the mask would exclude the beds the treatment covers).
   mosquito_event: {
-    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
+    eligible: true, variant: 'outline', captionKey: 'yardCoverage', requiresAppliedWork: true,
   },
   // Flea joins the evidence-conditional lanes (codex P1 r5): interior-only
   // and inspection-only completions are first-class choices on its form.
@@ -148,9 +153,10 @@ const SERVICE_KEY_RULES = {
   // never a property-perimeter application (codex P1 r6).
   bee_wasp_removal: { eligible: false, reason: 'localized_treatment_lane' },
   mud_dauber_removal: { eligible: false, reason: 'localized_treatment_lane' },
-  // mosquito programs
-  mosquito_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  mosquito_seasonal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // mosquito programs — yard geometry (turf + landscape beds), same outline
+  // overlay as lawn (owner 2026-08-11; see the mosquito_event rule above)
+  mosquito_monthly: { eligible: true, variant: 'outline', captionKey: 'yardCoverage' },
+  mosquito_seasonal: { eligible: true, variant: 'outline', captionKey: 'yardCoverage' },
   // Billing construct, not a visit (zero duration, booking disabled) —
   // WaveGuard's actual stops book as the mosquito programs above (codex
   // P2 r4).
@@ -267,11 +273,15 @@ const ELIGIBLE_NAME_RES = [
   // tick/flea rows must resolve the same outline geometry their stable
   // rules define, not the generic spray token below.
   [/\b(?:fire\s*ants?|ticks?|fleas?)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  // Mosquito is yard geometry (owner 2026-08-11) — ranked above the generic
+  // spray token so identity-less mosquito rows resolve the same outline
+  // their stable keys define.
+  [/\bmosquito(?:es)?\b/i, { variant: 'outline', captionKey: 'yardCoverage' }],
   // Ranked ABOVE the bait check below: combined names like "Quarterly
   // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
   // real (codex P1 r1). A pure "Termite Bait" name matches neither of
   // these and falls to the bait rule.
-  [/\b(?:pest|mosquito|spray|trees?|shrubs?|roach(?:es)?|ants?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+  [/\b(?:pest|spray|trees?|shrubs?|roach(?:es)?|ants?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
 ];
 const TRAILING_INELIGIBLE_NAME_RES = [
   [/\bbait\b/i, 'bait_station_lane'],
@@ -549,7 +559,9 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
   // (legacy clients) passes.
   const modeMismatchBlock = (variant) => {
     if (captureMode === undefined || captureMode === null || captureMode === '') return null;
-    const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight';
+    // 'yard' is the mosquito outline capture (owner 2026-08-11) — an area
+    // claim like the lawn modes, so it satisfies an 'outline' verdict.
+    const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight' || captureMode === 'yard';
     const wantsLawn = variant === 'outline';
     if (lawnMode === wantsLawn) return null;
     return {
