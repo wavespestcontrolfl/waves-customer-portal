@@ -29,6 +29,11 @@ const VALID_SOURCES = Object.freeze([
 // dedupes by finding the grant's marker inside prior reversal notes.
 const WAVEGUARD_EXTENSION_CREDIT_BY = 'system:waveguard_tier_extension';
 const WAVEGUARD_EXTENSION_REVERSAL_BY = 'system:waveguard_tier_extension_reversal';
+// Repayment restore (a refunded prepay invoice paid again — lost-dispute
+// revival): re-issues what the reversal clawed, marker-for-marker. The
+// three identities form a per-marker event log whose LAST event decides
+// what runs next: grant/restore → clawable; reversal → restorable.
+const WAVEGUARD_EXTENSION_RESTORE_BY = 'system:waveguard_tier_extension_restore';
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -62,7 +67,7 @@ async function getLedger(customerId, { limit = 100 } = {}) {
  */
 async function postCreditMovement({
   customerId, delta, source, invoiceId = null, referralId = null,
-  note = null, createdBy = null,
+  note = null, createdBy = null, stampInsertOrder = false,
 }, trx = null) {
   const amount = round2(delta);
   if (!customerId) throw new Error('customerId is required');
@@ -114,6 +119,14 @@ async function postCreditMovement({
       referral_id: referralId,
       note: note ? String(note).slice(0, 1000) : null,
       created_by: createdBy ? String(createdBy).slice(0, 200) : null,
+      // stampInsertOrder: event-log writers (the WaveGuard extension
+      // grant/claw/restore classes) order rows by created_at, but the
+      // column default now() is TRANSACTION-START time — a txn that
+      // started early and committed late would stamp its row older than
+      // an event it actually followed. These writers all hold the
+      // customer row FOR UPDATE at insert, so clock_timestamp() taken
+      // here is strictly ordered by lock acquisition = true event order.
+      ...(stampInsertOrder ? { created_at: t.raw('clock_timestamp()') } : {}),
     }).returning('*');
 
     return { balanceAfter, entry };
@@ -581,6 +594,7 @@ module.exports = {
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
   WAVEGUARD_EXTENSION_CREDIT_BY,
   WAVEGUARD_EXTENSION_REVERSAL_BY,
+  WAVEGUARD_EXTENSION_RESTORE_BY,
   round2,
   getBalance,
   getLedger,

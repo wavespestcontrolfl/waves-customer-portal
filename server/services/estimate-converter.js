@@ -1121,6 +1121,9 @@ async function applyFrozenExistingServiceExtension({
         invoiceId: prepayInvoiceByTerm.get(termId) || null,
         note: `WaveGuard ${activatedTier} extension — prepaid-term difference (term ${termId}, estimate ${estimateId})`,
         createdBy: WAVEGUARD_EXTENSION_CREDIT_BY,
+        // First event of the marker's grant/claw/restore log — insert-order
+        // stamped so the log's created_at ordering is the true event order.
+        stampInsertOrder: true,
       }, database.isTransaction ? database : null);
     }
     summary.creditAmount = creditTotal;

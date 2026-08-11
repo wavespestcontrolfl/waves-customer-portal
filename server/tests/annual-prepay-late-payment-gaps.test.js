@@ -14,6 +14,7 @@ jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
   WAVEGUARD_EXTENSION_CREDIT_BY: 'system:waveguard_tier_extension',
   WAVEGUARD_EXTENSION_REVERSAL_BY: 'system:waveguard_tier_extension_reversal',
+  WAVEGUARD_EXTENSION_RESTORE_BY: 'system:waveguard_tier_extension_restore',
 }));
 
 const db = require('../models/db');
@@ -368,8 +369,12 @@ describe('annual prepay late-payment gap fixes', () => {
           query({ first: { id: 'prepay-inv-1', scheduled_service_id: null } }), // visit-invoice hook lookup
         ],
         customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock
           query({ first: { billing_mode: 'per_application' } }), // prior-mode read
           stampModeQ, // billing_mode re-stamp
+        ],
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
         ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
@@ -410,12 +415,16 @@ describe('annual prepay late-payment gap fixes', () => {
       const conn = makeConn({
         'annual_prepay_terms as t': [query({ rows: [bareTerm] })],
         customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
           query({ rows: [grant] }), // sweep grant scan
           query({ rows: [{ ...grant, id: 'ledger-1' }] }), // reversal: grants for term+visit
           query({ rows: [] }), // reversal: existing reversal notes
         ],
         invoices: [query({ first: { id: 'inv-1', status: 'refunded' } })],
-        customers: [query({ first: { id: 'cust-1', account_credits: '120.00' } })],
+        customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock
+          query({ first: { id: 'cust-1', account_credits: '120.00' } }),
+        ],
       });
 
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
@@ -469,8 +478,9 @@ describe('annual prepay late-payment gap fixes', () => {
         ],
         customer_credit_ledger: [
           query({ rows: [extGrant] }), // extension grant class scan
-          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: grants for the term
-          query({ rows: [] }), // reversal: prior reversal notes
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: per-term grants
+          query({ rows: [] }), // reversal: legacy-shape grants — none
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: marker events (grant-last → clawable)
         ],
         invoices: [
           query({ first: { id: 'inv-prepay', status: 'refunded' } }), // unlocked pre-check
@@ -765,6 +775,7 @@ describe('annual prepay late-payment gap fixes', () => {
           query({ rows: [] }), // decided-coverage select
         ],
         customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock (revival leg)
           query({ columnInfo: {} }), // syncCustomerRenewalDate probe
           query({ first: { billing_mode: null } }), // stamp prior-mode read
           stampModeQ, // billing_mode stamp
@@ -777,7 +788,10 @@ describe('annual prepay late-payment gap fixes', () => {
         payments: [query({
           rows: [{ id: 'pay-dues-1', status: 'paid', amount: '89.00', payment_date: '2026-07-06', refund_status: null, refund_amount: null }],
         })],
-        customer_credit_ledger: [query({ first: undefined })], // dues dedupe check
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
+          query({ first: undefined }), // dues dedupe check
+        ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
       db.mockImplementation(() => query({ columnInfo: SS_COLS }));
@@ -830,9 +844,15 @@ describe('annual prepay late-payment gap fixes', () => {
         // stampAnnualPrepayBillingMode / applyPrepaidCoverageForTerm — any
         // attempt would consume the dues row lock below and fail the credit
         // assertion.
-        customers: [query({ first: { id: 'cust-1' } })], // dues credit row lock
+        customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock (not window-gated)
+          query({ first: { id: 'cust-1' } }), // dues credit row lock
+        ],
         payments: [query({ rows: [PAID_DUES] })],
-        customer_credit_ledger: [query({ first: undefined })],
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
+          query({ first: undefined }), // dues dedupe check
+        ],
         invoices: [query({ first: { id: 'prepay-inv-1', scheduled_service_id: null } })], // visit-hook lookup
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };

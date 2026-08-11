@@ -3011,6 +3011,15 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // commit) keeps the reprice out until the invoice is visible to the
     // extension's probes.
     if (scheduledServiceId) {
+      // Lock-order guard (codex r3 P1): customer key-share BEFORE the visit
+      // row lock — the create() below inserts the invoice on this trx and
+      // its customer FK takes KEY SHARE regardless; taking it first keeps
+      // the global customer→scheduled-service order the extension accept
+      // path establishes (customer FOR UPDATE at entry, then visit rows).
+      await trx.raw(
+        'SELECT id FROM customers WHERE id = ? FOR KEY SHARE',
+        [project.customer_id],
+      );
       await trx('scheduled_services')
         .where({ id: scheduledServiceId })
         .forUpdate()

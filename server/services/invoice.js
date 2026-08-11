@@ -1627,6 +1627,15 @@ const InvoiceService = {
     // explicit-amount path bills the operator's figure and needs no lock.
     const buildParams = async (conn = null) => {
       if (replayFromScheduled && conn) {
+        // Lock-order guard (codex r3 P1): customer key-share BEFORE the
+        // visit row lock — the invoice insert's customer FK takes KEY SHARE
+        // anyway, and taking it first keeps the global customer→scheduled-
+        // service order the extension accept path establishes (it locks the
+        // customer FOR UPDATE at entry, then the visit rows).
+        await conn.raw(
+          "SELECT id FROM customers WHERE id = ? FOR KEY SHARE",
+          [sr.customer_id],
+        );
         const lockedRow = await conn("scheduled_services")
           .where({ id: sr.scheduled_service_id })
           .forUpdate()
