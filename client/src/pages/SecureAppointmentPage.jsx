@@ -118,6 +118,13 @@ export default function SecureAppointmentPage() {
   // must be picked before the card form appears on plan-bearing pages.
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [planBusy, setPlanBusy] = useState(false);
+  // Latches the disclosure version carried by the payload THIS tab rendered
+  // (latched, not live: a post-secure refresh nulls the note, but the
+  // consent echo must reflect what was shown when the customer agreed).
+  const stickyVersionRef = useRef(null);
+  useEffect(() => {
+    if (data?.stickyDisclosureVersion) stickyVersionRef.current = data.stickyDisclosureVersion;
+  }, [data]);
 
   // Re-pull the page payload (plan availability can change under us — the
   // office edits the visit, a term appears). Server truth wins.
@@ -162,7 +169,10 @@ export default function SecureAppointmentPage() {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setupIntentId }),
+      // Echo the disclosure version THIS tab's render carried — the server
+      // stamps the sticky-window consent marker from it, so it must come
+      // from the page state the customer actually saw, never a constant.
+      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: stickyVersionRef.current || undefined }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

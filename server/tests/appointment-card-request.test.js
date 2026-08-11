@@ -657,6 +657,30 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
+  test("the sticky-window consent marker is stamped from the completing tab's echoed disclosure version", async () => {
+    // Frozen fee terms present (stamped at render) — the consent stamp rides them.
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, no_show_fee_amount: '49.00', cancel_window_hours: 24 });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: true });
+    const completed = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completed.sticky_window_disclosed).toBe(true);
+    expect(completed.fee_agreed_at).toEqual(expect.any(Date));
+  });
+
+  test('a missing/legacy echo (old bundle, webhook backstop) stamps NON-sticky alongside the consent — never chargeable under unseen terms', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, no_show_fee_amount: '49.00', cancel_window_hours: 24 });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    const completed = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completed.sticky_window_disclosed).toBe(false);
+  });
+
   test('happy path: saves, records consent, enrolls, marks the row completed', async () => {
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', ip: '1.2.3.4', userAgent: 'jest' });
     expect(res).toEqual({ ok: true });
@@ -918,11 +942,11 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(stamp.no_show_fee_amount.bindings).toContain(75);
     expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
     expect(stamp.cancel_window_hours.bindings).toContain(24);
-    // The sticky-window marker is monotonic like the terms (Codex #3342 r2
-    // P1): SEEDED true only on the row's first-ever disclosure (terms still
-    // NULL); a row first disclosed pre-deploy is never upgraded by a later
-    // render from another tab or a link scanner.
-    expect(String(stamp.sticky_window_disclosed.__raw)).toContain('CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END');
+    // The render must NOT write the sticky-window marker (Codex #3342 r5
+    // P1): render-time seeding poisons rows across a rolling deploy. The
+    // marker is consent-time-only, stamped by the completion tail from the
+    // completing tab's echoed disclosure version.
+    expect(stamp.sticky_window_disclosed).toBeUndefined();
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
     expect(stamp.fee_agreed_at).toBeUndefined();
   });
@@ -1218,7 +1242,10 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
     expect(Object.keys(res).sort()).toEqual([
       // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
       // ruling) — present in ALL states, unrelated to the plan gate this test pins.
-      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+      // stickyDisclosureVersion joined 2026-08-10 (sticky cancel window) —
+      // the completing tab's echo token; present in the base payload in
+      // ALL states, unrelated to the plan gate this test pins.
+      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
     ]);
   });
 

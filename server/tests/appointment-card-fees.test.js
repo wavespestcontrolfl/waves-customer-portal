@@ -470,6 +470,14 @@ describe('sticky window on the cancellation path (reschedule-then-cancel dodge)'
     expect(Number(res.feeAmount)).toBe(49);
   });
 
+  test('the PREVIEW reports no fee once the saved card is removed — matching the charge path\'s revocation release', async () => {
+    mockApptTime = new Date(Date.now() + 240 * HOUR);
+    mockTableHandlers = handlersWith({ pmRow: null });
+    mockFindSticky.mockResolvedValueOnce(STICKY());
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: false });
+  });
+
   test('preview sticky lookup FAILURE surfaces fee-may-apply unresolved, never a silent no-fee', async () => {
     mockApptTime = new Date(Date.now() + 240 * HOUR);
     mockFindSticky.mockRejectedValueOnce(new Error('reschedule_log down'));

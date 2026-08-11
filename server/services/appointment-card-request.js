@@ -720,14 +720,9 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
                 'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
                 [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
               ),
-              // The invitation's fee sentence discloses the sticky rule —
-              // same monotonic seeding as the /secure render (Codex #3342
-              // r2 P1): first-ever disclosure seeds true; a row already
-              // disclosed (possibly pre-deploy, without the sentence) is
-              // never upgraded.
-              sticky_window_disclosed: db.raw(
-                'CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END',
-              ),
+              // Deliberately NO sticky marker write here either (Codex
+              // #3342 r5 P1) — the marker is consent-time-only, written by
+              // finishVerifiedSecureCapture from the completing tab's echo.
               updated_at: new Date(),
             });
           if (stampedRows !== 1) {
@@ -843,7 +838,7 @@ async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason 
 
 // POST /secure/:token completion. Verify live, then the shared completion
 // tail below.
-async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null }) {
+async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
   if (request.status === 'completed' || request.status === 'satisfied') {
@@ -858,6 +853,7 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
     setupIntentId: verified.setupIntentId,
     ip,
     userAgent,
+    disclosureVersion,
   });
 }
 
@@ -912,7 +908,18 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
 // enrolling the wrong party); the SetupIntent stays succeeded at Stripe,
 // so a retry (page re-POST or webhook redelivery) completes once the
 // payer state is readable.
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null }) {
+// The completing tab's attested disclosure version — the ONLY writer of the
+// sticky-window policy marker on this rail (Codex #3342 r5 P1): render-time
+// seeding was removable poison during a rolling deploy (a new worker's seed
+// survives an old worker's later old-copy render), so the enforceable bit is
+// written atomically WITH fee_agreed_at from the echo of the tab that
+// actually consented. The webhook completion backstop carries no echo and
+// stamps non-sticky — the browser died, so nothing stronger is provable.
+// Keep the literal in lockstep with CARD_HOLD_STICKY_DISCLOSURE_VERSION in
+// estimate-card-holds.js.
+const STICKY_DISCLOSURE_VERSION = 'sticky_v1';
+
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
     .first('id', 'status', 'scheduled_date', 'estimated_price');
@@ -1107,7 +1114,13 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       const disclosed = await db('appointment_card_requests')
         .where({ id: request.id })
         .first('no_show_fee_amount');
-      if (Number(disclosed?.no_show_fee_amount) > 0) frozenFeeTerms.fee_agreed_at = new Date();
+      if (Number(disclosed?.no_show_fee_amount) > 0) {
+        frozenFeeTerms.fee_agreed_at = new Date();
+        // Sticky marker rides ONLY with consent, from the completing tab's
+        // own echo — a missing/legacy echo (old bundle, webhook backstop)
+        // stamps non-sticky. See STICKY_DISCLOSURE_VERSION above.
+        frozenFeeTerms.sticky_window_disclosed = disclosureVersion === STICKY_DISCLOSURE_VERSION;
+      }
     } catch (err) {
       logger.warn(`[appt-card-request] disclosed-terms read failed for request ${request.id} — completing without fee consent stamp: ${err.message}`);
     }
@@ -1160,6 +1173,10 @@ async function loadSecureCardPageData(token) {
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
     cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
+    // Echo token for the completing tab: present exactly when the rendered
+    // note carries the sticky-window sentence; the client returns it on
+    // POST /complete and the marker is stamped from that echo.
+    stickyDisclosureVersion: visitPriced && feeDisclosure ? STICKY_DISCLOSURE_VERSION : null,
   };
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
@@ -1353,15 +1370,11 @@ async function loadSecureCardPageData(token) {
         'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
         [feeDisclosure.windowHours, feeDisclosure.windowHours],
       );
-      // This render's note discloses the sticky rule — but the marker must
-      // stay MONOTONIC like the LEAST-stamped terms above (Codex #3342 r2
-      // P1): completion can't know which open tab's render was accepted, so
-      // sticky may only SEED on the row's first-ever disclosure (fee terms
-      // still NULL). A row first disclosed pre-deploy keeps false forever —
-      // a later GET (other tab, link scanner) never upgrades it.
-      disclosure.sticky_window_disclosed = db.raw(
-        'CASE WHEN cancel_window_hours IS NULL THEN true ELSE sticky_window_disclosed END',
-      );
+      // Deliberately NO sticky marker write at render (Codex #3342 r5 P1):
+      // render-time seeding poisons rows during a rolling deploy (a new
+      // worker's seed survives an old worker's later old-copy render). The
+      // marker is written ONLY at completion, from the consenting tab's
+      // attested echo — see finishVerifiedSecureCapture.
     } else {
       disclosure.no_show_fee_amount = null;
       disclosure.cancel_window_hours = 0;
@@ -2176,6 +2189,15 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
         notBefore: request.fee_agreed_at,
         currentStart: previewStartLive ? new Date(previewStartMs) : null,
       }));
+      if (feeApplies) {
+        // Card removal is revocation on the charge path — the preview must
+        // agree (Codex #3342 r5 P2): a removed card means the charge leg
+        // closes released, so no fee prompt.
+        const pmRow = await db('payment_methods')
+          .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+          .first('id');
+        if (!pmRow) feeApplies = false;
+      }
     } catch (err) {
       logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
       return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };

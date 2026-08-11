@@ -106,6 +106,9 @@ router.post('/:token/complete', async (req, res) => {
       setupIntentId: typeof req.body?.setupIntentId === 'string' ? req.body.setupIntentId : null,
       ip: req.ip || null,
       userAgent: req.headers['user-agent'] || null,
+      // The completing tab's echo of the disclosure version its render
+      // carried — sole writer of the sticky-window policy marker.
+      disclosureVersion: typeof req.body?.stickyDisclosureVersion === 'string' ? req.body.stickyDisclosureVersion : null,
     });
     if (!result.ok) {
       if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });

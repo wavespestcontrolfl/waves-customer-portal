@@ -883,9 +883,15 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
   });
 
   it('the cancel PREVIEW mirrors the sticky verdict (operator prompt must not lie)', async () => {
-    stubDb({ ...holdRow, no_show_fee_amount: 49 }, { rescheduleLog: [lateCustomerMove] });
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(farStart);
     expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+  });
+
+  it('the PREVIEW reports no fee once the card is removed — matching the handler\'s revocation release', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, null], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
   });
 
   it('the mint stamps sticky_window_disclosed ONLY for the attested disclosure version — stale clients stay non-sticky', async () => {
@@ -982,6 +988,14 @@ describe('chargeNoShowFee — staleness guard (fee only for a FRESH missed visit
     expect(r).toEqual(expect.objectContaining({ charged: false, reason: 'no_show_start_unresolved' }));
     expect(mockChargeOffSession).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('attachSelfHeal:false never resurrects a removed card — the charge simply proceeds against the pm id (Codex #3342 r5)', async () => {
+    stubDb([HELD]); // hold lookup only — NO pm row consulted, no attach
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'late_cancel', serviceStart: new Date(Date.now() - 3600000), attachSelfHeal: false });
+    expect(r).toEqual(expect.objectContaining({ charged: true }));
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
   it('a caller-supplied fresh serviceStart skips the lookup and charges', async () => {

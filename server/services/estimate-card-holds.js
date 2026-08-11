@@ -710,7 +710,11 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
 // Charge the flat fee against the held card (face value, off-session). The fee
 // is read from the FROZEN hold row, not live constants. Idempotent on the hold
 // row; never throws into the host flow.
-async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
+// attachSelfHeal: the sticky cancel branch passes false (Codex #3342 r5 P1)
+// — card removal is revocation there, and the self-heal below would
+// resurrect a card removed in the check-to-charge gap. All other legs keep
+// the historical self-heal behavior.
+async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date(), attachSelfHeal = true }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
@@ -765,7 +769,12 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
     // Stripe customer yet and an off-session charge would fail forever — attach
     // it first (idempotent). The completion path gets this via
     // resolveHoldPaymentMethodRowId; the fee path charges the pm id directly.
-    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+    // Skipped for the sticky cancel branch (revocation semantics): a card
+    // removed in the check-to-charge gap then simply fails the off-session
+    // charge below — never resurrected.
+    if (attachSelfHeal) {
+      await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
+    }
     paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
       paymentMethodId: hold.stripe_payment_method_id,
@@ -1086,8 +1095,10 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     }
     // Charge against the CURRENT start — the visit being cancelled is the
     // live row (verified live just above), so the fee path's staleness
-    // guard judges THIS cancel's freshness.
-    return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
+    // guard judges THIS cancel's freshness. No attach self-heal: a card
+    // removed between the revocation check above and this charge must fail
+    // the charge, never be resurrected.
+    return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now, attachSelfHeal: false });
   }
   const startPassed = startMs != null && startMs <= now.getTime();
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
@@ -1221,8 +1232,18 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
         notBefore: hold.held_at,
         currentStart: start ? new Date(start) : null,
       }));
+      if (feeApplies) {
+        // Card removal is revocation on the charge path — the preview must
+        // agree (Codex #3342 r5 P2): the handler releases free when the
+        // local payment_methods row is gone, so no fee prompt.
+        const pmRow = await db('payment_methods')
+          .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+          .first('id');
+        if (!pmRow) feeApplies = false;
+      }
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed', { error: err.message });
+      feeApplies = false;
     }
   }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
