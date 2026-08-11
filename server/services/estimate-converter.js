@@ -2090,6 +2090,16 @@ function remainingUnitCatalogKey(svc = {}) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // Recurring palm (owner ruling 2026-08-11): the semiannual program row
+  // ships in the same PR (20260811000010). Estimator palm lines carry the
+  // label 'Palm Injection', which the completion resolver's short-name
+  // fallback uniquely matches to the ONE-TIME palm_injection row and its
+  // token_only profile — the id link routes the recurring program to its
+  // own typed recurring profile instead (codex #3349 P1). Only recurring
+  // remaining units reach this function, so one-time palm lines are
+  // unaffected; an absent row (env not yet migrated) degrades to the
+  // existing name-only warn path.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection') return 'palm_injection_semiannual';
   // NOTE (2026-08-09): trap_only_retainer deliberately has NO branch
   // here. The v1 mapper persists retainers under oneTime.specItems (not
   // RECURRING_SERVICES) and the pricer rows carry no `annual`, so this
@@ -2344,6 +2354,18 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
+  // Palm Injection (owner ruling 2026-08-11): the estimate builder's palm
+  // supplement carries visitsPerYear 2 but NO frequency field
+  // (estimate-public upsertSupplement 'palm_injection'), so generic
+  // inference would resolve the accepted PLAN's fallback frequency
+  // (quarterly/monthly/…) and the semiannual gate would reject it —
+  // seeding nothing (codex #3349 P1). Two palm applications a year has
+  // exactly one cadence; force it ahead of inference, mirroring the
+  // seasonal-mosquito rule above.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+    && visitsPerYearForRecurringService(svc) === 2) {
+    return 'semiannual';
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
@@ -2366,6 +2388,15 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
+  // Same forced-palm rule as converterFollowUpSeedingPattern above (owner
+  // ruling 2026-08-11): a builder palm line has no frequency field, so raw
+  // inference would record the plan's fallback cadence on the prepay term
+  // while the actual series seeds semiannual — the payment-time coverage
+  // refresh would then seed mismatched visits over the real series.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+    && visitsPerYearForRecurringService(svc) === 2) {
+    return 'semiannual';
   }
   return RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
@@ -3341,7 +3372,46 @@ const EstimateConverter = {
               noteKind: 'mosquito program',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits]) {
+        // Lawn/palm promotion (codex #3349 P1, owner rulings 2026-08-10/11):
+        // with lawn and palm now in the seeding allowlist, a lawn or palm
+        // line beside a non-combining reserved plan (e.g. quarterly pest +
+        // 9-visit lawn) sits in `remaining` and — per the adjudicated
+        // 2026-06-12 semantic — was never scheduled on the reservation
+        // path, even though the accept bills the program. Same remedy
+        // shape as the termite/bond and mosquito promotions above: a
+        // billed program must schedule. The pattern gate reuses the
+        // allowlist end-to-end, so a legacy line that would not seed does
+        // not promote either (office scheduling keeps its semantics).
+        const LAWN_CADENCE_CATALOG_KEYS = {
+          quarterly: 'lawn_care_quarterly',
+          bimonthly: 'lawn_care_recurring',
+          every_6_weeks: 'lawn_care_6week',
+          monthly: 'lawn_care_monthly',
+        };
+        const promotedLawnPalmUnits = (remaining || [])
+          .filter((line) => {
+            const fam = RecurringAppointmentSeeder.serviceKeyFor(line);
+            if (fam !== 'lawn_care' && fam !== 'palm_injection') return false;
+            const lineName = line.name || line.serviceName || line.service_name
+              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+          })
+          .map((line) => {
+            const fam = RecurringAppointmentSeeder.serviceKeyFor(line);
+            const lineName = line.name || line.serviceName || line.service_name
+              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return {
+              // Normalized name ON the unit (same rule as the mosquito
+              // promotion): the insert below reads only unit.service.name.
+              service: { ...line, name: lineName },
+              catalogServiceKey: fam === 'palm_injection'
+                ? 'palm_injection_semiannual'
+                : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
+              noteKind: fam === 'palm_injection' ? 'palm injection program' : 'lawn program',
+            };
+          });
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
           const unitKey = recurringServiceKey({ name: unit.service.name });

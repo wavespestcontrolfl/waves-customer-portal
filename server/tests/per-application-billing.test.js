@@ -188,6 +188,20 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(supportsConverterFollowUpSeeding({ ...semiannualLine, frequency: 'monthly' }, {}, 'monthly')).toBe(false);
     expect(supportsConverterFollowUpSeeding(semiannualLine, {}, 'quarterly')).toBe(false);
   });
+
+  test('builder palm line (visitsPerYear 2, NO frequency) beats the plan fallback — forced semiannual (codex #3349 P1)', () => {
+    // estimate-public's palm supplement carries no frequency field, so
+    // without the forced rule the accepted PLAN's cadence (quarterly here)
+    // would win inference and the semiannual gate would seed nothing.
+    const builderLine = { service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(builderLine, { service_type: 'Palm Injection' }, 'quarterly')).toBe('semiannual');
+    expect(converterFollowUpSeedingPattern(builderLine, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
+  });
+
+  test('the forced rule keys on EXACTLY 2 visits — other counts fall through to inference and decline', () => {
+    const fourVisits = { service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 4 };
+    expect(converterFollowUpSeedingPattern(fourVisits, { service_type: 'Palm Injection' }, 'quarterly')).toBe(null);
+  });
 });
 
 describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27)', () => {

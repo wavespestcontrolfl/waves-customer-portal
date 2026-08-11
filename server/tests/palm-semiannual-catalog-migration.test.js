@@ -136,6 +136,19 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern(line, { service_type: row.name }, null)).toBe('semiannual');
   });
 
+  test('recurring palm remaining-units link the SEMIANNUAL catalog identity, not the one-time row (codex #3349 P1)', () => {
+    // Estimator palm lines carry the label 'Palm Injection', which the
+    // completion resolver's short-name fallback uniquely matches to the
+    // ONE-TIME palm_injection row (token_only profile). The id link must
+    // route the recurring program to its own typed recurring profile.
+    expect(EstimateConverter.remainingUnitCatalogKey({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 })).toBe(KEY);
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Palm Injection Program' })).toBe(KEY);
+    // Lawn remaining-units deliberately have NO branch: accepted lawn line
+    // names are exactly the catalog row names, so name-resolution already
+    // lands the right row.
+    expect(EstimateConverter.remainingUnitCatalogKey({ name: 'Bi-Monthly Lawn Care Service' })).toBe(null);
+  });
+
   test('END-TO-END: a scheduled visit with NO service_id resolves the typed palm profile by name', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
