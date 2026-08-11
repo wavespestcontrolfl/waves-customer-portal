@@ -248,16 +248,24 @@ async function markEnRoute(serviceId, opts = {}) {
   const scheduledDayStr = String(
     svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || ''
   ).slice(0, 10);
+  // Operational-status gate: completion persists status BEFORE the
+  // best-effort markComplete tracker flip, so a completed row can
+  // legitimately sit at on_property — healing it would erase a finished
+  // visit's timestamps and re-text the customer. Only non-terminal rows
+  // qualify, and the observed status joins the UPDATE predicate below so a
+  // completion landing between this read and the write makes the heal miss.
+  const healableStatus = !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status));
   if (!opts._afterStaleHeal
+    && healableStatus
     && ['en_route', 'on_property'].includes(svc.track_state)
     && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr)) {
-    const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time]
+    const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time, svc.check_in_time]
       .map((v) => (v ? new Date(v).getTime() : NaN))
       .filter((ms) => Number.isFinite(ms));
     if (evidenceMs.length && etDateString(new Date(Math.max(...evidenceMs))) < scheduledDayStr) {
       const { LIVE_LIFECYCLE_RESET } = require('./rebooker');
       const healed = await db('scheduled_services')
-        .where({ id: serviceId, track_state: svc.track_state })
+        .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
         .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
       if (healed > 0) {
         logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);

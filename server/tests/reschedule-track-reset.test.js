@@ -129,7 +129,7 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(result.alreadyEnRoute).toBe(false);
     expect(result.enRouteAt).toEqual(expect.any(Date));
     // The heal wrote the full lifecycle rewind, guarded on the observed state.
-    expect(healUpdate.where).toHaveBeenCalledWith({ id: 'job-stale', track_state: 'on_property' });
+    expect(healUpdate.where).toHaveBeenCalledWith({ id: 'job-stale', track_state: 'on_property', status: 'pending' });
     expect(healUpdate.update.mock.calls[0][0]).toMatchObject(LIVE_LIFECYCLE_RESET);
     // The fresh flip stamped en_route_at.
     expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
@@ -225,6 +225,59 @@ describe('markEnRoute stale-attempt self-heal', () => {
 
     expect(result.state).toBe('complete');
     expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('completed status with a stuck on_property track_state never heals', async () => {
+    // Completion persists operational status BEFORE the best-effort
+    // markComplete tracker flip — a crash between the two leaves exactly
+    // this row. It is a finished visit: no rewind, no SMS.
+    const stuckDoneSvc = {
+      id: 'job-stuck-done',
+      customer_id: 'cust-6',
+      technician_id: null,
+      status: 'completed',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      actual_start_time: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(stuckDoneSvc));
+
+    const result = await trackTransitions.markEnRoute('job-stuck-done');
+
+    expect(result.state).toBe('on_property');
+    expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
+  });
+
+  test('stale check_in_time alone is enough evidence to heal', async () => {
+    const checkInOnlySvc = {
+      id: 'job-checkin',
+      customer_id: 'cust-7',
+      technician_id: null,
+      status: 'pending',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      en_route_at: null,
+      arrived_at: null,
+      actual_start_time: null,
+      check_in_time: isoDaysAgo(7),
+      track_sms_sent_at: null,
+      cancelled_at: null,
+    };
+    const healedSvc = { ...checkInOnlySvc, track_state: 'scheduled', check_in_time: null };
+    const healUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(checkInOnlySvc))
+      .mockReturnValueOnce(healUpdate)
+      .mockReturnValueOnce(query(healedSvc))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markEnRoute('job-checkin');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(healUpdate.update.mock.calls[0][0]).toMatchObject(LIVE_LIFECYCLE_RESET);
   });
 });
 
