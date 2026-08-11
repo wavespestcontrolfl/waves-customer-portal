@@ -282,6 +282,21 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     if (['cancelled', 'skipped'].includes(String(row.status || ''))) {
       return false;
     }
+    // Fresh rejection re-check immediately before the side effects: the
+    // first read above may be arbitrarily stale by the time a sweep batch
+    // reaches this row, and a just-committed cancel/skip must win
+    // (Codex #3361 r8 P1). A cancel landing INSIDE the hook window is
+    // handled below by the status-guarded stamp plus the cancellation
+    // paths' own compensating seams (invoice void + credit reversal run
+    // on every cancel/skip transition; a lead converted moments before a
+    // cancel matches ordinary book-then-cancel semantics).
+    const fresh = await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('status', 'customer_confirmed');
+    if (!fresh || fresh.customer_confirmed
+      || ['cancelled', 'skipped'].includes(String(fresh.status || ''))) {
+      return false;
+    }
     // Hook FIRST, stamp on success: the customer_confirmed stamp is the
     // completion marker, so stamping before the hook would make a
     // transiently-failed leg unretryable forever (Codex #3361 r3 P1).
@@ -298,6 +313,9 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     }
     const stamped = await db('scheduled_services')
       .where({ id: serviceId, customer_confirmed: false })
+      // A rejection that committed during the hook window wins: never
+      // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
+      .whereNotIn('status', ['cancelled', 'skipped'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
     return stamped > 0;
   } catch (e) {

@@ -11119,7 +11119,12 @@ const CallRecordingProcessor = {
                   // a won deal and promote funnel metrics off a free visit —
                   // judged from the REUSED row's own identity (codex #3231:
                   // a reprocess may resolve differently than what booked).
-                  if (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised) {
+                  // A SKIPPED reused row was a REJECTED booking (the dispatch
+                  // Skip action — same rejection semantics the activation
+                  // helper honors): a replay must not close its lead as won
+                  // or spawn its follow-up visit (Codex #3361 r8 P1).
+                  const primaryRowSkipped = String(primaryRow.status || '') === 'skipped';
+                  if (!primaryRowSkipped && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11131,7 +11136,7 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
-                  } else {
+                  } else if (!primaryRowSkipped) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   }
@@ -11582,8 +11587,11 @@ const CallRecordingProcessor = {
                   // the lead must still convert (idempotent, ownership-guarded) —
                   // unless this is a covered re-service ($0 callback, not a
                   // sale — judged from the reused row's own identity, codex
-                  // #3231).
-                  if (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised) {
+                  // #3231) or a SKIPPED row (a rejected booking; a replay
+                  // must not close its lead or spawn its follow-up visit,
+                  // Codex #3361 r8 P1).
+                  const existingByKeySkipped = String(existingByKey.status || '') === 'skipped';
+                  if (!existingByKeySkipped && (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11594,7 +11602,9 @@ const CallRecordingProcessor = {
                   }
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
-                  followUpCreated = await ensureCallFollowUpVisit(existingByKey);
+                  if (!existingByKeySkipped) {
+                    followUpCreated = await ensureCallFollowUpVisit(existingByKey);
+                  }
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -11763,6 +11773,13 @@ const CallRecordingProcessor = {
                       confirmationDelivered = await db('sms_log')
                         .where({ customer_id: customerId, message_type: 'confirmation', direction: 'outbound' })
                         .where('created_at', '>=', svc.created_at || new Date(0))
+                        // Provider-ACCEPTED rows only (Codex #3361 r8 P2): the
+                        // quiet-hours rail inserts status='scheduled'
+                        // confirmation rows before Twilio ever accepts them —
+                        // a queued secondary copy is not evidence the primary
+                        // customer was reached. Same genuine-SID pattern the
+                        // cancellation-notice worker uses.
+                        .whereRaw("twilio_sid ~ '^(SM|MM)'")
                         .first('id');
                     }
                     if (!confirmationDelivered) {
