@@ -3894,14 +3894,21 @@ const EstimateConverter = {
           // concurrent accepts serialize per customer + service family and
           // the loser skips instead of minting a second series.
           const outcome = await runSeedingStep(async (trx) => {
-            // Gate on the pattern the seeder will ACTUALLY use, not raw
-            // inference (codex #3349 P1) — same rule the reserved path
-            // already applies. A unit that seeds NO series (a builder 1x
-            // palm line infers 'annual'/the plan fallback; seedingPattern
-            // is null) cannot mint a duplicate series, and family-matching
-            // it against an existing semiannual palm series would swallow
-            // a legitimate one-time appointment.
-            if (seedingPattern) {
+            // The guard runs whenever a series would seed (seedingPattern)
+            // OR the unit still reads as recurring (raw pattern) — with
+            // exactly ONE bypass: the builder's one-application palm line
+            // (visitsPerYear 1, inferring 'annual'/the plan fallback while
+            // seedingPattern is null). Family-matching that against an
+            // existing semiannual palm series would swallow a legitimate
+            // one-time appointment (codex #3349 P1). The bypass must NOT
+            // widen to every non-seeding recurring unit (codex r4 P1): a
+            // commercial-lawn line (8 visits) also resolves no seeding
+            // pattern, and skipping its duplicate check would insert a
+            // second appointment beside an active commercial-lawn series
+            // the previous raw-pattern gate correctly caught.
+            const oneApplicationPalm = RecurringAppointmentSeeder.serviceKeyFor(svc) === 'palm_injection'
+              && visitsPerYearForRecurringService(svc) === 1;
+            if (seedingPattern || (pattern && !oneApplicationPalm)) {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: combinedServiceId,

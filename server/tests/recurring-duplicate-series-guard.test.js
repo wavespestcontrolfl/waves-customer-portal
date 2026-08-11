@@ -556,18 +556,24 @@ describe('the series creators consume the guard (source guards)', () => {
     const autoGuard = converterSrc.lastIndexOf('checkActiveSeriesLocked(trx, {');
     const autoInsert = converterSrc.indexOf("trx('scheduled_services').insert(row)", autoGuard);
     expect(autoInsert).toBeGreaterThan(autoGuard);
-    // The auto-schedule guard is gated on the SEEDING pattern, not raw
-    // inference (codex #3349 P1): a builder 1x palm line infers 'annual' or
-    // the plan fallback while seedingPattern is null — it seeds no series,
-    // so it cannot mint a duplicate, and family-matching it against an
-    // active semiannual palm series would swallow the legitimate one-time
-    // appointment. The gate must sit between the seeding step's open and
-    // the locked guard call.
+    // The auto-schedule guard runs whenever a series would seed OR the
+    // unit still reads as recurring, with exactly ONE bypass — the
+    // builder's one-application palm line (codex #3349 P1 + r4 P1): 1x
+    // palm infers 'annual'/the plan fallback while seeding nothing, and
+    // family-matching it against an active semiannual palm series would
+    // swallow a legitimate one-time appointment. The bypass must stay
+    // palm-1x-narrow: a non-seeding COMMERCIAL-lawn unit (8 visits) must
+    // still duplicate-check. The gate sits between the seeding step's
+    // open and the locked guard call.
     const autoStep = converterSrc.lastIndexOf('await runSeedingStep(async (trx) => {', autoGuard);
-    const seedingGate = converterSrc.indexOf('if (seedingPattern) {', autoStep);
+    const seedingGate = converterSrc.indexOf('if (seedingPattern || (pattern && !oneApplicationPalm)) {', autoStep);
     expect(seedingGate).toBeGreaterThan(autoStep);
     expect(seedingGate).toBeLessThan(autoGuard);
-    // Raw-inference gating must not come back on any guard.
+    const bypassDef = converterSrc.indexOf("serviceKeyFor(svc) === 'palm_injection'", autoStep);
+    expect(bypassDef).toBeGreaterThan(autoStep);
+    expect(bypassDef).toBeLessThan(seedingGate);
+    expect(converterSrc.slice(bypassDef, seedingGate)).toContain('visitsPerYearForRecurringService(svc) === 1');
+    // Bare raw-inference gating (the pre-fix shape) must not come back.
     expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
     expect((converterSrc.match(/action: 'recurring_series_skipped'/g) || []).length).toBe(3);

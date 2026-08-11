@@ -329,8 +329,15 @@ exports.down = async function down(knex) {
     // (nothing retained) clears the record entirely (exemplar doctrine).
     const retained = state.services.filter((entry) => entry && retainedKeys.has(entry.key));
     if (retained.length > 0) {
-      await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: [], retained }) });
-      console.warn(`[palm-semiannual] down: recorded ${retained.length} retained row(s) for roll-forward reactivation`);
+      // Retained PROFILE provenance persists too (codex r4 P2): the
+      // retained service's marker profile survives this rollback, and a
+      // later roll-forward must resume tracking it — otherwise a second
+      // rollback (after the references clear) would delete the service row
+      // but skip the now-untracked marker profile, leaving an active
+      // orphan that could silently attach to a future same-key service.
+      const retainedProfiles = state.profiles.filter((key) => retainedKeys.has(key));
+      await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: retainedProfiles, retained }) });
+      console.warn(`[palm-semiannual] down: recorded ${retained.length} retained row(s) (+${retainedProfiles.length} profile(s)) for roll-forward reactivation`);
     } else {
       await knex('system_settings').where({ key: STATE_KEY }).del();
     }

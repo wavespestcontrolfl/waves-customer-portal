@@ -244,13 +244,15 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect((stateValue(db).retained || []).map((e) => e.key)).toEqual([KEY]);
   });
 
-  test('roll-forward: up() after a retaining rollback REACTIVATES the row and resumes tracking it', async () => {
+  test('roll-forward: up() after a retaining rollback REACTIVATES the row and resumes tracking row AND profile', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     const insertedId = svcRow(db).id;
     db.scheduled_services.push({ id: 'v1', service_id: insertedId });
     await migration.down(fakeKnex(db));
     expect(svcRow(db).is_active).toBe(false);
+    // Profile provenance survives the retaining rollback (codex r4 P2).
+    expect(stateValue(db).profiles).toEqual([KEY]);
 
     await migration.up(fakeKnex(db));
     expect(svcRow(db).is_active).toBe(true);
@@ -258,6 +260,23 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     // The reactivated row re-enters the removable set (a future clean
     // rollback can remove it again once nothing references it).
     expect((stateValue(db).services || []).map((e) => e.id)).toContain(insertedId);
+    expect(stateValue(db).profiles).toEqual([KEY]);
+  });
+
+  test('retain → roll-forward → references clear → second rollback removes BOTH row and profile (no orphan marker profile)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const insertedId = svcRow(db).id;
+    db.scheduled_services.push({ id: 'v1', service_id: insertedId });
+    await migration.down(fakeKnex(db));
+    await migration.up(fakeKnex(db));
+    // The visit reference clears (visit completed and archived away).
+    db.scheduled_services = [];
+    await migration.down(fakeKnex(db));
+
+    expect(svcRow(db)).toBeUndefined();
+    expect(profileRow(db)).toBeUndefined();
+    expect(stateValue(db)).toBeUndefined();
   });
 
   test('down() RETAINS on a NAME-ONLY visit reference — no service_id, service_type matches the row name (codex P1)', async () => {
