@@ -590,8 +590,18 @@ async function findActiveRecurringSeries(conn, {
   // requires this module at load time, so a top-level import would cycle.
   let familyKeyOf = (label) => serviceKeyFor({ service_type: label });
   try {
-    const { seedingFamilyKey } = require('./estimate-converter');
-    familyKeyOf = (label) => seedingFamilyKey({}, { service_type: label });
+    const { seedingFamilyKey, isPalmInjectionFamily } = require('./estimate-converter');
+    familyKeyOf = (label) => {
+      const fam = seedingFamilyKey({}, { service_type: label });
+      // Injection vs nutritional are DISTINCT guard identities (codex r21
+      // pre-push P0, second pass): an active nutritional series must never
+      // suppress a paid injection series (or vice versa) just because the
+      // broad family collapses both to palm_injection.
+      if (fam === 'palm_injection') {
+        return isPalmInjectionFamily({}, { service_type: label }) ? 'palm_injection' : 'palm_nutritional';
+      }
+      return fam;
+    };
   } catch { /* seeder-local resolver stands */ }
   const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];

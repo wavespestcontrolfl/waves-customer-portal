@@ -299,6 +299,24 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect(result.matches[0].id).toBe(9);
   });
 
+  test('a NUTRITIONAL palm series never suppresses an injection target — distinct guard identities (codex r21 pre-push P0)', async () => {
+    const { db } = makeLockEnv({
+      parents: [{ id: 11, service_id: null, service_type: 'Palm Tree Nutritional Treatment', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result = await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(result.matches).toHaveLength(0);
+    // …while a nutritional target still matches its own family.
+    const { db: db2 } = makeLockEnv({
+      parents: [{ id: 12, service_id: null, service_type: 'Palm Tree Nutritional Treatment', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result2 = await db2.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Treatment',
+    }));
+    expect(result2.matches).toHaveLength(1);
+  });
+
   test('locks BOTH matcher dimensions when the caller carries service_id AND a label', async () => {
     const { db, rawCalls } = makeLockEnv({ parents: [] });
     await db.transaction((trx) => checkActiveSeriesLocked(trx, {
