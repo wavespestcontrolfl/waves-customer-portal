@@ -10032,6 +10032,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // estimated_price) can never raise what the saved card may be
           // charged past what the customer consented to here.
           acceptedAmount: visitEstimatedPrice,
+          // The accepting client's attested disclosure version — governs
+          // the sticky-window policy marker for saved-method holds (their
+          // only consent surface) and ANDs with the mint marker on SI rows.
+          disclosureVersion: typeof req.body?.cardHoldDisclosureVersion === 'string' ? req.body.cardHoldDisclosureVersion : null,
           trx,
         });
       }

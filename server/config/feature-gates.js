@@ -35,6 +35,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
+ *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *
@@ -82,6 +83,16 @@ const gates = {
   // disclosed amount is enforceable the day the gate lights. Kill switch:
   // unset or any non-'true' value.
   apptCardNoShowFee: process.env.GATE_APPT_CARD_NO_SHOW_FEE === 'true',
+
+  // Sticky cancel window (owner ruling 2026-08-10): a customer reschedule
+  // made inside the late-cancel fee window keeps a later cancel chargeable —
+  // closes the reschedule-then-cancel fee dodge on BOTH saved-card rails.
+  // Money gate: strict opt-in in EVERY environment; while dark, every
+  // cancel/preview/reminder path is byte-identical to today (only the
+  // updated disclosure copy is live). Enforcement additionally requires the
+  // per-row sticky_window_disclosed consent marker, so flipping this never
+  // touches legacy consents. Kill switch: unset or any non-'true' value.
+  stickyCancelWindow: process.env.GATE_STICKY_CANCEL_WINDOW === 'true',
 
   // Completion auto-charge for one-time visits whose card came through the
   // /secure lane (owner-approved 2026-08-01): the lane's SMS promises "your

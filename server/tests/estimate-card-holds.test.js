@@ -13,6 +13,12 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The real registry snapshots env at module load — re-read it per call so
+// the sticky tests can flip GATE_STICKY_CANCEL_WINDOW in beforeEach.
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((name) => name === 'stickyCancelWindow' && process.env.GATE_STICKY_CANCEL_WINDOW === 'true'),
+  gates: {},
+}));
 
 // No-show fee settlement + recap completion-invoice dependencies (lazy-required).
 const mockInvoiceCreate = jest.fn(async () => ({ id: 'inv1', token: 'tok1' }));
@@ -47,6 +53,10 @@ jest.mock('../utils/datetime-et', () => ({
   addETDays: jest.fn(),
   formatETDate: jest.fn(() => 'July 13, 2026'),
   formatETTime: jest.fn(() => '9:00 AM'),
+  // Real implementation: the sticky-window lookup composes reschedule_log's
+  // original DATE+TIME into an ET instant with it, and the tests pin real
+  // ET math (fixed EDT dates), not a stub's.
+  parseETDateTime: jest.requireActual('../utils/datetime-et').parseETDateTime,
 }));
 // cardHoldCancelPreview resolves the appointment start via the shared helper
 // when not supplied; the cancel-path tests pass serviceStart explicitly and
@@ -99,6 +109,7 @@ const {
   chargeNoShowFee,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
+  createCardHoldSetupIntentForEstimate,
 } = require('../services/estimate-card-holds');
 
 beforeEach(() => {
@@ -114,9 +125,11 @@ afterEach(() => {
 // Chainable db stub. Each db() call returns a fresh chain; terminal .first()
 // calls consume `firstResults` in order (so hasHeldCard's lookup and the
 // webhook-pending fallback lookup can return different rows).
-function stubDb(firstResults) {
+let mockRescheduleLogChains = [];
+function stubDb(firstResults, { rescheduleLog = [] } = {}) {
   const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
-  mockDbHandler = () => {
+  mockRescheduleLogChains = [];
+  mockDbHandler = (table) => {
     const chain = {};
     for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
@@ -133,6 +146,15 @@ function stubDb(firstResults) {
       mockDbInserts.push(payload);
       return Promise.resolve([{}]);
     });
+    if (table === 'reschedule_log') {
+      // Knex chains are thenables — the sticky-window lookup awaits the
+      // chain itself (multi-row select, no .first()). Captured per call so
+      // tests can pin the customer-actor SQL filter.
+      chain.then = (resolve, reject) => (rescheduleLog instanceof Error
+        ? Promise.reject(rescheduleLog)
+        : Promise.resolve(rescheduleLog)).then(resolve, reject);
+      mockRescheduleLogChains.push(chain);
+    }
     return chain;
   };
 }
@@ -494,6 +516,76 @@ describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec �
   });
 });
 
+describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation (Codex #3342 r1 P1)', () => {
+  it('a saved-method hold from an attesting accept is sticky-capable — its only consent surface is the accept page', async () => {
+    stubDb([null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sticky_window_disclosed: true, status: 'held' }),
+    ]));
+  });
+  it('a saved-method hold from a legacy/non-attesting accept stays non-sticky', async () => {
+    stubDb([null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sticky_window_disclosed: false, status: 'held' }),
+    ]));
+  });
+  it('the retried-accept update path records the BOOKING accept\'s attestation (the consent trail belongs to the accept that booked)', async () => {
+    stubDb([{ id: 'hold-existing' }]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', disclosureVersion: 'sticky_v1',
+    });
+    const patch = mockDbUpdates.find((p) => p.status === 'held');
+    expect(patch.sticky_window_disclosed).toBe(true);
+  });
+  it('the SI conflict path carries the accept attestation onto the pending row — acceptance is the sole marker writer', async () => {
+    // SI path: term lookup first() → existing pending terms row.
+    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    const merges = [];
+    const prevHandler = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = prevHandler(table);
+      const origInsert = chain.insert;
+      chain.insert = (payload) => {
+        origInsert(payload);
+        return { onConflict: () => ({ merge: (m) => { merges.push(m); return Promise.resolve(1); } }) };
+      };
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: 'si_1', paymentMethodId: 'pm_cap', disclosureVersion: 'sticky_v1',
+    });
+    expect(merges[0].sticky_window_disclosed).toBe(true);
+    // And a NON-attesting accept records false the same way.
+    stubDb([{ no_show_fee_amount: 49, cancel_window_hours: 24 }]);
+    const secondBase = mockDbHandler;
+    const merges2 = [];
+    mockDbHandler = (table) => {
+      const chain = secondBase(table);
+      const origInsert = chain.insert;
+      chain.insert = (payload) => {
+        origInsert(payload);
+        return { onConflict: () => ({ merge: (m) => { merges2.push(m); return Promise.resolve(1); } }) };
+      };
+      return chain;
+    };
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: 'si_1', paymentMethodId: 'pm_cap',
+    });
+    expect(merges2[0].sticky_window_disclosed).toBe(false);
+  });
+});
+
 describe('recordCardHoldHeld — freezes the accepted amount at booking (Codex #2821 P1)', () => {
   it('stamps accepted_amount onto a fresh hold row (insert path)', async () => {
     stubDb([null]); // no existing SI-less held row → insert path
@@ -593,6 +685,355 @@ describe('handleCardHoldCancellation — fee guardrails', () => {
   });
 });
 
+// Sticky cancel window (owner ruling 2026-08-10): a reschedule made INSIDE
+// the fee window must not launder a later cancel into a free release —
+// before this, "reschedule 10 days out at T-2h, then cancel" dodged the fee
+// because rebooker overwrites scheduled_date in place and the window check
+// only ever saw the new slot.
+describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel dodge)', () => {
+  beforeEach(() => { process.env.GATE_STICKY_CANCEL_WINDOW = 'true'; });
+  afterEach(() => { delete process.env.GATE_STICKY_CANCEL_WINDOW; });
+  const now = new Date('2026-07-06T12:00:00Z');
+  const farStart = new Date('2026-07-20T14:00:00Z'); // current slot: 14 days out, far outside the window
+  // held_at is the CONSENT anchor — only reschedules made after it can
+  // stick — and sticky_window_disclosed is the FROZEN policy marker: the
+  // row's consent surface stated the sticky rule.
+  const holdRow = { id: 'h1', cancel_window_hours: 24, held_at: new Date('2026-06-30T10:00:00Z'), sticky_window_disclosed: true };
+  const chargeRow = { ...holdRow, customer_id: 'c1', stripe_payment_method_id: 'pm1', no_show_fee_amount: 49, estimate_id: 'e1' };
+  // Original slot 2026-07-01 10:00 ET (14:00Z EDT), customer moved it at
+  // 12:00Z — 2 hours' notice, squarely inside the 24h window.
+  const lateCustomerMove = {
+    original_date: '2026-07-01', original_window: '10:00:00-12:00:00',
+    reason_code: 'customer_request', initiated_by: 'customer_self_serve',
+    created_at: '2026-07-01T12:00:00Z',
+    // Landed on the slot now being cancelled (farStart = 2026-07-20 10:00
+    // ET) — the lineage check requires the newest logged move to match.
+    new_date: '2026-07-20', new_window: '10:00:00-12:00:00',
+  };
+
+  it('charges the late-cancel fee when a customer reschedule was itself made inside the window', async () => {
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], { rescheduleLog: [lateCustomerMove] });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+    expect(mockChargeOffSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('a STAFF-ASSISTED customer reschedule (admin actor, customer_request reason) sticks — the phone-in dodge is closed too', async () => {
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'admin' }],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
+  it('an admin OPS move (route_overload) never sticks — only customer-asked moves count', async () => {
+    stubDb(holdRow, {
+      rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'admin', reason_code: 'route_overload' }],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it("a customer's OWN SMS pick sticks even though it inherits the rain-out reason — the actor is authoritative", async () => {
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'customer_sms', reason_code: 'weather_rain' }],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
+  it('a LATER company move supersedes earlier sticky evidence — cancelling the slot WE picked stays free', async () => {
+    stubDb(holdRow, {
+      rescheduleLog: [
+        lateCustomerMove, // customer late-move: sticky evidence...
+        { original_date: '2026-07-02', original_window: '09:00:00-11:00:00', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: '2026-07-02T10:00:00Z' }, // ...then Waves rain-outs the new slot
+      ],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a customer late-move AFTER the company move re-arms sticky from scratch', async () => {
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [
+        lateCustomerMove,
+        { original_date: '2026-07-02', original_window: '09:00:00-11:00:00', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: '2026-07-02T10:00:00Z' },
+        // Waves-picked slot 2026-07-03 10:00 ET (14:00Z); customer moves it
+        // again at 12:00Z — 2 hours' notice, a fresh late move.
+        { ...lateCustomerMove, original_date: '2026-07-03', created_at: '2026-07-03T12:00:00Z' },
+      ],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
+  it('the WAVES rain-out move itself (weather_auto actor) never sticks — company moves reset the clock', async () => {
+    stubDb(holdRow, { rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'weather_auto', reason_code: 'weather_rain' }] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a customer reschedule with PLENTY of notice does not stick — the cancel stays free', async () => {
+    stubDb(holdRow, {
+      rescheduleLog: [{ ...lateCustomerMove, original_date: '2026-07-05' }], // 4 days' notice at reschedule time
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('the booking-age narrowing applies AT RESCHEDULE TIME — a same-day booker who immediately moved the visit stays free', async () => {
+    // Booked (held) 11:00Z, moved 12:00Z, original slot 08:00Z next day:
+    // 20h notice, but the effective window is min(24h, 1h since booking).
+    stubDb({ ...holdRow, held_at: new Date('2026-07-01T11:00:00Z') }, {
+      rescheduleLog: [{ ...lateCustomerMove, original_date: '2026-07-02', original_window: '04:00:00-06:00:00' }],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('DARK by default — gate off, a sticky row exists, the cancel releases free and the log is never even queried', async () => {
+    delete process.env.GATE_STICKY_CANCEL_WINDOW;
+    stubDb(holdRow, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+  });
+
+  it('sticky evidence never bills a DEAD slot — a cancel past the arrival grace stays a free cleanup release', async () => {
+    stubDb(holdRow, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-05T12:00:00Z'), // current slot came and went a day ago
+      now,
+    });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('the PREVIEW also refuses sticky on a dead slot — no fee prompt for stale-row cleanup', async () => {
+    stubDb({ ...holdRow, no_show_fee_amount: 49 }, { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(new Date('2026-07-05T12:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
+
+  it('a reschedule made BEFORE fee consent (held_at) can never authorize a fee — terms not yet accepted', async () => {
+    stubDb(holdRow, {
+      // In-window move, but made the day before the card hold existed.
+      rescheduleLog: [{ ...lateCustomerMove, original_date: '2026-06-29', created_at: '2026-06-29T12:00:00Z' }],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a hold consented under the OLD copy (no sticky_window_disclosed marker) can NEVER be sticky-charged', async () => {
+    stubDb({ ...holdRow, sticky_window_disclosed: false }, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+  });
+
+  it('sticky evidence with the PARENT card-hold rail off releases free — never a stranded hold a later re-enable could charge (pre-push r8 P1)', async () => {
+    // Sticky gate on, ONE_TIME_CARD_HOLD off: the sticky branch must not
+    // run (chargeNoShowFee would refuse feature_disabled WITHOUT releasing)
+    // — the cancel falls through to the ordinary free release, matching
+    // the preview's both-gates condition.
+    process.env.ONE_TIME_CARD_HOLD = 'false';
+    stubDb(holdRow, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
+  it('a legacy pre-marker row keeps its dated reminder cutoff — the promise stays honored', async () => {
+    stubDb({ ...holdRow, no_show_fee_amount: 49, sticky_window_disclosed: false }, { rescheduleLog: [lateCustomerMove] });
+    // The cutoff clause renders only for a still-future cutoff (real clock).
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * 3600000));
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('cancel free until');
+  });
+
+  it('a legacy hold without held_at has no consent anchor — no sticky at all, the log is never queried', async () => {
+    stubDb({ id: 'h1', cancel_window_hours: 24, sticky_window_disclosed: true }, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+  });
+
+  it('card removal is REVOCATION — a sticky cancel with the local payment_methods row gone releases free with an office alert', async () => {
+    stubDb([holdRow, null], { rescheduleLog: [lateCustomerMove] }); // pm-revocation check finds nothing
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('card removed'),
+      expect.stringContaining('revocation'),
+      expect.anything(),
+    );
+  });
+
+  it('an UNLOGGED later move (series shift) invalidates sticky — the newest logged move must land on the slot being cancelled', async () => {
+    stubDb(holdRow, {
+      rescheduleLog: [{ ...lateCustomerMove, new_date: '2026-07-15' }], // customer landed on the 15th; visit now sits on the 20th — something unlogged moved it
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('an unlogged move BETWEEN two logged customer moves clears earlier sticky evidence — adjacency, not just the final landing (pre-push r8 P0)', async () => {
+    // Customer late-move lands on the 5th; something UNLOGGED (a direct
+    // admin edit — possibly a window-resetting company move) puts the visit
+    // on the 10th; the customer then moves the 10th → the 20th with a week's
+    // notice. The final logged landing matches the slot being cancelled, so
+    // the newest-landing check alone is blind to the seam — the 10th ≠ the
+    // 5th is the tell, and unverifiable lineage never charges.
+    stubDb(holdRow, {
+      rescheduleLog: [
+        { ...lateCustomerMove, new_date: '2026-07-05' },
+        {
+          original_date: '2026-07-10', original_window: '10:00:00-12:00:00',
+          reason_code: 'customer_request', initiated_by: 'customer_self_serve',
+          created_at: '2026-07-03T12:00:00Z', // a week out — not itself a late move
+          new_date: '2026-07-20', new_window: '10:00:00-12:00:00',
+        },
+      ],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a fresh LATE customer move after the unlogged seam re-arms sticky on its own strength', async () => {
+    // Same seam as above, but the second customer move is itself made 2
+    // hours before its slot — new evidence born after the gap, judged on
+    // its own terms, still charges.
+    stubDb([holdRow, { id: 'pm-live' }, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [
+        { ...lateCustomerMove, new_date: '2026-07-05' },
+        {
+          original_date: '2026-07-10', original_window: '10:00:00-12:00:00',
+          reason_code: 'customer_request', initiated_by: 'customer_self_serve',
+          created_at: '2026-07-10T12:00:00Z', // 10:00 ET slot = 14:00Z — 2 hours' notice
+          new_date: '2026-07-20', new_window: '10:00:00-12:00:00',
+        },
+      ],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
+  it('the reminder suppresses its cutoff on EVIDENCE even while the enforcement gate is off — a dark-period promise must survive a later flip', async () => {
+    delete process.env.GATE_STICKY_CANCEL_WINDOW;
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).not.toContain('cancel free until');
+    expect(note).toContain('fee applies only if you cancel or no one is home');
+  });
+
+  it('sticky lookup failure releases free — this rail never charges a fee it cannot justify', async () => {
+    stubDb(holdRow, { rescheduleLog: new Error('reschedule_log down') });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('the cancel PREVIEW mirrors the sticky verdict (operator prompt must not lie)', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+  });
+
+  it('the PREVIEW reports no fee once the card is removed — matching the handler\'s revocation release', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, null], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
+
+  it('the mint NEVER writes the sticky marker — acceptance is the sole writer (a pre-consent seed could survive an old-worker accept)', async () => {
+    const inserts = [];
+    const merges = [];
+    mockDbHandler = () => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'count']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn(() => Promise.resolve(null)); // no reusable pending row; generation count 0
+      chain.update = jest.fn(() => Promise.resolve(1));
+      chain.insert = jest.fn((payload) => {
+        inserts.push(payload);
+        return { onConflict: () => ({ merge: (m) => { merges.push(m); return Promise.resolve(1); } }) };
+      });
+      return chain;
+    };
+    mockCreateSetupIntent.mockResolvedValue({ id: 'si_mint', client_secret: 'cs_test' });
+    await createCardHoldSetupIntentForEstimate({ id: 'est1', customer_id: 'c1' });
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].sticky_window_disclosed).toBeUndefined();
+    expect(merges[0].sticky_window_disclosed).toBeUndefined();
+  });
+
+  it('pending-intent REUSE never touches the marker — nothing pre-consent does', async () => {
+    const updates = [];
+    const pendingRow = {
+      id: 'p1', stripe_setup_intent_id: 'si_reuse',
+      no_show_fee_amount: 49, cancel_window_hours: 24,
+    };
+    mockDbHandler = () => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'count']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn(() => Promise.resolve(pendingRow));
+      chain.update = jest.fn((payload) => { updates.push(payload); return Promise.resolve(1); });
+      return chain;
+    };
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_reuse', status: 'requires_payment_method', client_secret: 'cs_reuse' });
+    await createCardHoldSetupIntentForEstimate({ id: 'est1' });
+    expect(updates.pop()).not.toEqual(expect.objectContaining({ sticky_window_disclosed: expect.anything() }));
+  });
+
+  it('the reminder drops its free-cancel cutoff promise once a sticky reschedule exists (generic copy stays accurate)', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).not.toContain('cancel free until');
+    expect(note).toContain('fee applies only if you cancel or no one is home');
+  });
+
+  it("the reminder goes SILENT once the card is removed after a sticky reschedule — never threaten a fee the handler releases free (Codex #3342 r8 P2)", async () => {
+    // Same evidence as above, but the local payment_methods row is gone:
+    // the cancel handler treats that as revocation (free release + office
+    // alert) and the preview reports feeApplies:false — the 72h/24h SMS and
+    // appointment email must not still claim a card on file or threaten
+    // the fee.
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, null], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldReminderNote('svc1')).toBe('');
+  });
+
+  it('an unverifiable card at reminder time also suppresses the note — same posture as the handler/preview', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, new Error('pm lookup down')], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldReminderNote('svc1')).toBe('');
+  });
+});
+
 describe('chargeNoShowFee — staleness guard (fee only for a FRESH missed visit)', () => {
   const HOUR = 3600000;
   const HELD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', no_show_fee_amount: 49, estimate_id: 'e1' };
@@ -630,6 +1071,14 @@ describe('chargeNoShowFee — staleness guard (fee only for a FRESH missed visit
     expect(r).toEqual(expect.objectContaining({ charged: false, reason: 'no_show_start_unresolved' }));
     expect(mockChargeOffSession).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('attachSelfHeal:false never resurrects a removed card — the charge simply proceeds against the pm id (Codex #3342 r5)', async () => {
+    stubDb([HELD]); // hold lookup only — NO pm row consulted, no attach
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'late_cancel', serviceStart: new Date(Date.now() - 3600000), attachSelfHeal: false });
+    expect(r).toEqual(expect.objectContaining({ charged: true }));
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
   it('a caller-supplied fresh serviceStart skips the lookup and charges', async () => {
