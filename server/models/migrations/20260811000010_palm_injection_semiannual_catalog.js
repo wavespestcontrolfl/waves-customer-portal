@@ -276,6 +276,13 @@ exports.down = async function down(knex) {
     }
     if (await knex.schema.hasTable('scheduled_service_addons')) {
       refs += (await knex('scheduled_service_addons').where({ service_id: entry.id }).pluck('service_id')).length;
+      // Add-ons carry the same durable snapshot as scheduled_services
+      // (20260716000000 added+backfilled it on both tables): an add-on with
+      // a null service_id and a non-alias name still resolves this row via
+      // service_key_snapshot (pre-push r12 P1 — mirrors the check above).
+      if (await knex.schema.hasColumn('scheduled_service_addons', 'service_key_snapshot')) {
+        refs += (await knex('scheduled_service_addons').where({ service_key_snapshot: entry.key }).pluck('id')).length;
+      }
     }
     if (await knex.schema.hasTable('service_records')) {
       refs += (await knex('service_records').where({ service_id: entry.id }).pluck('service_id')).length;

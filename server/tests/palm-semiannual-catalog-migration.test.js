@@ -383,6 +383,18 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(profileRow(db)).toBeDefined();
   });
 
+  test('down() RETAINS on an ADD-ON service_key_snapshot reference — null service_id, non-alias name (pre-push r12 P1)', async () => {
+    // 20260716000000 backfilled the snapshot on scheduled_service_addons
+    // too: an add-on with no service_id and a non-alias name still resolves
+    // this row, so it counts exactly like the scheduled_services snapshot.
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    db.scheduled_service_addons.push({ id: 'a1', service_id: null, service_name: 'Trunk Injection Add-On', service_key_snapshot: KEY });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db)).toBeDefined();
+    expect(profileRow(db)).toBeDefined();
+  });
+
   test('down() retains on completed service records and add-on wiring too', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));

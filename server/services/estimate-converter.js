@@ -338,15 +338,23 @@ function explicitCadenceFieldForService(svc = {}) {
   // P1: plan_frequency snake_case included) minus its visit-count
   // fallbacks — visit counts are exactly what this reader must NOT infer
   // from.
-  const values = [
+  const rawValues = [
     svc.frequency, svc.frequencyKey, svc.frequency_key,
     svc.recurringPattern, svc.recurring_pattern,
     svc.cadence, svc.cadenceKey, svc.cadence_key,
     svc.planFrequency, svc.plan_frequency,
   ]
-    .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
+    .map((value) => String(value || '').trim())
     .filter(Boolean);
-  const unique = [...new Set(values)];
+  const normalized = rawValues.map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value));
+  // A POPULATED cadence field the normalizer can't read (e.g.
+  // 'every_4_months') is still cadence-bearing (pre-push r12 P1): treated
+  // as absent, the forced palm/lawn branches would seed from the visit
+  // count and override a cadence we couldn't even parse. Same sentinel
+  // mechanics as the conflict below — forces stand down, gates and the
+  // prepay mirrors decline the row to office scheduling.
+  if (normalized.some((value) => !value)) return 'unrecognized_cadence_field';
+  const unique = [...new Set(normalized)];
   if (unique.length === 0) return null;
   if (unique.length === 1) return unique[0];
   // Conflicting cadence fields — e.g. frequency 'semiannual' left beside a
@@ -2443,6 +2451,14 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // residential (both gate on this pattern resolving).
     if (isCommercialRecurringLine(svc, parentRow)) return false;
     if (visitCountFieldsConflict(svc)) return false;
+    // A cadence FIELD that disagrees with the resolved pattern declines
+    // (pre-push r12 P1, mirroring the palm gate): the conflict and
+    // unrecognized-field sentinels never equal a real pattern, and a
+    // cadence-only spelling inference can't read (r7's `cadence`/
+    // `planFrequency`) must not lose to a first-read alias — with a null
+    // plan fallback, inference seeds straight from the visit count.
+    const lawnCadenceField = explicitCadenceFieldForService(svc);
+    if (lawnCadenceField && lawnCadenceField !== pattern) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'bimonthly') return visits === 6;
     if (pattern === 'every_6_weeks') return visits === 9;

@@ -291,6 +291,21 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
   });
 
+  test('an UNRECOGNIZED populated cadence field declines — never treated as cadence-less (pre-push r12 P1)', () => {
+    // normalizeRecurringPattern can't read 'every_4_months'; filtered out
+    // as absent, the forced palm/lawn branches would seed from the visit
+    // count and override a cadence we couldn't even parse.
+    const palmUnknown = { service: 'palm_injection', name: 'Palm Injection', frequency: 'every_4_months', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(palmUnknown, { service_type: 'Palm Injection' }, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(palmUnknown, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    // Name deliberately cadence-less: with a null plan fallback, inference
+    // resolves straight from the visit count — the lawn GATE's field check
+    // is the only decline on this route.
+    const lawnUnknown = { service: 'lawn_care', name: 'Lawn Care Service', frequency: 'every_4_months', visits: 6 };
+    expect(converterFollowUpSeedingPattern(lawnUnknown, { service_type: 'Lawn Care' }, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(lawnUnknown, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+  });
+
   test('the duplicate guard receives a palm-canonical serviceType for alias labels (codex r10 P1)', () => {
     const { guardServiceTypeFor } = EstimateConverter;
     // An adopted alias label would family-match an unrelated ACTIVE Tree
