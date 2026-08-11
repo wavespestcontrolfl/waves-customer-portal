@@ -245,7 +245,14 @@ describe('POST /admin/communications/reschedule-link', () => {
       expect(res.status).toBe(404); // no visit — resolution path is what's under test
       expect(customers.calls.where).toContainEqual([{ id: CUSTOMER_UUID }]);
       expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
-      expect(customers.whereRaw).not.toHaveBeenCalled();
+      // Identity resolution never re-derives from the phone on this path —
+      // the single whereRaw is the exact last-10 NAME-agreement set
+      // (firstNameForPhone), not a lookup that could widen the account.
+      expect(customers.whereRaw).toHaveBeenCalledTimes(1);
+      expect(customers.whereRaw).toHaveBeenCalledWith(
+        "right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+        ['9415551234'],
+      );
       expect(customers.inner.where).toHaveBeenCalledWith({ account_id: 'acct-9' });
       expect(customers.inner.orWhere).toHaveBeenCalledWith({ id: 'acct-9' });
       expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID, 'cust-sibling']]);
@@ -419,17 +426,14 @@ describe('POST /admin/communications/reschedule-link', () => {
     };
     buildRescheduleLink.mockResolvedValue(GOOD_LINK);
 
-    // Phone path: several rows can share the number within one account — the
-    // name only rides when the named rows AGREE (trimmed, case-insensitive).
-    // Blank siblings don't break agreement.
+    // Phone path (selects: matches → expansion → name set). The name only
+    // rides when every named row on the NUMBER agrees (trimmed,
+    // case-insensitive); blank siblings don't break agreement.
     const byPhone = makeCustomersBuilder({
       selectResults: [
-        [
-          { id: 'cust-b', account_id: 'acct-1', first_name: 'Krista ' },
-          { id: 'cust-a', account_id: 'acct-1', first_name: '  ' },
-          { id: 'cust-c', account_id: 'acct-1', first_name: 'krista' },
-        ],
+        [{ id: 'cust-b', account_id: 'acct-1' }, { id: 'cust-a', account_id: 'acct-1' }],
         [{ id: CUSTOMER_UUID }],
+        [{ first_name: 'Krista ' }, { first_name: '  ' }, { first_name: 'krista' }],
       ],
     });
     wireDb({ customers: byPhone, services: makeServicesBuilder([[visit]]) });
@@ -439,28 +443,29 @@ describe('POST /admin/communications/reschedule-link', () => {
       expect((await res.json()).firstName).toBe('Krista');
     });
 
-    // Rows naming DIFFERENT people (shared household number) must not greet
-    // an arbitrary pick — no name at all, the composer keeps the bare clause.
+    // customerId path (selects: expansion → name set): a thread-open
+    // auto-selects whichever row the latest message carried, so a supplied
+    // customerId is NOT proof of an explicit pick (codex P2) — the same
+    // number-wide agreement gate applies. Rows naming DIFFERENT people →
+    // no greeting, the composer keeps the bare clause.
     const ambiguous = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
       selectResults: [
-        [
-          { id: 'cust-b', account_id: 'acct-1', first_name: 'Krista' },
-          { id: 'cust-a', account_id: 'acct-1', first_name: 'Walt' },
-        ],
         [{ id: CUSTOMER_UUID }],
+        [{ first_name: 'Krista' }, { first_name: 'Walt' }],
       ],
     });
     wireDb({ customers: ambiguous, services: makeServicesBuilder([[visit]]) });
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { phone: '9415551234' });
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(200);
       expect((await res.json()).firstName).toBeNull();
     });
 
-    // customerId path: the selected row's own name.
+    // customerId path, agreeing number: the name rides.
     const byId = makeCustomersBuilder({
-      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID, first_name: 'Walt' },
-      selectResults: [[{ id: CUSTOMER_UUID }]],
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
+      selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Walt' }]],
     });
     wireDb({ customers: byId, services: makeServicesBuilder([[visit]]) });
     await withServer(async (baseUrl) => {
