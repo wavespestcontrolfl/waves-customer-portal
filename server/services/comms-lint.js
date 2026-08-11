@@ -57,14 +57,17 @@ const SMS_SEGMENT_LIMIT = 2; // owner ruling: 2 segments is fine, 3+ is not
  * matching gets both of those wrong.
  */
 function findShortenerHost(text) {
-  for (let tok of String(text || '').toLowerCase().split(/[\s<>()'"]+/)) {
-    tok = tok
-      .replace(/^[^a-z0-9]+/, '')
-      .replace(/^https?:\/\//, '')
-      .split(/[/?#:]/, 1)[0]
-      .replace(/[^a-z0-9]+$/, '');
-    if (!tok.includes('.')) continue;
-    const hit = URL_SHORTENER_HOSTS.find((h) => tok === h || tok.endsWith(`.${h}`));
+  // Scan for hostname-shaped spans directly rather than tokenizing on
+  // whitespace: prose punctuation glued to a URL ("Pay here:https://bit.ly/x")
+  // must not hide it. Each candidate is the maximal dotted host at that
+  // position (leftmost-greedy), so bit.ly inside bit.ly.evil.com is never
+  // extracted on its own.
+  const candidateRe = /(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,}/g;
+  const lower = String(text || '').toLowerCase();
+  let m;
+  while ((m = candidateRe.exec(lower)) !== null) {
+    const host = m[0];
+    const hit = URL_SHORTENER_HOSTS.find((h) => host === h || host.endsWith(`.${h}`));
     if (hit) return hit;
   }
   return null;

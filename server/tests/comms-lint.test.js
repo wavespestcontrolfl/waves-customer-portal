@@ -70,6 +70,13 @@ describe('lintComms mechanics', () => {
     expect(r.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
   });
 
+  it('catches shortener URLs glued to prose punctuation', () => {
+    for (const msg of ['Pay here:https://bit.ly/x', 'Pay here,https://tinyurl.com/x', 'See:bit.ly/x']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('no-url-shortener');
+    }
+  });
+
   it('flags any bare third-party host, not just g.page', () => {
     const r = lintComms('Leave us a review at trustpilot.com when you get a chance.', { channel: 'sms', audience: 'customer' });
     const hit = r.failures.find((f) => f.rule === 'portal-link-scheme');
