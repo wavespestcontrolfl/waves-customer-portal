@@ -121,14 +121,26 @@ exports.up = async function up(knex) {
     }
   }
 
-  // Experiment variants render INSTEAD of the base body — same policy.
+  // Experiment variants render INSTEAD of the base body — same policy. A
+  // variant whose body exactly matches the audited base body gets the full
+  // rewrite; a diverged one gets the mechanical STOP-drop only (and the
+  // spacing-only receipt fix is exact-match-or-skip, same as the base row).
   if (await knex.schema.hasTable('sms_template_variants')) {
+    const swapByKey = new Map(SWAPS.map(([key, expect, set]) => [key, { expect, set }]));
     const variants = await knex('sms_template_variants')
-      .whereIn('template_key', [...STOP_KEYS])
+      .whereIn('template_key', SWAPS.map(([key]) => key))
       .select('id', 'template_key', 'body');
     for (const v of variants) {
       if (typeof v.body !== 'string') continue;
-      const next = mechanical(v.template_key, v.body);
+      const swap = swapByKey.get(v.template_key);
+      let next;
+      if (swap && v.body === swap.expect) {
+        next = swap.set;
+      } else if (STOP_KEYS.has(v.template_key)) {
+        next = mechanical(v.template_key, v.body);
+      } else {
+        continue;
+      }
       if (next !== v.body) {
         await knex('sms_template_variants').where({ id: v.id }).update({ body: next, updated_at: new Date() });
       }
