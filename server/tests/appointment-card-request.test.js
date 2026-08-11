@@ -335,7 +335,9 @@ describe('the send', () => {
       // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
       // send that reaches the template — the $0/unpriced guard upstream is
       // what keeps it off zero-amount visits. GSM-7-safe (no em-dash).
-      cancel_fee_line: expect.stringMatching(/^\n\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\.$/),
+      // Trailing-space clause (owner spacing pass 2026-08-11): the template
+      // places the token directly before the card-security sentence.
+      cancel_fee_line: expect.stringMatching(/^\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\. $/),
     }));
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
