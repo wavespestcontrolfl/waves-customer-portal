@@ -77,6 +77,13 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('a stray literal percent does not disable link canonicalization', () => {
+    const hidden = lintComms('Save 50% today: https://bit%2Ely/x', { channel: 'sms', audience: 'customer' });
+    expect(hidden.failures.map((f) => f.rule)).toContain('no-url-shortener');
+    const plain = lintComms('Save 50% on your renewal this month.', { channel: 'sms', audience: 'customer' });
+    expect(plain.failures.map((f) => f.rule)).not.toContain('no-url-shortener');
+  });
+
   it('counts segments on the normalized body the send path dispatches', () => {
     const body = `We’ll be out Friday between 10 and noon. ${'a'.repeat(100)}`;
     const r = lintComms(body, { channel: 'sms', audience: 'customer' });

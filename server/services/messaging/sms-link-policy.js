@@ -26,9 +26,12 @@ function normalizeForLinkCheck(raw) {
   let out = String(raw).normalize('NFKC');
   out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
   out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  // Decode valid %XX escapes SELECTIVELY: decodeURIComponent over the whole
+  // body throws on any unrelated literal percent ("Save 50% today") and
+  // would abandon canonicalization entirely — one stray % must not disable
+  // the link checks (Codex #3348).
   for (let i = 0; i < 3; i++) {
-    let decoded;
-    try { decoded = decodeURIComponent(out); } catch { break; }
+    const decoded = out.replace(/%([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
     if (decoded === out) break;
     out = decoded;
   }
