@@ -4033,10 +4033,16 @@ const EstimateConverter = {
               }
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+              // Same abort as the auto-schedule path (codex r21 pre-push
+              // P1): an errored palm lookup is unknown state, not a
+              // knowable missing-row env.
+              if (unit.catalogServiceKey === 'palm_injection_semiannual') {
+                throw palmCatalogMissingError();
+              }
             }
             // Palm never schedules by name (codex r15 pre-push P0 — see
-            // notifyPalmCatalogMissing): lookup miss or failure skips the
-            // promoted unit to manual scheduling.
+            // notifyPalmCatalogMissing): a lookup MISS skips the promoted
+            // unit to manual scheduling.
             if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
               notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion');
               continue;
@@ -4415,11 +4421,19 @@ const EstimateConverter = {
             }
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+            // A lookup ERROR on the palm identity ABORTS the conversion
+            // (codex r21 pre-push P1): skip+bell would let billing
+            // complete without the sold appointment on a fire-and-forget
+            // notification — a MISSING row is a knowable env state, but an
+            // errored lookup is unknown and must fail closed.
+            if (unit.catalogServiceKey === 'palm_injection_semiannual') {
+              throw palmCatalogMissingError();
+            }
           }
           // Palm never schedules by name (codex r15 pre-push P0 — see
-          // notifyPalmCatalogMissing): a lookup miss OR failure skips the
-          // unit to manual scheduling. Lawn keeps the name fallback — lawn
-          // line names equal their catalog names exactly, so name
+          // notifyPalmCatalogMissing): a lookup MISS skips the unit to
+          // manual scheduling with the bell. Lawn keeps the name fallback —
+          // lawn line names equal their catalog names exactly, so name
           // resolution cannot misfile them.
           if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {
             notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit');

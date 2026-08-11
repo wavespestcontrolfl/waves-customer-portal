@@ -644,7 +644,10 @@ describe('the series creators consume the guard (source guards)', () => {
     // The operational 422 must escape the follow-up catch, or the
     // acceptance completes around the rollback it forces.
     expect(converterSrc).toContain('function palmCatalogMissingError()');
-    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(2);
+    // 2 reserved-relink sites + 2 lookup-ERROR aborts (codex r21 pre-push
+    // P1: an errored palm lookup is unknown state and fails the
+    // conversion; only a knowable MISSING row keeps skip+bell).
+    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(4);
     expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
     expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
     // Invalid-but-recurring palm lines never proceed as name-only rows

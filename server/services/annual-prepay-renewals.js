@@ -436,8 +436,12 @@ function coverageFamilyIsPalm(coverageServiceType) {
     return isPalmInjectionFamily({ name: coverageServiceType, service_type: coverageServiceType });
   } catch (familyErr) {
     logger.warn(`[annual-prepay] palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
-    return /\bpalm\b/i.test(String(coverageServiceType || ''))
-      && !/nutritional|fertil/i.test(String(coverageServiceType || ''));
+    // Injection-scoped like the resolver (codex r21 pre-push P1): bare
+    // historical 'Palm'/'Palm Treatment' labels are the nutritional lane.
+    const label = String(coverageServiceType || '');
+    return /\bpalm\b/i.test(label)
+      && /injection/i.test(label)
+      && !/nutritional|fertil/i.test(label);
   }
 }
 
