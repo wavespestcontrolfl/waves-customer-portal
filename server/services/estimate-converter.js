@@ -4163,14 +4163,16 @@ const EstimateConverter = {
               // Fail-open: an absent row (env not yet migrated) keeps
               // today's behavior, id included.
               {
-                // Family via the CONVERTER's resolver, not the seeder's
-                // (codex r8 P1): serviceKeyFor checks tree tokens before
-                // palm, so an adopted appointment labeled "Palm Tree
-                // Injections" — an alias estimate-public explicitly
-                // supports during adoption — classifies tree_shrub and
-                // the relink never fires. recurringServiceKey puts palm
-                // first, exactly for labels like this.
-                const reservedFam = recurringServiceKey({ name: reservedStart.service_type });
+                // Family from the ACCEPTED LINE first, row label as
+                // fallback (codex r18 pre-push P0): the seeding pattern is
+                // derived from the line, so a slot reserved under a
+                // generic/other label with a semiannual palm line accepted
+                // must still relink — deriving from the row alone resolved
+                // no palm key and seeded children from the stale/null
+                // parent identity. seedingFamilyKey keeps the r8 palm
+                // corrections (tree-first alias, Palmetto substring) in
+                // both directions.
+                const reservedFam = seedingFamilyKey(seedSvc || {}, reservedStart);
                 const reservedCatalogKey = reservedFam === 'palm_injection'
                   ? (reservedSeedingPattern === 'semiannual' ? 'palm_injection_semiannual' : null)
                   : reservedFam === 'lawn_care'
@@ -4180,9 +4182,17 @@ const EstimateConverter = {
                   try {
                     const catalogRow = await trx('services')
                       .where({ service_key: reservedCatalogKey })
-                      .first('id');
+                      .first('id', 'service_key');
                     if (catalogRow && reservedStart.service_id !== catalogRow.id) {
-                      await trx('scheduled_services').where({ id: reservedStart.id }).update({ service_id: catalogRow.id });
+                      // Snapshot rides along (durable identity — completion
+                      // trusts id, then snapshot). service_type is NEVER
+                      // relabeled (standing doctrine): id + snapshot alone
+                      // route completion to the right profile.
+                      const relinkPatch = { service_id: catalogRow.id };
+                      if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+                        relinkPatch.service_key_snapshot = catalogRow.service_key;
+                      }
+                      await trx('scheduled_services').where({ id: reservedStart.id }).update(relinkPatch);
                       reservedStart.service_id = catalogRow.id;
                     }
                     // Palm follow-ups never seed without the recurring
