@@ -577,8 +577,15 @@ describe('admin customers route helpers', () => {
     // One-application and cadence-less palm lines keep the one-time lane.
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection' }, serviceIndex)?.service_key).toBe('palm_injection');
-    // An explicit serviceKey selection still wins outright.
-    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection');
+    // An EXPLICIT one-time palm key beside recurring evidence is a
+    // contradiction and stays UNMATCHED (codex r18 pre-push P0) — the
+    // prefilled semiannual cadence would submit a recurring series on the
+    // one-time id.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    // An explicit one-time key on a genuinely one-time line keeps its
+    // exact match.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
     // INVALID-but-recurring palm data fails closed to NO match (codex r16
     // pre-push P0): contradictory cadence and conflicting counts are not
     // definitively one-time — the one-time profile would invoice work

@@ -1956,13 +1956,23 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
-    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
-    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
-    // Callers sync customers.waveguard_renewal_date from the PRE-slide end
-    // (or their own normalizedEnd), so renewal workflows would fire while
-    // coverage is still running — re-sync from the slid end here.
-    if (windowEnd !== termEnd) {
-      await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
+    // A palm-identity deferral is a HARD STOP for this refresh (codex r18
+    // pre-push P1): attaching and prepay-stamping adopted visits while
+    // their identity is still the one-time palm row would hand them the
+    // one-time billing posture the deferral exists to prevent. The
+    // deferral already filed a durable coverage exception; the next
+    // idempotent refresh retries the full sequence.
+    const palmDeferred = ensured?.reason === 'palm_catalog_missing'
+      || ensured?.reason === 'palm_identity_backfill_failed';
+    if (!palmDeferred) {
+      await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+      await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+      // Callers sync customers.waveguard_renewal_date from the PRE-slide end
+      // (or their own normalizedEnd), so renewal workflows would fire while
+      // coverage is still running — re-sync from the slid end here.
+      if (windowEnd !== termEnd) {
+        await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
+      }
     }
   }
   const coveredRows = coverageServiceType && coverageVisitCount

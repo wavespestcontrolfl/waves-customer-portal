@@ -335,6 +335,35 @@ function serviceCatalogMatch(line, serviceIndex) {
   // recurring row while 1x and cadence-less palm lines keep the one-time
   // match. No explicitKey guard needed: an explicit serviceKey selection
   // stays candidate #1 ahead of this, mirroring the seasonal-mosquito rule.
+  // An EXPLICIT one-time palm selection beside recurring evidence is a
+  // contradiction (codex r18 pre-push P0): the exact-key match would carry
+  // the one-time id while the prefilled cadence (inferred from the visit
+  // count) submits a RECURRING series on it — recurring-plan work
+  // completing with one-time billing/token-only posture. Reject to
+  // unmatched; the operator resolves which program was actually sold. An
+  // explicit one-time key on a genuinely one-time line (1 visit,
+  // count-less) keeps its exact match.
+  if (explicitKey === 'palm_injection') {
+    try {
+      const {
+        visitsPerYearForRecurringService, visitCountFieldsConflict,
+        visitCountFieldsInvalid, explicitCadenceFieldForService,
+        explicitlyOneTimeCadence,
+      } = require('../services/estimate-converter');
+      const visits = visitsPerYearForRecurringService(line || {});
+      const contradictsOneTime = visitCountFieldsConflict(line || {})
+        || visitCountFieldsInvalid(line || {})
+        || (visits != null && visits > 1)
+        || (!!explicitCadenceFieldForService(line || {}) && !explicitlyOneTimeCadence(line || {}));
+      if (contradictsOneTime) {
+        logger.warn('[admin-customers] explicit one-time palm key beside recurring evidence — leaving line unmatched (fail closed)');
+        return null;
+      }
+    } catch (resolveErr) {
+      logger.warn(`[admin-customers] explicit palm key validation failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+      return null;
+    }
+  }
   if (!explicitKey && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
       const {

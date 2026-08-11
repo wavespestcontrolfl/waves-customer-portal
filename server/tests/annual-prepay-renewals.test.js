@@ -614,6 +614,14 @@ describe('annual prepay renewal helpers', () => {
     expect(palmCheck).toBeGreaterThan(-1);
     expect(slidePersist).toBeGreaterThan(-1);
     expect(palmCheck).toBeLessThan(slidePersist);
+    // And refreshTermSnapshot HARD-STOPS on a palm deferral (codex r18
+    // pre-push P1): attach/prepay-stamp must not run while adopted visits
+    // still carry the one-time identity.
+    const deferGuard = src.indexOf('const palmDeferred = ensured?.reason');
+    const attachCall = src.indexOf('await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);');
+    expect(deferGuard).toBeGreaterThan(-1);
+    expect(attachCall).toBeGreaterThan(deferGuard);
+    expect(src).toContain('if (!palmDeferred) {');
   });
 
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
