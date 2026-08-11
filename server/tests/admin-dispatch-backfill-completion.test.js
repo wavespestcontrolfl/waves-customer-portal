@@ -1991,6 +1991,25 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(invoiceSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedRow\.estimated_price\);/);
     });
 
+    test('a SCHEDULED_PRICE_MOVED refusal on a NON-required live mint retries in place at the moved price (codex #3344 r6 P1)', () => {
+      // Non-required lanes are non-blocking on mint failure — the completion
+      // finalizes succeeded — so the reprice 409 must retry in place or the
+      // visit finalizes with NO invoice (lost AR). Amount and basis move
+      // together to the locked price; anything else rethrows so a genuine
+      // transient failure keeps the historical non-blocking posture.
+      const retryMatch = source.match(
+        /catch \(mintErr\) \{[\s\S]{0,1600}if \(mintErr\?\.code === 'SCHEDULED_PRICE_MOVED'\s*\n\s*&& Number\.isInteger\(mintErr\.currentEstimatedPriceCents\)\s*\n\s*&& mintErr\.currentEstimatedPriceCents > 0\) \{[\s\S]{0,700}createFromService\(record\.id, \{\s*\n\s*\.\.\.mintOptions,\s*\n\s*amount: movedPrice,\s*\n\s*scheduledPriceBasis: movedPrice,\s*\n\s*\}\);[\s\S]{0,120}\} else \{\s*\n\s*throw mintErr;/,
+      );
+      expect(retryMatch).not.toBeNull();
+      // The retry wraps the non-required else-branch mint, inside the outer
+      // invoice try — a rethrown non-reprice error still reaches the
+      // required/non-blocking catch unchanged.
+      const elseMintAt = source.indexOf('invoice = await InvoiceService.createFromService(record.id, mintOptions);');
+      const retryAt = source.indexOf("if (mintErr?.code === 'SCHEDULED_PRICE_MOVED'");
+      expect(elseMintAt).toBeGreaterThan(-1);
+      expect(retryAt).toBeGreaterThan(elseMintAt);
+    });
+
     test('the posture derives ONCE at commit from the same input sources as the mint decision, and is FROZEN in the record transaction (fix round 8; broadened round 9)', () => {
       // Commit-time derivation: the BROADENED expected-mint posture, fed the
       // same hoisted derivations and row columns the shouldInvoice call

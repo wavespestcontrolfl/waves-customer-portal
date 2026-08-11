@@ -8892,7 +8892,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           invoice = minted.invoice;
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
-          invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          try {
+            invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          } catch (mintErr) {
+            // Typed reprice refusal on a NON-required live lane (codex r6
+            // P1): these lanes' failure posture is non-blocking — the
+            // completion finalizes succeeded — so without an in-place retry
+            // the 409 that exists to make the retry bill fresh would
+            // instead finalize the visit with NO invoice at all (lost AR,
+            // strictly worse than the stale price it refused). Rebuild once
+            // from the price the refusal proved current (read under the
+            // mint's own row lock): amount AND basis move together, so the
+            // replay rebuilds from the moved price and a SECOND movement
+            // mid-retry 409s again and falls through to the non-blocking
+            // catch like any transient failure. Required lanes never enter
+            // this branch's 409 (backfill mints bypass replay; typed
+            // one-time mints go through the serialized helper above and
+            // release for resume on refusal).
+            if (mintErr?.code === 'SCHEDULED_PRICE_MOVED'
+              && Number.isInteger(mintErr.currentEstimatedPriceCents)
+              && mintErr.currentEstimatedPriceCents > 0) {
+              const movedPrice = mintErr.currentEstimatedPriceCents / 100;
+              logger.warn(`[dispatch] visit ${svc.id} repriced mid-mint — retrying the completion invoice at the moved price $${movedPrice.toFixed(2)}`);
+              invoice = await InvoiceService.createFromService(record.id, {
+                ...mintOptions,
+                amount: movedPrice,
+                scheduledPriceBasis: movedPrice,
+              });
+            } else {
+              throw mintErr;
+            }
+          }
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on
