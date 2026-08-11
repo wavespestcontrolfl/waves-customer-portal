@@ -769,10 +769,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const backfillPalmIdentity = async (rows, label) => {
     try {
       const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
+      // Retargeting a row that CARRIES the one-time identity requires
+      // PROVENANCE (codex r18 pre-push P0): Waves sells genuine one-time
+      // palm injections, and coverage matching is by service-type text —
+      // an unrelated one-time appointment inside the term window must not
+      // be converted to recurring and have its separate billing
+      // suppressed. Only a row already attached to THIS term retargets;
+      // rows with no identity evidence at all (name-only) remain the
+      // original r15 case.
+      const committedToTerm = (row) => term?.id != null
+        && String(row.annual_prepay_term_id) === String(term.id);
       const retargetable = (row) => row && row.id
         && (
-          (!row.service_id && (!row.service_key_snapshot || oneTimePalmSnapshot(row)))
-          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId)
+          (!row.service_id && !row.service_key_snapshot)
+          || (!row.service_id && oneTimePalmSnapshot(row) && committedToTerm(row))
+          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId && committedToTerm(row))
         );
       const backfillIds = rows.filter(retargetable).map((row) => row.id);
       if (backfillIds.length) {

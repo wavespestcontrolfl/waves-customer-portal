@@ -2533,6 +2533,10 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // residential (both gate on this pattern resolving).
     if (isCommercialRecurringLine(svc, parentRow)) return false;
     if (visitCountFieldsConflict(svc)) return false;
+    // Populated-but-invalid aliases fail closed too (codex r18 P1):
+    // { visitsPerYear: 6, visits: 0 } must not pass the exact-count check
+    // off its first valid alias.
+    if (visitCountFieldsInvalid(svc)) return false;
     // A cadence FIELD that disagrees with the resolved pattern declines
     // (pre-push r12 P1, mirroring the palm gate): the conflict and
     // unrecognized-field sentinels never equal a real pattern, and a
@@ -2567,6 +2571,9 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     const cadenceField = explicitCadenceFieldForService(svc);
     if (cadenceField && cadenceField !== 'semiannual') return false;
     if (visitCountFieldsConflict(svc)) return false;
+    // Same populated-invalid rule as the lawn gate (codex r18 P1):
+    // { visitsPerYear: 2, visits: 0 } is malformed, not a valid 2-visit.
+    if (visitCountFieldsInvalid(svc)) return false;
     const visits = visitsPerYearForRecurringService(svc);
     // The count-less compatibility case is for genuinely ABSENT counts
     // (quote-based lines) — a populated-but-invalid count (0, text) is
@@ -2742,6 +2749,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   if (seedingFamilyKey(svc, parentRow) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
     && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)
     && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc, parentRow)) {
     // Cadence-less OR semiannual-agreeing field both force (codex r9 P1):
@@ -2761,7 +2769,8 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // still declines through the gate's exact-visits check.
   if (seedingFamilyKey(svc, parentRow) === 'lawn_care'
     && !isCommercialRecurringLine(svc, parentRow)
-    && !visitCountFieldsConflict(svc)) {
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
     const lawnField = explicitCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
@@ -2798,6 +2807,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   if (seedingFamilyKey(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
     && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)
     && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
@@ -2807,7 +2817,8 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // visit-count-only lawn row would otherwise inherit.
   if (seedingFamilyKey(svc) === 'lawn_care'
     && !isCommercialRecurringLine(svc)
-    && !visitCountFieldsConflict(svc)) {
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
     const lawnField = explicitCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
@@ -2827,6 +2838,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const cadenceField = explicitCadenceFieldForService(svc);
     if (inferred !== 'semiannual'
       || !((visits == null && !visitCountFieldsInvalid(svc)) || visits === 2)
+      || visitCountFieldsInvalid(svc)
       || visitCountFieldsConflict(svc)
       || (cadenceField && cadenceField !== 'semiannual')
       || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;

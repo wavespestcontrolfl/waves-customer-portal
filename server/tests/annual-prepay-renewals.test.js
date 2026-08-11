@@ -532,11 +532,12 @@ describe('annual prepay renewal helpers', () => {
     });
     const rowsQuery = query({
       rows: [
-        { id: 'v-stale', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', status: 'pending' },
-        // Null id but a DIFFERENT durable snapshot = not name-only; a
-        // deliberate explicit id stays too (codex r17 pre-push P1). Only
-        // 2 of the sold visits fit, so these two are the coverage set.
-        { id: 'v-deliberate', scheduled_date: '2026-12-15', service_type: 'Palm Injection', service_id: null, service_key_snapshot: 'tree_shrub_program', status: 'pending' },
+        // Committed to THIS term (provenance) — the stale one-time id
+        // retargets.
+        { id: 'v-stale', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', annual_prepay_term_id: 'term-palm-stale', status: 'pending' },
+        // One-time id WITHOUT term provenance = possibly a GENUINE
+        // one-time palm sale (codex r18 pre-push P0) — never converted.
+        { id: 'v-genuine-onetime', scheduled_date: '2026-12-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', status: 'pending' },
       ],
     });
     const backfillUpdate = query({});

@@ -299,6 +299,16 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(EstimateConverter.annualPrepayCoverageCadence(zeroCount, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
     const textCount = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visits: 'two' };
     expect(supportsConverterFollowUpSeeding(textCount, {}, 'semiannual')).toBe(false);
+    // An invalid alias BESIDE a valid count is still malformed (codex r18
+    // P1 follow-up): { visitsPerYear: 2, visits: 0 } must not seed or
+    // force off its first valid alias, and the lawn exact-count gate must
+    // not pass { visitsPerYear: 6, visits: 0 } either.
+    const mixedPalm = { service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2, visits: 0 };
+    expect(supportsConverterFollowUpSeeding(mixedPalm, {}, 'semiannual')).toBe(false);
+    expect(converterFollowUpSeedingPattern(mixedPalm, { service_type: 'Palm Injection' }, 'quarterly')).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(mixedPalm, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    const mixedLawn = { service: 'lawn_care', name: 'Bi-Monthly Lawn Care Service', frequency: 'bi_monthly', visitsPerYear: 6, visits: 0 };
+    expect(supportsConverterFollowUpSeeding(mixedLawn, {}, 'bimonthly')).toBe(false);
     // A genuinely ABSENT count still seeds (semiannual is unambiguous).
     const absent = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual' };
     expect(supportsConverterFollowUpSeeding(absent, {}, 'semiannual')).toBe(true);
