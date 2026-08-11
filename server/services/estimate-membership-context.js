@@ -489,12 +489,22 @@ async function loadPrepaidTermsById(database, rows) {
     // prepaid dollars to the visit regardless of where it sits on the
     // calendar.
     const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+    // customer_id and coverage_service_type come along so the caller can apply
+    // annualPrepayCoversVisit's remaining two guards in memory (codex #3353
+    // r12) — a batched equivalent of the canonical predicate rather than a
+    // per-row async call, since this loader also runs on the estimate-save
+    // path where N extra queries would be a real cost.
     const terms = await coveredTermsAsOf(database, null)
       .whereIn('t.id', termIds)
-      .select('t.id', 't.prepay_amount', 't.coverage_visit_count');
+      .select('t.id', 't.prepay_amount', 't.coverage_visit_count', 't.customer_id', 't.coverage_service_type');
     return new Map(terms.map((term) => [String(term.id), term]));
   } catch {
-    return new Map();
+    // NULL, not an empty Map: "this term is not in the covered set" and "the
+    // coverage query failed" mean opposite things now. The first says
+    // coverage lapsed, so the visit bills its scheduled price; the second
+    // says we don't know, and a customer who may be prepaid must not be
+    // quoted the undiscounted price on a guess.
+    return null;
   }
 }
 
@@ -687,15 +697,42 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // positive but unrelated stamp. These are the same three conditions
       // annualPrepayCoversVisit checks before consulting the term.
       const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
-      const fullyPrepaid = contractRows.length > 0
-        && contractRows.every((row) => !!row.annual_prepay_term_id
-          && Number(row.prepaid_amount) > 0
-          && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+      const { serviceMatchesCoverage, normalizeCoverageServiceType } = require('./annual-prepay-renewals')._private;
+      // The remaining two guards from annualPrepayCoversVisit (codex #3353
+      // r12), applied in memory against the batched terms:
+      //  - the term must belong to THIS customer, so a stale stamp pointing at
+      //    another customer's live term can't claim coverage;
+      //  - and when the term declares a coverage service, the stamped visit
+      //    must still BE that service. Coverage-selection cleanup is
+      //    best-effort, so an appointment retyped out of the term's coverage
+      //    keeps its stamp — completion billing rejects that coverage, and
+      //    this panel must not divide the term amount under the new service.
+      // Legacy terms with no coverage_service_type never had a service to
+      // match, exactly as the canonical predicate treats them.
+      const rowCoveredByTerm = (row) => {
+        if (!row.annual_prepay_term_id) return false;
+        if (!(Number(row.prepaid_amount) > 0)) return false;
+        if (row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
+        const term = prepaidTermsById?.get(String(row.annual_prepay_term_id));
+        if (!term) return false;
+        if (term.customer_id != null && String(term.customer_id) !== String(customerId)) return false;
+        if (term.coverage_service_type && row.service_type
+          && !serviceMatchesCoverage(row, normalizeCoverageServiceType(term.coverage_service_type))) {
+          return false;
+        }
+        return true;
+      };
+      const fullyPrepaid = contractRows.length > 0 && contractRows.every(rowCoveredByTerm);
       // Rows carrying a term link that did NOT qualify above: coverage was
       // cancelled (stamps cleared, link kept for audit) or the term's money is
       // no longer live. Those visits bill their scheduled price now, so any
       // invoice predating the prepay is superseded.
       const lapsedPrepaidLink = !fullyPrepaid
+        && prepaidTermsById !== null
+        && contractRows.some((row) => !!row.annual_prepay_term_id);
+      // Coverage lookup failed outright: any row carrying a term link is of
+      // UNKNOWN status, so no basis is trustworthy for this contract.
+      const prepaidStatusUnknown = prepaidTermsById === null
         && contractRows.some((row) => !!row.annual_prepay_term_id);
       const prepaidTerm = (fullyPrepaid && prepaidTermIds.length === 1)
         ? prepaidTermsById.get(String(prepaidTermIds[0]))
@@ -724,19 +761,21 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
         // inheriting a catalog cadence over a live one. A PARTLY prepaid
         // contract keeps the scheduled price, which is genuine for the
         // visits that aren't prepaid.
-        perVisit: prepaidPerVisit ?? (fullyPrepaid ? null : scheduledPerVisit),
+        perVisit: prepaidPerVisit ?? ((fullyPrepaid || prepaidStatusUnknown) ? null : scheduledPerVisit),
         prepaid: uniformlyPrepaid,
         // A prepaid contract whose allocations could not be averaged: no
         // figure of ANY provenance is trustworthy for it, so the family-level
         // precedence must suppress the historical-invoice fallback too, not
         // just the scheduled price (codex #3353 r8 — r7 suppressed only the
         // latter, so a superseded per-visit invoice still surfaced).
-        prepaidWithoutBasis: fullyPrepaid && prepaidPerVisit == null,
+        prepaidWithoutBasis: (fullyPrepaid && prepaidPerVisit == null) || prepaidStatusUnknown,
         // Per-contract provenance: one prepaid property alongside one billing
         // at its scheduled price must not describe BOTH as a paid allocation.
         spendSource: prepaidPerVisit != null
           ? 'prepaid_allocation'
-          : ((!fullyPrepaid && scheduledPerVisit != null) ? 'scheduled_estimate' : 'unavailable'),
+          : ((!fullyPrepaid && !prepaidStatusUnknown && scheduledPerVisit != null)
+            ? 'scheduled_estimate'
+            : 'unavailable'),
         cadenceLabel: cadenceLabelFor(contractCadence?.frequency),
         visitsPerYear: contractCadence?.visitsPerYear ?? null,
         lapsedPrepaidLink,

@@ -43,6 +43,7 @@ function fakeDb({
   // (prepay_amount / coverage_visit_count), so a prepaid fixture without a
   // matching term here withholds — which is the intended behavior.
   prepaidTerms = [],
+  prepaidTermsQueryThrows = false,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -108,7 +109,10 @@ function fakeDb({
             requested.filter((key) => key in row).map((key) => [key, row[key]]),
           ));
         }
-        if (table === 'annual_prepay_terms' || table === 'annual_prepay_terms as t') return prepaidTerms;
+        if (table === 'annual_prepay_terms' || table === 'annual_prepay_terms as t') {
+          if (prepaidTermsQueryThrows) throw new Error('relation does not exist');
+          return prepaidTerms;
+        }
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {
@@ -1344,6 +1348,10 @@ describe('current-spend cadence and stamped billing basis', () => {
         { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 360, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 560, coverage_visit_count: 4 },
+      ],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1447,13 +1455,80 @@ describe('current-spend cadence and stamped billing basis', () => {
     }));
   });
 
-  test('a prepaid contract whose term cannot be loaded withholds rather than quoting list price', async () => {
+  test('a stamp whose term is no longer in the covered set bills the scheduled price', async () => {
     const database = fakeDb({
       scheduledRows: [
         { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't-missing', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      // Absent from coveredTermsAsOf = coverage is not live. That is a
+      // DEFINITE answer: the visit bills its scheduled price.
       prepaidTerms: [],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a stamp left on a RETYPED appointment is not treated as term coverage', async () => {
+    const database = fakeDb({
+      // Coverage-selection cleanup is best-effort, so an appointment retyped
+      // out of the term's coverage keeps its stamp. Completion billing rejects
+      // that coverage via serviceMatchesCoverage; the panel must too, or it
+      // divides the pest term's amount under Lawn Care.
+      scheduledRows: [
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-05', estimated_price: 80, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'l1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{
+        id: 't1', prepay_amount: 456, coverage_visit_count: 4,
+        customer_id: 'cust-1', coverage_service_type: 'Pest Control',
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).not.toBe(114);
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 80,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test("a stamp pointing at another customer's term is not treated as coverage", async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{
+        id: 't1', prepay_amount: 456, coverage_visit_count: 4,
+        customer_id: 'someone-else', coverage_service_type: 'Pest Control',
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a FAILED coverage lookup withholds instead of assuming the prepay lapsed', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+      // "Not in the covered set" and "the query failed" mean opposite things —
+      // a customer who may still be prepaid must not be quoted $120 on a guess.
+      prepaidTermsQueryThrows: true,
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1495,6 +1570,10 @@ describe('current-spend cadence and stamped billing basis', () => {
       // per-visit invoice still surfaced. A paid term disproves it too.
       paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 360, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 560, coverage_visit_count: 4 },
+      ],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
@@ -1515,6 +1594,10 @@ describe('current-spend cadence and stamped billing basis', () => {
         { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 100.02, prepaid_method: 'annual_prepay_invoice' },
       ],
       catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 400, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 400.08, coverage_visit_count: 4 },
+      ],
     });
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
