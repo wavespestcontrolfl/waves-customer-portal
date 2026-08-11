@@ -104,6 +104,20 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('treats every canonical schemeless host like the portal (bare required, scheme flagged)', () => {
+    const bare = lintComms('Pay at waves-customer-portal-production.up.railway.app/pay/abc anytime.', { channel: 'sms', audience: 'customer' });
+    expect(bare.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+    const schemed = lintComms('Pay at https://waves-customer-portal-production.up.railway.app/pay/abc anytime.', { channel: 'sms', audience: 'customer' });
+    expect(schemed.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+  });
+
+  it('flags bare edu/gov hosts too', () => {
+    for (const msg of ['More detail at edis.ifas.ufl.edu if curious.', 'See www.epa.gov for the label.']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+    }
+  });
+
   it('still sees a bare host glued behind a qualified URL or email', () => {
     for (const msg of ['See https://example.com,yelp.com today', 'Email contact@wavespestcontrol.com;trustpilot.com has details']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer' });

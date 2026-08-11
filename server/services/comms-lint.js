@@ -74,13 +74,24 @@ function findShortenerHost(text) {
 }
 
 // Bare-host detection for the SMS link-scheme rule. The ruling is
-// direction-specific: OUR portal link goes bare, every third-party link
-// keeps https:// (a bare host won't preview). Own-domain hosts are exempt
-// (they're the "goes bare" side of the ruling), and the TLD list is
-// deliberately short and conservative — a false positive on prose
-// ("no.problem") costs more than a missed exotic TLD nothing we send uses.
-const BARE_EXEMPT_HOST_RE = /(?:^|\.)wavespestcontrol\.com$/i;
-const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app'];
+// direction-specific: hosts on the canonical schemeless list (shared with
+// the SMS template renderer via sms-link-policy.js) plus own-domain hosts
+// go bare; every third-party link keeps https:// (a bare host won't
+// preview). The TLD list is deliberately curated — a false positive on
+// prose ("no.problem") costs more than a missed exotic TLD nothing we
+// send uses.
+const { SCHEMELESS_SMS_HOSTS } = require('./messaging/sms-link-policy');
+function isBareExemptHost(host) {
+  const h = String(host || '').toLowerCase();
+  return SCHEMELESS_SMS_HOSTS.includes(h) || h === 'wavespestcontrol.com' || h.endsWith('.wavespestcontrol.com');
+}
+// Scheme-carrying form of a must-go-bare host (the renderer strips these;
+// a draft carrying one renders inconsistently with the sent form).
+const SCHEMED_PORTAL_RE = new RegExp(
+  `https?://(${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})`,
+  'i'
+);
+const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app', 'edu', 'gov', 'mil'];
 // No left-boundary class: prose punctuation glued to a link ("See:yelp.com",
 // "[yelp.com]") must not hide it. Substring safety comes from greedy
 // leftmost matching — the maximal dotted host is consumed whole, so the tail
@@ -104,7 +115,7 @@ function findBareThirdPartyHost(text) {
   BARE_HOST_RE.lastIndex = 0;
   let m;
   while ((m = BARE_HOST_RE.exec(stripped)) !== null) {
-    if (!BARE_EXEMPT_HOST_RE.test(m[0])) return m[0];
+    if (!isBareExemptHost(m[0])) return m[0];
   }
   return null;
 }
@@ -156,8 +167,9 @@ const RULES = [
     name: 'portal-link-scheme',
     applies: (ctx) => ctx.channel === 'sms',
     check: (text) => {
-      if (/https?:\/\/portal\.wavespestcontrol\.com/i.test(text)) {
-        return 'portal link carries a scheme — portal.wavespestcontrol.com goes bare in SMS';
+      const schemed = text.match(SCHEMED_PORTAL_RE);
+      if (schemed) {
+        return `portal link carries a scheme — ${schemed[1]} goes bare in SMS`;
       }
       // Third-party links keep their scheme: a bare host won't preview.
       const bare = findBareThirdPartyHost(text);
