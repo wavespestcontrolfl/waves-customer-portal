@@ -421,24 +421,19 @@ router.get('/station-map', async (req, res, next) => {
 // dates only. Coverage TERMS stay out of the payload on purpose — the card
 // holds the same generic-coverage line as the renewal email
 // (termite.bond_renewal): specifics are a conversation, not portal copy.
-// Dark behind GATE_PORTAL_TERMITE_BOND (default OFF), same convention as
-// GATE_PORTAL_STATION_MAP above; gate-off and no-bond both answer 200
+// Dark behind GATE_PORTAL_TERMITE_BOND (default OFF), read at request time
+// via the shared gateEnvValue parser (the renewal-email sweep reads the
+// same gate through the same parser); gate-off and no-bond both answer 200
 // {available:false} — the client renders nothing rather than an error.
-function portalTermiteBondEnabled() {
-  return ['1', 'true', 'yes', 'on'].includes(String(process.env.GATE_PORTAL_TERMITE_BOND || '').trim().toLowerCase());
-}
-
-// termite_bonds.started_at / renews_at are ET business-calendar DATEs; pg
-// returns them as 'YYYY-MM-DD' strings or Date objects at UTC midnight.
-// Slice in UTC — an ET-aware formatter would shift them back a day.
-function bondDateString(d) {
-  const s = d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
-}
+// termite_bonds.started_at / renews_at are ET business-calendar DATEs;
+// dateOnlyString handles the pg string/UTC-midnight-Date duality and
+// returns null on anything malformed (never throws — fail-soft).
+const { gateEnvValue } = require('../config/feature-gates');
+const { dateOnlyString } = require('../utils/date-only');
 
 router.get('/termite-bond', async (req, res, next) => {
   try {
-    if (!portalTermiteBondEnabled()) {
+    if (!gateEnvValue('GATE_PORTAL_TERMITE_BOND')) {
       return res.json({ available: false, reason: 'disabled', bonds: [] });
     }
     // Fail-soft: a bonds query error renders no card, never a broken tab.
@@ -451,8 +446,8 @@ router.get('/termite-bond', async (req, res, next) => {
       .map((r) => ({
         serviceType: r.service_type,
         termYears: Number(r.term_years) || 1,
-        startedAt: bondDateString(r.started_at),
-        renewsAt: bondDateString(r.renews_at),
+        startedAt: dateOnlyString(r.started_at),
+        renewsAt: dateOnlyString(r.renews_at),
         status: r.status,
       }))
       .filter((b) => b.startedAt && b.renewsAt);

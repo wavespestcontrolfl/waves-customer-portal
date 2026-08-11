@@ -131,10 +131,18 @@ describe('GET /api/property/termite-bond', () => {
   });
 
   test('a row with an unparseable date is dropped rather than sent malformed', async () => {
+    // Second row carries an Invalid Date object — the codex #3362 P1
+    // scenario where a throwing normalizer would turn fail-soft into a 500.
     state.rows = [{
       service_type: 'Termite Bond Service (1-Year Term)',
       term_years: 1,
       started_at: 'not-a-date',
+      renews_at: '2027-08-01',
+      status: 'active',
+    }, {
+      service_type: 'Termite Bond Service (1-Year Term)',
+      term_years: 1,
+      started_at: new Date('garbage'),
       renews_at: '2027-08-01',
       status: 'active',
     }];

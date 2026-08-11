@@ -31,15 +31,13 @@ const GRACE_DAYS = 7; // still notify up to a week past renews_at (missed runs)
 
 const FALLBACK_PORTAL_HOME_URL = 'https://portal.wavespestcontrol.com';
 
-// Mirrors portalTermiteBondEnabled() in routes/property.js (same env var,
-// same parse — keep in sync): the renewal CTA deep-links to the My Plan
-// bond card only once that card is live. While the gate is dark the email
+// Same gate + same shared parser as GET /api/property/termite-bond
+// (routes/property.js): the renewal CTA deep-links to the My Plan bond
+// card only once that card is live. While the gate is dark the email
 // keeps the legacy login landing, so a customer never gets steered to a
 // tab with no bond on it (codex #3362 P2). Read at send time, so a
 // Railway gate flip takes effect on the next sweep without a deploy.
-function portalTermiteBondCardEnabled() {
-  return ['1', 'true', 'yes', 'on'].includes(String(process.env.GATE_PORTAL_TERMITE_BOND || '').trim().toLowerCase());
-}
+const { gateEnvValue } = require('../config/feature-gates');
 
 function termYearsFrom(serviceType) {
   const m = String(serviceType || '').match(/(\d+)\s*-\s*Year/i);
@@ -176,7 +174,7 @@ async function runBondRenewalSweep() {
           // Unauthenticated clicks survive the round-trip: ProtectedRoute
           // redirects to /login?next=<this path> and LoginPage navigates
           // back after the SMS code.
-          renewal_url: portalTermiteBondCardEnabled()
+          renewal_url: gateEnvValue('GATE_PORTAL_TERMITE_BOND')
             ? `${FALLBACK_PORTAL_HOME_URL}/?tab=plan`
             : `${FALLBACK_PORTAL_HOME_URL}/login`,
           customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
