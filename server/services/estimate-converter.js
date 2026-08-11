@@ -3252,6 +3252,31 @@ const EstimateConverter = {
                       : 'mosquito_monthly',
                   );
                 }
+                continue;
+              }
+              // Promoted lawn/palm units (owner rulings 2026-08-10/11) join
+              // the same sorted pre-pass — same inversion risk as the
+              // termite/mosquito promotions above. Mirrors the promotion's
+              // own name/pattern/key derivations exactly.
+              const fam = RecurringAppointmentSeeder.serviceKeyFor(svc);
+              if (fam === 'lawn_care' || fam === 'palm_injection') {
+                const svcName = svc.name || svc.serviceName || svc.service_name
+                  || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+                const pattern = converterFollowUpSeedingPattern(
+                  svc, { service_type: svcName }, inferredFrequencyKey,
+                );
+                if (pattern) {
+                  const lawnKeys = {
+                    quarterly: 'lawn_care_quarterly',
+                    bimonthly: 'lawn_care_recurring',
+                    every_6_weeks: 'lawn_care_6week',
+                    monthly: 'lawn_care_monthly',
+                  };
+                  await addUnit(
+                    svcName,
+                    fam === 'palm_injection' ? 'palm_injection_semiannual' : (lawnKeys[pattern] || null),
+                  );
+                }
               }
             }
           } else {
