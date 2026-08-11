@@ -514,15 +514,32 @@ function traceFeedFields(verdict, addonVerdicts = []) {
   );
   // Only a PHOTO-ONLY visit hides the tracer. A satellite line alongside the
   // foam keeps the button — the tech traces the trenching and marks the foam.
-  if (photo && !satellite) return { traceEligible: false, traceVariant: 'photo' };
+  if (photo && !satellite) return { traceEligible: false, traceVariant: 'photo', traceCaptionKey: null };
   // With the eligibility gate off, every non-photo lane keeps pre-gate
   // behavior: enabling marks must not start publishing variants (or hiding
   // tracers) across unrelated services.
   if (!traceEligibilityGateOn() || !verdict) {
-    return { traceEligible: true, traceVariant: null };
+    return { traceEligible: true, traceVariant: null, traceCaptionKey: null };
   }
-  if (satellite) return { traceEligible: true, traceVariant: satellite.variant };
-  return { traceEligible: verdict.eligible, traceVariant: verdict.eligible ? verdict.variant : null };
+  // traceCaptionKey rides alongside the variant (codex P2 on #3354): two
+  // outline lanes capture DIFFERENT geometry — lawn (turf boundary,
+  // highlight mask) vs yard (turf + beds, mosquito) — and the client must
+  // not reconstruct that from the primary's display name: an ineligible
+  // primary rescued by a mosquito ADD-ON would open lawn mode and save a
+  // lawn-only claim for a yard treatment. The winning satellite line's
+  // captionKey is the discriminator ('yardCoverage' → yard workflow).
+  if (satellite) {
+    return {
+      traceEligible: true,
+      traceVariant: satellite.variant,
+      traceCaptionKey: satellite.captionKey || null,
+    };
+  }
+  return {
+    traceEligible: verdict.eligible,
+    traceVariant: verdict.eligible ? verdict.variant : null,
+    traceCaptionKey: verdict.eligible ? verdict.captionKey || null : null,
+  };
 }
 
 /**

@@ -2718,6 +2718,59 @@ function emptyCaptureExempt(str, index) {
   return EMPTY_CAPTURE_INTENT_RE.test(before.slice(sentenceStart + 1));
 }
 
+// Activity-LEVEL claim screen (codex P1 on #3354). The AI draft is written
+// before the tech's last edit to the gauge/level select, so a body drafted
+// while activity read Heavy can ride under a re-pinned "low" headline — the
+// nonzero mirror of the zero-state rule (a draft must never outrank the
+// typed level it predates). Levels collapse to three bands (low 1 /
+// moderate 2 / high 3) and only a CROSS-FAMILY mismatch (|Δ| ≥ 2 — a
+// low-family claim on a high-family final, or vice versa) refuses the
+// body: adjacent-band drift ("moderate" vs a 4-pin) reads fine under the
+// deterministic headline, and the conservative distance keeps ordinary
+// prose ("low areas of the yard") from costing the tech their copy unless
+// it actually contradicts the record. Claims are judged per clause and
+// only in clauses that talk about activity/infestation/pressure;
+// future/conditional intent and prior-visit references are exempt.
+// Refusal falls back to the deterministic template — a completion is
+// never blocked on copy — and the tech's confirmed reconciliation prompt
+// overrides this screen like every other (a person reviewed the
+// contradiction).
+const LEVEL_CLAIM_BANDS = {
+  'very low': 1, light: 1, low: 1, minimal: 1,
+  moderate: 2,
+  high: 3, heavy: 3, severe: 3, extreme: 3,
+};
+const LEVEL_CLAIM_WORD_RE = /\b(very\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)\b(?!-)/gi;
+const LEVEL_CLAIM_NOUN_RE = /\b(?:activity|infestation|pressure)\b/i;
+const LEVEL_CLAIM_EXEMPT_RE = new RegExp(
+  `${EMPTY_CAPTURE_INTENT_RE.source}`
+  + '|\\b(?:last|previous|prior|initial|first|earlier)\\s+(?:visit|service|stop|check|treatment)\\b'
+  + '|\\b(?:typical(?:ly)?|usual(?:ly)?|may|might|could|can)\\b',
+  'i',
+);
+function levelBandForScore(score) {
+  if (!Number.isInteger(score) || score < 1) return null;
+  if (score >= 4) return 3;
+  if (score === 3) return 2;
+  return 1;
+}
+function activityLevelContradictions(text, finalBand) {
+  if (!finalBand) return [];
+  const found = [];
+  for (const clause of clauses(String(text || ''))) {
+    if (!LEVEL_CLAIM_NOUN_RE.test(clause)) continue;
+    if (LEVEL_CLAIM_EXEMPT_RE.test(clause)) continue;
+    for (const match of clause.matchAll(LEVEL_CLAIM_WORD_RE)) {
+      const word = match[1].toLowerCase().replace(/\s+/g, ' ');
+      const claimBand = LEVEL_CLAIM_BANDS[word];
+      if (claimBand && Math.abs(claimBand - finalBand) >= 2) {
+        found.push(`level_claim_mismatch:${word}`);
+      }
+    }
+  }
+  return found;
+}
+
 /**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
@@ -3061,8 +3114,17 @@ function buildTodaysResult({
     // bait-cooperation guidance and the palmetto flush disclosure are
     // owner-critical and carry in EVERY body. A cleared state keeps the
     // template: the draft can predate a late flip to "None observed" and
-    // must never outrank the typed zero it predates.
-    const knockdownReportBody = !cleared ? technicianReportBody : null;
+    // must never outrank the typed zero it predates. A nonzero draft that
+    // contradicts the FINAL level family is refused the same way (codex
+    // P1 on #3354), unless the tech confirmed the reconciliation prompt.
+    const knockdownBand = score != null
+      ? levelBandForScore(score)
+      : (LEVEL_CLAIM_BANDS[levelWord] || null);
+    const knockdownReportBody = !cleared
+      && (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, knockdownBand).length)
+      ? technicianReportBody
+      : null;
     return {
       headline,
       body: `${knockdownReportBody || `${intro} ${whatWeDid}`}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
@@ -3086,12 +3148,19 @@ function buildTodaysResult({
       // The tech's reviewed "Generate AI report" copy becomes the body
       // (owner 2026-08-11 — the one-time mosquito report dropped it). The
       // "None observed" state above keeps the template: the draft can
-      // predate a late flip to zero and must never outrank it.
+      // predate a late flip to zero and must never outrank it — and a
+      // draft claiming the opposite level family is refused the same way
+      // (codex P1 on #3354), reconcile override honored.
+      const mosquitoBand = { Light: 1, Moderate: 2, Heavy: 3 }[level];
+      const mosquitoReportBody = (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, mosquitoBand).length)
+        ? technicianReportBody
+        : null;
       return {
         headline: `Mosquito activity was ${level.toLowerCase()} today.`,
-        body: `${technicianReportBody || whatWeDid} ${nextStep}`,
+        body: `${mosquitoReportBody || whatWeDid} ${nextStep}`,
         nextStep,
-        ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+        ...(mosquitoReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
   }
@@ -3145,7 +3214,11 @@ function buildTodaysResult({
     const gaugeReportBody = rawGaugeBody
       && (reconcileConfirmed
         || (!(initialTrapSetup && setupContradictions(rawGaugeBody).length)
-          && !countContradictions(rawGaugeBody, values).length))
+          && !countContradictions(rawGaugeBody, values).length
+          // A draft describing one activity family under a final gauge in
+          // the opposite family is refused (codex P1 on #3354) — the
+          // nonzero mirror of the zero exclusion above.
+          && !activityLevelContradictions(rawGaugeBody, levelBandForScore(activity.score)).length))
       ? rawGaugeBody
       : null;
     // One line of expectation-setting on a trap-setup visit: nothing has
@@ -3509,6 +3582,8 @@ module.exports = {
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,
+  activityLevelContradictions,
+  levelBandForScore,
   normalizeWordNumbers,
   findingsSchemaForType,
 };

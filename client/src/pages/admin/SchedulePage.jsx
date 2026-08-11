@@ -9873,8 +9873,14 @@ export function CompletionPanel({
   // Mosquito traces the treated YARD — turf + landscape beds — with the
   // outline workflow, saved as captureMode 'yard' (owner 2026-08-11: the
   // mosquito report gets the lawn-style overlay with the bedding included).
-  const isMosquitoTrace =
-    detectServiceCategory(service.serviceType) === "mosquito";
+  // The feed's captionKey is authoritative when present (codex P2 on
+  // #3354): an ineligible primary rescued by a mosquito ADD-ON carries
+  // 'yardCoverage' from the winning satellite line, which the primary's
+  // display name cannot reveal. Absent captionKey (gate off, older
+  // payloads) keeps the category heuristic.
+  const isMosquitoTrace = service.traceCaptionKey
+    ? service.traceCaptionKey === "yardCoverage"
+    : detectServiceCategory(service.serviceType) === "mosquito";
   const traceOutlineMode = service.traceVariant
     ? service.traceVariant === "outline"
     : isLawn || isMosquitoTrace;

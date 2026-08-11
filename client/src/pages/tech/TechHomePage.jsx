@@ -779,13 +779,18 @@ export default function TechHomePage() {
              a bare lawn|turf regex missed lawn jobs like Weed Control and
              Dethatching (codex P1 #3038 r3). Mosquito uses the outline
              workflow in YARD mode: the traced boundary is turf + landscape
-             beds, saved as captureMode 'yard' (owner 2026-08-11). */
+             beds, saved as captureMode 'yard' (owner 2026-08-11). The
+             feed's captionKey wins when present (codex P2 on #3354): a
+             mosquito ADD-ON rescuing an ineligible primary carries
+             'yardCoverage', which the primary's name cannot reveal. */
           lawnMode={zoneTarget.traceVariant
             ? zoneTarget.traceVariant === 'outline'
             : ['lawn', 'mosquito'].includes(
               detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType)
             )}
-          yardMode={detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'mosquito'}
+          yardMode={zoneTarget.traceCaptionKey
+            ? zoneTarget.traceCaptionKey === 'yardCoverage'
+            : detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'mosquito'}
         />
       )}
 
