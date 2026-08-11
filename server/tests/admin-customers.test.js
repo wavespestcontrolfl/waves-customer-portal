@@ -608,6 +608,12 @@ describe('admin customers route helpers', () => {
     // valid semiannual line both keep the operator's choice.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual' }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // The legacy `freq` alias is part of the shared vocabulary now
+    // (codex r19 P1): { serviceKey: 'palm_injection', freq: 'monthly' }
+    // is recurring evidence on an explicit one-time key — unmatched.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', freq: 'monthly' }, serviceIndex)).toBeFalsy();
+    // An explicitly one-time freq keeps the one-time match.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', freq: 'one_time' }, serviceIndex)?.service_key).toBe('palm_injection');
     // An UNKNOWN explicit key is inert and must not bypass palm
     // validation (codex r18 pre-push P0): a legacy { serviceKey: 'palm' }
     // 2-visit line routes to the recurring row, and a contradictory one

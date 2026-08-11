@@ -438,8 +438,10 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), parentInsert, childInsert],
       services: [
-        // coverageRowsForTerm's palm identity filter looks the id up first.
+        // coverageRowsForTerm's palm identity filter looks BOTH ids up
+        // first (semiannual + one-time), then the seeding resolve repeats.
         query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -497,8 +499,10 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
       services: [
-        // coverageRowsForTerm's palm identity filter looks the id up first.
+        // coverageRowsForTerm's palm identity filter looks BOTH ids up
+        // first (semiannual + one-time), then the seeding resolve repeats.
         query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -553,8 +557,10 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, replacementInsert],
       services: [
-        // coverageRowsForTerm's palm identity filter looks the id up first.
+        // coverageRowsForTerm's palm identity filter looks BOTH ids up
+        // first (semiannual + one-time), then the seeding resolve repeats.
         query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -601,7 +607,9 @@ describe('annual prepay renewal helpers', () => {
     });
     const rowsQuery = query({
       rows: [
-        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, source_estimate_id: 'est-42', status: 'pending' },
+        // The seeded reserved parent carries recurring markers — the
+        // provenance tiebreaker (codex r19 P0 second pass).
+        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
       ],
     });
     const backfillUpdate = query({});
@@ -609,7 +617,10 @@ describe('annual prepay renewal helpers', () => {
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
       services: [
+        // coverageRowsForTerm's palm identity filter looks BOTH ids up
+        // first (semiannual + one-time), then the seeding resolve repeats.
         query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
         query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
         query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
       ],
@@ -631,6 +642,61 @@ describe('annual prepay renewal helpers', () => {
     expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved']);
   });
 
+  test('a one-time palm visit from the SAME estimate is never consumed as coverage (codex r19 P1)', async () => {
+    // One estimate can sell the recurring program AND a genuine one-time
+    // palm item — both visits carry source_estimate_id. The one-time
+    // identity disqualifies estimate provenance: only a direct term link
+    // or prepaid stamp commits such a row.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+        { id: 'v-est-onetime', scheduled_date: '2026-09-01', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', source_estimate_id: 'est-42', status: 'pending' },
+        // NAME-ONLY one-time reservation from the same estimate: no
+        // recurring markers, no identity — provenance alone must not
+        // commit it (codex r19 P0 second pass).
+        { id: 'v-onetime-nameonly', scheduled_date: '2027-03-01', service_type: 'Palm Injection', service_id: null, source_estimate_id: 'est-42', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
+      services: [
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-mixed',
+      customer_id: 'customer-palm',
+      source_estimate_id: 'est-42',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    // Only the name-only reserved visit is adopted/backfilled — the
+    // one-time item keeps its identity and separate billing.
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved']);
+  });
+
   test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {
     const columnQuery = query({
       columnInfo: {
@@ -644,7 +710,7 @@ describe('annual prepay renewal helpers', () => {
     });
     setDbQueues({
       scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
-      services: [query({ first: undefined }), query({ first: undefined })],
+      services: [query({ first: undefined }), query({ first: undefined }), query({ first: undefined })],
       notifications: [query({ first: undefined })],
     });
 
@@ -700,7 +766,7 @@ describe('annual prepay renewal helpers', () => {
     });
     setDbQueues({
       scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
-      services: [query({ first: undefined })],
+      services: [query({ first: undefined }), query({ first: undefined })],
       notifications: [query({ first: undefined })],
     });
 

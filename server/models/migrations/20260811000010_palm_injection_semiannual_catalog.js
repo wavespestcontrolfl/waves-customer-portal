@@ -105,6 +105,19 @@ async function recordState(knex, state) {
   }
 }
 
+// EXACT recurring/semiannual metadata check — shared by the pre-existing
+// row gate and retained-row reactivation (codex r19 P1): recurring palm
+// visits link this key by existence alone, so ANY same-key row that will
+// serve as the identity must carry exact metadata or the deploy blocks.
+function assertRecurringSemiannualRow(row, context) {
+  const valid = row.billing_type === 'recurring'
+    && String(row.frequency || '').toLowerCase() === 'semiannual'
+    && Number(row.visits_per_year) === 2;
+  if (!valid) {
+    throw new Error(`[palm-semiannual] ${context}: ${SERVICE.service_key} row is NOT a verified recurring/semiannual service (billing_type=${row.billing_type}, frequency=${row.frequency}, visits_per_year=${row.visits_per_year}) — recurring palm visits link this key by existence alone, so invalid metadata would bill per-application work against the sold plan. Fix or remove the row, then re-run the migration.`);
+  }
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) {
     console.warn('[palm-semiannual] services table absent — skipping');
@@ -140,6 +153,11 @@ exports.up = async function up(knex) {
         console.warn(`[palm-semiannual] roll-forward: retained row ${entry.id} now carries key "${row.service_key}" (was ${entry.key}) — admin-repurposed, leaving untouched`);
         continue;
       }
+      // An admin can mutate a retained row's billing metadata while
+      // keeping the key — reactivating it would revive an invalid
+      // identity (codex r19 P1). Same deploy-block as the pre-existing
+      // gate below.
+      assertRecurringSemiannualRow(row, 'roll-forward retained row');
       if (row.is_active === true) {
         console.log(`[palm-semiannual] roll-forward: previously retained row ${entry.key} already active — no-op`);
       } else {
@@ -189,13 +207,14 @@ exports.up = async function up(knex) {
   // the catalog-cadence prefill falling back to quarterly (four billable
   // applications on a two-application program). Rows this migration
   // inserted always satisfy this (SERVICE literal above).
-  const rowIsRecurringSemiannual = service.billing_type === 'recurring'
-    && String(service.frequency || '').toLowerCase() === 'semiannual'
-    && Number(service.visits_per_year) === 2;
   const preExistingRow = !inserted.services.some((entry) => entry && entry.key === SERVICE.service_key);
-  if (preExistingRow && !rowIsRecurringSemiannual) {
-    await recordState(knex, inserted);
-    throw new Error(`[palm-semiannual] pre-existing ${SERVICE.service_key} row is NOT a verified recurring/semiannual service (billing_type=${service.billing_type}, frequency=${service.frequency}, visits_per_year=${service.visits_per_year}) — recurring palm visits link this key by existence alone, so invalid metadata would bill per-application work against the sold plan. Fix or remove the row, then re-run the migration.`);
+  if (preExistingRow) {
+    try {
+      assertRecurringSemiannualRow(service, 'pre-existing row');
+    } catch (invalidErr) {
+      await recordState(knex, inserted);
+      throw invalidErr;
+    }
   }
   // An admin-deactivated/archived row keeps its posture: attaching an
   // active auto_send profile would re-enable typed sends the admin turned

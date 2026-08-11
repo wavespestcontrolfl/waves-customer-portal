@@ -333,11 +333,16 @@ const STANDALONE_SUPPLEMENT_ROUTES = {
 // count for one and not the other (r8/r15 shared-vocabulary lesson).
 function cadenceFieldRawValues(svc = {}) {
   return [
-    svc.frequency, svc.frequencyKey, svc.frequency_key,
+    svc.frequency, svc.freq, svc.frequencyKey, svc.frequency_key,
     svc.recurringPattern, svc.recurring_pattern,
     svc.cadence, svc.cadenceKey, svc.cadence_key,
     svc.planFrequency, svc.plan_frequency,
   ]
+    // `freq` joined the list for the admin-prefill lines that carry it
+    // (codex r19 P1): validation reading this vocabulary while the
+    // prefill reader gave `freq` precedence let
+    // { serviceKey: 'palm_injection', freq: 'monthly' } pass the
+    // one-time identity check and book a monthly series on it.
     .map((value) => String(value || '').trim())
     .filter(Boolean);
 }

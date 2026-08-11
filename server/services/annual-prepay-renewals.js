@@ -396,6 +396,36 @@ function rowCommittedToTerm(term, row) {
       && String(row.source_estimate_id) === String(term.source_estimate_id));
 }
 
+// Palm-aware commitment (codex r19 P1): one accepted estimate can sell
+// BOTH the recurring palm program and a genuine one-time palm item, and
+// both visits carry the same source_estimate_id — so for rows that CARRY
+// the one-time palm identity (id or snapshot), estimate provenance is
+// NOT commitment; only a direct term link or prepaid stamp is. Rows
+// without the one-time identity keep the full commitment set.
+function palmRowCommittedToTerm(term, row, oneTimePalmId) {
+  const carriesOneTimeIdentity = (oneTimePalmId && row.service_id === oneTimePalmId)
+    || String(row.service_key_snapshot || '') === 'palm_injection';
+  const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  if (carriesOneTimeIdentity) return directCommitment;
+  if (directCommitment) return true;
+  // Estimate provenance alone commits only rows that READ recurring
+  // (codex r19 P0, second pass): a mixed estimate's genuine one-time palm
+  // reservation can be NAME-ONLY, and a shared source_estimate_id cannot
+  // tell the program's visit from the one-time item's. The recurring
+  // markers (is_recurring / recurring_pattern / recurring_parent_id) are
+  // the tiebreaker — the sold program's reserved parent carries them
+  // after seeding, and office bookings pick catalog services (id
+  // stamped), so a bare name-only row without markers is not provably
+  // the program's visit.
+  const readsRecurring = row.is_recurring === true
+    || !!row.recurring_pattern
+    || !!row.recurring_parent_id;
+  return readsRecurring
+    && term?.source_estimate_id != null && row.source_estimate_id != null
+    && String(row.source_estimate_id) === String(term.source_estimate_id);
+}
+
 // Palm coverage family detection, shared by coverage matching and the
 // seeding identity guard (codex r18 pre-push P0/P1): word-boundary
 // fallback keeps 'Palmetto…' service types out when the resolver errors.
@@ -442,13 +472,16 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // instead (fail closed).
   if (coverageFamilyIsPalm(coverageServiceType)) {
     let semiannualPalmId = null;
+    let oneTimePalmId = null;
     try {
       semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
+      oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
     } catch { semiannualPalmId = null; }
     const carriesRecurringPalmIdentity = (row) =>
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
-    matching = matching.filter((row) => carriesRecurringPalmIdentity(row) || isCommittedToTerm(row));
+    matching = matching.filter((row) => carriesRecurringPalmIdentity(row)
+      || palmRowCommittedToTerm(term, row, oneTimePalmId));
   }
   if (matching.length <= coverageVisitCount) return matching;
 
@@ -813,7 +846,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // suppressed. Only a row already attached to THIS term retargets;
       // rows with no identity evidence at all (name-only) remain the
       // original r15 case.
-      const committedToTerm = (row) => rowCommittedToTerm(term, row);
+      const committedToTerm = (row) => palmRowCommittedToTerm(term, row, staleOneTimePalmId);
       const retargetable = (row) => row && row.id
         && (
           (!row.service_id && !row.service_key_snapshot)
@@ -956,7 +989,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     && (!coverageIsPalm
       || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
-      || rowCommittedToTerm(term, row));
+      || palmRowCommittedToTerm(term, row, staleOneTimePalmId));
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;

@@ -236,6 +236,19 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(profileRow(db)).toBeUndefined();
   });
 
+  test('roll-forward THROWS when a retained row was admin-mutated to invalid metadata (codex r19 P1)', async () => {
+    // Retained rows re-enter inserted.services on roll-forward, bypassing
+    // the pre-existing gate — they must validate before reactivation.
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    db.scheduled_services.push({ id: 'v1', service_id: svcRow(db).id, service_type: svcRow(db).name, status: 'pending' });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db).is_active).toBe(false);
+    // Admin mutates the retained row's billing while keeping the key.
+    svcRow(db).billing_type = 'one_time';
+    await expect(migration.up(fakeKnex(db))).rejects.toThrow(/NOT a verified recurring\/semiannual/);
+  });
+
   test('down() with NO references removes the UUID-recorded row and marker-carrying profile', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
