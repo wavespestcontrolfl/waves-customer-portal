@@ -3042,6 +3042,12 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // the draft total matches the appointment (mirrors createFromService).
       trustedStoredDiscountSources: ['scheduled_service'],
       notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
+      // On THIS transaction, not the pool: the invoice's scheduled_service_id
+      // FK takes a key-share lock on the visit row we hold FOR UPDATE above —
+      // a pooled-connection insert would wait on our own lock while we await
+      // it (self-deadlock until timeout). Same-trx also makes invoice + link
+      // commit atomically.
+      database: trx,
     });
     const builtFresh = await trx('invoices').where({ id: createdNonWdo.id }).first();
     const builtInvoice = builtFresh || createdNonWdo;
