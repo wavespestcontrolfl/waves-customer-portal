@@ -15,26 +15,26 @@ describe("buildReschedulePrefill", () => {
   it("greets the recipient with the visit's day, service, and link", () => {
     expect(
       buildReschedulePrefill({
-        firstName: "Krista",
+        firstName: "PersonA",
         day: "Mon, Aug 10",
         serviceType: "Quarterly Pest Control Service",
         url: URL,
       }),
     ).toBe(
-      `Hi Krista, it's Waves Pest Control. Reschedule your Mon, Aug 10 Quarterly Pest Control Service visit here: ${URL}`,
+      `Hi PersonA, it's Waves Pest Control. Reschedule your Mon, Aug 10 Quarterly Pest Control Service visit here: ${URL}`,
     );
   });
 
   it("drops the service segment when the visit has no service type", () => {
     expect(
       buildReschedulePrefill({
-        firstName: "Krista",
+        firstName: "PersonA",
         day: "Mon, Aug 10",
         serviceType: null,
         url: URL,
       }),
     ).toBe(
-      `Hi Krista, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`,
+      `Hi PersonA, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`,
     );
   });
 
@@ -46,7 +46,7 @@ describe("buildReschedulePrefill", () => {
       buildReschedulePrefill({ firstName: "  ", day: "Mon, Aug 10", url: URL }),
     ).toBeNull();
     expect(
-      buildReschedulePrefill({ firstName: "Krista", day: "Mon, Aug 10", url: null }),
+      buildReschedulePrefill({ firstName: "PersonA", day: "Mon, Aug 10", url: null }),
     ).toBeNull();
   });
 
@@ -55,7 +55,7 @@ describe("buildReschedulePrefill", () => {
     // would be template punctuation (em dash, curly quote) silently flipping
     // the SMS to UCS-2 (70-char segments).
     const msg = buildReschedulePrefill({
-      firstName: "Krista",
+      firstName: "PersonA",
       day: "Mon, Aug 10",
       serviceType: "Quarterly Pest Control Service",
       url: URL,
@@ -64,32 +64,32 @@ describe("buildReschedulePrefill", () => {
     expect(msg).toMatch(/^[\x00-\x7F]+$/);
   });
 
-  it("passes non-ASCII dynamic values through untouched — José stays José", () => {
+  it("passes non-ASCII dynamic values through untouched — Personé stays Personé", () => {
     expect(
       buildReschedulePrefill({
-        firstName: "José",
+        firstName: "Personé",
         day: "Mon, Aug 10",
         serviceType: null,
         url: URL,
       }),
-    ).toBe(`Hi José, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`);
+    ).toBe(`Hi Personé, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`);
   });
 });
 
 describe("buildReservicePrefill", () => {
   it("greets the recipient with the covered lane and link", () => {
     expect(
-      buildReservicePrefill({ firstName: "Krista", laneLabel: "pest", url: URL }),
+      buildReservicePrefill({ firstName: "PersonA", laneLabel: "pest", url: URL }),
     ).toBe(
-      `Hi Krista, it's Waves Pest Control. Book your free pest re-service here: ${URL}`,
+      `Hi PersonA, it's Waves Pest Control. Book your free pest re-service here: ${URL}`,
     );
   });
 
   it("reads cleanly without a lane label", () => {
     expect(
-      buildReservicePrefill({ firstName: "Krista", laneLabel: null, url: URL }),
+      buildReservicePrefill({ firstName: "PersonA", laneLabel: null, url: URL }),
     ).toBe(
-      `Hi Krista, it's Waves Pest Control. Book your free re-service here: ${URL}`,
+      `Hi PersonA, it's Waves Pest Control. Book your free re-service here: ${URL}`,
     );
   });
 

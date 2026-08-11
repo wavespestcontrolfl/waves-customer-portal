@@ -434,14 +434,14 @@ describe('POST /admin/communications/reschedule-link', () => {
       selectResults: [
         [{ id: 'cust-b', account_id: 'acct-1' }, { id: 'cust-a', account_id: 'acct-1' }],
         [{ id: CUSTOMER_UUID }],
-        [{ first_name: 'Krista ' }, { first_name: '  ' }, { first_name: 'krista' }],
+        [{ first_name: 'PersonA ' }, { first_name: '  ' }, { first_name: 'persona' }],
       ],
     });
     wireDb({ customers: byPhone, services: makeServicesBuilder([[visit]]) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(200);
-      expect((await res.json()).firstName).toBe('Krista');
+      expect((await res.json()).firstName).toBe('PersonA');
     });
 
     // customerId path (selects: expansion → name set): a thread-open
@@ -453,7 +453,7 @@ describe('POST /admin/communications/reschedule-link', () => {
       firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
       selectResults: [
         [{ id: CUSTOMER_UUID }],
-        [{ first_name: 'Krista' }, { first_name: 'Walt' }],
+        [{ first_name: 'PersonA' }, { first_name: 'PersonB' }],
       ],
     });
     wireDb({ customers: ambiguous, services: makeServicesBuilder([[visit]]) });
@@ -470,13 +470,13 @@ describe('POST /admin/communications/reschedule-link', () => {
     // proceeds as the operator's disambiguation).
     const byId = makeCustomersBuilder({
       firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID },
-      selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Walt' }]],
+      selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'PersonB' }]],
     });
     wireDb({ customers: byId, services: makeServicesBuilder([[visit]]) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(200);
-      expect((await res.json()).firstName).toBe('Walt');
+      expect((await res.json()).firstName).toBe('PersonB');
       expect(byId.calls.whereIn).toContainEqual(['id', [CUSTOMER_UUID]]);
     });
   });
