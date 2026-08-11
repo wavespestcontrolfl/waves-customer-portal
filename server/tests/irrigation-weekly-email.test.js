@@ -722,6 +722,7 @@ describe('findLawnEmailAudienceGaps', () => {
 
     const unstamped = (over = {}) => ({
       id: 'cust-7', first_name: 'Stu', last_name: 'Sample',
+      email: 'stu@example.com', latitude: 27.3, longitude: -82.5,
       email_pref_ok: true, tips_pref_ok: true,
       ...over,
     });
@@ -732,6 +733,20 @@ describe('findLawnEmailAudienceGaps', () => {
       mockBookRows([unstamped()]);
       expect(await findUnstampedRecurringLawnMembers()).toEqual([
         { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'] },
+      ]);
+    });
+
+    test("send prerequisites ride the SAME card — stamping alone can't deliver to a bad email/coords (codex r1 P2)", async () => {
+      mockBookRows([
+        unstamped({ id: 'a', email: null }),
+        unstamped({ id: 'b', email: 'not-an-email', latitude: 'garbage' }),
+        unstamped({ id: 'c', latitude: 0, longitude: 0 }),
+      ]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps.map((g) => [g.customerId, ...g.fixable])).toEqual([
+        ['a', 'no_recurring_marked_lawn_visit', 'no_email'],
+        ['b', 'no_recurring_marked_lawn_visit', 'unusable_email', 'no_coordinates'],
+        ['c', 'no_recurring_marked_lawn_visit', 'placeholder_coordinates'],
       ]);
     });
 

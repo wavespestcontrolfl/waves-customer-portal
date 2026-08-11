@@ -263,13 +263,20 @@ async function runInner({ now = new Date() } = {}) {
   for (const g of lawnGaps) {
     if (capped()) break;
     if (g.kind === 'unstamped_member') {
+      // Stamping alone only helps if the sender's other prerequisites hold —
+      // the leg validates them too (codex #3341 r1 P2), so one card lists
+      // everything standing between this customer and Monday.
+      const extras = g.fixable.filter((f) => f !== 'no_recurring_marked_lawn_visit');
       await ring(
         `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
         `${g.name || 'A recurring member'}'s lawn visits aren't stamped as a recurring series`,
         `${g.name || 'This customer'} was enrolled as a recurring member and has lawn service on the ` +
         'books, but no visit is stamped as part of a recurring series (and no cadence shows yet), so ' +
         'the Monday irrigation email can never select them. Book or re-stamp their next lawn visit as ' +
-        'part of the recurring series and they are included automatically next Monday.',
+        'part of the recurring series' +
+        (extras.length
+          ? ` — and also fix: ${extras.join(', ')} — then they are included automatically next Monday.`
+          : ' and they are included automatically next Monday.'),
         { customer_id: g.customerId, fixable: g.fixable },
         { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
       );

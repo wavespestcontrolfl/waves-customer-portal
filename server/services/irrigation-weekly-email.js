@@ -974,19 +974,33 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       });
     })
     .select(
-      'c.id', 'c.first_name', 'c.last_name',
+      'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
     );
   return rows
     // Intentional opt-out: never pageable, same rule as the evidence legs.
     .filter((r) => r.email_pref_ok && r.tips_pref_ok)
-    .map((r) => ({
-      customerId: r.id,
-      name: [r.first_name, r.last_name].filter(Boolean).join(' '),
-      kind: 'unstamped_member',
-      fixable: ['no_recurring_marked_lawn_visit'],
-    }));
+    .map((r) => {
+      // Same prerequisite validators as findLawnEmailAudienceGaps (codex
+      // #3341 r1 P2): stamping the series makes the customer evidence-
+      // positive, but the SENDER still skips an unusable email or bad
+      // coordinates — one card must list everything standing between the
+      // customer and Monday, or the operator fixes half and gets paged
+      // again by the evidence leg on a later run.
+      const fixable = ['no_recurring_marked_lawn_visit'];
+      if (!isEmailLike(r.email)) fixable.push(r.email ? 'unusable_email' : 'no_email');
+      const lat = numberOrNull(r.latitude);
+      const lng = numberOrNull(r.longitude);
+      if (lat == null || lng == null) fixable.push('no_coordinates');
+      else if (lat === 0 && lng === 0) fixable.push('placeholder_coordinates');
+      return {
+        customerId: r.id,
+        name: [r.first_name, r.last_name].filter(Boolean).join(' '),
+        kind: 'unstamped_member',
+        fixable,
+      };
+    });
 }
 
 module.exports = {

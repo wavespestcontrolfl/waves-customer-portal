@@ -285,6 +285,17 @@ describe('runInner alerting', () => {
     expect(opts.link).toBe('/admin/customers?customerId=cust-7');
   });
 
+  test('an unstamped member with a bad email lists BOTH fixes on one card (codex r1 P2)', async () => {
+    findUnstampedRecurringLawnMembers.mockResolvedValueOnce([
+      { customerId: 'cust-8', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit', 'no_email'] },
+    ]);
+    makeDbMock();
+    await runInner({ now: NOW });
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('also fix: no_email');
+    expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-8:no_email+no_recurring_marked_lawn_visit');
+  });
+
   test('a failed lawn-gap check is REPORTED, never silently zero — and other classes still page', async () => {
     findLawnEmailAudienceGaps.mockRejectedValueOnce(new Error('db exploded'));
     makeDbMock({ staleRows: [staleVisit()] });
