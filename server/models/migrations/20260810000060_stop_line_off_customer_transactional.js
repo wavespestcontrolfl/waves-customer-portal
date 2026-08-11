@@ -99,8 +99,13 @@ function mechanical(key, body) {
     next = next
       .replace('unless you choose to prepay', 'unless you prepay')
       // Price-unit rule: customer-facing copy says "per application",
-      // never "per visit" — normalize drifted/variant bodies too.
-      .replace(/\bper visit\b/g, 'per application');
+      // never "per visit" — normalize drifted/variant bodies too,
+      // case-insensitively, mirroring the source capitalization.
+      .replace(/\bper\s+visit\b/gi, (m) => {
+        if (m === m.toUpperCase()) return 'PER APPLICATION';
+        if (m[0] === 'P') return 'Per Application';
+        return 'per application';
+      });
   }
   return next;
 }

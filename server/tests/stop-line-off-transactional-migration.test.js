@@ -81,6 +81,13 @@ describe('stop-line-off-transactional swap table', () => {
     const drifted = 'Admin edited: pay per visit with a card on file. Reply STOP to opt out.';
     expect(mechanical('secure_appointment_card_plans', drifted))
       .toBe('Admin edited: pay per application with a card on file.');
+    // Case-insensitive, mirroring the source capitalization.
+    expect(mechanical('secure_appointment_card_plans', 'Pay Per Visit today.'))
+      .toBe('Pay Per Application today.');
+    expect(mechanical('secure_appointment_card_plans', 'PAY PER VISIT.'))
+      .toBe('PAY PER APPLICATION.');
+    expect(mechanical('secure_appointment_card_plans', 'Per visit billing.'))
+      .toBe('Per Application billing.');
     // Bounded to the plans key — other templates keep admin wording verbatim.
     expect(mechanical('rain_out_moved_v3', 'Custom per visit note.\n\nReply STOP to opt out.'))
       .toBe('Custom per visit note.');
