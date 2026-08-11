@@ -1028,8 +1028,13 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   // 20260810000040): only rows whose consent surface stated the sticky rule
   // may be charged on its strength — legacy consents stay non-sticky. The
   // enforcement gate is checked HERE, not in the helper, so the reminder's
-  // copy suppression can see evidence while the gate is dark.
-  if (startLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
+  // copy suppression can see evidence while the gate is dark. BOTH gates
+  // are required, matching the preview (pre-push r8 P1): with the parent
+  // card-hold rail off, sticky evidence must not enter this branch —
+  // chargeNoShowFee would refuse (feature_disabled) WITHOUT releasing,
+  // stranding the hold on a cancelled visit that a later rail re-enable
+  // could then charge; falling through releases free instead.
+  if (isCardHoldEnabled() && startLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     try {
       sticky = await findStickyLateReschedule({
         scheduledServiceId,

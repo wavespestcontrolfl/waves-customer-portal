@@ -846,6 +846,20 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
     expect(mockRescheduleLogChains).toHaveLength(0);
   });
 
+  it('sticky evidence with the PARENT card-hold rail off releases free — never a stranded hold a later re-enable could charge (pre-push r8 P1)', async () => {
+    // Sticky gate on, ONE_TIME_CARD_HOLD off: the sticky branch must not
+    // run (chargeNoShowFee would refuse feature_disabled WITHOUT releasing)
+    // — the cancel falls through to the ordinary free release, matching
+    // the preview's both-gates condition.
+    process.env.ONE_TIME_CARD_HOLD = 'false';
+    stubDb(holdRow, { rescheduleLog: [lateCustomerMove] });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockRescheduleLogChains).toHaveLength(0);
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+  });
+
   it('a legacy pre-marker row keeps its dated reminder cutoff — the promise stays honored', async () => {
     stubDb({ ...holdRow, no_show_fee_amount: 49, sticky_window_disclosed: false }, { rescheduleLog: [lateCustomerMove] });
     // The cutoff clause renders only for a still-future cutoff (real clock).
