@@ -118,6 +118,27 @@ export default function SecureAppointmentPage() {
   // must be picked before the card form appears on plan-bearing pages.
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [planBusy, setPlanBusy] = useState(false);
+  // Latches the disclosure version carried by the payload THIS tab rendered
+  // (latched, not live: a post-secure refresh nulls the note, but the
+  // consent echo must reflect what was shown when the customer agreed).
+  // Mirrored into sessionStorage because a 3DS confirmSetup is a FULL-PAGE
+  // redirect: the component remounts on return and calls /complete before
+  // any payload fetch, so an in-memory ref alone would echo nothing and
+  // permanently stamp a 3DS customer's consent non-sticky. Same-tab only by
+  // design — a different tab/browser has no proof of what THIS tab showed.
+  const stickyVersionRef = useRef(null);
+  useEffect(() => {
+    if (data?.stickyDisclosureVersion) {
+      stickyVersionRef.current = data.stickyDisclosureVersion;
+      try { sessionStorage.setItem(`waves-sdv-${token}`, data.stickyDisclosureVersion); } catch { /* storage unavailable — ref still covers the no-redirect path */ }
+    } else if (data?.state === 'ready') {
+      // A READY payload WITHOUT the version means this tab now renders copy
+      // with no sticky sentence (old worker mid-deploy, or fee off) — the
+      // stale attestation must not outlive the render it described.
+      stickyVersionRef.current = null;
+      try { sessionStorage.removeItem(`waves-sdv-${token}`); } catch { /* ignore */ }
+    }
+  }, [data, token]);
 
   // Re-pull the page payload (plan availability can change under us — the
   // office edits the visit, a term appears). Server truth wins.
@@ -158,11 +179,26 @@ export default function SecureAppointmentPage() {
     setState('secured');
   }, [token]);
 
+  // The disclosure version THIS tab's render carried — the server stamps
+  // the sticky-window consent marker from it, so it must come from the
+  // page state the customer actually saw, never a constant. sessionStorage
+  // fallback covers the 3DS redirect return, where the remounted component
+  // completes before any payload fetch. Also the retry predicate for
+  // completion_in_progress (Codex #3342 r10 P1): a pending echo is worth
+  // waiting out the webhook's claim for; no echo → nothing to record, so
+  // the secured render should not be delayed.
+  const pendingStickyEcho = useCallback(() => {
+    let sdv = stickyVersionRef.current;
+    if (!sdv) { try { sdv = sessionStorage.getItem(`waves-sdv-${token}`) || null; } catch { sdv = null; } }
+    return sdv;
+  }, [token]);
+
   const complete = useCallback(async (setupIntentId) => {
+    const sdv = pendingStickyEcho();
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setupIntentId }),
+      body: JSON.stringify({ setupIntentId, stickyDisclosureVersion: sdv || undefined }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -171,7 +207,7 @@ export default function SecureAppointmentPage() {
       throw err;
     }
     return res.json();
-  }, [token]);
+  }, [token, pendingStickyEcho]);
 
   useEffect(() => {
     let cancelled = false;
@@ -185,8 +221,49 @@ export default function SecureAppointmentPage() {
           // us to the claim) fall through to the page-data fetch below —
           // the GET renders completing/completed rows as secured, so the
           // redirect race can never re-show the card form mid-save.
-          try { await complete(redirectIntent); } catch { /* fall through to page state */ }
-          if (!cancelled) {
+          // The params are stripped ONLY on success (Codex #3342 pre-push
+          // r8 P1): /complete is the sole writer of the webhook-first
+          // consent echo, and it is idempotent — keeping the params on a
+          // failed POST means a reload retries the recording instead of
+          // silently losing the disclosed sticky window. The retryable
+          // consent_echo_failed NACK is retried IN PAGE (pre-push r9 P1):
+          // the page renders secured either way (the card IS saved), so a
+          // customer has no reason to reload — waiting for one would make
+          // the kept params decorative. If the retries exhaust, the
+          // server's refresh instruction surfaces on the secured card.
+          // completion_in_progress is retried the same way WHEN an echo is
+          // pending (Codex #3342 r10 P1): the webhook holding the claim
+          // completes without a disclosure echo and stamps non-sticky, so
+          // breaking out here would silently keep the reschedule-then-
+          // cancel dodge for a customer who attested — retry until the row
+          // exits 'completing' and /complete records the echo on the
+          // completed row idempotently. No pending echo → the old
+          // fall-through is right (nothing to record; the GET renders
+          // completing rows as secured).
+          const retryable = (code) => code === 'consent_echo_failed'
+            || (code === 'completion_in_progress' && !!pendingStickyEcho());
+          let completed = false;
+          for (let attempt = 0; attempt < 3 && !completed && !cancelled; attempt += 1) {
+            try {
+              await complete(redirectIntent);
+              completed = true;
+            } catch (err) {
+              if (!retryable(err?.code)) break; // other errors: fall through to page state
+              if (attempt === 2) {
+                // The kept params make a reload retry the idempotent
+                // /complete, so the exhaustion notice must instruct one —
+                // the completion_in_progress server copy doesn't.
+                if (!cancelled) {
+                  setError(err?.code === 'completion_in_progress'
+                    ? 'Your card is saved — please refresh this page in a moment.'
+                    : (err.message || 'Your card is saved — please refresh this page.'));
+                }
+                break;
+              }
+              await new Promise((resolve) => { setTimeout(resolve, 1500 * (attempt + 1)); });
+            }
+          }
+          if (!cancelled && completed) {
             const cleaned = new URLSearchParams(searchParams);
             ['setup_intent', 'setup_intent_client_secret', 'redirect_status'].forEach((k) => cleaned.delete(k));
             setSearchParams(cleaned, { replace: true });
@@ -214,13 +291,17 @@ export default function SecureAppointmentPage() {
     if (busy || !captureRef.current?.isReady()) return;
     setBusy(true);
     setError(null);
+    // Hoisted so the completion_in_progress retry below can re-POST the
+    // SAME SetupIntent — the server pins the webhook-first echo to it.
+    let confirmedIntentId = null;
     try {
       const confirmed = await captureRef.current.confirmSetup();
       if (!confirmed.ok) {
         setError(confirmed.error || 'That card could not be saved. Try again.');
         return;
       }
-      await complete(confirmed.setupIntentId);
+      confirmedIntentId = confirmed.setupIntentId;
+      await complete(confirmedIntentId);
       // Re-pull the payload so the secured confirmation renders the FROZEN
       // row terms, never this render's pre-completion disclosure (Codex
       // #3153 r16 — a concurrent tab or a monotonic-down stamp can make
@@ -236,9 +317,28 @@ export default function SecureAppointmentPage() {
       }
       // The Stripe webhook (or another tab) won the completion claim and
       // is saving this card right now — the SetupIntent already succeeded,
-      // so the durable webhook path finishes it. Not a failure. Re-pull so
-      // the secured render carries the frozen row terms (Codex #3153 r16).
+      // so the durable webhook path finishes it. Not a failure. But the
+      // webhook tail carries no disclosure echo and stamps non-sticky, so
+      // when THIS render disclosed the sticky window, retry /complete
+      // until the row exits 'completing' and the echo records on the
+      // completed row idempotently (Codex #3342 r10 P1) — unlike the 3DS
+      // return there are no URL params here, so a reload never retries
+      // and in-page retries are the only chance to record it. Exhaustion
+      // renders secured without the echo: the marker stays false, which
+      // fails toward the customer (non-sticky), never toward a charge.
       if (err?.code === 'completion_in_progress') {
+        if (pendingStickyEcho() && confirmedIntentId) {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            await new Promise((resolve) => { setTimeout(resolve, 1500 * (attempt + 1)); });
+            try {
+              await complete(confirmedIntentId);
+              break;
+            } catch (retryErr) {
+              if (retryErr?.code !== 'completion_in_progress'
+                && retryErr?.code !== 'consent_echo_failed') break;
+            }
+          }
+        }
         await refreshOrSecured();
         return;
       }
@@ -254,7 +354,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh, refreshOrSecured]);
+  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
@@ -357,6 +457,12 @@ export default function SecureAppointmentPage() {
             <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
               {data.cancelFeeNote}
             </p>
+          ) : null}
+          {/* Exhausted consent-echo retries (pre-push r9 P1): the card is
+              saved, but the fee-terms recording needs one more /complete —
+              tell the customer to refresh (the kept 3DS params retry it). */}
+          {error ? (
+            <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
           <ContactRow />

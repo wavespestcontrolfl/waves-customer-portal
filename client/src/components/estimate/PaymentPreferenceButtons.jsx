@@ -238,7 +238,7 @@ export default function PaymentPreferenceButtons({
 
         <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {holdRequired
-            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
+            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. Rescheduling is free but doesn't reset the cancellation window. ${CARD_SURCHARGE_DISCLOSURE}`
             : fineprint}
         </div>
       </div>
