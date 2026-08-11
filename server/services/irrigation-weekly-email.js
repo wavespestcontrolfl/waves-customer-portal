@@ -905,11 +905,22 @@ async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
   return gaps;
 }
 
-// Emails the system itself sends when it starts treating a customer as a
-// recurring member — their existence in email_messages is durable proof the
-// business enrolled this customer, independent of how their visits were
-// stamped. Used by the membership-evidence gap leg below.
-const MEMBERSHIP_EVIDENCE_TEMPLATES = ['membership.started', 'welcome.new_recurring'];
+// Emails the system itself sends ONLY while it considers the customer a live
+// recurring member — each fires on a positive membership state transition
+// (or, for renewal_reminder/updated, on an existing live membership), so the
+// newest one is proof of membership AT THAT MOMENT, independent of how
+// visits were stamped. membership.reactivated matters (pre-push P1): the
+// deactivate/reactivate flow emits it INSTEAD of another started, so a set
+// without it would leave every reactivated member excluded forever by the
+// cancellation comparison below. membership.paused is deliberately neither
+// positive nor negative. Used by the membership-evidence gap leg below.
+const MEMBERSHIP_EVIDENCE_TEMPLATES = [
+  'membership.started',
+  'membership.updated',
+  'membership.renewal_reminder',
+  'membership.reactivated',
+  'welcome.new_recurring',
+];
 
 /**
  * Membership-evidence gap leg (owner ruling 2026-08-10). The evidence-based
@@ -973,7 +984,7 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       `GREATEST(
          COALESCE((SELECT MAX(em.created_at) FROM email_messages em
                     WHERE em.recipient_id = c.id::text AND em.recipient_type = 'customer'
-                      AND em.template_key IN (?, ?)), 'epoch'::timestamptz),
+                      AND em.template_key IN (${MEMBERSHIP_EVIDENCE_TEMPLATES.map(() => '?').join(', ')})), 'epoch'::timestamptz),
          COALESCE((SELECT MAX(cpr.created_at) FROM customer_plan_rates cpr
                     WHERE cpr.customer_id = c.id), 'epoch'::timestamptz)
        ) > COALESCE((SELECT MAX(emc.created_at) FROM email_messages emc
@@ -1056,6 +1067,7 @@ module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
   findUnstampedRecurringLawnMembers,
+  MEMBERSHIP_EVIDENCE_TEMPLATES,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
   fetchUpcomingWeekRainForecast,

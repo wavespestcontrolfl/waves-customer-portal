@@ -758,6 +758,20 @@ describe('findLawnEmailAudienceGaps', () => {
       );
     });
 
+    test('positive membership evidence covers the whole live-membership lifecycle (pre-push P1)', () => {
+      // The deactivate/reactivate flow emits membership.reactivated INSTEAD
+      // of another started — without it in the positive set, the
+      // cancellation comparison excludes every reactivated member forever.
+      // canceled is the negative signal and must never be positive evidence.
+      const { MEMBERSHIP_EVIDENCE_TEMPLATES } = require('../services/irrigation-weekly-email');
+      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).toEqual(expect.arrayContaining([
+        'membership.started', 'membership.updated', 'membership.renewal_reminder',
+        'membership.reactivated', 'welcome.new_recurring',
+      ]));
+      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).not.toContain('membership.canceled');
+      expect(MEMBERSHIP_EVIDENCE_TEMPLATES).not.toContain('membership.paused');
+    });
+
     test('the gap carries the triggering visit id so a later regression re-pages (codex r3 P2)', async () => {
       mockBookRows([unstamped({ trigger_visit_id: 'visit-42' })]);
       const gaps = await findUnstampedRecurringLawnMembers();
