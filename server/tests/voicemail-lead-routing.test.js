@@ -842,6 +842,36 @@ describe('findReusableCallLead match provenance ({ lead, matchedVia })', () => {
     expect(out).toEqual({ lead: unclaimed, matchedVia: 'same_call_stamp' });
   });
 
+  test('a PHONE-authorized stamp keeps its customer-owned lead on retry — even when the phone can no longer re-select it', async () => {
+    // The codex P2 scenario: first pass phone-reused + stamped a
+    // customer-owned lead (via 'phone'); the lead's number was then
+    // corrected away. The strict stamp arm used to reject the owned row
+    // and the phone fallback missed → duplicate mint + settled link. With
+    // the persisted authority the stamp arm keeps the phone path's
+    // ownership rules and the durable link holds.
+    const owned = { id: 'lead-r', customer_id: 'cust-9', phone: '+19415550777', twilio_call_sid: 'CA-original' };
+    const out = await findReusableCallLead(segmentDb([owned]), {
+      phone: PHONE, // caller's number no longer matches the corrected lead
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      stampedLeadVia: 'phone',
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(out).toEqual({ lead: owned, matchedVia: 'same_call_stamp' });
+
+    // A LEGACY stamp (no via) on the same shape stays strict — rejected.
+    const legacy = await findReusableCallLead(segmentDb([owned]), {
+      phone: PHONE,
+      callSid: 'CA-retry',
+      stampedLeadId: 'lead-r',
+      stampedLeadVia: null,
+      customerId: null,
+      workableUnnamedLead: false,
+    });
+    expect(legacy).toEqual({ lead: null, matchedVia: null });
+  });
+
   test('the call\'s own sid row reports matchedVia "same_call_sid"', async () => {
     const own = { id: 'lead-own', customer_id: null, phone: PHONE, twilio_call_sid: 'CA-this' };
     const out = await findReusableCallLead(segmentDb([own]), {
@@ -868,5 +898,104 @@ describe('findReusableCallLead match provenance ({ lead, matchedVia })', () => {
       customerId: null,
       workableUnnamedLead: false,
     })).toEqual({ lead: null, matchedVia: null });
+  });
+});
+
+describe('phone-authorized stamps survive retries (codex P2 r1 on the root fix)', () => {
+  const { parseStampedLeadLink, applySameCallLeadEligibility } = CallRecordingProcessor._test;
+
+  const spy = () => {
+    const calls = [];
+    const q = {};
+    for (const m of ['where', 'whereNull', 'whereNotIn', 'orderBy', 'first']) {
+      q[m] = (...a) => { calls.push([m, a]); return q; };
+    }
+    q.calls = calls;
+    return q;
+  };
+
+  test('parseStampedLeadLink reads the stamp authority; legacy stamps parse as via null', () => {
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-1', lead_link_via: 'phone' } }))
+      .toEqual({ leadId: 'lead-1', via: 'phone' });
+    expect(parseStampedLeadLink({ metadata: JSON.stringify({ lead_id: 'lead-2', lead_link_via: 'email' }) }))
+      .toEqual({ leadId: 'lead-2', via: 'email' });
+    // Pre-fix stamps carry no via — strict treatment.
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-3' } }))
+      .toEqual({ leadId: 'lead-3', via: null });
+    // Junk via never widens eligibility.
+    expect(parseStampedLeadLink({ metadata: { lead_id: 'lead-4', lead_link_via: 'anything' } }))
+      .toEqual({ leadId: 'lead-4', via: null });
+    expect(parseStampedLeadLink({ metadata: null })).toEqual({ leadId: null, via: null });
+  });
+
+  test('a phone-authorized stamp relaxes ONLY the customer-less unclaimed rule', () => {
+    // The original phone linkage was allowed to target a customer-owned
+    // lead; its retry keeps those ownership rules instead of the
+    // anonymous-strict set that rejected the exact stamped lead and minted
+    // a duplicate.
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(false);
+  });
+
+  test('shared-phone ambiguity is NEVER relaxed by phone authority', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: true, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('email/legacy stamps keep the strict unclaimed rule', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: null, unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: false,
+    });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('a resolved customer still scopes ownership to unclaimed-or-mine under phone authority', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, {
+      customerId: 'c1', unclaimedOnly: false, workableUnnamedLead: false, phoneAuthorizedStamp: true,
+    });
+    expect(q.calls.some(([m, a]) => m === 'where' && typeof a[0] === 'function')).toBe(true);
+  });
+});
+
+describe('phoneReuseStillValidOnLockedRow — the phone arm revalidated under the row lock (codex P2 r1)', () => {
+  const { phoneReuseStillValidOnLockedRow } = CallRecordingProcessor._test;
+  const PHONE = '+19415550101';
+  const base = { id: 'lead-p', phone: PHONE, deleted_at: null, status: 'new', converted_at: null, customer_id: null };
+  const args = { phone: PHONE, customerId: null, unclaimedOnly: false, workableUnnamedLead: false };
+
+  test('a row still satisfying the selecting predicates passes', () => {
+    expect(phoneReuseStillValidOnLockedRow(base, args)).toBe(true);
+    // Ownership: a customer-owned row is fine for a customer-less caller —
+    // the phone path applies no ownership filter there.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, args)).toBe(true);
+  });
+
+  test('phone corrected away, soft-delete, or a vanished row revokes the reuse', () => {
+    expect(phoneReuseStillValidOnLockedRow({ ...base, phone: '+19415550999' }, args)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, deleted_at: new Date() }, args)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow(null, args)).toBe(false);
+  });
+
+  test('the workableUnnamedLead lifecycle trio is re-enforced', () => {
+    const workable = { ...args, workableUnnamedLead: true };
+    expect(phoneReuseStillValidOnLockedRow(base, workable)).toBe(true);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, status: 'won' }, workable)).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, converted_at: new Date() }, workable)).toBe(false);
+  });
+
+  test('ownership arms mirror the phone branch exactly', () => {
+    // Shared-phone ambiguity: unclaimed only.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, { ...args, unclaimedOnly: true })).toBe(false);
+    // Customer-attached: unclaimed-or-mine.
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, { ...args, customerId: 'cust-1' })).toBe(false);
+    expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-1' }, { ...args, customerId: 'cust-1' })).toBe(true);
   });
 });

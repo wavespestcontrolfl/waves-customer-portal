@@ -2158,26 +2158,33 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 // and the guarded write rebuilt it ~400 lines away. One function means the
 // two can no longer drift, and a new predicate added here is automatically
 // enforced at both sites.
-function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workableUnnamedLead }) {
+function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workableUnnamedLead, phoneAuthorizedStamp = false }) {
   let out = query.whereNull('deleted_at');
   if (workableUnnamedLead) {
     out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
-  if (unclaimedOnly || !customerId) {
+  if (unclaimedOnly || (!customerId && !phoneAuthorizedStamp)) {
     // Anonymous retries require an UNCLAIMED row too, not just the
     // shared-phone-ambiguity case: unclaimedOnly is derived from shared-phone
     // candidates and is false for a customer-less caller, so without the
     // `!customerId` arm a row claimed between attempts stayed eligible and
     // an anonymous extraction could overwrite a customer-owned lead
-    // (audit P1 r15).
+    // (audit P1 r15). EXCEPTION (codex P2 on the root fix): a
+    // PHONE-authorized stamp (metadata.lead_link_via === 'phone') was
+    // legitimately allowed to target a customer-owned lead at stamp time —
+    // the phone path applies no ownership filter for a customer-less
+    // caller — so its retry keeps the same ownership rules the original
+    // linkage ran under instead of the anonymous-strict set. Email/legacy
+    // stamps (via absent) stay strict; shared-phone ambiguity
+    // (unclaimedOnly) is never relaxed.
     out = out.whereNull('customer_id');
-  } else {
+  } else if (customerId) {
     out = out.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   return out;
 }
 
-async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null }) {
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null, stampedLeadVia = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
   // attempt already inserted, and the call SID is the strongest identity
@@ -2217,9 +2224,14 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     if (own) return { lead: own, matchedVia: 'same_call_sid' };
   }
   if (stampedLeadId) {
+    // A phone-authorized stamp keeps the ownership rules its original
+    // linkage ran under (see applySameCallLeadEligibility) — otherwise a
+    // legitimately customer-owned phone-reused lead was rejected here and,
+    // when the phone fallback could no longer re-select it, the retry
+    // minted a duplicate and settled the durable link (codex P2).
     const own = await applySameCallLeadEligibility(
       database('leads').where('id', stampedLeadId),
-      { customerId, unclaimedOnly, workableUnnamedLead },
+      { customerId, unclaimedOnly, workableUnnamedLead, phoneAuthorizedStamp: stampedLeadVia === 'phone' },
     ).orderBy('created_at', 'desc').first();
     if (own) return { lead: own, matchedVia: 'same_call_stamp' };
   }
@@ -2288,14 +2300,32 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
 }
 
 // The lead stamp an earlier attempt of this call may have written
-// (call_log.metadata.lead_id — the phone-less reused-lead linkage). One
+// (call_log.metadata.lead_id — the reused-lead linkage). One
 // parser for every site that reconciles it: Step 4b, the implausible-
 // transcript rejection, and the spam/veto terminal exits.
 function parseStampedLeadId(call) {
+  return parseStampedLeadLink(call).leadId;
+}
+
+// The stamp plus its AUTHORITY (metadata.lead_link_via, 'phone' | 'email'):
+// which identity linked this call to the lead when the stamp was written.
+// A phone-authorized stamp on a customer-OWNED lead is legitimate (the
+// phone path applies no ownership filter for a customer-less caller), so a
+// retry's stamp-arm eligibility must not reject it with the
+// anonymous-strict unclaimed rule — that minted a duplicate and settled the
+// supposedly durable link whenever the phone fallback could no longer
+// re-select the row (lead phone corrected, or the retry's extraction lost
+// the number — codex P2 r1 ×2 on the root fix). Stamps written before this
+// key exists parse as via=null and keep the strict treatment.
+function parseStampedLeadLink(call) {
   try {
     const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
-    return md?.lead_id ? String(md.lead_id) : null;
-  } catch { return null; }
+    if (!md?.lead_id) return { leadId: null, via: null };
+    return {
+      leadId: String(md.lead_id),
+      via: md.lead_link_via === 'phone' || md.lead_link_via === 'email' ? md.lead_link_via : null,
+    };
+  } catch { return { leadId: null, via: null }; }
 }
 
 // Decides whether THIS pass writes the durable call→lead stamp
@@ -2327,6 +2357,30 @@ function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid
     || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
 }
 
+
+// Re-applies the PHONE arm's selecting predicates against the LOCKED lead
+// row before the stamp is written (codex P2 on the root fix): a
+// phone-matched lead edited (number corrected away), closed, converted, or
+// soft-deleted between findReusableCallLead and the transaction's row lock
+// no longer satisfies the identity/lifecycle the selection was based on —
+// and the ordinary phone-path write only repeats customer ownership, so
+// without this the pass stamped a durable association onto (and enriched)
+// an obsolete row. Mirrors the phone branch's own predicate set exactly:
+// phone equality, deleted_at, the workableUnnamedLead lifecycle trio, and
+// the ownership arm.
+function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead }) {
+  if (!lockedLead) return false;
+  if (lockedLead.deleted_at) return false;
+  if (String(lockedLead.phone || '') !== String(phone)) return false;
+  if (workableUnnamedLead) {
+    if (TERMINAL_LEAD_STATUSES.includes(lockedLead.status)) return false;
+    if (lockedLead.converted_at) return false;
+  }
+  if (unclaimedOnly && lockedLead.customer_id != null) return false;
+  if (customerId && lockedLead.customer_id != null
+    && String(lockedLead.customer_id) !== String(customerId)) return false;
+  return true;
+}
 
 // The lead columns the reuse enrichment can mutate — snapshotted
 // into call_log.metadata.lead_prior_state at stamp time and restored when a
@@ -2616,7 +2670,7 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     // runCallPpcAttribution would double-count the call against the former
     // lead's unresolved legacy row. The breadcrumb rides THIS fenced
     // write; a successful restamp removes it in the stamp transaction.
-    const clearedExpr = "(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq'";
+    const clearedExpr = "((((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq') - 'lead_link_via'";
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
@@ -8270,7 +8324,7 @@ const CallRecordingProcessor = {
     // phone or was vetoed out of lead creation entirely — or the consumers
     // that read the stamp keep associating this call with a lead a prior
     // attempt chose (audit P1 r22).
-    const priorStampedLeadId = parseStampedLeadId(call);
+    const { leadId: priorStampedLeadId, via: priorStampedLeadVia } = parseStampedLeadLink(call);
     // Linkage completion flag: once this call's flow involves a reused lead
     // or a prior stamp, it must EXIT with its linkage settled (stamped,
     // re-pointed, or cleared by the maintenance block). A throw anywhere
@@ -8314,6 +8368,7 @@ const CallRecordingProcessor = {
           lastName: extracted.last_name || null,
           callSid: call.twilio_call_sid || null,
           stampedLeadId: priorStampedLeadId,
+          stampedLeadVia: priorStampedLeadVia,
           ...sameCallEligibility,
         });
         // Same-call reuse (a retry found the lead THIS call's earlier attempt
@@ -8331,6 +8386,16 @@ const CallRecordingProcessor = {
         // newly-claimed lead.
         const sameCallLeadReuse = existingLeadVia === 'same_call_sid'
           || existingLeadVia === 'same_call_stamp';
+        // The guarded write and the 0-row recheck repeat EXACTLY the
+        // eligibility the selecting arm enforced — including the
+        // phone-authorized-stamp relaxation when the stamp arm applied it
+        // (codex P2): a stamp-arm hit under relaxed ownership must not be
+        // re-judged by the strict set at write time, and vice versa. Sid-arm
+        // hits stay strict (a sid row is this call's own insert).
+        const sameCallWriteEligibility = {
+          ...sameCallEligibility,
+          phoneAuthorizedStamp: existingLeadVia === 'same_call_stamp' && priorStampedLeadVia === 'phone',
+        };
         // A fresh insert with no prior stamp self-links via its own sid at
         // insert time — REUSE of a different-sid lead puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
@@ -8880,7 +8945,7 @@ const CallRecordingProcessor = {
               // overwritten, then a soft-deleted or closed row enriched
               // while the call finished clean). A 0-row outcome lands in the
               // reconciliation below.
-              enrichmentWrite = applySameCallLeadEligibility(enrichmentWrite, sameCallEligibility);
+              enrichmentWrite = applySameCallLeadEligibility(enrichmentWrite, sameCallWriteEligibility);
             }
             if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
@@ -9011,6 +9076,7 @@ const CallRecordingProcessor = {
                   }
                 } catch { /* unparseable metadata — no breadcrumb */ }
               }
+              let phoneReuseRevokedUnderLock = false;
               enriched = await db.transaction(async (trx) => {
                 // Snapshot under a ROW LOCK inside the same transaction that
                 // stamps and updates (codex P2 r16): two concurrent
@@ -9026,6 +9092,23 @@ const CallRecordingProcessor = {
                   .forUpdate()
                   .first();
                 let lockedLead = await lockLeadRow();
+                // A PHONE-selected row is revalidated against the LOCKED
+                // state BEFORE anything is written (codex P2): the lookup's
+                // selecting predicates can stop holding in the gap (number
+                // corrected away, row closed/converted/soft-deleted), and
+                // the phone-path write below only repeats ownership — the
+                // pass would stamp a durable association onto an obsolete
+                // row. On failure nothing is stamped or enriched; the
+                // association is dropped after the transaction (Needs
+                // Review lane) and maintenance settles any prior stamp.
+                // Same-call arms keep their own eligibility (the guarded
+                // write repeats it) and the email arm's write enforces its
+                // full predicate set in SQL already.
+                if (existingLeadVia === 'phone'
+                  && !phoneReuseStillValidOnLockedRow(lockedLead, { phone, ...sameCallEligibility })) {
+                  phoneReuseRevokedUnderLock = true;
+                  return 0;
+                }
                 // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
                 // older call after a DIFFERENT call enriched the same reused
                 // lead (codex P2 r17)? Its old stamp belongs to a finished
@@ -9197,16 +9280,25 @@ const CallRecordingProcessor = {
                     // replacement stamp durably lands (codex P1 r17) — the
                     // moved-link branch below consumes it this same
                     // transaction.
+                    // lead_link_via records the AUTHORITY that linked this
+                    // call to the lead (codex P2): 'phone' when this pass
+                    // carries the caller's number (a gained-phone re-stamp
+                    // upgrades the authority — the number now corroborates
+                    // the link), 'email' otherwise. Retry eligibility for a
+                    // phone-authorized stamp keeps the phone path's
+                    // ownership rules; email/legacy stamps stay strict.
                     metadata: db.raw(
-                      "(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
+                      "(jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
                       + `, '{lead_written_state}', ${writtenExpr}, true)`
-                      + `, '{lead_stamp_seq}', ${seqExpr}, true)) - 'attribution_former_lead_id'`,
+                      + `, '{lead_stamp_seq}', ${seqExpr}, true)`
+                      + ", '{lead_link_via}', ?::jsonb, true)) - 'attribution_former_lead_id'",
                       [
                         JSON.stringify(String(leadId)),
                         String(leadId), JSON.stringify(prior), JSON.stringify(prior),
                         String(leadId), JSON.stringify(written), JSON.stringify(written),
                         String(leadId), nextSeq, nextSeq,
+                        JSON.stringify(phone ? 'phone' : 'email'),
                       ],
                     ),
                     updated_at: new Date(),
@@ -9294,7 +9386,17 @@ const CallRecordingProcessor = {
                 }
                 return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });
-              currentStampedLeadId = String(leadId);
+              if (phoneReuseRevokedUnderLock) {
+                // The locked row no longer satisfies the phone arm's
+                // selecting predicates — nothing was stamped or enriched.
+                // Drop the association (Needs Review lane); the maintenance
+                // block settles any prior stamp via its lead-less branch.
+                logger.warn(`[call-proc] phone-reused lead ${leadId} no longer matches the selecting predicates under lock — dropping the association for ${maskSid(callSid)}`);
+                leadId = null;
+                sameCallOwnershipRejected = true;
+              } else {
+                currentStampedLeadId = String(leadId);
+              }
             } else {
               enriched = await enrichmentWrite.update(leadUpdates);
             }
@@ -9321,7 +9423,7 @@ const CallRecordingProcessor = {
               let verified = true;
               try {
                 stillEligible = await applySameCallLeadEligibility(
-                  db('leads').where({ id: leadId }), sameCallEligibility,
+                  db('leads').where({ id: leadId }), sameCallWriteEligibility,
                 ).first('id');
               } catch (eligErr) {
                 // FAIL CLOSED (codex P2): swallowing this and keeping leadId
@@ -13533,6 +13635,8 @@ CallRecordingProcessor._test = {
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,
+  parseStampedLeadLink,
+  phoneReuseStillValidOnLockedRow,
   shouldStampCallLeadLinkage,
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
