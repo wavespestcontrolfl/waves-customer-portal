@@ -579,13 +579,27 @@ async function findActiveRecurringSeries(conn, {
   if (columns.recurring_ongoing) query.select('recurring_ongoing');
   if (excludeParentId) query.whereNot('id', excludeParentId);
   const parents = await query;
-  const targetKey = serviceType ? serviceKeyFor({ service_type: serviceType }) : null;
+  // Palm-first family classification for BOTH sides (codex r21 pre-push
+  // P0): serviceKeyFor checks tree tokens before palm, so a legacy parent
+  // labeled 'Palm Tree Injections' with a null/stale service_id
+  // classified tree_shrub while the canonicalized TARGET reads
+  // palm_injection — the guard missed it and minted a duplicate
+  // per-application palm series. seedingFamilyKey corrects the alias in
+  // both directions ('Palmetto…' stays non-palm); for every other family
+  // it returns exactly serviceKeyFor. Lazy require — the converter
+  // requires this module at load time, so a top-level import would cycle.
+  let familyKeyOf = (label) => serviceKeyFor({ service_type: label });
+  try {
+    const { seedingFamilyKey } = require('./estimate-converter');
+    familyKeyOf = (label) => seedingFamilyKey({}, { service_type: label });
+  } catch { /* seeder-local resolver stands */ }
+  const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
   for (const parent of parents || []) {
     const idMatch = serviceId != null && parent.service_id != null
       && String(parent.service_id) === String(serviceId);
     const keyMatch = targetKey != null && parent.service_type
-      && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
+      && familyKeyOf(parent.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
       const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');

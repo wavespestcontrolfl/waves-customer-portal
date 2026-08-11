@@ -284,6 +284,21 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     ]);
   });
 
+  test('an existing ALIAS parent (Palm Tree Injections, null id) matches a palm target (codex r21 pre-push P0)', async () => {
+    // serviceKeyFor is tree-first, so the legacy alias parent classified
+    // tree_shrub while the canonicalized target read palm_injection — the
+    // guard missed it and minted a duplicate per-application palm series.
+    // Both sides now classify palm-first via seedingFamilyKey.
+    const { db } = makeLockEnv({
+      parents: [{ id: 9, service_id: null, service_type: 'Palm Tree Injections', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result = await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].id).toBe(9);
+  });
+
   test('locks BOTH matcher dimensions when the caller carries service_id AND a label', async () => {
     const { db, rawCalls } = makeLockEnv({ parents: [] });
     await db.transaction((trx) => checkActiveSeriesLocked(trx, {
