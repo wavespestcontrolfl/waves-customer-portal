@@ -3,7 +3,9 @@
 // (or the rest of the assigned tech's route) for weather or a schedule delay
 // and texts the customer a self-serve reschedule link, optionally with a
 // dispatcher-typed note appended (≤200 chars, no link shorteners — server
-// enforces). All logic lives in
+// enforces). The gated Custom reason flips the note into the FRONT of the
+// text (required, 2-segment cap) with the move line + link appended after.
+// All logic lives in
 // server/services/rain-out.js; this calls the admin endpoints:
 //   GET  /admin/dispatch/:id/rain-out-options
 //   POST /admin/dispatch/:id/rain-out
@@ -38,6 +40,12 @@ const EXTRA_REASONS = [
   { code: 'customer_noshow', label: 'No-show' },
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
+// Custom reason (rendered only when the options payload says
+// GATE_QUICKMOVE_CUSTOM_REASON is on): the dispatcher's message opens the
+// SMS and the templated move line + reschedule link close it. Single stop
+// only; the assembled text is capped at 2 SMS segments (server renders the
+// real body pre-move and enforces — the counter below is the mirror).
+const CUSTOM_REASON = 'custom';
 
 // Friendly copy for the server's structured rejections.
 const ERROR_COPY = {
@@ -49,6 +57,10 @@ const ERROR_COPY = {
   note_guard_blocked: 'That note would trip the SMS safety guard — avoid {braces} and the words null, undefined, or 1970.',
   note_compliance_blocked: 'That wording isn’t allowed in customer texts — no "safe" claims (say "safe once dry — your technician confirms timing"), no EPA-approved, no fixed re-entry times.',
   note_invalid: 'That note could not be sent — plain text only.',
+  custom_route_scope: 'Custom messages apply to this stop only.',
+  custom_requires_note: 'Write the message — it becomes the front of the text.',
+  note_too_many_segments: 'That message would send as 3+ SMS segments — shorten it to fit 2.',
+  custom_message_unavailable: 'The custom-message text template is turned off — use a preset reason.',
 };
 
 // Mirrors of the server's note guards (rain-out.js sanitizeCustomerNote) —
@@ -244,6 +256,62 @@ function normalizeForLinkCheck(raw) {
   return out;
 }
 
+// ——— Custom-reason 2-segment counter mirrors (server: segment-counter.js +
+// gsm-normalize.js + the rain_out_moved_custom_v1 template) — advisory here;
+// commit() renders the real body pre-move and is the enforcer. ———
+// GSM 03.38 basic alphabet; extension chars cost 2 slots each. Any char
+// outside both sets flips the WHOLE message to UCS-2 (2 segments = 134
+// UTF-16 units instead of 306 GSM slots).
+const GSM_BASIC_SET = new Set(
+  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
+);
+const GSM_EXT_SET = new Set(['{', '}', '[', ']', '~', '|', '\\', '^', '€', '\f']);
+// Compact mirror of the send path's GSM punctuation normalizer: smart
+// quotes/dashes → plain, Unicode space family → space, invisibles dropped,
+// ellipsis → '...'. Counting the normalized form keeps an iOS smart
+// apostrophe from reading as a UCS-2 flip the send path will prevent.
+function gsmNormalizeForCount(text) {
+  return String(text)
+    .replace(/[‘’‚‛′ʼ`´]/g, "'")
+    .replace(/[“”„‟″]/g, '"')
+    .replace(/[‐‑‒–—―−•]/g, '-')
+    .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '')
+    .replace(/…/g, '...');
+}
+// Characters left inside the 2-segment cap for a predicted body (negative =
+// over). GSM-7: 2×153 = 306 slots; UCS-2: 2×67 = 134 UTF-16 units.
+function twoSegmentRemaining(body) {
+  const norm = gsmNormalizeForCount(body);
+  let slots = 0;
+  for (const ch of norm) {
+    if (GSM_EXT_SET.has(ch)) { slots += 2; continue; }
+    if (!GSM_BASIC_SET.has(ch)) return { remaining: 134 - norm.length, ucs2: true };
+    slots += 1;
+  }
+  return { remaining: 306 - slots, ucs2: false };
+}
+// Mirror of the server's customer-facing option label (customerArrivalOption
+// in rain-out.js): "Fri, Aug 14, 8:00 AM - 10:00 AM" — the arrival window
+// quoted to customers is always 2 hours from the start, independent of the
+// booked 1-hour block.
+function smsDateLabel(dateStr) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return String(dateStr);
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: TIMEZONE });
+}
+function smsNewOption(dateStr, startHHMM) {
+  const startMin = hhmmToMin(startHHMM);
+  if (startMin == null) return smsDateLabel(dateStr);
+  const endMin = (startMin + 120) % (24 * 60);
+  return `${smsDateLabel(dateStr)}, ${fmtTime(minToHHMM(startMin))} - ${fmtTime(minToHHMM(endMin))}`;
+}
+// Mirror of the rain_out_moved_custom_v1 template body — keep in sync with
+// the migration.
+function predictedCustomBody(compose, message, option) {
+  return `Hi ${compose.firstName} - ${message}\n\nWe've moved your ${compose.serviceType} to ${smsNewOption(option.date, option.window?.start)}.${compose.linkClause}`;
+}
+
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
 const CUSTOM_KEY = 'custom';
@@ -375,7 +443,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // preset — reseat the selection on the first still-visible option.
   const pickReason = (code) => {
     setReason(code);
-    if (code === 'customer_noshow') setScope('job');
+    if (code === 'customer_noshow' || code === CUSTOM_REASON) setScope('job');
     if (selectedKey && selectedKey !== CUSTOM_KEY) {
       const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
       if (!stillVisible) {
@@ -413,8 +481,19 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       : noteGuard ? ERROR_COPY.note_guard_blocked
         : ERROR_COPY.note_compliance_blocked;
 
+  // Custom-reason state: the message is REQUIRED when a text is going out
+  // (it's the front of the SMS), and the predicted assembled body must fit
+  // 2 segments. Advisory mirror — the server renders the real body pre-move.
+  const isCustomReason = reason === CUSTOM_REASON;
+  const compose = options?.customCompose || null;
+  const customSeg = (isCustomReason && notify && compose && selected)
+    ? twoSegmentRemaining(predictedCustomBody(compose, note.trim(), selected))
+    : null;
+  const customOverBudget = !!(customSeg && customSeg.remaining < 0);
+  const customMissing = !!(isCustomReason && notify && !note.trim());
+
   const handleCommit = async () => {
-    if (!selected || busy || noteBlocked) return;
+    if (!selected || busy || noteBlocked || customMissing || customOverBudget) return;
     setBusy(true);
     setError('');
     try {
@@ -548,7 +627,11 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', backgroundSize: '16px',
               }}
             >
-              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
+              {[
+                ...RAIN_REASONS,
+                ...(options.extraReasonsEnabled ? EXTRA_REASONS : []),
+                ...(options.customReasonEnabled ? [{ code: CUSTOM_REASON, label: 'Custom message' }] : []),
+              ].map((r) => (
                 <option key={r.code} value={r.code}>{r.label}</option>
               ))}
             </select>
@@ -575,7 +658,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.display}
-                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
+                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && reason !== CUSTOM_REASON && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
@@ -657,7 +740,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               </div>
             )}
 
-            {routeCount > 0 && reason !== 'customer_noshow' && (
+            {routeCount > 0 && reason !== 'customer_noshow' && !isCustomReason && (
               <>
                 <div style={sectionLabel}>SCOPE</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
@@ -682,12 +765,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                   maxLength={NOTE_MAX_CHARS}
-                  rows={2}
-                  aria-label="Add a note to the text (optional)"
-                  placeholder="Add a note to the text (optional) — added to the end of the message"
+                  rows={isCustomReason ? 3 : 2}
+                  aria-label={isCustomReason ? 'Your message (required)' : 'Add a note to the text (optional)'}
+                  placeholder={isCustomReason
+                    ? 'Your message — it opens the text; the new time and reschedule link are added at the end'
+                    : 'Add a note to the text (optional) — added to the end of the message'}
                   style={{
                     width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10,
-                    fontSize: 14, border: `1px solid ${noteBlocked ? '#DC2626' : '#D4D4D8'}`,
+                    fontSize: 14, border: `1px solid ${(noteBlocked || customOverBudget) ? '#DC2626' : '#D4D4D8'}`,
                     background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit', resize: 'vertical',
                   }}
                 />
@@ -695,11 +780,21 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   <span>
                     {noteBlocked
                       ? <span style={{ color: '#B91C1C' }}>{noteBlockedCopy}</span>
-                      : (scope === 'route' && routeCount > 0 && note.trim()
-                        ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
-                        : '')}
+                      : customOverBudget
+                        ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_too_many_segments}</span>
+                        : isCustomReason
+                          ? 'Sent as: your message, then the new time + reschedule link.'
+                          : (scope === 'route' && routeCount > 0 && note.trim()
+                            ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
+                            : '')}
                   </span>
-                  {note.length > 0 && <span style={{ flexShrink: 0 }}>{note.length}/{NOTE_MAX_CHARS}</span>}
+                  {customSeg
+                    ? (
+                      <span style={{ flexShrink: 0, color: customOverBudget ? '#B91C1C' : '#71717A' }}>
+                        {customSeg.remaining >= 0 ? `${customSeg.remaining} left` : `${-customSeg.remaining} over`} · 2-segment limit
+                      </span>
+                    )
+                    : note.length > 0 && <span style={{ flexShrink: 0 }}>{note.length}/{NOTE_MAX_CHARS}</span>}
                 </div>
               </div>
             )}
@@ -718,11 +813,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy || noteBlocked}
+                disabled={!selected || busy || noteBlocked || customMissing || customOverBudget}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy || noteBlocked ? 'default' : 'pointer', opacity: !selected || busy || noteBlocked ? 0.5 : 1,
+                  cursor: !selected || busy || noteBlocked || customMissing || customOverBudget ? 'default' : 'pointer',
+                  opacity: !selected || busy || noteBlocked || customMissing || customOverBudget ? 0.5 : 1,
                 }}
               >
                 {busy ? 'Moving…' : 'Move appointment'}

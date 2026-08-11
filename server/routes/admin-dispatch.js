@@ -12159,7 +12159,8 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
           'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked',
-          'note_compliance_blocked', 'note_invalid'].includes(result.reason) ? 400
+          'note_compliance_blocked', 'note_invalid',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

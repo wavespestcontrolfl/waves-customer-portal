@@ -1756,4 +1756,210 @@ describe('rain-out service', () => {
       }
     });
   });
+
+  describe('custom reason (GATE_QUICKMOVE_CUSTOM_REASON)', () => {
+    afterEach(() => {
+      delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
+    });
+
+    function wireSingle() {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+    }
+
+    // Realistic custom-rung render so the pre-move segment check counts a
+    // body shaped like production's (mirrors the migration BODY).
+    function mockCustomRender() {
+      renderSmsTemplate.mockImplementation(async (key, vars) => {
+        if (key !== 'rain_out_moved_custom_v1') return 'rendered body';
+        return `Hi ${vars.first_name} - ${vars.custom_message}\n\nWe've moved your ${vars.service_type} to ${vars.new_option}.${vars.link_clause}`;
+      });
+    }
+
+    const MESSAGE = 'The building limits vendor entry after 6 - I will come back tomorrow afternoon.';
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'custom',
+      scope: 'job',
+      target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+      customerNote: MESSAGE,
+      actorUserId: 'admin-7',
+    };
+
+    test('gate off: custom is rejected before any reschedule (fail closed)', async () => {
+      wireSingle();
+      const result = await RainOut.commit(COMMIT_ARGS);
+      expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: route scope rejected — a custom message is stop-specific, like the note', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      wireSingle();
+      const result = await RainOut.commit({ ...COMMIT_ARGS, scope: 'route' });
+      expect(result).toMatchObject({ ok: false, reason: 'custom_route_scope' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: notifying without a message is rejected — the message IS the reason', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      wireSingle();
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: null });
+      expect(result).toMatchObject({ ok: false, reason: 'custom_requires_note' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: message opens the SMS, move line + link close it, no note append, no weather work', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const sent = sendCustomerMessage.mock.calls[0][0];
+      expect(sent.body).toBe(
+        `Hi Pat - ${MESSAGE}\n\n`
+        + "We've moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM."
+        + ' New time & other options: https://waves.test/r/tok123',
+      );
+      // The message is the FRONT — never also appended as a trailing note.
+      expect(sent.body).not.toContain('Note from our team');
+      expect(sent.metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_custom_v1',
+        reason_code: 'custom',
+        adminUserId: 'admin-7',
+      });
+      // No weather claims and no NWS fetches on a custom move.
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      // Checked body == sent body: the link is built once and the template
+      // rendered once (pre-move segment check); the send reuses both — an
+      // admin template edit or a shortener long-URL fallback between check
+      // and send could otherwise exceed the cap the check passed.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls).toHaveLength(1);
+    });
+
+    test('gate on: a body that would send as 3 segments is rejected BEFORE the move', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+
+      // 200 chars (the note cap) + the ~130-char fixed tail ≈ 340 GSM slots
+      // — over the 306-slot 2-segment budget.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: missing/disabled custom template rejects the move pre-commit (kill switch, fail closed)', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      renderSmsTemplate.mockResolvedValueOnce(null);
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: notifyCustomer=false moves silently with no render and no segment check', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, notifyCustomer: false, customerNote: null });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the standard note guards still screen the custom message pre-move', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      wireSingle();
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍' });
+      expect(result).toMatchObject({ ok: false, reason: 'note_emoji_blocked' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('custom template body stays GSM-7 and a representative render fits 2 segments', () => {
+      const { BODY } = require('../models/migrations/20260811000020_rain_out_moved_custom_template')._test;
+      const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
+      expect(detectEncoding(BODY).encoding).toBe('GSM_7');
+      const rendered = BODY
+        .replace('{first_name}', 'Riley')
+        .replace('{custom_message}', 'They limit vendor entry at six, other than emergencies. I will circle back tomorrow afternoon.')
+        .replace('{service_type}', 'quarterly pest control')
+        .replace('{new_option}', 'Fri, Aug 14, 8:00 AM - 10:00 AM')
+        .replace('{link_clause}', ' New time & other options: portal.wavespestcontrol.com/l/ty34tarkdu');
+      expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+      expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
+    });
+
+    test('getOptions: gate flag + compose info for the sheet counter (existing short link, read-only)', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) }),
+          chain({ rows: [] }),
+        ],
+        short_codes: [
+          chain({ first: jest.fn().mockResolvedValue({ code: 'ty34tarkdu' }) }),
+        ],
+      });
+
+      const options = await RainOut.getOptions('svc-1');
+
+      expect(options.ok).toBe(true);
+      expect(options.customReasonEnabled).toBe(true);
+      expect(options.customCompose).toMatchObject({
+        firstName: 'Pat',
+        serviceType: 'quarterly pest control',
+        maxSegments: 2,
+      });
+      // The counter counts what the customer receives: the EXISTING short
+      // code, scheme-less (the renderer strips https:// from portal hosts).
+      expect(options.customCompose.linkClause).toMatch(/^ New time & other options: \S+\/l\/ty34tarkdu$/);
+      expect(options.customCompose.linkClause).not.toContain('https://');
+    });
+
+    test('getOptions: no reschedule token → compose uses the reply fallback clause; gate off → no compose at all', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [] }),
+        ],
+      });
+      let options = await RainOut.getOptions('svc-1');
+      expect(options.customCompose).toMatchObject({
+        linkClause: ' Need a different time? Reply to this message.',
+      });
+
+      delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [] }),
+        ],
+      });
+      options = await RainOut.getOptions('svc-1');
+      expect(options.customReasonEnabled).toBe(false);
+      expect(options.customCompose).toBeNull();
+    });
+  });
 });
