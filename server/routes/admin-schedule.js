@@ -592,6 +592,15 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+  // Shared belt for every notice path (update-details, bulk reschedule, IB
+  // schedule tools): a LEGACY outbound-review row (pending before the
+  // 2026-08-11 review-hold removal) must be activated — reminders armed,
+  // lead converted, review card resolved — before a definitive reschedule
+  // text goes out (Codex #3361 r2 P0). The direct writers call this too;
+  // the helper's guarded stamp makes the hook at-most-once. No-op for
+  // every other row.
+  const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+  await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'reschedule-notice');
   const start = normalizeHHMM(startHHMM);
   if (!start) {
     // A date-only visit has no arrival window to promise — never fabricate
@@ -6372,6 +6381,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (detailsChanged || addonsReplaced || recurringCreated > 0) {
       const touched = await db('scheduled_services').where({ id: req.params.id }).first('customer_id');
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
+    }
+
+    // A moved LEGACY outbound-review row (pending before the 2026-08-11
+    // review-hold removal) activates here even on a SILENT move — this
+    // writer bypasses transitionJobStatus, and without activation the
+    // resynced reminder times have no registered reminders to follow
+    // (Codex #3361 r2 P0). At-most-once via the helper's guarded stamp
+    // (the notice sender's own belt call no-ops after this one); no-op for
+    // every other row.
+    if (scheduleMoveForNotice) {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');
     }
 
     // Immediate reschedule text — only when the edit actually moved the

@@ -10438,6 +10438,27 @@ const CallRecordingProcessor = {
     // inbound-only (see above), so an unclear/generic outbound call stays
     // unbooked for the office.
     const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
+    // outbound consent is never implied, and the removed review hold used to
+    // be the backstop that kept a shadow/legacy-mode outbound booking from
+    // texting. Recompute the verdict for outbound bookings regardless of
+    // routing mode, fail-closed: with no extraction/consent data,
+    // checkTcpaConsent blocks SMS and keeps the email fallback (Codex #3361
+    // r2 P1). OR-composition only ever tightens — enforce-mode's own verdict
+    // is identical for outbound (implied consent is inbound-only).
+    if (outboundAutoBooking) {
+      try {
+        const outboundTcpa = checkTcpaConsent(
+          v2ApprovedExtraction || v2CanonicalExtraction || null,
+          { impliedConsent: false },
+        );
+        v2SmsBlocked = v2SmsBlocked || !outboundTcpa.canSms;
+        v2EmailBlocked = v2EmailBlocked || !outboundTcpa.canEmail;
+      } catch (tcpaErr) {
+        v2SmsBlocked = true;
+        logger.warn(`[call-proc] outbound TCPA recompute failed for ${maskSid(callSid)} — SMS blocked fail-closed: ${tcpaErr.message}`);
+      }
+    }
     const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     // Outbound requires a REAL catalog row (never a coarse ok-label with
@@ -11630,14 +11651,12 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
-              } else {
-                // Idempotency-conflict REPLAY of a call booking (Codex
-                // #3178 r37 P2): the first attempt committed the visit +
-                // evidence but may have died before its side-effects ran —
-                // this retry is the recovery path, and reminders are
-                // already registered, but the fast redemption must re-run
-                // or a Charge Now / pay link in the next hour collects the
-                // full amount. Best-effort; the sweep stays the guarantee.
+              } else if (attachedManualBookingId) {
+                // ATTACH reuse (call attached to a manually created booking):
+                // that booking owns its own reminder registration — only the
+                // fast redemption must re-run (Codex #3178 r37 P2) or a
+                // Charge Now / pay link in the next hour collects the full
+                // amount. Best-effort; the sweep stays the guarantee.
                 try {
                   await require('./inspection-credit').redeemInspectionCreditForBooking({
                     customerId,
@@ -11646,6 +11665,51 @@ const CallRecordingProcessor = {
                   });
                 } catch (replayErr) {
                   logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
+              } else {
+                // Same-key REPLAY of this call's OWN booking (idempotency
+                // conflict): the first attempt committed the visit but may
+                // have died before its side effects ran (Codex #3178 r37 P2;
+                // #3361 r2 P2) — repair BOTH rails, not just redemption.
+                // registerScheduleSideEffects is idempotent (registration
+                // dedupes by scheduled_service_id; redemption is
+                // evidence-gated), so a replay whose first attempt did
+                // complete is a no-op.
+                const replayDate = svc.scheduled_date instanceof Date
+                  ? svc.scheduled_date.toISOString().split('T')[0]
+                  : String(svc.scheduled_date || '').split('T')[0];
+                await registerScheduleSideEffects({
+                  scheduledServiceId: svc.id,
+                  customerId,
+                  scheduledDate: replayDate,
+                  windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : '09:00',
+                  serviceType: svc.service_type,
+                });
+                // Confirmation repair, evidence-gated: the reused-row branch
+                // below never re-sends inline, and selfHealMissingReminderRows
+                // marks recreated rows confirmation_sent=true — so a
+                // confirmation lost to the crash would stay lost. Re-arm onto
+                // the 15-min stranded-confirmation sweep ONLY when no
+                // per-visit delivery evidence exists and the visit is still
+                // in the future (a late reprocess must not text a past
+                // visit); the sweep's canonical send owns fan-out and cannot
+                // double-text a customer the first attempt reached.
+                try {
+                  const confirmationDelivered = await db('messaging_audit_log')
+                    .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
+                    .whereNotNull('sent_at')
+                    .first('id');
+                  if (!confirmationDelivered) {
+                    const rearmed = await db('appointment_reminders')
+                      .where({ scheduled_service_id: svc.id, cancelled: false })
+                      .where('appointment_time', '>', new Date())
+                      .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                    if (rearmed > 0) {
+                      logger.info(`[call-proc] replay of ${svc.id}: no confirmation evidence — re-armed for the stranded-confirmation sweep`);
+                    }
+                  }
+                } catch (confirmRepairErr) {
+                  logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                 }
               }
               if (!svc.technician_id) {

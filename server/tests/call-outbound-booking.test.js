@@ -21,7 +21,7 @@ const {
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('../services/call-booking-source-actions');
-const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+const { runOutboundReviewConfirmHook, activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
 const { transitionJobStatus } = require('../services/job-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
@@ -136,6 +136,69 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       'svc1', 'cust1', '2026-08-11T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false },
     );
+  });
+});
+
+describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () => {
+  // The reschedule writers (SmartRebooker, update-details, the shared
+  // notice sender) bypass transitionJobStatus — this helper is their
+  // activation seam for legacy pending review rows (Codex #3361 r2 P0).
+  const makeDb = (row, { stampRows = 1 } = {}) => {
+    const state = { updates: [] };
+    const fn = (table) => {
+      const q = {};
+      ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => (table === 'scheduled_services' ? row : null));
+      q.select = jest.fn(async () => []);
+      q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return table === 'scheduled_services' ? stampRows : 1; });
+      return q;
+    };
+    fn.fn = { now: () => new Date() };
+    fn.transaction = async (cb) => cb(fn);
+    fn.raw = jest.fn(async () => ({}));
+    fn._state = state;
+    return fn;
+  };
+  const legacyRow = {
+    id: 'svc1',
+    source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+    customer_id: 'cust1',
+    scheduled_date: '2026-08-12',
+    window_start: '09:00',
+    service_type: 'pest_control',
+    source_call_log_id: null,
+    is_callback: false,
+    estimated_price: 100,
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('activates a legacy pending row: stamps customer_confirmed and runs the confirm hook', async () => {
+    const db = makeDb({ ...legacyRow });
+    const activated = await activateLegacyOutboundReviewRowIfNeeded(db, 'svc1', 'test');
+    expect(activated).toBe(true);
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      'svc1', 'cust1', '2026-08-12T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false },
+    );
+  });
+
+  test('no-ops for a non-review row and for an already-confirmed row', async () => {
+    expect(await activateLegacyOutboundReviewRowIfNeeded(
+      makeDb({ ...legacyRow, source_action: 'ai_call_pipeline' }), 'svc1', 'test',
+    )).toBe(false);
+    expect(await activateLegacyOutboundReviewRowIfNeeded(
+      makeDb({ ...legacyRow, customer_confirmed: true }), 'svc1', 'test',
+    )).toBe(false);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a lost stamp race (0 rows) skips the hook — the winner owns it', async () => {
+    const db = makeDb({ ...legacyRow }, { stampRows: 0 });
+    expect(await activateLegacyOutboundReviewRowIfNeeded(db, 'svc1', 'test')).toBe(false);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 });
 

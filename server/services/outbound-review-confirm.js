@@ -196,4 +196,46 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
 }
 
-module.exports = { runOutboundReviewConfirmHook };
+/**
+ * Lazy activation for a LEGACY outbound-review row (created pending before
+ * the 2026-08-11 review-hold removal, PR #3361) touched by a writer that
+ * does NOT go through transitionJobStatus — the direct reschedule writers
+ * (SmartRebooker, admin-schedule update-details) and the shared
+ * reschedule-notice sender. Guarded by a conditional UPDATE on
+ * customer_confirmed so concurrent callers (or a racing transitionJobStatus
+ * activation) run the hook at most once. No-op for every other row — one
+ * indexed read. Best-effort by contract: the caller's move/notice must
+ * never fail on an activation hiccup.
+ *
+ * @returns {Promise<boolean>} true when THIS call performed the activation
+ */
+async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation') {
+  try {
+    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+    const row = await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
+        'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
+        'is_callback', 'estimated_price');
+    if (!row || row.source_action !== CALL_OUTBOUND_REVIEW_SOURCE_ACTION || row.customer_confirmed) {
+      return false;
+    }
+    // Terminal rows are not activated — a cancelled/skipped legacy review
+    // booking was a rejection, and completing/no-showing already routed
+    // through transitionJobStatus's own activation.
+    if (['cancelled', 'skipped', 'completed', 'no_show'].includes(String(row.status || ''))) {
+      return false;
+    }
+    const stamped = await db('scheduled_services')
+      .where({ id: serviceId, customer_confirmed: false })
+      .update({ customer_confirmed: true, confirmed_at: new Date() });
+    if (!stamped) return false; // a concurrent activation won — its hook runs
+    await runOutboundReviewConfirmHook(db, row, routeTag);
+    return true;
+  } catch (e) {
+    logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
+    return false;
+  }
+}
+
+module.exports = { runOutboundReviewConfirmHook, activateLegacyOutboundReviewRowIfNeeded };

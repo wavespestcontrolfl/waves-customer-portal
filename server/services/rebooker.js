@@ -546,6 +546,19 @@ class SmartRebooker {
         .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
     }
 
+    // This writer moves the visit with a direct UPDATE, not
+    // transitionJobStatus — a LEGACY outbound-review row (pending before the
+    // 2026-08-11 review-hold removal) rescheduled here would otherwise move
+    // and message the customer while still unactivated: reminders unarmed,
+    // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
+    // post-commit, at-most-once via the helper's guarded stamp.
+    try {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
+    } catch (activateErr) {
+      logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+    }
+
     return { success: true, originalDate, newDate };
   }
 
