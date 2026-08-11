@@ -502,6 +502,85 @@ describe('typed snapshot — technician report body in the generic tail composit
     });
     expect(staleActivity.body).not.toContain('feeding at 3 stations');
     expect(staleActivity).not.toHaveProperty('bodySource');
+    // Partitive phrasing claims NOTHING (codex on #3358): "3 of the 12
+    // stations were checked" names the roster denominator, and reading 12
+    // as the checked count would drop legitimate copy against a typed
+    // stations_checked of 3.
+    const partitive = buildTodaysResult({
+      ...base,
+      values: { stations_checked: '3', stations_with_activity: '1', bait_consumption: 'Light' },
+      technicianReportBody: '3 of the 12 stations were checked on this visit, and 1 of the 12 stations '
+        + 'had light feeding. Bait was refreshed where needed.',
+    });
+    expect(partitive.bodySource).toBe('technician_report');
+  });
+
+  // The eight #3358 review findings, pinned: the station guard must not
+  // drop truthful copy (negation, partitives, clause boundaries, subset
+  // actions) and must not miss stale counts the natural wordings carry
+  // (adverbs, the repo's own noun phrase, totals, inaccessible counts).
+  test('station guard: truthful copy publishes; stale natural wordings are caught (codex #3358)', () => {
+    const base = {
+      projectType: 'termite_bait_station',
+      reportTypeLabel: 'Termite Bait Station Summary',
+      chips,
+      activity: { score: 2 },
+      visitSequence: 2,
+    };
+    const publish = (values, body) => buildTodaysResult({ ...base, values, technicianReportBody: body });
+    // Truthful copy publishes:
+    expect(publish(
+      { stations_checked: '12', stations_with_activity: '1', bait_consumption: 'Light' },
+      'Feeding was light; bait at 3 stations was refreshed. We checked 12 bait stations.',
+    ).bodySource).toBe('technician_report');
+    expect(publish(
+      { stations_checked: '12', stations_with_activity: '0', bait_consumption: 'None — bait intact' },
+      'We checked 12 bait stations and 3 bait stations had no activity signs at all.',
+    ).bodySource).toBe('technician_report');
+    expect(publish(
+      { stations_checked: '12', bait_consumption: 'Light' },
+      'We serviced 3 bait stations with damaged lids and checked 12 bait stations in total.',
+    ).bodySource).toBe('technician_report');
+    expect(publish(
+      { stations_checked: '10', bait_consumption: 'Light' },
+      'Only 10 of the 12 bait stations were inspected today; two sat behind a locked gate.',
+    ).bodySource).toBe('technician_report');
+    // Stale counts refuse:
+    expect(publish(
+      { stations_checked: '10', bait_consumption: 'Light' },
+      '12 bait stations were thoroughly inspected on this visit.',
+    )).not.toHaveProperty('bodySource');
+    expect(publish(
+      { stations_checked: '10', bait_consumption: 'Light' },
+      'We checked 12 exterior rodent bait stations today.',
+    )).not.toHaveProperty('bodySource');
+    expect(publish(
+      { stations_checked: '12', total_stations: '18', bait_consumption: 'Light' },
+      'There are 20 stations on the property protecting the structure.',
+    )).not.toHaveProperty('bodySource');
+    expect(publish(
+      { stations_checked: '12', stations_inaccessible: '1', bait_consumption: 'Light' },
+      'Two stations were inaccessible behind the locked side gate.',
+    )).not.toHaveProperty('bodySource');
+  });
+
+  test('negated and subject-position intent qualifiers stay governed (codex #3358)', () => {
+    const base = {
+      projectType: 'cockroach',
+      reportTypeLabel: 'Cockroach Treatment Summary',
+      values: { activity_level: 'Low' },
+      chips,
+      activity: { score: 1 },
+      visitSequence: 1,
+    };
+    expect(buildTodaysResult({
+      ...base,
+      technicianReportBody: 'Activity may not be heavy going forward. We applied gel bait behind the appliances.',
+    }).bodySource).toBe('technician_report');
+    expect(buildTodaysResult({
+      ...base,
+      technicianReportBody: 'Typically, heavy activity may be seen in summer. We applied gel bait behind the appliances.',
+    }).bodySource).toBe('technician_report');
   });
 
   test('an intent marker BEFORE the claim still exempts it', () => {
