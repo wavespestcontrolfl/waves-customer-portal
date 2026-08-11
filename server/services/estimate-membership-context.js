@@ -162,8 +162,13 @@ function accountServiceKeys(raw) {
 // catalog name that names no service family at all ("Premium Home Plan")
 // tells us nothing, so the row's own text still speaks. Mirrors the rule
 // ownershipKeysForRow applies in waveguard-existing-services.
+// The catalog KEY alone, never key+name concatenated (codex #3359). Feeding
+// "termite_liquid Termite Liquid Treatment" through the free-text classifier
+// yields termite_liquid_termite_liquid_treatment — a noncanonical key that
+// matches nothing and renders as a duplicated label. The service_key IS the
+// canonical identity; the name is for display only.
 function catalogIdentityText(meta) {
-  return [meta?.serviceKey, meta?.serviceName].filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  return String(meta?.serviceKey || '').replace(/[_-]+/g, ' ');
 }
 
 function catalogNamesAFamily(text) {
@@ -184,6 +189,16 @@ function authoritativeServiceText(row = {}, meta = null) {
   if (!isEnabled('autoWaveguardTierEnroll')) return row.service_type;
   const catalogText = catalogIdentityText(meta);
   return catalogNamesAFamily(catalogText) ? catalogText : row.service_type;
+}
+
+// Display name for a row: the catalog's own name when its identity is what we
+// keyed on, so the label reads "Termite Liquid Treatment" rather than a
+// de-slugged key. Falls back to the row text on the same terms as the key.
+function authoritativeServiceLabelText(row = {}, meta = null) {
+  if (!isEnabled('autoWaveguardTierEnroll')) return row.service_type;
+  return catalogNamesAFamily(catalogIdentityText(meta))
+    ? (meta?.serviceName || catalogIdentityText(meta))
+    : row.service_type;
 }
 
 function accountServiceLabel(key, raw) {
@@ -364,17 +379,26 @@ function isDepositCreditLine(line = {}) {
   return String(line.category || '') === 'deposit_credit';
 }
 
-function isAddonLine(line = {}) {
-  return /_addon_/.test(String(line.client_id || ''));
+// The covered base visit line. invoice.js's own invoiceHasNonBaseCharges
+// keys on this same tag: add-ons carry `_addon_`, but a pre-minted
+// mobile-checkout invoice adds positive extraLineItems with NO such id, so
+// "is it an add-on" is the wrong question — "is it the primary line" is the
+// right one. Anything else positive is an extra, however it got there.
+function isPrimaryLine(line = {}) {
+  return String(line.client_id || '').includes('_primary');
+}
+
+function isPositiveLine(line = {}) {
+  return lineItemAmount(line) > 0;
 }
 
 function isDiscountLine(line = {}) {
   return line._kind === 'discount' || Number(lineItemAmount(line)) < 0;
 }
 
-// A discount attached to an add-on line, which leaves with that add-on.
-function discountTargetsAddon(line = {}) {
-  return isDiscountLine(line) && /_addon_/.test(String(line.discount_for || ''));
+// A discount attached to a specific line, which leaves with that line.
+function discountTargets(line = {}, clientIds) {
+  return isDiscountLine(line) && clientIds.has(String(line.discount_for || ''));
 }
 
 // Appointment-wide discount: a discount line naming no parent.
@@ -390,37 +414,78 @@ function isAppointmentWideDiscount(line = {}) {
 // $175 per application" (codex #3353 r11). Add-ons and their own discounts
 // are excluded; the primary line and its discount are what the recurring
 // service costs.
+// Does this invoice bill for a SERVICE at all? A standalone setup/membership
+// or deposit-only invoice does not, so it is not the invoice that decides what
+// the customer pays per application — it is skipped entirely, and an older
+// service invoice may still answer. Distinct from a service invoice whose
+// basis is unattributable, which DOES decide the key (as withheld).
+function invoiceCarriesServiceCharge(row = {}) {
+  const lines = invoiceLineItems(row);
+  if (!lines.length) return Number(row.total) > 0;
+  return lines
+    .filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line))
+    .some(isPositiveLine);
+}
+
 function invoiceServiceAmount(row = {}) {
   const lines = invoiceLineItems(row);
-  if (lines.length) {
-    const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
-    const addonLines = billable.filter(isAddonLine);
-    // An appointment-WIDE discount spans the primary line and the add-ons
-    // together, and nothing in the row says how it was apportioned. With
-    // add-ons present there is no honest way to attribute it to the service
-    // alone, so the figure is withheld rather than guessed — the same rule
-    // this module applies to every other unattributable basis.
-    if (addonLines.length && billable.some(isAppointmentWideDiscount)) return null;
-    const serviceLines = billable.filter((line) => !isAddonLine(line) && !discountTargetsAddon(line));
-    let serviceTotal = serviceLines.reduce((sum, line) => sum + lineItemAmount(line), 0);
-    // An invoice-level manual discount (selected through discountIds) is
-    // recorded in invoices.discount_amount WITHOUT a negative line, so the
-    // line sum is the undiscounted subtotal — a $120 visit paid with 10% off
-    // reads as $120 instead of $108. Applied ONLY when the lines carry no
-    // discount of their own, so a discount already represented as a negative
-    // line is never subtracted twice.
-    const invoiceDiscount = Number(row.discount_amount);
-    if (invoiceDiscount > 0 && !billable.some(isDiscountLine)) {
-      serviceTotal -= invoiceDiscount;
-    }
-    if (serviceTotal > 0) return round2(serviceTotal);
-    // All lines were setup/membership/deposit (or discounts netted it to
-    // zero) — not a usable per-visit price.
-    return null;
+  if (!lines.length) {
+    // No parseable lines: the invoice total is already net of any discount.
+    const total = Number(row.total);
+    return Number.isFinite(total) && total > 0 ? round2(total) : null;
   }
-  // No parseable lines: the invoice total is already net of any discount.
-  const total = Number(row.total);
-  return Number.isFinite(total) && total > 0 ? round2(total) : null;
+  const hadSetupLines = lines.some(isSetupLineItem);
+  const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
+  const positives = billable.filter(isPositiveLine);
+  const primaries = positives.filter(isPrimaryLine);
+
+  let serviceLines;
+  let extras;
+  if (primaries.length) {
+    extras = positives.filter((line) => !isPrimaryLine(line));
+    const primaryIds = new Set(primaries.map((line) => String(line.client_id)));
+    const primaryDiscounts = billable.filter((line) => discountTargets(line, primaryIds));
+    const appointmentWide = billable.filter(isAppointmentWideDiscount);
+    // An appointment-WIDE discount spans the primary line and every extra
+    // together, and nothing records how it was apportioned. With extras
+    // present there is no honest attribution, so the basis is withheld —
+    // the same rule this module applies to every other unattributable
+    // figure.
+    if (extras.length && appointmentWide.length) return null;
+    serviceLines = [...primaries, ...primaryDiscounts, ...(extras.length ? [] : appointmentWide)];
+  } else {
+    // Legacy / fallback invoices carry no client_id at all. One positive line
+    // is unambiguously the service; several cannot be told apart, so they
+    // withhold rather than summing unrelated charges into a per-application
+    // price.
+    if (positives.length !== 1) return null;
+    extras = [];
+    serviceLines = [...positives, ...billable.filter(isDiscountLine)];
+  }
+
+  let serviceTotal = serviceLines.reduce((sum, line) => sum + lineItemAmount(line), 0);
+
+  // invoices.discount_amount holds the SUM of every discount on the invoice —
+  // line-specific ones AND a manual discountIds selection (InvoiceService
+  // .create). The line-represented part is already in serviceTotal above, so
+  // only the REMAINDER is the manual portion still missing. Ignoring the
+  // field whenever any discount line exists drops that remainder; subtracting
+  // it whole would double-count the line part.
+  const lineDiscountTotal = billable
+    .filter(isDiscountLine)
+    .reduce((sum, line) => sum + Math.abs(lineItemAmount(line)), 0);
+  const manualPortion = round2((Number(row.discount_amount) || 0) - lineDiscountTotal);
+  if (manualPortion > 0) {
+    // A manual discount is computed against the whole subtotal, so with any
+    // extra or setup line on the invoice it is not the service's alone.
+    if (extras.length || hadSetupLines) return null;
+    serviceTotal -= manualPortion;
+  }
+
+  if (serviceTotal > 0) return round2(serviceTotal);
+  // Everything was setup/membership/deposit, or discounts netted it to zero —
+  // not a usable per-visit price.
+  return null;
 }
 
 // What the customer actually LAST PAID per visit, by qualifying key — most
@@ -444,9 +509,14 @@ async function loadLastPaidSpendByKey(database, customerId) {
       // discount_amount carries a manual invoice-level discount that never
       // appears as a negative line (codex #3353 r11).
       .select('service_type', 'total', 'line_items', 'paid_at', 'discount_amount');
+    // The NEWEST invoice for a key decides that key, even when it decides
+    // "withheld" (codex #3359): letting an older invoice fill in behind an
+    // intentionally-unattributable newest one presents a superseded price as
+    // what the customer currently pays.
+    const decided = new Set();
     for (const row of rows) {
       const key = accountServiceKey(row.service_type);
-      if (!key || spend[key] != null) continue;
+      if (!key || decided.has(key)) continue;
       // A COMBINED invoice ("Quarterly Pest + Termite Bait Station") is one
       // charge covering several families, but accountServiceKey files it
       // under the FIRST component alone — so using it as that component's
@@ -455,7 +525,18 @@ async function loadLastPaidSpendByKey(database, customerId) {
       // component-count guard on the customer-level stamps below, and it
       // matters more because last-paid takes precedence over every other
       // basis. Withhold rather than mis-attribute.
-      if (accountServiceKeys(row.service_type).length > 1) continue;
+      // Not a service invoice (setup/membership or deposit only): it says
+      // nothing about the per-application price, so an older service invoice
+      // may still answer.
+      if (!invoiceCarriesServiceCharge(row)) continue;
+      if (accountServiceKeys(row.service_type).length > 1) {
+        // A combined invoice decides the key too — as withheld. Falling
+        // through to an older single-family invoice would quote a price the
+        // customer has since stopped paying.
+        decided.add(key);
+        continue;
+      }
+      decided.add(key);
       const amount = invoiceServiceAmount(row);
       if (amount != null) {
         spend[key] = {
@@ -561,6 +642,68 @@ async function loadCadenceByRowId(database, customerId) {
         visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
       }];
     }));
+  } catch {
+    return new Map();
+  }
+}
+
+// Which of these rows carry add-ons. Returns NULL on failure — the caller
+// then treats every row as possibly-composite and requires an explicit
+// primary-line price, because assuming "no add-ons" would quote appointment
+// totals as service prices.
+async function loadAddonRowIds(database, rows) {
+  const rowIds = rows.map((row) => row.id).filter(Boolean);
+  if (!rowIds.length) return new Set();
+  try {
+    const addonRows = await database('scheduled_service_addons')
+      .whereIn('scheduled_service_id', rowIds)
+      .select('scheduled_service_id');
+    return new Set(addonRows.map((row) => String(row.scheduled_service_id)));
+  } catch {
+    return null;
+  }
+}
+
+// What the RECURRING SERVICE costs on this visit, as opposed to what the
+// appointment totals (codex #3359). scheduled_services.estimated_price is the
+// whole visit net — calculateVisitFinancialsForAddons sums the primary line
+// and every add-on, then applies the appointment discount — so on a visit with
+// add-ons it is not a per-application price for the plan. The same $100 + $75
+// appointment the invoice path now separates would otherwise come back as $175
+// through this fallback whenever invoice evidence is missing or withheld.
+//
+// A composite visit therefore decomposes: primary_line_price minus its own
+// line discount. Without that column there is nothing to decompose from, so
+// the row yields no basis rather than a padded one.
+function rowServicePrice(row = {}, addonRowIds) {
+  const composite = addonRowIds ? addonRowIds.has(String(row.id)) : true;
+  if (!composite) {
+    return Number(row.estimated_price) > 0 ? round2(row.estimated_price) : null;
+  }
+  const primary = Number(row.primary_line_price);
+  if (!(primary > 0)) return null;
+  const net = round2(primary - (Number(row.line_discount_dollars) || 0));
+  return net > 0 ? net : null;
+}
+
+// Catalog identity per scheduled row, loaded INDEPENDENTLY of cadence (codex
+// #3359). loadCadenceByRowId is deliberately fail-soft and carries a wider
+// projection; if it degrades (schema lag on a cadence column, say) while the
+// narrower identity query still works, folding identity into it would silently
+// revert the panel to stale service_type — recreating, with the tier gate on,
+// exactly the tier-vs-label divergence this is meant to remove. Two queries,
+// two failure domains. Degrades to an empty Map, which simply means "no
+// catalog identity" and defers to service_type.
+async function loadCatalogIdentityByRowId(database, customerId) {
+  try {
+    const rows = await database('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      .select('s.id', 'svc.service_key', 'svc.name as service_name');
+    return new Map(rows.map((row) => [row.id, {
+      serviceKey: row.service_key || null,
+      serviceName: row.service_name || null,
+    }]));
   } catch {
     return new Map();
   }
@@ -674,6 +817,12 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const cadenceByRowId = await loadCadenceByRowId(database, customerId);
+  const catalogIdentityByRowId = await loadCatalogIdentityByRowId(database, customerId);
+  const addonRowIds = await loadAddonRowIds(database, rows);
+  // ET calendar day — scheduled_date is a pg DATE column, read as the stored
+  // day (repo convention), so the cutoff must be the ET day too.
+  const { etDateString } = require('../utils/datetime-et');
+  const todayEt = etDateString();
   const prepaidTermsById = await loadPrepaidTermsById(database, rows);
   // Best-effort: the customer row backs the stamped per-application /
   // monthly-rate basis of last resort below. A failed load simply leaves
@@ -685,7 +834,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   for (const row of rows) {
     // Catalog identity decides what this row IS, not its (possibly stale)
     // service_type text — see authoritativeServiceText.
-    const identityText = authoritativeServiceText(row, cadenceByRowId.get(row.id));
+    const identityText = authoritativeServiceText(row, catalogIdentityByRowId.get(row.id));
     const key = accountServiceKey(identityText);
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
@@ -770,15 +919,27 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // price across reloads of identical data. Earliest scheduled day with a
       // row-id tiebreak, exactly how the extension path in this file picks
       // its basis: the figure the customer actually pays next.
+      // PAST rows are excluded first (codex #3359): loadActiveRecurringServiceRows
+      // filters status but not date, so a stale past pending visit sorts ahead
+      // of every future appointment and an ascending sort would deterministically
+      // quote its old price. A visit still en_route/on_site across ET midnight
+      // is today's work and stays eligible — same live-in-progress exception the
+      // ownership path makes.
+      const LIVE_IN_PROGRESS = new Set(['en_route', 'on_site', 'in_progress']);
       const scheduled = [...contractRows]
-        .filter((row) => Number(row.estimated_price) > 0)
+        .filter((row) => rowServicePrice(row, addonRowIds) != null)
+        .filter((row) => {
+          if (LIVE_IN_PROGRESS.has(String(row.status || '').toLowerCase())) return true;
+          const day = visitDateKey(row.scheduled_date);
+          return !!day && day >= todayEt;
+        })
         .sort((a, b) => {
           const dayA = visitDateKey(a.scheduled_date) || '';
           const dayB = visitDateKey(b.scheduled_date) || '';
           if (dayA !== dayB) return dayA.localeCompare(dayB);
           return String(a.id).localeCompare(String(b.id));
         })[0];
-      const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
+      const scheduledPerVisit = scheduled ? rowServicePrice(scheduled, addonRowIds) : null;
       // Annual-prepay coverage: prepaid_amount is the DISCOUNTED amount the
       // customer ACTUALLY PAID for the visit, while estimated_price stays the
       // undiscounted list price. A panel captioned "currently pays per
@@ -1008,7 +1169,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // counted.
       label: accountServiceLabel(
         key,
-        authoritativeServiceText(serviceRows[0] || {}, cadenceByRowId.get(serviceRows[0]?.id)),
+        authoritativeServiceLabelText(serviceRows[0] || {}, catalogIdentityByRowId.get(serviceRows[0]?.id)),
       ),
       qualifiesForWaveGuard: existingServiceKeys.includes(key),
       // Every property this service is active at — lets duplicate checks

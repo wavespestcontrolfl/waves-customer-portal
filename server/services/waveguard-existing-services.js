@@ -138,6 +138,12 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // unrelated out-of-band payment (annual-prepay-renewals' own
   // annualPrepayCoversVisit keys on it first).
   if (cols.prepaid_method) selectCols.push('prepaid_method');
+  // Appointment decomposition: estimated_price is the whole visit NET
+  // (primary + add-ons − appointment discount), so the primary line's own
+  // price and discount are what a per-application figure for the recurring
+  // service must be built from.
+  if (cols.primary_line_price) selectCols.push('primary_line_price');
+  if (cols.line_discount_dollars) selectCols.push('line_discount_dollars');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
