@@ -591,6 +591,26 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(converterSrc).toContain('const seedsInOwnTransaction = !database.isTransaction;');
   });
 
+  test('palm scheduling FAILS CLOSED without the recurring catalog row on all three converter paths (codex r15 pre-push P0)', () => {
+    // Scheduling palm by bare name resolves the ONE-TIME row at completion
+    // and its typed completion invoices already-billed recurring work — a
+    // money bug. Each path must skip the palm series (manual scheduling +
+    // admin bell) when palm_injection_semiannual is unavailable.
+    expect(converterSrc).toContain('function notifyPalmCatalogMissing');
+    // Auto-schedule unit loop: lookup miss/failure skips the unit.
+    expect(converterSrc).toContain("if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {");
+    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit')");
+    // Reserved-bundle promotion: same skip before the standalone insert.
+    expect(converterSrc).toContain("if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {");
+    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion')");
+    // Reserved relink: a missing row (or failed lookup) aborts the seeding
+    // step BEFORE follow-ups copy the parent's identity; the customer's
+    // reserved first visit stays.
+    expect((converterSrc.match(/return \{ palmCatalogMissing: true \};/g) || []).length).toBe(2);
+    expect(converterSrc).toContain('if (outcome.palmCatalogMissing) {');
+    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'reserved palm series seeding')");
+  });
+
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {
     // Route-entry preflight (fast, unlocked) still rejects the common case.
     expect(scheduleSrc).toContain('findActiveRecurringSeries(db, {');

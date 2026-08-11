@@ -2535,6 +2535,29 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   return false;
 }
 
+// FAIL-CLOSED palm scheduling requirement (codex #3349 r15 pre-push P0):
+// the semiannual palm program bills per-application against the RECURRING
+// catalog row. A palm series scheduled by bare name resolves the ONE-TIME
+// palm_injection row at completion (unique short-name match), whose typed
+// completion invoices work the plan already billed — a money bug. When
+// palm_injection_semiannual is absent (rolled-back migration, broken env)
+// the series must NOT be created; the unit routes to manual scheduling
+// with an admin bell. Fire-and-forget, never blocks the accept.
+function notifyPalmCatalogMissing(estimateId, customerId, context) {
+  logger.error(`[estimate-converter] palm_injection_semiannual catalog row unavailable — ${context} for estimate ${estimateId} routed to manual scheduling (fail closed)`);
+  try {
+    const NotificationService = require('./notification-service');
+    void NotificationService.notifyAdmin(
+      'estimate_converted',
+      'Palm program needs manual scheduling',
+      `Accepted estimate #${estimateId} sold a semiannual palm program, but the recurring palm catalog row (palm_injection_semiannual) is unavailable — no palm series was auto-scheduled. Restore the catalog row (migration 20260811000010), then schedule the program manually.`,
+      { icon: '\u{1F334}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
+    ).catch((err) => logger.warn(`[estimate-converter] palm catalog-missing notify failed: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[estimate-converter] palm catalog-missing notify setup failed: ${err.message}`);
+  }
+}
+
 function scheduledDateOnly(value) {
   if (!value) return null;
   if (typeof value === 'string') return value.slice(0, 10);
@@ -3795,6 +3818,13 @@ const EstimateConverter = {
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
             }
+            // Palm never schedules by name (codex r15 pre-push P0 — see
+            // notifyPalmCatalogMissing): lookup miss or failure skips the
+            // promoted unit to manual scheduling.
+            if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
+              notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion');
+              continue;
+            }
             // Promoted lawn/palm parents get the converter FAMILY duration
             // (codex r7 P2): the identity-only skip above correctly refuses
             // the lawn catalog's contradictory 45-minute default, but a
@@ -4011,8 +4041,21 @@ const EstimateConverter = {
                       await trx('scheduled_services').where({ id: reservedStart.id }).update({ service_id: catalogRow.id });
                       reservedStart.service_id = catalogRow.id;
                     }
+                    // Palm follow-ups never seed without the recurring
+                    // identity (codex r15 pre-push P0): every seeded child
+                    // copies the parent's id — a missing row would seed the
+                    // whole series onto the one-time posture. The reserved
+                    // first visit (the customer's committed slot) stays;
+                    // only the series routes to manual scheduling.
+                    if (!catalogRow && reservedCatalogKey === 'palm_injection_semiannual') {
+                      return { palmCatalogMissing: true };
+                    }
                   } catch (relinkErr) {
                     logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
+                    // Unknown identity state = fail closed for palm too.
+                    if (reservedCatalogKey === 'palm_injection_semiannual') {
+                      return { palmCatalogMissing: true };
+                    }
                   }
                 }
               }
@@ -4031,7 +4074,9 @@ const EstimateConverter = {
               });
               return { seedResult };
             });
-            if (outcome.kept) {
+            if (outcome.palmCatalogMissing) {
+              notifyPalmCatalogMissing(estimateId, customerId, 'reserved palm series seeding');
+            } else if (outcome.kept) {
               logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${reservedStart.service_type}" (series ${outcome.kept.id}) — reserved visit ${reservedStart.id} kept, duplicate follow-up series skipped`);
               try {
                 await database('activity_log').insert({
@@ -4115,6 +4160,15 @@ const EstimateConverter = {
             }
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+          }
+          // Palm never schedules by name (codex r15 pre-push P0 — see
+          // notifyPalmCatalogMissing): a lookup miss OR failure skips the
+          // unit to manual scheduling. Lawn keeps the name fallback — lawn
+          // line names equal their catalog names exactly, so name
+          // resolution cannot misfile them.
+          if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {
+            notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit');
+            continue;
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';

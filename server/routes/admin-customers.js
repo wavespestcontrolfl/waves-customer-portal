@@ -332,7 +332,15 @@ function serviceCatalogMatch(line, serviceIndex) {
       const { converterFollowUpSeedingPattern } = require('../services/estimate-converter');
       const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
       if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
-        candidates.unshift('palm_injection_semiannual');
+        // FAIL CLOSED (codex #3349 r15 pre-push P0): a detected semiannual
+        // palm line books the RECURRING row or nothing. Falling through to
+        // the one-time palm_injection candidate would give an admin-booked
+        // recurring program one-time billing and completion posture — with
+        // per-application pricing on the plan, that is a money bug. An
+        // unmatched line stays unmatched for the operator to resolve.
+        return serviceIndex.byKey.get(normalizeServiceKey('palm_injection_semiannual'))
+          || serviceIndex.byName.get(normalizeServiceKey('palm_injection_semiannual'))
+          || null;
       }
     } catch (resolveErr) {
       // Fail-open to the existing exact-key behavior.

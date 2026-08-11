@@ -707,11 +707,40 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           coverageCatalogServiceId = catalogRow.id;
           coverageCatalogKey = catalogRow.service_key;
         } else {
-          logger.warn(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row not found — seeding palm coverage without catalog identity`);
+          // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
+          // visits would knowingly hand them the one-time completion/
+          // billing posture. Defer — ensureCoverageRowsForTerm is
+          // idempotent and re-runs on every term refresh, and the deduped
+          // coverage exception keeps it office-visible until then.
+          logger.error(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row missing — deferring palm coverage seeding (fail closed)`);
+          await fileCoverageException(term, 'palm_catalog_missing',
+            'The recurring palm catalog row (palm_injection_semiannual) is missing, so this term\'s prepaid palm visits were NOT created. Restore the catalog row (migration 20260811000010); the next term refresh seeds them automatically.');
+          return {
+            createdCount: 0,
+            targetDates,
+            existingCount: existingRows.length,
+            createdRows: [],
+            effectiveTermEnd,
+            reason: 'palm_catalog_missing',
+          };
         }
       }
     } catch (err) {
       logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link skipped: ${err.message}`);
+      // Unknown identity state = fail closed for palm too (word-boundary
+      // test so 'Palmetto…' coverage never trips this).
+      if (/\bpalm\b/i.test(String(coverageServiceType))) {
+        await fileCoverageException(term, 'palm_catalog_missing',
+          'The recurring palm catalog identity could not be verified while seeding this term\'s prepaid visits — seeding deferred; the next term refresh retries automatically.');
+        return {
+          createdCount: 0,
+          targetDates,
+          existingCount: existingRows.length,
+          createdRows: [],
+          effectiveTermEnd,
+          reason: 'palm_catalog_missing',
+        };
+      }
     }
   }
 

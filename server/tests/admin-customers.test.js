@@ -574,12 +574,14 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection' }, serviceIndex)?.service_key).toBe('palm_injection');
     // An explicit serviceKey selection still wins outright.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection');
-    // Envs without the semiannual row (not yet migrated) fall back to the
-    // one-time match rather than no-match.
+    // FAIL CLOSED when the semiannual row is missing (codex r15 pre-push
+    // P0): a detected 2x palm line stays UNMATCHED — never the one-time
+    // row, whose typed completion would invoice the already-billed
+    // recurring plan.
     const legacyIndex = indexServicesForSchedule([
       { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection' },
     ]);
-    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, legacyIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, legacyIndex)).toBeFalsy();
   });
 
   test('rodent bait falls back to monthly monitoring when the catalog lacks the quarterly row', () => {
