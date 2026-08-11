@@ -63,6 +63,24 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // confirmation message.
   try {
     const AppointmentReminders = require('./appointment-reminders');
+    // Register against the CURRENT slot, not the caller's snapshot: a
+    // sweep-held row snapshot can predate a concurrent reschedule, and
+    // registerAppointment's existing-row dedupe would keep the stale
+    // appointment_time (Codex #3361 r10 P2). Fresh read here; any move
+    // that lands after it is corrected by that move's own
+    // handleReschedule reminder resync, which now finds the row this
+    // registration creates.
+    let slotDate = svc.scheduled_date;
+    let slotStart = svc.window_start;
+    try {
+      const freshSlot = await db('scheduled_services')
+        .where({ id: svc.id })
+        .first('scheduled_date', 'window_start');
+      if (freshSlot) {
+        slotDate = freshSlot.scheduled_date;
+        slotStart = freshSlot.window_start;
+      }
+    } catch { /* fall back to the caller's snapshot */ }
     // registerAppointment is fail-soft: it catches internally and returns
     // NULL on failure (every success path — including the already-
     // registered dedupe — returns the record). The catch below alone would
@@ -71,7 +89,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     const reminderRecord = await AppointmentReminders.registerAppointment(
       svc.id,
       svc.customer_id,
-      `${dateOnly(svc.scheduled_date)}T${svc.window_start || '09:00'}`,
+      `${dateOnly(slotDate)}T${slotStart || '09:00'}`,
       svc.service_type,
       'admin_manual',
       { sendConfirmation: false },
