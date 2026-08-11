@@ -168,6 +168,23 @@ describe('combineRecurringServicesForScheduling', () => {
       { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
     ]);
     expect(clean.combos).toHaveLength(1);
+    // The COMPANION validates independently even on accept-resolved
+    // routes (codex r18 pre-push P1): a conflicted bait companion beside
+    // an accepted quarterly pest plan declines the combine.
+    const acceptCompanionConflict = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control' },
+        { name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4, visits: 2 },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(acceptCompanionConflict.combos).toEqual([]);
+    // Populated-but-invalid aliases decline line-resolved combines too.
+    const invalidAlias = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4, visits: 0 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(invalidAlias.combos).toEqual([]);
   });
 
   test('conflicting pest counts on an accepted-frequency combo: combine stands, count never rides (Codex r12 P1)', () => {

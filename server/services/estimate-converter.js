@@ -487,8 +487,14 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     // plan cadence is the truth there (stale-debris doctrine) and the pest
     // seeding gate tolerates the missing count.
     const acceptResolvedPrimary = route.primaryUsesAcceptFrequency && acceptPattern;
+    // The COMPANION validates independently on every route (codex r18
+    // pre-push P1): only the PRIMARY cadence is accept-resolved, so a
+    // conflicted/invalid companion count must decline even when the
+    // accepted plan cadence carries the primary. Populated-but-invalid
+    // aliases (0/text) are malformed like conflicts.
+    if (visitCountFieldsConflict(companion) || visitCountFieldsInvalid(companion)) continue;
     if (!acceptResolvedPrimary
-      && (visitCountFieldsConflict(primary) || visitCountFieldsConflict(companion))) continue;
+      && (visitCountFieldsConflict(primary) || visitCountFieldsInvalid(primary))) continue;
     // Cadence resolution is role-aware:
     //  - PEST PRIMARY (primaryUsesAcceptFrequency): the ACCEPTED plan
     //    selection wins — it is the customer's FINAL visit-cadence choice,
