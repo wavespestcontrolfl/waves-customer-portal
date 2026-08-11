@@ -3085,11 +3085,16 @@ export default function EstimateToolViewV2({
   // behavior before this existed) rather than blocking the builder.
   const [customerSpend, setCustomerSpend] = useState(null);
   useEffect(() => {
+    // Clear FIRST, on every relink. The chip above switches to the newly
+    // linked customer the instant staff clicks them, so carrying the
+    // previous customer's figures until this fetch resolves would caption
+    // one customer's per-application prices with another customer's name —
+    // and these are numbers the office reads out loud. The cancelled guard
+    // below stops a slow response for an earlier selection from landing on
+    // top of the current one; this stops the stale render before it.
+    setCustomerSpend(null);
     const customerId = existingCustomerMatch?.id;
-    if (!customerId) {
-      setCustomerSpend(null);
-      return undefined;
-    }
+    if (!customerId) return undefined;
     let cancelled = false;
     (async () => {
       try {
