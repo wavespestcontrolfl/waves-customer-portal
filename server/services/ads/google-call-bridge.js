@@ -445,6 +445,13 @@ function buildMatches(googleCalls, crmCalls, targetNumber = mainLine().number) {
   return matches;
 }
 
+// The CRM-side fetch cap — FIXED, independent of the Google-side `limit`
+// option (codex P1, ambiguity-record r5 GH round: rescan trust must compare
+// crmMainLineCalls against THIS bound, not the caller's Google limit, or a
+// healthy manual apply at the UI's default limit reads 200–499 CRM calls as
+// a capped scan and can never clear its old ambiguity records).
+const CRM_FETCH_LIMIT = 500;
+
 async function fetchCrmCalls(days = 30) {
   const safeDays = Math.min(Math.max(parseInt(days, 10) || 30, 1), 90);
   const since = addETDays(new Date(), -safeDays);
@@ -462,7 +469,7 @@ async function fetchCrmCalls(days = 30) {
     .whereIn('to_phone', phoneVariants(target.number))
     .where('created_at', '>=', since)
     .orderBy('created_at', 'desc')
-    .limit(500);
+    .limit(CRM_FETCH_LIMIT);
 
   return db('call_log as c')
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
@@ -1535,8 +1542,13 @@ async function applyBridge(options = {}) {
   // concurrent scan still reports.
   const scanDays = preview.period?.days || 30;
   const scanLimit = preview.period?.limit || 200;
+  // Each side compares against ITS OWN cap (codex P1, r5 GH round): the
+  // Google fetch is bounded by the caller's limit option, the CRM fetch by
+  // the fixed CRM_FETCH_LIMIT — comparing CRM rows to the (default 200)
+  // Google limit read healthy scans as capped and left old records
+  // permanently unclearable.
   const capHit = (preview.summary?.googleCalls || 0) >= scanLimit
-    || (preview.summary?.crmMainLineCalls || 0) >= scanLimit;
+    || (preview.summary?.crmMainLineCalls || 0) >= CRM_FETCH_LIMIT;
   const writeFailed = skipped.some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
   await resolveAmbiguousBridgeCalls({
     ambiguousCallIds: ambiguousCandidateCallIds,
@@ -1684,9 +1696,14 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     // automatic retry lane ends at created_at + the shared extraction
     // retry window, and every pass that can link a lead — the
     // age-unlimited admin force-reprocess included — goes through a claim
-    // write that stamps processing_started_at. Generic updated_at was
-    // rejected here (disposition edits and triage sync move it, widening
-    // the horizon with non-processing writes); the daily re-record of a
+    // write that stamps processing_started_at, which finalization
+    // deliberately preserves. The anchor gets the processor's own
+    // 10-minute stale-pass allowance on top (codex P1, r5 GH round):
+    // findReusableCallLead runs late in the pass and can reuse a lead
+    // committed after the claim — a pass older than that allowance is the
+    // processor's own definition of dead. Generic updated_at was rejected
+    // here (disposition edits and triage sync move it, widening the
+    // horizon with non-processing writes); the daily re-record of a
     // still-open ambiguity refreshes the snapshot after a late pass. The exact pick ("newest eligible exact-phone match at
     // processing time") is not reconstructible post-hoc — claim states
     // move under it — so the hold keeps every candidate (over-holding a
@@ -1704,7 +1721,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
            ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
           AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
             = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
-          AND l.created_at < GREATEST(cl.created_at + make_interval(secs => ?), COALESCE(cl.processing_started_at, cl.created_at))
+          AND l.created_at < GREATEST(cl.created_at + make_interval(secs => ?), COALESCE(cl.processing_started_at + interval '10 minutes', cl.created_at))
         WHERE cl.id IN (${ids.map(() => '?').join(', ')})
        ON CONFLICT DO NOTHING`,
       [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...ids],

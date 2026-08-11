@@ -129,11 +129,13 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(snap[0]).toMatch(/RIGHT\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(snap[0]).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\)\) >= 10/);
     // TEMPORALLY BOUNDED (audit P1 r4), anchored to PROCESSING-SPECIFIC
-    // evidence (codex P1s GH r3+r4): every pass that can link a lead —
+    // evidence (codex P1s GH r3+r4+r5): every pass that can link a lead —
     // the age-unlimited force-reprocess included — goes through a claim
-    // write stamping processing_started_at. Generic updated_at was
-    // rejected (disposition edits and triage sync move it).
-    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), COALESCE\(cl\.processing_started_at, cl\.created_at\)\)/);
+    // write stamping processing_started_at, plus the processor's own
+    // 10-minute stale-pass allowance (findReusableCallLead runs LATE in
+    // the pass and can reuse a lead committed after the claim). Generic
+    // updated_at was rejected (disposition edits and triage sync move it).
+    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), COALESCE\(cl\.processing_started_at \+ interval '10 minutes', cl\.created_at\)\)/);
     expect(snap[1]).toEqual([7 * 24 * 60 * 60, 'call-1', 'call-2']);
   });
 
@@ -429,6 +431,15 @@ describe('scheduler wiring (source pins)', () => {
     // configured is part of trust (codex P2 GH r4): an unconfigured apply
     // runs no scan, and absence from a scan that never ran clears nothing.
     expect(apply).toMatch(/rescanTrusted: !!preview\.configured && !preview\.scanFailed && !capHit && !writeFailed/);
+    // Each fetch compares against ITS OWN cap (codex P1 GH r5): CRM rows
+    // against the fixed CRM_FETCH_LIMIT, never the caller's Google limit —
+    // a healthy manual apply at the default limit read 200–499 CRM calls
+    // as capped and could never clear its old records.
+    expect(apply).toMatch(/\(preview\.summary\?\.googleCalls \|\| 0\) >= scanLimit/);
+    expect(apply).toMatch(/\(preview\.summary\?\.crmMainLineCalls \|\| 0\) >= CRM_FETCH_LIMIT/);
+    const bridgeSrc2 = fs2.readFileSync(path.join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
+    expect(bridgeSrc2).toMatch(/const CRM_FETCH_LIMIT = 500/);
+    expect(bridgeSrc2).toMatch(/\.limit\(CRM_FETCH_LIMIT\)/);
   });
 });
 
