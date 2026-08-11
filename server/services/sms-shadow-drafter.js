@@ -956,7 +956,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         intent: intentName,
         intent_confidence: intent?.confidence ?? null,
         context_summary: context.summary || null,
-        flags: JSON.stringify(context.flags || []),
+        // Account flags from context, plus comms-lint failures on the draft
+        // itself (advisory: recorded for cohort readouts and the composer
+        // card, never blocking here — delivery-mode decisions stay above).
+        flags: JSON.stringify([
+          ...(context.flags || []),
+          ...require('./comms-lint').lintFlags(parsed.reply, { channel: 'sms', audience: 'customer' }),
+        ]),
         status: SHADOW_STATUS,
         drafter: DRAFTER,
         model: draftModel,
