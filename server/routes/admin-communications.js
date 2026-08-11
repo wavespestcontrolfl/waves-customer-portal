@@ -1226,12 +1226,14 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
           error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
         });
       }
-      // Several rows can share the phone within the one account; pick the
-      // first named row in a deterministic (id-sorted) order.
-      const named = [...matches]
-        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
-        .find((m) => String(m.first_name || '').trim());
-      recipientFirstName = named ? String(named.first_name).trim() : null;
+      // Several rows can share the phone within the one account. Only greet
+      // when the rows agree on ONE name — any "first row" pick would be
+      // arbitrary and could greet the wrong household member. Ambiguous →
+      // null, and the composer falls back to the bare clause.
+      const named = matches.map((m) => String(m.first_name || '').trim()).filter(Boolean);
+      recipientFirstName = named.length && new Set(named.map((n) => n.toLowerCase())).size === 1
+        ? named[0]
+        : null;
       customerIds = await customerIdsForAccount(accountKeys[0]);
     }
     if (!customerIds.length) {
@@ -1360,10 +1362,12 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
           error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
         });
       }
-      const named = [...matches]
-        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
-        .find((m) => String(m.first_name || '').trim());
-      recipientFirstName = named ? String(named.first_name).trim() : null;
+      // Agreement rule, same as /reschedule-link: one unambiguous name or
+      // no greeting at all.
+      const named = matches.map((m) => String(m.first_name || '').trim()).filter(Boolean);
+      recipientFirstName = named.length && new Set(named.map((n) => n.toLowerCase())).size === 1
+        ? named[0]
+        : null;
       customerIds = await customerIdsForAccount(accountKeys[0]);
     }
     if (!customerIds.length) {

@@ -611,8 +611,11 @@ function ConversationViewV2({
 // the composer is EMPTY — an operator-typed draft gets the bare server
 // clause appended instead, so the greeting never lands mid-message. Returns
 // null when there is no first name to greet with (fall back to the clause).
-// Plain-ASCII copy on purpose: an em dash or curly quote silently flips the
-// SMS to UCS-2 and cuts each segment from 160 to 70 chars.
+// The TEMPLATE copy stays plain ASCII on purpose — an em dash or curly
+// quote silently flips the SMS to UCS-2 and cuts each segment from 160 to
+// 70 chars. Dynamic values (name, service type) pass through untouched: a
+// customer named José still gets greeted correctly, and the operator sees
+// the resulting body (and char count) before sending.
 export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;

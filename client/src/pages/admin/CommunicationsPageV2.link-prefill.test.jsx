@@ -50,15 +50,29 @@ describe("buildReschedulePrefill", () => {
     ).toBeNull();
   });
 
-  it("stays pure GSM-7 — no unicode punctuation sneaks into the segment math", () => {
+  it("keeps the TEMPLATE copy pure ASCII — no unicode punctuation of our own", () => {
+    // With ASCII inputs the whole message must be ASCII: any non-ASCII char
+    // would be template punctuation (em dash, curly quote) silently flipping
+    // the SMS to UCS-2 (70-char segments).
     const msg = buildReschedulePrefill({
       firstName: "Krista",
       day: "Mon, Aug 10",
       serviceType: "Quarterly Pest Control Service",
       url: URL,
     });
-     
+
     expect(msg).toMatch(/^[\x00-\x7F]+$/);
+  });
+
+  it("passes non-ASCII dynamic values through untouched — José stays José", () => {
+    expect(
+      buildReschedulePrefill({
+        firstName: "José",
+        day: "Mon, Aug 10",
+        serviceType: null,
+        url: URL,
+      }),
+    ).toBe(`Hi José, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`);
   });
 });
 

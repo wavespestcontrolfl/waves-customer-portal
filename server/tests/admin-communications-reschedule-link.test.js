@@ -420,13 +420,14 @@ describe('POST /admin/communications/reschedule-link', () => {
     buildRescheduleLink.mockResolvedValue(GOOD_LINK);
 
     // Phone path: several rows can share the number within one account — the
-    // pick is the first NAMED row in id-sorted order, trimmed. The name is
-    // the RECIPIENT row's, independent of which row owns the visit.
+    // name only rides when the named rows AGREE (trimmed, case-insensitive).
+    // Blank siblings don't break agreement.
     const byPhone = makeCustomersBuilder({
       selectResults: [
         [
           { id: 'cust-b', account_id: 'acct-1', first_name: 'Krista ' },
           { id: 'cust-a', account_id: 'acct-1', first_name: '  ' },
+          { id: 'cust-c', account_id: 'acct-1', first_name: 'krista' },
         ],
         [{ id: CUSTOMER_UUID }],
       ],
@@ -436,6 +437,24 @@ describe('POST /admin/communications/reschedule-link', () => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(200);
       expect((await res.json()).firstName).toBe('Krista');
+    });
+
+    // Rows naming DIFFERENT people (shared household number) must not greet
+    // an arbitrary pick — no name at all, the composer keeps the bare clause.
+    const ambiguous = makeCustomersBuilder({
+      selectResults: [
+        [
+          { id: 'cust-b', account_id: 'acct-1', first_name: 'Krista' },
+          { id: 'cust-a', account_id: 'acct-1', first_name: 'Walt' },
+        ],
+        [{ id: CUSTOMER_UUID }],
+      ],
+    });
+    wireDb({ customers: ambiguous, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBeNull();
     });
 
     // customerId path: the selected row's own name.
