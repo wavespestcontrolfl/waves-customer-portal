@@ -11741,10 +11741,30 @@ const CallRecordingProcessor = {
                 // cannot double-text a customer the first attempt reached.
                 if (!v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
                   try {
-                    const confirmationDelivered = await db('messaging_audit_log')
+                    // ALL THREE delivery ledgers, not just messaging_audit_log
+                    // (Codex #3361 r7 P2): appointment EMAILS audit into
+                    // customer_interactions, and a Twilio-accepted SMS whose
+                    // final audit write failed still landed durably in
+                    // sms_log (no visit id there — key by customer + type
+                    // since THIS visit's row was created; a cross-visit match
+                    // skips the re-arm, failing toward silence).
+                    let confirmationDelivered = await db('messaging_audit_log')
                       .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
                       .whereNotNull('sent_at')
                       .first('id');
+                    if (!confirmationDelivered) {
+                      confirmationDelivered = await db('customer_interactions')
+                        .where({ interaction_type: 'email_outbound' })
+                        .whereRaw("metadata->>'scheduled_service_id' = ?", [String(svc.id)])
+                        .whereRaw("metadata->>'status' = 'sent'")
+                        .first('id');
+                    }
+                    if (!confirmationDelivered) {
+                      confirmationDelivered = await db('sms_log')
+                        .where({ customer_id: customerId, message_type: 'confirmation', direction: 'outbound' })
+                        .where('created_at', '>=', svc.created_at || new Date(0))
+                        .first('id');
+                    }
                     if (!confirmationDelivered) {
                       const rearmed = await db('appointment_reminders')
                         .where({ scheduled_service_id: svc.id, cancelled: false })

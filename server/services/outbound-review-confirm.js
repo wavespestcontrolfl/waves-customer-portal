@@ -307,26 +307,27 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
 }
 
 /**
- * Hourly backstop for stranded legacy activations (Codex #3361 r5 P1): the
- * per-path lazy activations (transitionJobStatus, the reschedule writers,
- * the call-pipeline reuse paths) are fast paths, not the guarantee — a
- * process exit between a transition's commit and its post-commit activation
- * leaves a WORKED legacy row (confirmed/moved/en_route/completed/no_show)
- * permanently unstamped with no later touch promised. This re-derives the
- * obligation from persisted state: any un-confirmed outbound-review row
- * whose status shows it was accepted or worked — anything but the untouched
- * 'pending' park and the cancel/skip rejections — activates through the same
- * hook-first helper. Idempotent (the helper's guarded stamp), bounded per
- * run, and self-terminating: the legacy population only shrinks, so runs
- * become free no-ops. Untouched pending rows are deliberately NOT swept —
- * an unworked legacy booking still waits for the office (or its first
- * touch).
+ * Hourly backstop that drains the ENTIRE legacy outbound-review population
+ * (Codex #3361 r5/r7 P1): the per-path lazy activations
+ * (transitionJobStatus, the reschedule writers, the call-pipeline reuse
+ * paths) are fast paths, not the guarantee — a process exit or transient
+ * core-leg failure after any of them leaves the row unstamped, and a moved
+ * row can still carry status 'pending', so a status-scoped sweep could not
+ * retry it. Every un-confirmed outbound-review row except the cancel/skip
+ * rejections therefore activates here — including untouched pending rows:
+ * the review hold was removed collectively (owner directive 2026-08-11),
+ * new outbound bookings land live at insert, and a legacy pending row is a
+ * REAL booking the old pipeline was holding, so parity activates it too
+ * (reminders armed, lead converted, review card resolved; the card-ask leg
+ * stays clearance-gated). Idempotent (the helper's guarded stamp), bounded
+ * per run, and self-terminating: the legacy population only shrinks, so
+ * runs become free no-ops once it drains.
  */
 async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } = {}) {
   const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
   const rows = await dbh('scheduled_services')
     .where({ source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false })
-    .whereNotIn('status', ['pending', 'cancelled', 'skipped'])
+    .whereNotIn('status', ['cancelled', 'skipped'])
     .limit(limit)
     .select('id');
   let activated = 0;
