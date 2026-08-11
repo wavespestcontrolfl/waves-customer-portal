@@ -556,6 +556,19 @@ describe('the series creators consume the guard (source guards)', () => {
     const autoGuard = converterSrc.lastIndexOf('checkActiveSeriesLocked(trx, {');
     const autoInsert = converterSrc.indexOf("trx('scheduled_services').insert(row)", autoGuard);
     expect(autoInsert).toBeGreaterThan(autoGuard);
+    // The auto-schedule guard is gated on the SEEDING pattern, not raw
+    // inference (codex #3349 P1): a builder 1x palm line infers 'annual' or
+    // the plan fallback while seedingPattern is null — it seeds no series,
+    // so it cannot mint a duplicate, and family-matching it against an
+    // active semiannual palm series would swallow the legitimate one-time
+    // appointment. The gate must sit between the seeding step's open and
+    // the locked guard call.
+    const autoStep = converterSrc.lastIndexOf('await runSeedingStep(async (trx) => {', autoGuard);
+    const seedingGate = converterSrc.indexOf('if (seedingPattern) {', autoStep);
+    expect(seedingGate).toBeGreaterThan(autoStep);
+    expect(seedingGate).toBeLessThan(autoGuard);
+    // Raw-inference gating must not come back on any guard.
+    expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
     expect((converterSrc.match(/action: 'recurring_series_skipped'/g) || []).length).toBe(3);
     expect(converterSrc).toContain('duplicate-series guard failed (scheduling proceeds)');

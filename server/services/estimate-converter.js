@@ -3877,7 +3877,14 @@ const EstimateConverter = {
           // concurrent accepts serialize per customer + service family and
           // the loser skips instead of minting a second series.
           const outcome = await runSeedingStep(async (trx) => {
-            if (pattern) {
+            // Gate on the pattern the seeder will ACTUALLY use, not raw
+            // inference (codex #3349 P1) — same rule the reserved path
+            // already applies. A unit that seeds NO series (a builder 1x
+            // palm line infers 'annual'/the plan fallback; seedingPattern
+            // is null) cannot mint a duplicate series, and family-matching
+            // it against an existing semiannual palm series would swallow
+            // a legitimate one-time appointment.
+            if (seedingPattern) {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: combinedServiceId,
