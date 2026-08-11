@@ -2232,6 +2232,24 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'quarterly') return visits == null || visits === 4;
     return false;
   }
+  // Lawn Care programs (owner GO 2026-08-10 — the last recurring family with
+  // the sold-a-series-got-one-visit defect the T&S audit and the mosquito fix
+  // below each closed for their own families; found live via two accepted
+  // lawn plans whose reserved first visit stayed unstamped and seeded
+  // nothing, leaving the customers invisible to every recurring-lawn
+  // surface). The four sellable tiers (estimate-slot-availability
+  // LAWN_TIER_META): basic/quarterly 4 · standard/bi-monthly 6 ·
+  // enhanced/every-6-weeks 9 · premium/monthly 12 — each gated on its
+  // explicit visit count, so LEGACY lawn rows without explicit visits keep
+  // office scheduling exactly as before (same shape as tree_shrub above).
+  if (key === 'lawn_care') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'quarterly') return visits === 4;
+    if (pattern === 'bimonthly') return visits === 6;
+    if (pattern === 'every_6_weeks') return visits === 9;
+    if (pattern === 'monthly') return visits === 12;
+    return false;
+  }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
   // plan booked its FIRST visit and never created the rest — the customer was
   // billed monthly for a series they did not get. Same failure the T&S audit

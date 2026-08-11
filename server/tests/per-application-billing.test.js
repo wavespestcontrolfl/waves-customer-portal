@@ -126,6 +126,43 @@ describe('resolveFirstApplicationAmount — per-application precedence', () => {
   });
 });
 
+describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)', () => {
+  const { supportsConverterFollowUpSeeding, converterFollowUpSeedingPattern } = EstimateConverter;
+  // Real accepted-line shapes from the live defect (2026-08-10): a sold
+  // recurring lawn plan booked its reserved first visit and seeded nothing.
+  const bimonthlyLine = { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', frequency: 'bi_monthly', visits: 6, visitsPerYear: 6 };
+  const sixWeekLine = { name: 'Every 6 Weeks Lawn Care Service', service: 'lawn_care', cadence: 'every_6_weeks', frequency: 'every_6_weeks', visits: 9, visitsPerYear: 9 };
+  const quarterlyLine = { name: 'Quarterly Lawn Care Service', service: 'lawn_care', frequency: 'quarterly', visitsPerYear: 4 };
+  const monthlyLine = { name: 'Monthly Lawn Care Service', service: 'lawn_care', frequency: 'monthly', visitsPerYear: 12 };
+
+  test('all four sellable lawn tiers seed their series (LAWN_TIER_META)', () => {
+    expect(supportsConverterFollowUpSeeding(quarterlyLine, {}, 'quarterly')).toBe(true);
+    expect(supportsConverterFollowUpSeeding(bimonthlyLine, {}, 'bimonthly')).toBe(true);
+    expect(supportsConverterFollowUpSeeding(sixWeekLine, {}, 'every_6_weeks')).toBe(true);
+    expect(supportsConverterFollowUpSeeding(monthlyLine, {}, 'monthly')).toBe(true);
+  });
+
+  test('cadence resolves end-to-end from the accepted line, parent row keyed by service_type', () => {
+    // The reserved row carries service_type "Lawn Care" — serviceKeyFor must
+    // land the lawn_care family from either the line or the row.
+    expect(converterFollowUpSeedingPattern(bimonthlyLine, { service_type: 'Lawn Care' }, null)).toBe('bimonthly');
+    expect(converterFollowUpSeedingPattern(sixWeekLine, { service_type: 'Lawn Care' }, null)).toBe('every_6_weeks');
+  });
+
+  test('a visit count that contradicts the cadence declines rather than guesses', () => {
+    expect(supportsConverterFollowUpSeeding({ ...bimonthlyLine, visits: 9, visitsPerYear: 9 }, {}, 'bimonthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding({ ...monthlyLine, visitsPerYear: 6 }, {}, 'monthly')).toBe(false);
+  });
+
+  test('LEGACY lawn rows without explicit visits keep office scheduling', () => {
+    // The lawn billing cadence (monthly) must never seed a 12-visit series
+    // for a plan whose visit cadence is unknown — no visits, no series.
+    const legacy = { name: 'Lawn Care', service: 'lawn_care' };
+    expect(converterFollowUpSeedingPattern({ ...legacy, frequency: 'monthly' }, { service_type: 'Lawn Care' }, null)).toBe(null);
+    expect(supportsConverterFollowUpSeeding(legacy, { service_type: 'Lawn Care' }, 'monthly')).toBe(false);
+  });
+});
+
 describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27)', () => {
   const { supportsConverterFollowUpSeeding, converterFollowUpSeedingPattern } = EstimateConverter;
   const SEASONAL = 'seasonal_feb_oct';
