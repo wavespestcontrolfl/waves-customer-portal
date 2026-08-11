@@ -977,6 +977,20 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       'c.id', 'c.first_name', 'c.last_name', 'c.email', 'c.latitude', 'c.longitude',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
+      // The most recent visit evidencing the class, so the watchdog can key
+      // its dedupe to the OFFENDING BOOKING (codex #3341 r3 P2): a customer
+      // fixed once and regressed later — stamped series cancelled, replaced
+      // by another one-time — carries a new visit id and pages again,
+      // while the same unresolved card stays deduped day after day.
+      db.raw(
+        `(SELECT ss4.id FROM scheduled_services ss4
+           WHERE ss4.customer_id = c.id
+             AND ss4.status NOT IN (${nonLivePlaceholders})
+             AND ss4.scheduled_date >= ?
+             AND (${lawnLikeSql.replace(/ss3\./g, 'ss4.')})
+           ORDER BY ss4.scheduled_date DESC, ss4.id DESC LIMIT 1) as trigger_visit_id`,
+        [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
+      ),
     );
   const gaps = [];
   // Intentional opt-out: never pageable, same rule as the evidence legs.
@@ -991,24 +1005,27 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
     if (!isEmailLike(r.email)) {
       fixable.push(r.email ? 'unusable_email' : 'no_email');
     } else {
-      // An active suppression blocks sendTemplate even after stamping
-      // (codex #3341 r2 P2) — evaluated with the sender's OWN gate
-      // (activeSuppressionFor) on this sweep's stream, never a copy of its
-      // rules. A bounce is a fixable deliverability failure (the
-      // bounce-rescue lane exists to repair addresses), so it rides the
-      // card; every other suppression type (do_not_email, spam_complaint,
-      // unsubscribes incl. group-scoped) is the customer's own choice —
-      // never pageable, same rule as the prefs opt-outs above. The
-      // evidence legs don't need this: their customers reach the sender,
-      // whose blocked operational sends already alert
-      // (alertBlockedOperationalSend); this class never reaches the
-      // sender, so this card is their only signal.
-      const suppression = await EmailTemplateLibrary.activeSuppressionFor(
+      // Active suppressions block sendTemplate even after stamping (codex
+      // #3341 r2 P2) — evaluated with the sender's OWN gate on this
+      // sweep's stream, never a copy of its rules. ALL applicable rows are
+      // inspected (r3 P2: several can be active at once, and an arbitrary
+      // first match let a bounce mask a coexisting opt-out): any consent
+      // suppression (do_not_email, spam_complaint, unsubscribes incl.
+      // group-scoped) wins — the customer's own choice is never pageable,
+      // same rule as the prefs opt-outs above. Only a pure bounce rides
+      // the card as a fixable deliverability failure (the bounce-rescue
+      // lane exists to repair addresses). The evidence legs don't need
+      // this: their customers reach the sender, whose blocked operational
+      // sends already alert (alertBlockedOperationalSend); this class
+      // never reaches the sender, so this card is their only signal.
+      const suppressions = await EmailTemplateLibrary.activeSuppressionsFor(
         { suppression_group_key: SUPPRESSION_GROUP }, r.email, SUPPRESSION_GROUP,
       );
-      if (suppression) {
-        const type = String(suppression.suppression_type || '').toLowerCase();
-        if (type !== 'bounce') continue;
+      if (suppressions.length) {
+        const allBounces = suppressions.every(
+          (row) => String(row.suppression_type || '').toLowerCase() === 'bounce',
+        );
+        if (!allBounces) continue;
         fixable.push('bounced_email');
       }
     }
@@ -1021,6 +1038,7 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
       name: [r.first_name, r.last_name].filter(Boolean).join(' '),
       kind: 'unstamped_member',
       fixable,
+      triggerVisitId: r.trigger_visit_id || null,
     });
   }
   return gaps;

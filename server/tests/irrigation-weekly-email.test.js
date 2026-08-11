@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
-  activeSuppressionFor: jest.fn(async () => null),
+  activeSuppressionsFor: jest.fn(async () => []),
 }));
 jest.mock('../services/service-report/application-conditions', () => ({
   fetchServiceWeekWeather: jest.fn(async () => ({ rainInches: null, et0Inches: null, dailyRain: null })),
@@ -733,25 +733,35 @@ describe('findLawnEmailAudienceGaps', () => {
       // predicate) — rows resolving here are already the blind-spot class.
       mockBookRows([unstamped()]);
       expect(await findUnstampedRecurringLawnMembers()).toEqual([
-        { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'] },
+        { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'], triggerVisitId: null },
       ]);
     });
 
-    test("an active BOUNCE suppression rides the card; opt-out suppressions never page (codex r2 P2)", async () => {
-      // Evaluated with the sender's own gate (activeSuppressionFor) — a
-      // bounce is a fixable deliverability failure; do_not_email/spam are
-      // the customer's choice, same never-pageable rule as prefs opt-outs.
-      EmailTemplateLibrary.activeSuppressionFor
-        .mockResolvedValueOnce({ suppression_type: 'bounce' })
-        .mockResolvedValueOnce({ suppression_type: 'do_not_email' });
-      mockBookRows([unstamped({ id: 'a' }), unstamped({ id: 'b' })]);
+    test("a pure BOUNCE suppression rides the card; any consent suppression never pages, even beside a bounce (codex r2+r3 P2)", async () => {
+      // Evaluated with the sender's own gate (activeSuppressionsFor —
+      // plural: several rows can be active at once, and an arbitrary first
+      // match let a bounce mask a coexisting opt-out). A pure bounce is a
+      // fixable deliverability failure; any consent row (do_not_email /
+      // spam / unsubscribe) wins — same never-pageable rule as prefs
+      // opt-outs.
+      EmailTemplateLibrary.activeSuppressionsFor
+        .mockResolvedValueOnce([{ suppression_type: 'bounce' }])
+        .mockResolvedValueOnce([{ suppression_type: 'bounce' }, { suppression_type: 'do_not_email' }])
+        .mockResolvedValueOnce([{ suppression_type: 'unsubscribe', group_key: 'service_operational' }]);
+      mockBookRows([unstamped({ id: 'a' }), unstamped({ id: 'b' }), unstamped({ id: 'c' })]);
       const gaps = await findUnstampedRecurringLawnMembers();
       expect(gaps.map((g) => [g.customerId, ...g.fixable])).toEqual([
         ['a', 'no_recurring_marked_lawn_visit', 'bounced_email'],
       ]);
-      expect(EmailTemplateLibrary.activeSuppressionFor).toHaveBeenCalledWith(
+      expect(EmailTemplateLibrary.activeSuppressionsFor).toHaveBeenCalledWith(
         { suppression_group_key: 'service_operational' }, 'stu@example.com', 'service_operational',
       );
+    });
+
+    test('the gap carries the triggering visit id so a later regression re-pages (codex r3 P2)', async () => {
+      mockBookRows([unstamped({ trigger_visit_id: 'visit-42' })]);
+      const gaps = await findUnstampedRecurringLawnMembers();
+      expect(gaps[0].triggerVisitId).toBe('visit-42');
     });
 
     test("send prerequisites ride the SAME card — stamping alone can't deliver to a bad email/coords (codex r1 P2)", async () => {

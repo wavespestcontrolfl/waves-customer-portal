@@ -267,8 +267,12 @@ async function runInner({ now = new Date() } = {}) {
       // the leg validates them too (codex #3341 r1 P2), so one card lists
       // everything standing between this customer and Monday.
       const extras = g.fixable.filter((f) => f !== 'no_recurring_marked_lawn_visit');
+      // Dedupe keyed to the OFFENDING BOOKING, not just customer+fixables
+      // (codex #3341 r3 P2): alreadyAlerted has no expiry, so a customer
+      // fixed once and regressed later — new one-time booking after the
+      // stamped series was cancelled — must mint a NEW key and page again.
       await ring(
-        `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
+        `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}${g.triggerVisitId ? `:${g.triggerVisitId}` : ''}`,
         `${g.name || 'A recurring member'}'s lawn visits aren't stamped as a recurring series`,
         `${g.name || 'This customer'} was enrolled as a recurring member and has lawn service on the ` +
         'books, but no visit is stamped as part of a recurring series (and no cadence shows yet), so ' +
