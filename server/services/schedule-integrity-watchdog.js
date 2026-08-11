@@ -250,14 +250,31 @@ async function runInner({ now = new Date() } = {}) {
   let lawnGaps = [];
   let lawnGapCheckFailed = false;
   try {
-    const { findLawnEmailAudienceGaps } = require('./irrigation-weekly-email');
+    const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('./irrigation-weekly-email');
     lawnGaps = await findLawnEmailAudienceGaps({ now });
+    // Membership-evidence leg (owner ruling 2026-08-10): members whose lawn
+    // visits were never stamped recurring fail the shared evidence predicate,
+    // so the leg above is structurally blind to them — this one pages them.
+    lawnGaps = lawnGaps.concat(await findUnstampedRecurringLawnMembers({ now }));
   } catch (e) {
     lawnGapCheckFailed = true;
     logger.error(`[schedule-integrity] lawn-email audience-gap check failed: ${e.message}`);
   }
   for (const g of lawnGaps) {
     if (capped()) break;
+    if (g.kind === 'unstamped_member') {
+      await ring(
+        `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
+        `${g.name || 'A recurring member'}'s lawn visits aren't stamped as a recurring series`,
+        `${g.name || 'This customer'} was enrolled as a recurring member and has lawn service on the ` +
+        'books, but no visit is stamped as part of a recurring series (and no cadence shows yet), so ' +
+        'the Monday irrigation email can never select them. Book or re-stamp their next lawn visit as ' +
+        'part of the recurring series and they are included automatically next Monday.',
+        { customer_id: g.customerId, fixable: g.fixable },
+        { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
+      );
+      continue;
+    }
     await ring(
       `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
       `${g.name || 'A recurring-lawn customer'} is missing from the Monday watering email`,

@@ -717,6 +717,33 @@ describe('findLawnEmailAudienceGaps', () => {
     expect(await findLawnEmailAudienceGaps()).toEqual([]);
   });
 
+  describe('findUnstampedRecurringLawnMembers (membership-evidence leg, owner ruling 2026-08-10)', () => {
+    const { findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
+
+    const unstamped = (over = {}) => ({
+      id: 'cust-7', first_name: 'Stu', last_name: 'Sample',
+      email_pref_ok: true, tips_pref_ok: true,
+      ...over,
+    });
+
+    test('an enrolled member with unstamped lawn visits maps to a stamp-the-series gap', async () => {
+      // The QUERY excludes evidence-positive customers (whereNot on the shared
+      // predicate) — rows resolving here are already the blind-spot class.
+      mockBookRows([unstamped()]);
+      expect(await findUnstampedRecurringLawnMembers()).toEqual([
+        { customerId: 'cust-7', name: 'Stu Sample', kind: 'unstamped_member', fixable: ['no_recurring_marked_lawn_visit'] },
+      ]);
+    });
+
+    test('opted-out members never page — same rule as the evidence legs', async () => {
+      mockBookRows([
+        unstamped({ tips_pref_ok: false }),
+        unstamped({ id: 'z', email_pref_ok: false }),
+      ]);
+      expect(await findUnstampedRecurringLawnMembers()).toEqual([]);
+    });
+  });
+
   test('churned customers (trailing-only evidence, non-customer stage) are a legitimate drop', async () => {
     mockBookRows([
       member({ id: 'churned', pipeline_stage: 'churned', has_future_evidence: false, email: null }),
