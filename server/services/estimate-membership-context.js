@@ -150,6 +150,42 @@ function accountServiceKeys(raw) {
   return [...keys].filter(Boolean);
 }
 
+// CATALOG-AUTHORITATIVE identity for a scheduled row (codex #3353 r3).
+// A row's service_type text can drift from what its service_id actually
+// points at — the repo's documented case is a stale "Pest Control" label on
+// a row linked to lawn_care_monthly — and the qualifying/tier path already
+// treats the joined catalog identity as the truth. Without this the same
+// response counts Lawn Care toward the tier while telling staff the customer
+// buys Pest Control.
+//
+// INFORMATIVE catalog text wins; anything else defers to service_type. A
+// catalog name that names no service family at all ("Premium Home Plan")
+// tells us nothing, so the row's own text still speaks. Mirrors the rule
+// ownershipKeysForRow applies in waveguard-existing-services.
+function catalogIdentityText(meta) {
+  return [meta?.serviceKey, meta?.serviceName].filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+}
+
+function catalogNamesAFamily(text) {
+  const s = String(text || '').toLowerCase();
+  return /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?|rodent|rats?|mouse|mice)\b/.test(s);
+}
+
+// The text the account key/label should be derived from for this row.
+//
+// GATED on autoWaveguardTierEnroll, deliberately: that is the same flag
+// loadExistingRecurringQualifyingRows uses to decide whether the tier path
+// classifies by catalog identity or by service_type text. Reading the
+// catalog here unconditionally would fix the gate-ON divergence Codex
+// reported (tier counts Lawn Care, panel says Pest Control) while CREATING
+// the mirror-image one with the gate off. Display follows whatever rule
+// qualification is using, so the two can never disagree in either state.
+function authoritativeServiceText(row = {}, meta = null) {
+  if (!isEnabled('autoWaveguardTierEnroll')) return row.service_type;
+  const catalogText = catalogIdentityText(meta);
+  return catalogNamesAFamily(catalogText) ? catalogText : row.service_type;
+}
+
 function accountServiceLabel(key, raw) {
   if (SERVICE_LABEL[key]) return SERVICE_LABEL[key];
   return String(raw || key || 'Service')
@@ -314,20 +350,75 @@ function lineItemAmount(line = {}) {
   return Number.isFinite(unit) ? unit * qty : 0;
 }
 
-// What the invoice charged for the SERVICE itself: the sum of its
-// non-setup lines, falling back to the invoice total when there are no
-// parseable line items.
+// Line classification, keyed on the shapes buildScheduledServiceInvoiceLines
+// actually emits (server/services/invoice.js): the primary service line and
+// each add-on carry a client_id of scheduled_<id>_primary / _addon_<addonId>,
+// and every discount is a negative line tagged _kind:'discount' whose
+// discount_for names the line it reduces (null = appointment-wide).
+
+// A deposit credit is the APPLICATION OF A PAYMENT, not a price reduction:
+// the customer paid that money earlier on the estimate. Treating it as a
+// discount reports a $117 application with a $49 deposit as $68 — the
+// customer paid the full $117, just across two moments.
+function isDepositCreditLine(line = {}) {
+  return String(line.category || '') === 'deposit_credit';
+}
+
+function isAddonLine(line = {}) {
+  return /_addon_/.test(String(line.client_id || ''));
+}
+
+function isDiscountLine(line = {}) {
+  return line._kind === 'discount' || Number(lineItemAmount(line)) < 0;
+}
+
+// A discount attached to an add-on line, which leaves with that add-on.
+function discountTargetsAddon(line = {}) {
+  return isDiscountLine(line) && /_addon_/.test(String(line.discount_for || ''));
+}
+
+// Appointment-wide discount: a discount line naming no parent.
+function isAppointmentWideDiscount(line = {}) {
+  return isDiscountLine(line) && !line.discount_for;
+}
+
+// What the invoice charged for THE SERVICE ITSELF, per application.
+//
+// Add-ons are separate line items on the same appointment invoice while
+// service_type still names only the primary service, so summing every line
+// reports a $100 pest visit with a $75 one-time add-on as "Pest Control ·
+// $175 per application" (codex #3353 r11). Add-ons and their own discounts
+// are excluded; the primary line and its discount are what the recurring
+// service costs.
 function invoiceServiceAmount(row = {}) {
   const lines = invoiceLineItems(row);
   if (lines.length) {
-    const serviceTotal = lines
-      .filter((line) => !isSetupLineItem(line))
-      .reduce((sum, line) => sum + lineItemAmount(line), 0);
+    const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
+    const addonLines = billable.filter(isAddonLine);
+    // An appointment-WIDE discount spans the primary line and the add-ons
+    // together, and nothing in the row says how it was apportioned. With
+    // add-ons present there is no honest way to attribute it to the service
+    // alone, so the figure is withheld rather than guessed — the same rule
+    // this module applies to every other unattributable basis.
+    if (addonLines.length && billable.some(isAppointmentWideDiscount)) return null;
+    const serviceLines = billable.filter((line) => !isAddonLine(line) && !discountTargetsAddon(line));
+    let serviceTotal = serviceLines.reduce((sum, line) => sum + lineItemAmount(line), 0);
+    // An invoice-level manual discount (selected through discountIds) is
+    // recorded in invoices.discount_amount WITHOUT a negative line, so the
+    // line sum is the undiscounted subtotal — a $120 visit paid with 10% off
+    // reads as $120 instead of $108. Applied ONLY when the lines carry no
+    // discount of their own, so a discount already represented as a negative
+    // line is never subtracted twice.
+    const invoiceDiscount = Number(row.discount_amount);
+    if (invoiceDiscount > 0 && !billable.some(isDiscountLine)) {
+      serviceTotal -= invoiceDiscount;
+    }
     if (serviceTotal > 0) return round2(serviceTotal);
-    // All lines were setup/membership (or discounts netted to zero) — not a
-    // usable per-visit price.
+    // All lines were setup/membership/deposit (or discounts netted it to
+    // zero) — not a usable per-visit price.
     return null;
   }
+  // No parseable lines: the invoice total is already net of any discount.
   const total = Number(row.total);
   return Number.isFinite(total) && total > 0 ? round2(total) : null;
 }
@@ -350,7 +441,9 @@ async function loadLastPaidSpendByKey(database, customerId) {
       .whereNotNull('service_type')
       .orderBy('paid_at', 'desc')
       .limit(100)
-      .select('service_type', 'total', 'line_items', 'paid_at');
+      // discount_amount carries a manual invoice-level discount that never
+      // appears as a negative line (codex #3353 r11).
+      .select('service_type', 'total', 'line_items', 'paid_at', 'discount_amount');
     for (const row of rows) {
       const key = accountServiceKey(row.service_type);
       if (!key || spend[key] != null) continue;
@@ -394,7 +487,11 @@ async function loadCadenceByRowId(database, customerId) {
       // missed it, so the r4 interval-days resolution silently never fired
       // against a real database and every custom series fell back to the
       // catalog cadence).
-      .select('s.id', 's.recurring_pattern', 's.recurring_interval_days', 'svc.frequency', 'svc.visits_per_year');
+      // The catalog IDENTITY rides along with the cadence: one join already
+      // resolves both, and the identity is what makes the displayed service
+      // name trustworthy when service_type text has drifted.
+      .select('s.id', 's.recurring_pattern', 's.recurring_interval_days',
+        'svc.frequency', 'svc.visits_per_year', 'svc.service_key', 'svc.name as service_name');
     // The LIVE series wins over the catalog default (codex #3353 r3): a
     // series whose scheduled_services.recurring_pattern overrides its
     // catalog frequency really runs at the overridden cadence, and reading
@@ -436,8 +533,9 @@ async function loadCadenceByRowId(database, customerId) {
         || normalizeCoverageCadence(row.recurring_pattern)
         || cadenceFromIntervalDays(row.recurring_interval_days);
       const liveVisitsPerYear = visitsPerYearForCadence(liveCadence);
+      const identity = { serviceKey: row.service_key || null, serviceName: row.service_name || null };
       if (liveCadence && liveVisitsPerYear) {
-        return [row.id, { frequency: liveCadence, visitsPerYear: liveVisitsPerYear }];
+        return [row.id, { ...identity, frequency: liveCadence, visitsPerYear: liveVisitsPerYear }];
       }
       // A series that DECLARES a live recurrence we cannot name yields NO
       // cadence — never the catalog default (codex #3353 r6). weekly and
@@ -455,9 +553,10 @@ async function loadCadenceByRowId(database, customerId) {
       // figure. The catalog only speaks for a series that declares no
       // recurrence of its own.
       if (rawPattern || Number(row.recurring_interval_days) > 0) {
-        return [row.id, { frequency: null, visitsPerYear: null }];
+        return [row.id, { ...identity, frequency: null, visitsPerYear: null }];
       }
       return [row.id, {
+        ...identity,
         frequency: row.frequency || null,
         visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
       }];
@@ -563,9 +662,14 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const qualifyingRows = Array.isArray(existingRows)
     ? existingRows
     : await loadExistingRecurringQualifyingRows(database, customerId);
+  // qualifyingKeysForRow, not a re-derivation from service_type text: it is
+  // the SAME catalog-authoritative reducer loadExistingRecurringQualifyingRows
+  // qualified these rows with, so the tier families here match the ones that
+  // path selected. Re-reading service_type reported the stale family — the
+  // display half of the drift Codex flagged. Gate-off rows carry no catalog
+  // fields, so it falls back to service_type exactly as before.
   const existingServiceKeys = [...new Set(qualifyingRows
-    .flatMap((row) => accountServiceKeys(row.service_type))
-    .map((key) => toQualifyingKey(key))
+    .flatMap((row) => qualifyingKeysForRow(row))
     .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
@@ -579,13 +683,16 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const componentKeysByKey = new Map();
   const componentRowsByKey = new Map();
   for (const row of rows) {
-    const key = accountServiceKey(row.service_type);
+    // Catalog identity decides what this row IS, not its (possibly stale)
+    // service_type text — see authoritativeServiceText.
+    const identityText = authoritativeServiceText(row, cadenceByRowId.get(row.id));
+    const key = accountServiceKey(identityText);
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(row);
     const components = componentKeysByKey.get(key) || new Set();
     const componentRows = componentRowsByKey.get(key) || new Map();
-    accountServiceKeys(row.service_type).forEach((component) => {
+    accountServiceKeys(identityText).forEach((component) => {
       components.add(component);
       if (!componentRows.has(component)) componentRows.set(component, []);
       componentRows.get(component).push(row);
@@ -656,7 +763,21 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       contractGroups = [{ address: null, rows: serviceRows }];
     }
     const contracts = contractGroups.map(({ address, rows: contractRows }) => {
-      const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
+      // The NEXT upcoming priced appointment, not whichever row the unordered
+      // query happened to return first (codex #3353 r11). Mixed-price
+      // contracts are a supported shape — a newly repriced future visit sits
+      // beside older ones — so "first positive row" could present either
+      // price across reloads of identical data. Earliest scheduled day with a
+      // row-id tiebreak, exactly how the extension path in this file picks
+      // its basis: the figure the customer actually pays next.
+      const scheduled = [...contractRows]
+        .filter((row) => Number(row.estimated_price) > 0)
+        .sort((a, b) => {
+          const dayA = visitDateKey(a.scheduled_date) || '';
+          const dayB = visitDateKey(b.scheduled_date) || '';
+          if (dayA !== dayB) return dayA.localeCompare(dayB);
+          return String(a.id).localeCompare(String(b.id));
+        })[0];
       const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
       // Annual-prepay coverage: prepaid_amount is the DISCOUNTED amount the
       // customer ACTUALLY PAID for the visit, while estimated_price stays the
@@ -882,7 +1003,13 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     return {
       key,
       keys: [...(componentKeysByKey.get(key) || new Set([key]))],
-      label: accountServiceLabel(key, serviceRows[0]?.service_type),
+      // Labelled from the same authoritative text the key was derived from,
+      // so the name staff reads can never disagree with the family the tier
+      // counted.
+      label: accountServiceLabel(
+        key,
+        authoritativeServiceText(serviceRows[0] || {}, cadenceByRowId.get(serviceRows[0]?.id)),
+      ),
       qualifiesForWaveGuard: existingServiceKeys.includes(key),
       // Every property this service is active at — lets duplicate checks
       // scope to the quoted property instead of blocking account-wide.
