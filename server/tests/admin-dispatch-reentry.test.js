@@ -87,8 +87,9 @@ describe('service-line advisory defaults', () => {
   });
 
   // Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
-  // re-entry window on both sides instead of the pest line's 30 minutes.
-  test('cockroach-family service types default to 120 min on BOTH sides', () => {
+  // INTERIOR re-entry window; the exterior dry-down keeps the pest line's
+  // 30-minute default.
+  test('cockroach-family service types default to 120 min interior, 30 min exterior', () => {
     for (const type of [
       'Cockroach Control',
       'German Roach Knockdown',
@@ -97,7 +98,7 @@ describe('service-line advisory defaults', () => {
       'German Roach Cleanout',
     ]) {
       expect(getAdvisoryDefaults(type)).toMatchObject({
-        exterior_reentry_min: 120,
+        exterior_reentry_min: 30,
         interior_reentry_min: 120,
       });
     }

@@ -2801,8 +2801,8 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // Type-aware (not just line-aware): cockroach-family visits default to
-    // 120 min (owner rule 2026-08-11) — the editor's defaults must match
-    // what a fresh completion would persist.
+    // a 120-min interior window (owner rule 2026-08-11) — the editor's
+    // defaults must match what a fresh completion would persist.
     const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
     const defaults = {
       exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
@@ -6463,8 +6463,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // no lower than the default so a 0-hr / "until dry" product still shows
             // a sensible dry-down window.
             const productReentryMin = await maxProductReentryMinutes(trx, products || []);
-            // Type-aware base: cockroach-family visits default to 120 min
-            // on both sides (owner rule 2026-08-11) instead of the pest
+            // Type-aware base: cockroach-family visits default to a 120-min
+            // INTERIOR window (owner rule 2026-08-11) instead of the pest
             // line's 30 — see getAdvisoryDefaults.
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
             const advisoryDefaultsForVisit = productReentryMin != null

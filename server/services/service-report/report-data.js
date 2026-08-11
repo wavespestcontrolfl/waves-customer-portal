@@ -3629,9 +3629,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         : {}),
     });
   const advisory = normalizeAdvisoryForTreatmentScope({
-    // Type-aware defaults (cockroach-family visits default to 120 min —
-    // owner rule 2026-08-11); the STORED advisory still wins whenever the
-    // completion persisted one.
+    // Type-aware defaults (cockroach-family visits default to a 120-min
+    // interior window — owner rule 2026-08-11); the STORED advisory still
+    // wins whenever the completion persisted one.
     ...getAdvisoryDefaults(service.service_type),
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
