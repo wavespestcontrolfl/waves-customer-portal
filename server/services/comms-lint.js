@@ -86,9 +86,16 @@ function isBareExemptHost(host) {
   return SCHEMELESS_SMS_HOSTS.includes(h) || h === 'wavespestcontrol.com' || h.endsWith('.wavespestcontrol.com');
 }
 // Scheme-carrying form of a must-go-bare host (the renderer strips these;
-// a draft carrying one renders inconsistently with the sent form).
+// a draft carrying one renders inconsistently with the sent form). NOTE
+// the deliberate asymmetry with isBareExemptHost: the exemption set for
+// the bare-host rule (any owned host may appear bare) is WIDER than the
+// must-go-bare set (exactly the renderer's SCHEMELESS_SMS_HOSTS) — a
+// scheme'd https://wavespestcontrol.com marketing link is legitimate both
+// ways. The hostname boundary stops a lookalike third-party URL
+// (https://portal.wavespestcontrol.com.evil.com/...) from matching on its
+// owned-host prefix.
 const SCHEMED_PORTAL_RE = new RegExp(
-  `https?://(${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})`,
+  `https?://(${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})(?![-a-z0-9]|\\.[a-z0-9])`,
   'i'
 );
 const BARE_HOST_TLDS = ['com', 'net', 'org', 'io', 'co', 'us', 'biz', 'info', 'page', 'link', 'app', 'edu', 'gov', 'mil'];

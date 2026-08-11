@@ -192,6 +192,18 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('scheme matcher needs a hostname boundary and only covers the must-go-bare set', () => {
+    // A scheme'd lookalike is a third-party URL, not our portal link.
+    const lookalike = lintComms('See https://portal.wavespestcontrol.com.evil.com/x for details', { channel: 'sms', audience: 'customer' });
+    expect(lookalike.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+    // Sentence-final scheme'd portal link still flags.
+    const sentenceEnd = lintComms('Pay anytime at https://portal.wavespestcontrol.com.', { channel: 'sms', audience: 'customer' });
+    expect(sentenceEnd.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+    // The marketing site is not in the must-go-bare set: legitimate both ways.
+    const marketing = lintComms('More at https://wavespestcontrol.com/lawn-care anytime.', { channel: 'sms', audience: 'customer' });
+    expect(marketing.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
+  });
+
   it('does not read a mid-message reply instruction as a sign-off closer', () => {
     for (const msg of ['Please reply to this message with the gate code so the technician can enter.', 'Reply to this message if Tuesday works so I can schedule it.']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
