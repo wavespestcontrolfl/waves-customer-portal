@@ -110,7 +110,7 @@ describe('lintComms mechanics', () => {
   });
 
   it('flags dollar-anchored each/every visit forms but not scheduling prose', () => {
-    for (const msg of ['The plan is $117 each visit.', 'Service runs $99 every visit after the initial.', 'It comes to $30 a visit.']) {
+    for (const msg of ['The plan is $117 each visit.', 'Service runs $99 every visit after the initial.', 'It comes to $30 a visit.', 'That plan is 117 dollars each visit.', 'Runs about 30 bucks a visit.', 'Billed at USD 117 every visit.']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
       expect(r.failures.map((f) => f.rule)).toContain('per-application-wording');
     }

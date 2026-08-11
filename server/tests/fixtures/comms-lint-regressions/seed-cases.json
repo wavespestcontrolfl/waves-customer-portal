@@ -160,7 +160,14 @@
       "text": "The quarterly plan works out to $117 each visit.",
       "context": { "channel": "sms", "audience": "customer" },
       "expect": { "pass": false, "rules": ["per-application-wording"] },
-      "provenance": "2026-08-11 codex round on #3348: each/every-visit price forms say the same forbidden unit; dollar anchor keeps scheduling prose (\"we text before each visit\") clean"
+      "provenance": "2026-08-11 codex round on #3348: each/every-visit price forms say the same forbidden unit; monetary anchor keeps scheduling prose (\"we text before each visit\") clean"
+    },
+    {
+      "name": "spelled-out dollars each visit",
+      "text": "That comes to 117 dollars each visit after the first one.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["per-application-wording"] },
+      "provenance": "2026-08-11 codex round on #3348: the monetary anchor covers $, USD, dollars, and bucks — a spelled-out amount is the same forbidden price unit"
     },
     {
       "name": "STOP-to-unsubscribe tail on transactional message",

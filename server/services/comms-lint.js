@@ -165,11 +165,13 @@ const RULES = [
     // "per visit"/"per-visit" is intrinsically price-unit phrasing and always
     // forbidden. "each/every/a visit" is ordinary scheduling language ("we
     // text before each visit"), so those forms only count as price units when
-    // a dollar amount anchors them ("$117 each visit"); same for the slash
-    // form, where the digit anchor also keeps URL paths from matching.
-    check: (text) => (/\bper[\s-]+visit\b|\d\s*\/\s*visit\b|\$\s*\d[\d.,]*\s+(?:each|every|a)\s+visit\b/i.test(text)
-      ? 'says "per visit" — recurring pricing is always "per application" (commercial accounts exempt)'
-      : null),
+    // a monetary amount anchors them — "$117", "USD 117", "117 dollars",
+    // "117 bucks" — same idea as the slash form, where the digit anchor also
+    // keeps URL paths from matching.
+    check: (text) => (
+      /\bper[\s-]+visit\b|\d\s*\/\s*visit\b|(?:\$\s*|\busd\s+)\d[\d.,]*\s+(?:each|every|a)\s+visit\b|\b\d[\d.,]*\s*(?:dollars?|bucks?)\s+(?:each|every|a)\s+visit\b/i.test(text)
+        ? 'says "per visit" — recurring pricing is always "per application" (commercial accounts exempt)'
+        : null),
   },
   {
     name: 'reentry-language',
