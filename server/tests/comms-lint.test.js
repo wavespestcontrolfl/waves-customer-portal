@@ -158,6 +158,22 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('detects plan units that precede the amount', () => {
+    for (const msg of ['Your monthly plan total is $117.', 'The annual total is $1,404 for the year.']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: false });
+      expect(r.failures.map((f) => f.rule)).toContain('no-plan-total');
+    }
+    const memberDues = lintComms('Your monthly dues are $98.50 as always.', { channel: 'sms', audience: 'customer', monthlyBilled: true, billingMode: 'monthly_membership' });
+    expect(memberDues.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+  });
+
+  it('appointment timing does not satisfy the re-entry confirmation idiom', () => {
+    const r = lintComms('The treatment is safe once dry. The technician will confirm the timing of your next visit.', { channel: 'sms', audience: 'customer' });
+    expect(r.failures.map((f) => f.rule)).toContain('reentry-language');
+    const ok = lintComms('It is safe once dry - your technician will confirm the timing.', { channel: 'sms', audience: 'customer' });
+    expect(ok.failures.map((f) => f.rule)).not.toContain('reentry-language');
+  });
+
   it('plan-total exemptions are unit-specific, not lane-wide', () => {
     const prepayYearly = lintComms('Your annual prepay is $1,404/yr, already covered.', { channel: 'sms', audience: 'customer', monthlyBilled: false, billingMode: 'annual_prepay' });
     expect(prepayYearly.failures.map((f) => f.rule)).not.toContain('no-plan-total');

@@ -3192,8 +3192,14 @@ const WET_STATE_CLAIM_RE = /\b(?:while|when|whether|even\s+(?:when|while|if))\s+
 // Refusal/failure/inability framing negates the confirmation too (Codex
 // PR r15: "refuses to confirm", "failed to confirm", "unable to confirm").
 const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t|refus\\w+|fail\\w+|unable|declin\\w+|neglect\\w+|without)";
+// "timing" only counts when it is not APPOINTMENT timing (Codex #3348):
+// "the technician will confirm the timing of your next visit" is a
+// scheduling promise, not the idiom's second part — the lookahead rejects
+// a scheduling object after "timing", while bare "confirms the timing"
+// (the idiom's canonical form) and "timing of re-entry" still qualify.
+const TIMING_OBJ_SRC = "timing(?!(?:[^.!?\\n]){0,30}?\\b(?:visit|appointment|service\\b|arrival|application|estimate|quote|call)\\b)";
 const TECH_CONFIRMS_RE = new RegExp(
-  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
+  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:${TIMING_OBJ_SRC}|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,
   'i',
 );

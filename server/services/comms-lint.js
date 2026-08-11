@@ -213,17 +213,23 @@ const RULES = [
       && typeof ctx.monthlyBilled === 'boolean',
     check: (text, ctx) => {
       // Amount: $117 / USD 117 / 117 dollars / 117 bucks. Unit: /mo, "per
-      // month", "a year", or the adjectival "monthly"/"yearly"/"annually".
-      const re = /(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))(?:\s*\/\s*(mo|month|yr|year)\b|\s+(?:per|a|each|every)\s+(mo|month|yr|year)\b|\s+(monthly|yearly|annually)\b)/gi;
+      // month", "a year", the adjectival "monthly"/"yearly"/"annually" —
+      // AFTER the amount ("$117/mo") or BEFORE it within the same sentence
+      // ("your monthly plan total is $117").
+      const amountSrc = String.raw`(?:(?:\$\s*|\busd\s+)\d[\d.,]*|\b\d[\d.,]*\s*(?:dollars?|bucks?))`;
+      const unitAfterRe = new RegExp(`${amountSrc}(?:\\s*\\/\\s*(mo|month|yr|year)\\b|\\s+(?:per|a|each|every)\\s+(mo|month|yr|year)\\b|\\s+(monthly|yearly|annually)\\b)`, 'gi');
+      const unitBeforeRe = new RegExp(`\\b(monthly|yearly|annual(?:ized)?)\\b[^.!?\\n]{0,40}?${amountSrc}`, 'gi');
+      const hits = [];
       let m;
-      while ((m = re.exec(text)) !== null) {
-        const unit = (m[1] || m[2] || m[3] || '').toLowerCase();
-        const monthlyUnit = unit === 'mo' || unit === 'month' || unit === 'monthly';
+      while ((m = unitAfterRe.exec(text)) !== null) hits.push({ span: m[0], unit: (m[1] || m[2] || m[3]).toLowerCase() });
+      while ((m = unitBeforeRe.exec(text)) !== null) hits.push({ span: m[0], unit: m[1].toLowerCase() });
+      for (const hit of hits) {
+        const monthlyUnit = hit.unit === 'mo' || hit.unit === 'month' || hit.unit === 'monthly';
         const allowed = monthlyUnit
           ? ctx.monthlyBilled === true
           : ctx.billingMode === 'annual_prepay';
         if (!allowed) {
-          return `quotes a combined plan total "${m[0].trim()}" — plan totals never appear in customer copy (a lane's own genuine unit exempt)`;
+          return `quotes a combined plan total "${hit.span.trim()}" — plan totals never appear in customer copy (a lane's own genuine unit exempt)`;
         }
       }
       return null;

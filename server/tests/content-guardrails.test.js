@@ -3084,6 +3084,13 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(affirmative.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('the confirmation must concern re-entry timing, not an appointment (Codex #3348)', () => {
+    const appointment = guardrails.evaluate({ body: 'The treatment is safe once dry. The technician will confirm the timing of your next visit.' }, {});
+    expect(appointment.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const reentryObject = guardrails.evaluate({ body: 'The treatment is safe once dry. The technician will confirm the timing of re-entry.' }, {});
+    expect(reentryObject.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('dries-for durations and hazard-negation predicates block (Codex PR r14)', () => {
     const driesFor = guardrails.evaluate({ body: 'The product dries for 30 minutes.' }, {});
     expect(driesFor.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);

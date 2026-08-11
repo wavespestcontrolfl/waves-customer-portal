@@ -1159,22 +1159,42 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         // suggest gate at publication time: with it off, the agent-draft
         // route hides this workflow, and a published card nobody can see
         // would pull the draft out of the judge pool for nothing.
+        let publishDemotedCard = true;
         if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
-          logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) — auto-send demoted to composer card (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+          // Same race guard as the auto-send fallback above: an admin may
+          // have demoted the intent (or a gate flipped) while this draft
+          // generated — re-resolve before the lint demotion publishes a
+          // card the intent no longer wants. A now-shadow intent stays
+          // silent shadow (the judge pool keeps the draft).
+          const freshMode = await suggestMode.resolveDeliveryMode({
+            reply: parsed.reply,
+            customerId: customer?.id || null,
+            smsLogId: smsLogId || null,
+            intent: intentName,
+            schedulingIntent,
+          });
+          publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
+          if (publishDemotedCard) {
+            logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) — auto-send demoted to composer card (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+          } else {
+            logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) but intent re-resolved to ${freshMode} — draft kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+          }
         }
-        const decisionId = await suggestMode.publishSuggestion({
-          draftId: row.id,
-          customerId: customer.id,
-          smsLogId,
-          inboundMessage,
-          reply: parsed.reply,
-          intent: intentName,
-          confidence: intent?.confidence ?? null,
-          model: draftModel,
-          promptVersion: PROMPT_VERSION,
-          lintFailures: lint.failures,
-        });
-        if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+        if (publishDemotedCard) {
+          const decisionId = await suggestMode.publishSuggestion({
+            draftId: row.id,
+            customerId: customer.id,
+            smsLogId,
+            inboundMessage,
+            reply: parsed.reply,
+            intent: intentName,
+            confidence: intent?.confidence ?? null,
+            model: draftModel,
+            promptVersion: PROMPT_VERSION,
+            lintFailures: lint.failures,
+          });
+          if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+        }
       } else if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
         // Lint-failed auto-send draft with the suggest gate OFF: stay
         // shadow (judge pool keeps it) rather than publishing a card the
