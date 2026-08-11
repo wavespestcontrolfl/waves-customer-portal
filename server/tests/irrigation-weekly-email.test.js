@@ -771,6 +771,10 @@ describe('findLawnEmailAudienceGaps', () => {
         unstamped({ id: 'member' }),
         unstamped({ id: 'cancelled', waveguard_tier: null, monthly_rate: 0 }),
         unstamped({ id: 'label-only', waveguard_tier: 'Bronze', monthly_rate: 0, waveguard_tier_source: 'auto', billing_mode: 'per_visit' }),
+        // Explicit one_time lane = no recurring relationship, whatever
+        // tier/rate values linger (codex r5 P2, same lane gate
+        // sendMembershipStarted suppresses on).
+        unstamped({ id: 'one-time', waveguard_tier: 'Bronze', monthly_rate: 45, billing_mode: 'one_time' }),
       ]);
       const gaps = await findUnstampedRecurringLawnMembers();
       expect(gaps.map((g) => g.customerId)).toEqual(['member']);

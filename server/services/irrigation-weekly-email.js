@@ -996,13 +996,21 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
   // runs once per daily watchdog tick.
   const { hasMembership } = require('./membership-state');
   const { isAutoDerivedTierLabelRow } = require('./self-booking-plan-sync');
+  const { resolveBillingLane } = require('./billing-lane');
   const gaps = [];
   // Intentional opt-out: never pageable, same rule as the evidence legs.
   // Membership must hold under the EXACT shared predicates: hasMembership
   // (real tier or paid monthly rate) minus auto-derived label-only rows —
-  // the same pairing the lifecycle emails use (admin-customers.js).
+  // the same pairing the lifecycle emails use (admin-customers.js) — and
+  // the resolved billing lane must not be one_time (codex #3341 r5 P2):
+  // an explicit one_time lane means NO recurring relationship no matter
+  // what tier/rate values linger on the row, the same lane gate
+  // sendMembershipStarted suppresses on. resolveBillingLane is the
+  // existing resolver; per_visit/per_application stay in — a real tier
+  // billed at completion IS an ongoing plan.
   for (const r of rows.filter((row) => row.email_pref_ok && row.tips_pref_ok
-    && hasMembership(row) && !isAutoDerivedTierLabelRow(row))) {
+    && hasMembership(row) && !isAutoDerivedTierLabelRow(row)
+    && resolveBillingLane(row).mode !== 'one_time')) {
     // Same prerequisite validators as findLawnEmailAudienceGaps (codex
     // #3341 r1 P2): stamping the series makes the customer evidence-
     // positive, but the SENDER still skips an unusable email or bad
