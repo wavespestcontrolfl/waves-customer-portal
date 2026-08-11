@@ -3368,6 +3368,14 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
+      // Behind the send-window gate (codex r27): this recovery path exists
+      // only because the gate's hold rails can release/lose the detached
+      // worker's one-shot claim. With the gate dark it must stay inert —
+      // otherwise deploying dark could text/email customers for any recent
+      // processing invoice whose acknowledgment claim is null for an
+      // unrelated pre-gate reason (e.g. the worker died after the webhook
+      // acked). Not behavior-preserving = not a dark ship.
+      if (!require('../config/feature-gates').isEnabled('smsSendWindow')) return;
       const { sweepUnacknowledgedAchProcessingAcks } = require('../routes/stripe-webhook');
       const result = await sweepUnacknowledgedAchProcessingAcks();
       if (result.candidates) {

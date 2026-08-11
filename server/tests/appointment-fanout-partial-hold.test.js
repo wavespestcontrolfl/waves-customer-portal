@@ -222,6 +222,45 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     });
   });
 
+  test('r27: a held contact whose queue insert keeps failing becomes a durable office obligation', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    // Every sms_log insert fails — the queued row was the held contact's
+    // ONLY delivery obligation (the notice finalizes off the accepted
+    // contact), so exhaustion must hand it to the office lane.
+    const failingInsert = jest.fn(async () => { throw new Error('db down'); });
+    db.mockImplementation(() => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => null);
+      q.insert = failingInsert;
+      return q;
+    });
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Confirmed', 'confirmation', 'appointment_confirmation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    expect(sent).toBe(true);
+    expect(failingInsert).toHaveBeenCalledTimes(3);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'comms',
+      'Held appointment notice needs a manual send',
+      expect.any(String),
+      expect.objectContaining({
+        metadata: expect.objectContaining({ reason: 'held_notice_contact_enqueue_failed' }),
+      }),
+    );
+
+    // Restore the default implementation for any later tests.
+    db.mockImplementation(() => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => null);
+      q.insert = jest.fn(async (row) => { db._inserts.push(row); });
+      return q;
+    });
+  }, 15000);
+
   test('a later NON-hold block (opt-out) is not misread as held — nothing queued for it', async () => {
     sendCustomerMessage
       .mockResolvedValueOnce(ACCEPTED)

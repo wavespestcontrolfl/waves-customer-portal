@@ -320,6 +320,24 @@ const REGISTRY = {
       // no-invoice notices stay eligible — their copy directs to the
       // billing page, which always shows current state.
       try {
+        // Escalation-stage pin (codex r27): a reusable PI failing again
+        // after this row queued bumps customers.ach_failure_count and
+        // queues the NEXT stage's notice — replaying every queued stage at
+        // 8:00 AM would text the customer the whole obsolete ladder at
+        // once. Rows stamp the count they were rendered against
+        // (recent_failures); a live count that moved on supersedes them,
+        // and only the newest stage's row still matches. Legacy rows
+        // without the stamp keep the collectibility-only behavior.
+        const ACH_FAILURE_LADDER = ['ach_retry_notice', 'ach_card_fallback', 'ach_suspended'];
+        if (ACH_FAILURE_LADDER.includes(meta.original_message_type)
+          && meta.recent_failures != null && meta.customer_id) {
+          const cust = await db('customers')
+            .where({ id: meta.customer_id })
+            .first('ach_failure_count');
+          if (cust && Number(cust.ach_failure_count) > Number(meta.recent_failures)) {
+            return { eligible: false, reason: 'ach-stage-superseded' };
+          }
+        }
         let invoiceId = meta.invoice_id || null;
         if (!invoiceId && meta.stripe_payment_intent_id) {
           const inv = await db('invoices')
@@ -914,6 +932,27 @@ async function contactSlotStillAuthorized(meta, label) {
       getAppointmentContacts(customer, prefsRow), meta.customer_id
     )).some((c) => digits(c.phone) === digits(meta.to_phone));
     if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
+    // Channel pin (codex r27): a customer who flips the relevant
+    // appointment channel to email-only overnight must not be texted by
+    // the replay — the immediate sender routes these through the channel
+    // prefs, and the generic scheduled executor does not. Re-run the SAME
+    // resolution (getReminderPrefs, account-owner aware). Only a pure
+    // 'email' preference suppresses; 'both' keeps the SMS leg. Purposes
+    // without a channel pref (cancellation/no-show/reschedule notices)
+    // are untouched, and the prefs helper's own lookup-degraded default
+    // ('sms') is inherited deliberately — same error policy as the
+    // immediate path.
+    const purpose = String(meta.replay_purpose || '');
+    const channelField = purpose === 'appointment_reminder_72h'
+      ? 'reminder72hChannel'
+      : (purpose === 'appointment_confirmation' ? 'confirmationChannel' : null);
+    if (channelField) {
+      const { getReminderPrefs } = require('../appointment-reminders');
+      const prefs = await getReminderPrefs(meta.customer_id);
+      if (prefs?.[channelField] === 'email') {
+        return { eligible: false, reason: 'channel-email' };
+      }
+    }
     return { eligible: true };
   } catch (err) {
     return failClosed(label, meta.scheduled_service_id, err);
@@ -940,6 +979,19 @@ async function invoiceStillCollectible(meta) {
         .first('status');
       if (seq && String(seq.status || '') === 'stopped') {
         return { eligible: false, reason: 'sequence-stopped' };
+      }
+    }
+    // Amount pin (codex r27): partial credit applied or reversed overnight
+    // leaves the invoice collectible while the frozen body names the OLD
+    // balance next to a live pay link. Rows that stamped the rendered
+    // amount suppress on mismatch — the sequence's next touch (or the
+    // caller's own re-fire) re-renders from the current balance. Legacy
+    // rows keep the status-only behavior.
+    if (meta.rendered_amount != null) {
+      const { invoiceAmountDue } = require('../invoice-helpers');
+      const liveAmount = invoiceAmountDue(inv).toFixed(2);
+      if (liveAmount !== String(meta.rendered_amount)) {
+        return { eligible: false, reason: 'amount-changed' };
       }
     }
     return { eligible: true };

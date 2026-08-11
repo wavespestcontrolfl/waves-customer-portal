@@ -40,6 +40,9 @@ jest.mock('../services/appointment-reminders', () => ({
   // Defaults to a future instant so pre-r24 pins keep exercising their own
   // suppression reasons; instant-sensitive tests override with ...Once.
   scheduledServiceApptTime: jest.fn(async () => new Date(Date.now() + 60 * 60 * 1000)),
+  // Channel resolution the contact-slot recheck re-runs (r27). Default
+  // 'sms' keeps pre-r27 pins untouched; channel pins override with ...Once.
+  getReminderPrefs: jest.fn(async () => ({ confirmationChannel: 'sms', reminder72hChannel: 'sms' })),
 }));
 const mockGetAppointmentContacts = jest.fn(() => [{ phone: '+19415557777' }]);
 jest.mock('../services/customer-contact', () => ({
@@ -723,6 +726,73 @@ describe('deferred-replay registry', () => {
       granted_expires_at: '2026-08-25T00:00:00.000Z',
     });
     expect(held).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+  });
+
+  test('invoice replay amount pin (r27): a balance that moved overnight suppresses the frozen body', async () => {
+    // Credit applied after enqueue: live due 75.00 ≠ rendered 100.00.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, total: 100, credit_applied: 25 }));
+    const changed = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1', rendered_amount: '100.00' });
+    expect(changed.eligible).toBe(false);
+    expect(changed.reason).toBe('amount-changed');
+
+    // Unchanged balance replays; legacy rows without the stamp skip the pin.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, total: 100, credit_applied: 0 }));
+    const same = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1', rendered_amount: '100.00' });
+    expect(same.eligible).toBe(true);
+  });
+
+  test('notice-contact channel pin (r27): an email-only preference flipped overnight suppresses the SMS replay', async () => {
+    const { getReminderPrefs } = require('../services/appointment-reminders');
+    const meta = {
+      scheduled_service_id: 'ss-1',
+      customer_id: 'cust-1',
+      to_phone: '+19415557777',
+      replay_purpose: 'appointment_confirmation',
+    };
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    getReminderPrefs.mockResolvedValueOnce({ confirmationChannel: 'email', reminder72hChannel: 'sms' });
+    const flipped = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(flipped.eligible).toBe(false);
+    expect(flipped.reason).toBe('channel-email');
+
+    // 'both' keeps the SMS leg; purposes without a channel pref never
+    // consult the helper.
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
+    mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
+    getReminderPrefs.mockResolvedValueOnce({ confirmationChannel: 'both', reminder72hChannel: 'sms' });
+    const both = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
+    expect(both.eligible).toBe(true);
+  });
+
+  test('ACH ladder pin (r27): a failure count that advanced overnight supersedes the queued stage', async () => {
+    // The PI failed again after this retry-notice queued — the customer
+    // will get the NEWER stage's notice; this one is obsolete.
+    db.mockReturnValueOnce(firstChain({ ach_failure_count: 2 }));
+    const superseded = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_retry_notice',
+      recent_failures: 1,
+      customer_id: 'cust-1',
+      invoice_id: 'inv-1',
+    });
+    expect(superseded.eligible).toBe(false);
+    expect(superseded.reason).toBe('ach-stage-superseded');
+
+    // Count unchanged → the stage is current; falls through to the
+    // collectibility check.
+    db.mockReturnValueOnce(firstChain({ ach_failure_count: 1 }));
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    const current = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_retry_notice',
+      recent_failures: 1,
+      customer_id: 'cust-1',
+      invoice_id: 'inv-1',
+    });
+    expect(current.eligible).toBe(true);
   });
 
   test('notice-contact slot pin (r25): a second overnight move suppresses the frozen first-move copy', async () => {

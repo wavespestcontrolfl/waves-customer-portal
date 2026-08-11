@@ -94,7 +94,7 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
 // phone match or customer_id), pause the cron touch and let Virginia
 // handle it live. Soft-fails if the messages/conversations tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14) {
+async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
   const cutoff = new Date(Date.now() - days * 86400000);
   try {
     const q = db("messages")
@@ -117,6 +117,12 @@ async function hasRepliedRecently(est, days = 14) {
     const row = await q;
     return !!row;
   } catch (e) {
+    // Cron path fails OPEN (a skipped nudge self-heals on the next stage
+    // tick). The REPLAY path must fail CLOSED instead (codex #3259 r27):
+    // the queued row is a one-shot bearer-link send, and "reply state
+    // unverifiable" is exactly when it must not fire — the caller
+    // propagates the error onto the executor's bounded retry rail.
+    if (throwOnError) throw e;
     logger.warn(`[est-followup] reply-pause check skipped: ${e.message}`);
     return false; // fail open
   }
@@ -124,7 +130,7 @@ async function hasRepliedRecently(est, days = 14) {
 
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
-async function safetyGate(est, now = new Date()) {
+async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
   if (wasRecentlyOpened(est, 2, now.getTime()))
@@ -137,7 +143,7 @@ async function safetyGate(est, now = new Date()) {
   const conv = await customerConvertedSince(est);
   if (conv.converted)
     return { skip: true, reason: `customer-converted:${conv.reason}` };
-  if (await hasRepliedRecently(est))
+  if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
 }
@@ -155,7 +161,10 @@ async function deferredFollowupStillEligible(estimateId) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
-    const gate = await safetyGate(est);
+    // replay:true — the reply-pause lookup THROWS on a transient failure
+    // here (codex r27) instead of the cron path's fail-open false, so an
+    // unverifiable reply state lands in the catch below and holds the row.
+    const gate = await safetyGate(est, new Date(), { replay: true });
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
   } catch (e) {

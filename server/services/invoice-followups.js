@@ -799,6 +799,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   followup_sequence_id: row.id,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
+                  // The amount the frozen body NAMES (codex r27): credit
+                  // applied/reversed overnight changes the balance while
+                  // the invoice stays collectible — the replay suppresses
+                  // on mismatch and the sequence's next touch re-renders.
+                  rendered_amount: amount,
                   refresh_customer_phone: true,
                   resolve_from_by_customer: true,
                 }),

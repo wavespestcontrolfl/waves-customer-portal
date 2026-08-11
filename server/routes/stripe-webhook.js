@@ -3988,16 +3988,26 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         // queued sms_log row. Either one means the customer's notice is
         // owned — only their joint absence proves the prior delivery lost
         // it. Fail closed to skip on a probe error (never double-text).
-        const auditNotice = await db('messaging_audit_log')
+        // Scoped to THIS Stripe event when its id is known (codex r27): a
+        // reusable PI fails repeatedly, and a PI-only probe would match an
+        // EARLIER failure event's delivered notice — returning "owned" and
+        // permanently losing the current escalation stage. Rows queued
+        // before the event-id stamp existed match on PI alone (legacy).
+        const probeAudit = db('messaging_audit_log')
           .where({ entry_point: 'stripe_webhook' })
           .whereNotNull('provider_message_id')
-          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
-          .first('id');
-        const queuedNotice = auditNotice ? null : await db('sms_log')
-          .where({ direction: 'outbound' })
-          .whereIn('status', ['queued', 'sent', 'delivered', 'scheduled', 'sending'])
-          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
-          .first('id');
+          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)]);
+        if (eventId) probeAudit.whereRaw("metadata->>'stripe_event_id' = ?", [String(eventId)]);
+        const auditNotice = await probeAudit.first('id');
+        let queuedNotice = null;
+        if (!auditNotice) {
+          const probeQueued = db('sms_log')
+            .where({ direction: 'outbound' })
+            .whereIn('status', ['queued', 'sent', 'delivered', 'scheduled', 'sending'])
+            .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)]);
+          if (eventId) probeQueued.whereRaw("metadata->>'stripe_event_id' = ?", [String(eventId)]);
+          queuedNotice = await probeQueued.first('id');
+        }
         noticeExists = !!(auditNotice || queuedNotice);
       } catch (probeErr) {
         logger.warn(`[stripe-webhook] ACH replay notice probe failed (skipping resend, fail closed): ${probeErr.message}`);
@@ -4041,6 +4051,10 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
           original_message_type: messageType,
           stripe_payment_intent_id: paymentIntent.id,
           recent_failures: recentFailures,
+          // Event scoping for the replay notice-probe (codex r27) — a
+          // reused PI's next failure event must not mistake THIS notice
+          // for its own.
+          ...(eventId ? { stripe_event_id: String(eventId) } : {}),
         });
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] ACH failure SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);

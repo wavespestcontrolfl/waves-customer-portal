@@ -1125,33 +1125,68 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     }
   }
   for (const held of heldContacts) {
-    try {
-      await db('sms_log').insert({
-        customer_id: customer.id,
-        direction: 'outbound',
-        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-        to_phone: held.contact.phone,
-        message_body: held.body,
-        status: 'scheduled',
-        scheduled_for: new Date(held.nextAllowedAt),
-        message_type: messageType,
-        metadata: JSON.stringify({
-          entry_point: 'appointment_notice_contact_deferred',
-          ...(metaExtra.scheduled_service_id ? { scheduled_service_id: metaExtra.scheduled_service_id } : {}),
-          appointment_contact_role: held.contact.role || null,
-          original_block_code: 'QUIET_HOURS_HOLD',
-          replay_purpose: purpose,
-          ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
-          ...(slotStamp || {}),
-          resolve_from_by_customer: true,
-        }),
-      });
+    const heldRow = {
+      customer_id: customer.id,
+      direction: 'outbound',
+      from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+      to_phone: held.contact.phone,
+      message_body: held.body,
+      status: 'scheduled',
+      scheduled_for: new Date(held.nextAllowedAt),
+      message_type: messageType,
+      metadata: JSON.stringify({
+        entry_point: 'appointment_notice_contact_deferred',
+        ...(metaExtra.scheduled_service_id ? { scheduled_service_id: metaExtra.scheduled_service_id } : {}),
+        appointment_contact_role: held.contact.role || null,
+        original_block_code: 'QUIET_HOURS_HOLD',
+        replay_purpose: purpose,
+        ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
+        ...(slotStamp || {}),
+        resolve_from_by_customer: true,
+      }),
+    };
+    // The fan-out already partially delivered, so callers finalize the
+    // notice as sent — this queued row is the held contact's ONLY delivery
+    // obligation (codex r27). Re-arming the whole notice would double-text
+    // the accepted contact, so the enqueue itself retries, and exhaustion
+    // hands the obligation to the office lane as a durable admin
+    // notification (the same exception rail as the estimate-accept
+    // booking link).
+    let queued = false;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3 && !queued; attempt += 1) {
+      try {
+        await db('sms_log').insert(heldRow);
+        queued = true;
+      } catch (queueErr) {
+        lastErr = queueErr;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
+      }
+    }
+    if (queued) {
       logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
-    } catch (queueErr) {
-      // The fan-out already partially delivered — re-arming the whole
-      // notice would double-text the accepted contact, so a failed
-      // enqueue can only be surfaced loudly.
-      logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}): ${queueErr.message}`);
+      continue;
+    }
+    logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'comms',
+        'Held appointment notice needs a manual send',
+        `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
+        {
+          link: `/admin/customers/${customer.id}`,
+          metadata: {
+            customerId: customer.id,
+            scheduledServiceId: metaExtra.scheduled_service_id || null,
+            messageType,
+            contactRole: held.contact.role || null,
+            reason: 'held_notice_contact_enqueue_failed',
+            heldForWindowOpen: held.nextAllowedAt,
+          },
+        },
+      );
+    } catch (notifyErr) {
+      logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
   }
 }

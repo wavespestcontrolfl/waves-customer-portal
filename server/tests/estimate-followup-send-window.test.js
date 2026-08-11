@@ -8,20 +8,40 @@
 
 jest.mock('../models/db', () => {
   const inserts = [];
-  const mockDb = jest.fn((table) => ({
-    insert: jest.fn(async (row) => { inserts.push({ table, row }); }),
+  const mockDb = jest.fn((table) => {
+    // Self-returning LAZY chain: every builder method returns the chain,
+    // and resolution happens only when the chain is awaited (knex-thenable
+    // semantics). hasRepliedRecently awaits the bare builder after calling
+    // .first(), so an eager first() would strand a rejected promise as an
+    // unhandled rejection when a later chain call throws first.
+    const q = {
+      insert: jest.fn(async (row) => { inserts.push({ table, row }); }),
+    };
+    ['where', 'join', 'andWhere', 'orWhere', 'whereIn', 'whereNull', 'first'].forEach((m) => {
+      q[m] = jest.fn(() => q);
+    });
     // r20: the hold path reads the account phone to decide the replay's
     // refresh behavior; _firstImpl lets each pin choose the row (or throw).
-    where: jest.fn(() => ({
-      first: jest.fn(async () => (typeof mockDb._firstImpl === 'function' ? mockDb._firstImpl(table) : null)),
-    })),
-  }));
+    q.then = (resolve, reject) => {
+      let v;
+      try {
+        v = typeof mockDb._firstImpl === 'function' ? mockDb._firstImpl(table) : null;
+      } catch (e) {
+        return Promise.reject(e).then(resolve, reject);
+      }
+      return Promise.resolve(v).then(resolve, reject);
+    };
+    return q;
+  });
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
   mockDb._inserts = inserts;
   mockDb._firstImpl = null;
   return mockDb;
 });
+jest.mock('../services/estimate-conversion-guard', () => ({
+  customerConvertedSince: jest.fn(async () => ({ converted: false })),
+}));
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: jest.fn(() => '+19413180000'),
 }));
@@ -164,5 +184,26 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
     expect(attempted).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
     expect(db._inserts).toHaveLength(0);
+  });
+
+  test('replay eligibility fails CLOSED when the reply-pause lookup fails (r27)', async () => {
+    // Cron path fails open on this lookup (a skipped nudge self-heals);
+    // the REPLAY path is a one-shot bearer-link send whose worst case is
+    // firing exactly when the customer's overnight reply was unverifiable
+    // — it must hold the row instead.
+    const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+    db._firstImpl = (table) => {
+      if (table === 'estimates') {
+        return { id: 'est-1', status: 'sent', customer_id: 'cust-1', customer_phone: '+19415550123' };
+      }
+      if (table === 'messages') throw new Error('db down');
+      return null;
+    };
+    await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({
+      eligible: false,
+      reason: 'recheck-failed',
+      retryable: true,
+    });
+    db._firstImpl = null;
   });
 });
