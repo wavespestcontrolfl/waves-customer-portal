@@ -79,6 +79,7 @@ function emptyDb() {
     system_settings: [],
     service_records: [],
     scheduled_services: [],
+    scheduled_service_addons: [],
     service_addons: [],
     service_package_items: [],
   };
@@ -222,6 +223,22 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(svcRow(db)).toBeDefined();
     expect(profileRow(db)).toBeDefined();
     expect(db.scheduled_services[0].service_id).toBe(insertedId);
+  });
+
+  test('down() RETAINS on a NAME-ONLY visit reference — no service_id, service_type matches the row name (codex P1)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'semiannual palm injection service' });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db)).toBeDefined();
+    expect(profileRow(db)).toBeDefined();
+
+    // Short-name references retain too (the resolver accepts them).
+    const db2 = emptyDb();
+    await migration.up(fakeKnex(db2));
+    db2.scheduled_service_addons.push({ id: 'a1', service_id: null, service_name: 'Semiannual Palm' });
+    await migration.down(fakeKnex(db2));
+    expect(db2.services.find((r) => r.service_key === KEY)).toBeDefined();
   });
 
   test('down() retains on completed service records and add-on wiring too', async () => {

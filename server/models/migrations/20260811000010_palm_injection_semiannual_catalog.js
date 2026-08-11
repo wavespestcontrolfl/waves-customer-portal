@@ -232,6 +232,26 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasTable('discounts')) {
       refs += (await knex('discounts').where({ service_key_filter: entry.key }).pluck('service_key_filter')).length;
     }
+    // Name-only references count too (exemplar's alias sweep): a visit
+    // scheduled under the row's name/short name without a service_id still
+    // resolves this row by name, so deleting it would reroute that visit's
+    // completion. Aliases mirror what the completion resolver accepts.
+    const row = await knex('services').where({ id: entry.id }).first();
+    if (row) {
+      const aliases = [...new Set([
+        row.name,
+        row.name ? `${row.name} Service` : null,
+        row.short_name,
+      ].filter(Boolean))];
+      for (const alias of aliases) {
+        if (await knex.schema.hasTable('scheduled_services')) {
+          refs += (await knex('scheduled_services').whereRaw('lower(service_type) = lower(?)', [alias]).pluck('id')).length;
+        }
+        if (await knex.schema.hasTable('scheduled_service_addons')) {
+          refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [alias]).pluck('id')).length;
+        }
+      }
+    }
     if (refs > 0) {
       retainedKeys.add(entry.key);
       console.warn(`[palm-semiannual] down: ${entry.key} (${entry.id}) is referenced by ${refs} visit/record/add-on/package/discount row(s) — retaining row and profile (live identity preserved)`);
