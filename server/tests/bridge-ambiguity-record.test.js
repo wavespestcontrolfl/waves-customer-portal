@@ -370,6 +370,21 @@ describe('openAmbiguousCallExclusions', () => {
     const read = builders.find((b) => b._table === 'bridge_ambiguous_call_leads as bal');
     expect(read._wheres).toContainEqual(['whereNull', 'bac.resolved_at']);
   });
+
+  test('open snapshots are REFRESHED before the held-lead read — post-window reprocessing is picked up (codex P1 GH r6)', async () => {
+    // A force-reprocess has no age limit, but applyBridge scans cap at 90
+    // days, so an open ambiguity older than that is never re-recorded; the
+    // pre-sweep refresh re-runs the snapshot against the call's CURRENT
+    // processing evidence on every sweep path, before the exclusions are
+    // read — refresh-then-read-then-sweep leaves no gap.
+    listQueueByTable.bridge_ambiguous_calls = [[
+      { call_log_id: 'call-old', twilio_call_sid: 'CA-old' },
+    ]];
+    await openAmbiguousCallExclusions();
+    const refresh = mockDb.raw.mock.calls.find(([sql]) => /INSERT INTO bridge_ambiguous_call_leads/.test(sql));
+    expect(refresh).toBeTruthy();
+    expect(refresh[1]).toEqual([7 * 24 * 60 * 60, 'call-old']);
+  });
 });
 
 describe('scheduler wiring (source pins)', () => {

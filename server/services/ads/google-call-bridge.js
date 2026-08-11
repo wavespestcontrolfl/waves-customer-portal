@@ -1599,6 +1599,27 @@ function isBridgeTargetNumber(phone) {
 // on POSITIVE evidence, and feed the organic exclusions from ALL open rows.
 // ---------------------------------------------------------------------------
 
+// The phone-linkage snapshot INSERT — ONE definition shared by the record
+// path and the pre-sweep refresh (codex P1, ambiguity-record r6 GH round).
+// Insert-only and idempotent; the temporal bound reads the call's CURRENT
+// processing evidence, so re-running it after a later pass picks up leads
+// that pass linked.
+function insertPhoneLinkageSnapshot(dbc, callIds) {
+  return dbc.raw(
+    `INSERT INTO bridge_ambiguous_call_leads (call_log_id, lead_id)
+     SELECT cl.id, l.id
+       FROM call_log cl
+       JOIN leads l
+         ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
+        AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
+          = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
+        AND l.created_at < COALESCE(cl.processing_started_at + interval '10 minutes', cl.created_at + make_interval(secs => ?))
+      WHERE cl.id IN (${callIds.map(() => '?').join(', ')})
+     ON CONFLICT DO NOTHING`,
+    [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...callIds],
+  );
+}
+
 // Upsert a scan's ambiguous candidate calls. A repeat refreshes
 // last_seen_at; a candidate that was previously RESOLVED re-opens — today's
 // scan saying "ambiguous" supersedes any older resolution.
@@ -1715,19 +1736,7 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     // re-reports. Leads the call itself minted carry its sid and ride the
     // sid arm instead. Deliberately no deleted_at filter — a hold on a
     // soft-deleted lead is dormant until an undelete, then protective.
-    await trx.raw(
-      `INSERT INTO bridge_ambiguous_call_leads (call_log_id, lead_id)
-       SELECT cl.id, l.id
-         FROM call_log cl
-         JOIN leads l
-           ON LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10
-          AND RIGHT(regexp_replace(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10)
-            = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)
-          AND l.created_at < COALESCE(cl.processing_started_at + interval '10 minutes', cl.created_at + make_interval(secs => ?))
-        WHERE cl.id IN (${ids.map(() => '?').join(', ')})
-       ON CONFLICT DO NOTHING`,
-      [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000, ...ids],
-    );
+    await insertPhoneLinkageSnapshot(trx, ids);
     if (reconcileIds.length) {
       // Lazy require: this module and call-attribution require each other.
       const { retireCallAttributionRow, retireRowPreservingHistory } = require('./call-attribution');
@@ -1897,6 +1906,16 @@ async function openAmbiguousCallExclusions() {
   const open = await db('bridge_ambiguous_calls')
     .whereNull('resolved_at')
     .select('call_log_id', 'twilio_call_sid');
+  // REFRESH the snapshots BEFORE reading them (codex P1, r6 GH round): an
+  // open ambiguity older than the 90-day max scan window is never
+  // re-recorded by applyBridge, but an admin force-reprocess has no age
+  // limit and can attach a NEW phone-reuse lead to such a call — the
+  // temporal bound follows the bumped processing_started_at, yet nothing
+  // re-ran the snapshot. Every sweep path calls this read immediately
+  // before attributing, so refresh-then-read-then-sweep leaves no gap; a
+  // refresh failure throws to bridgePairError, which also skips the sweep.
+  const openIds = [...new Set(open.map((r) => String(r.call_log_id)))];
+  if (openIds.length) await insertPhoneLinkageSnapshot(db, openIds);
   // The phone-linkage snapshot for OPEN records: the exact leads each
   // indefinite hold covers (see recordAmbiguousBridgeCalls) — the durable
   // replacement for routing persisted holds through the broad phone arm
@@ -1906,7 +1925,7 @@ async function openAmbiguousCallExclusions() {
     .whereNull('bac.resolved_at')
     .select('bal.lead_id');
   return {
-    excludeCallIds: [...new Set(open.map((r) => String(r.call_log_id)))],
+    excludeCallIds: openIds,
     excludeCallSids: [...new Set(open.map((r) => r.twilio_call_sid).filter(Boolean))],
     excludeLeadIds: [...new Set(heldLeads.map((r) => String(r.lead_id)))],
   };
