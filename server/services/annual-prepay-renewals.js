@@ -390,27 +390,13 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
 // source_estimate_id; excluding it would seed replacement visits and
 // leave the sold visit separately billable).
 function rowCommittedToTerm(term, row) {
-  return (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
-    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD)
-    || (term?.source_estimate_id != null && row.source_estimate_id != null
-      && String(row.source_estimate_id) === String(term.source_estimate_id));
-}
-
-// Palm-aware commitment (codex r19 P1): one accepted estimate can sell
-// BOTH the recurring palm program and a genuine one-time palm item, and
-// both visits carry the same source_estimate_id — so for rows that CARRY
-// the one-time palm identity (id or snapshot), estimate provenance is
-// NOT commitment; only a direct term link or prepaid stamp is. Rows
-// without the one-time identity keep the full commitment set.
-function palmRowCommittedToTerm(term, row) {
-  // Commitment matrix (codex r19 P0, both passes): direct evidence (term
-  // link or prepaid stamp) always commits. Estimate provenance commits
-  // ONLY rows that READ recurring (is_recurring / recurring_pattern /
-  // recurring_parent_id — stamped at seeding) — regardless of identity:
-  // a legacy payment-pending parent still carrying the one-time palm id
-  // WITH markers is the sold program's visit (the backfill retargets it),
-  // while a genuine one-time reservation — name-only or id-carrying —
-  // never carries recurring markers and keeps its separate billing.
+  // Direct evidence (term link or prepaid stamp) always commits. Estimate
+  // provenance commits ONLY rows that READ recurring (is_recurring /
+  // recurring_pattern / recurring_parent_id, stamped at seeding) — for
+  // EVERY family (codex r21 pre-push P0): an estimate's extra one-time
+  // appointment matching the coverage text must never join the committed
+  // set, displace an already-stamped visit in the slice, or absorb a
+  // prepaid stamp of its own.
   const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
     || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   if (directCommitment) return true;
@@ -482,7 +468,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
     matching = matching.filter((row) => carriesRecurringPalmIdentity(row)
-      || palmRowCommittedToTerm(term, row));
+      || rowCommittedToTerm(term, row));
   }
   if (matching.length <= coverageVisitCount) return matching;
 
@@ -847,7 +833,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // suppressed. Only a row already attached to THIS term retargets;
       // rows with no identity evidence at all (name-only) remain the
       // original r15 case.
-      const committedToTerm = (row) => palmRowCommittedToTerm(term, row);
+      const committedToTerm = (row) => rowCommittedToTerm(term, row);
       const retargetable = (row) => row && row.id
         && (
           (!row.service_id && !row.service_key_snapshot)
@@ -990,7 +976,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     && (!coverageIsPalm
       || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
-      || palmRowCommittedToTerm(term, row));
+      || rowCommittedToTerm(term, row));
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
