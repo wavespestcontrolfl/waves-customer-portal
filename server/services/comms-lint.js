@@ -26,6 +26,18 @@
  *   - Long-form anti-AI-tell style: services/llm/human-prose-rules.js.
  */
 
+// Segment math and encoding detection delegate to the canonical counter the
+// send path uses (messaging/segment-counter.js) — the lint verdict must
+// match what Twilio is actually handed, so this module never re-derives it.
+const { countSegments, detectEncoding } = require('./messaging/segment-counter');
+// Canonical emoji detector (covers regional-indicator flags and keycap
+// sequences that bare Extended_Pictographic misses).
+const { findEmoji } = require('./messaging/validators/voice');
+// Canonical re-entry/safety compliance predicate — 20+ review rounds of
+// paraphrase coverage live there, and this rule and the publish gate must
+// never drift apart.
+const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
+
 // URL-shortener hosts. One shortened link in an SMS can burn the A2P 10DLC
 // registration, and A2P is non-resubmittable — this rule is downside
 // protection, not style. Matched as hostnames (word-boundary + '/'), never
@@ -36,51 +48,22 @@ const URL_SHORTENER_HOSTS = [
   's.id', 'soo.gd', 'bl.ink', 'snip.ly',
 ];
 
-// GSM-7 basic + extension sets, for segment math. Any character outside
-// these forces the whole message to UCS-2 (70/67 chars per segment instead
-// of 160/153) — which is why one curly quote can double the segment count.
-const GSM7_BASIC = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
-const GSM7_EXTENSION = '^{}\\[~]|€';
-
 const SMS_SEGMENT_LIMIT = 2; // owner ruling: 2 segments is fine, 3+ is not
 
 function isGsm7(text) {
-  for (const ch of text) {
-    if (!GSM7_BASIC.includes(ch) && !GSM7_EXTENSION.includes(ch)) return false;
-  }
-  return true;
+  return detectEncoding(String(text ?? '')).encoding === 'GSM_7';
 }
 
 function smsSegmentCount(text) {
   if (!text) return 0;
-  if (isGsm7(text)) {
-    let septets = 0;
-    for (const ch of text) septets += GSM7_EXTENSION.includes(ch) ? 2 : 1;
-    if (septets <= 160) return 1;
-    return Math.ceil(septets / 153);
-  }
-  const codeUnits = text.length; // UCS-2 counts UTF-16 code units
-  if (codeUnits <= 70) return 1;
-  return Math.ceil(codeUnits / 67);
+  return countSegments(String(text)).segmentCount;
 }
-
-const EMOJI_RE = /\p{Extended_Pictographic}/u;
 
 // Typographic characters the house voice bans outright: they read as
 // machine-written AND silently flip SMS encoding to UCS-2.
 const TYPOGRAPHIC_RE = /[\u2018\u2019\u201C\u201D\u2013\u2014\u2026]/;
 
-// "Re-entry is never 'safe'" (FDACS compliance ruling): a sentence that
-// pairs a safety claim with re-entry/pets/kids language is a violation
-// wherever it appears. "EPA-registered" as a reassurance is banned outright.
-const REENTRY_CONTEXT_RE = /\bre-?ent(?:er|ry)|\bback (?:inside|in the (?:house|home|yard)|on the lawn)|\breturn to the (?:lawn|yard|home|house)|\bpets?\b|\bkids?\b|\bchildren\b|\bfamily\b/i;
-const SAFETY_CLAIM_RE = /\b(?:is|are|it's|its|be|totally|completely|perfectly|100%)\s+safe\b|\bsafe\s+(?:for|to|around)\b|\bharmless\b|\bnon-?toxic\b/i;
-
 const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
-
-function sentences(text) {
-  return String(text).split(/(?<=[.!?])\s+|\n+/);
-}
 
 /**
  * Each rule: { name, applies(ctx) => bool, check(text, ctx) => reason|null }.
@@ -96,8 +79,8 @@ const RULES = [
     name: 'no-emoji',
     applies: (ctx) => ctx.audience === 'customer',
     check: (text) => {
-      const hit = [...text].find((ch) => EMOJI_RE.test(ch));
-      return hit ? `contains emoji "${hit}" — customer messages never carry emojis (owner ruling)` : null;
+      const { found, sample } = findEmoji(text);
+      return found ? `contains emoji "${sample}" — customer messages never carry emojis (owner ruling)` : null;
     },
   },
   {
@@ -130,13 +113,15 @@ const RULES = [
   },
   {
     name: 'reentry-language',
+    // Delegates wholesale to the publish gate's REENTRY_SAFETY_CLAIM
+    // predicate (content-guardrails): unconditional "safe" claims, the
+    // "EPA-approved" ban ("EPA-registered"/"EPA-exempt" is the required
+    // wording), fixed re-entry/drying figures, and the conditional
+    // "safe once dry" + technician-confirms-timing exemption all live there.
     applies: (ctx) => ctx.audience === 'customer',
     check: (text) => {
-      if (/\bEPA[-\s]registered\b/i.test(text)) {
-        return '"EPA-registered" used as reassurance — banned compliance language';
-      }
-      const hit = sentences(text).find((s) => SAFETY_CLAIM_RE.test(s) && REENTRY_CONTEXT_RE.test(s));
-      return hit ? `safety claim beside re-entry/pets/kids language ("${hit.trim().slice(0, 60)}…") — re-entry is never "safe"` : null;
+      const f = reentrySafetyClaimFinding(text);
+      return f ? f.message : null;
     },
   },
   {

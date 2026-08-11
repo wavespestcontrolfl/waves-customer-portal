@@ -3911,6 +3911,10 @@ module.exports = {
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
   isThirdPartyPriceCitation,
+  // single source of truth for the re-entry/safety compliance predicate
+  // (AGENTS.md "Compliance language on any customer surface") — consumed by
+  // comms-lint so the SMS harness can never drift from the publish gate.
+  reentrySafetyClaimFinding,
   // single source of truth for the product-claim + prevention-promise
   // policies — consumed by the writer prompts so instruction and enforcement
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).

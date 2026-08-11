@@ -58,18 +58,32 @@
       "provenance": "reconstructed — site-compliance sweep class 2026-07-11: re-entry is never described as safe"
     },
     {
-      "name": "EPA-registered as reassurance",
-      "text": "All our products are EPA-registered and family friendly.",
+      "name": "EPA-approved is banned wording",
+      "text": "All our products are EPA-approved and applied by licensed technicians.",
       "context": { "channel": "sms", "audience": "customer" },
       "expect": { "pass": false, "rules": ["reentry-language"] },
-      "provenance": "banned compliance language, site-compliance sweep 2026-07-11"
+      "provenance": "AGENTS.md compliance language: EPA-registered/EPA-exempt is the REQUIRED wording, EPA-approved is banned (seed originally encoded the inverted rule; corrected pre-merge per Codex pre-push review 2026-08-11)"
     },
     {
-      "name": "neutral re-entry instruction passes",
-      "text": "Give the lawn about an hour to dry before letting pets back out.",
+      "name": "EPA-registered is the required wording",
+      "text": "All our products are EPA-registered and applied per the label.",
       "context": { "channel": "sms", "audience": "customer" },
       "expect": { "pass": true },
-      "provenance": "instruction without a safety claim is the correct form"
+      "provenance": "AGENTS.md compliance language: EPA-registered/EPA-exempt is the correct form"
+    },
+    {
+      "name": "sanctioned conditional idiom passes",
+      "text": "The lawn is safe once it's fully dry, and the tech will confirm timing before leaving.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": true },
+      "provenance": "AGENTS.md approved idiom: \"safe once dry\" WITH the technician confirming timing — both parts required"
+    },
+    {
+      "name": "fixed drying figure is banned",
+      "text": "Keep pets off the treated lawn for 30 minutes while it dries.",
+      "context": { "channel": "sms", "audience": "customer" },
+      "expect": { "pass": false, "rules": ["reentry-language"] },
+      "provenance": "AGENTS.md compliance language: never a fixed re-entry/drying figure — the tech confirms timing on site (seed replaced pre-merge per Codex pre-push review 2026-08-11: the original neutral-instruction case carried \"about an hour to dry\", itself a violation)"
     },
     {
       "name": "curly apostrophe flips encoding",
