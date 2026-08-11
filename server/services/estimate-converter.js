@@ -2137,6 +2137,12 @@ const LAWN_CADENCE_CATALOG_KEYS = {
 // retired) — the forced-lawn resolution and its prepay mirror share this.
 const LAWN_VISITS_PATTERNS = { 6: 'bimonthly', 9: 'every_6_weeks', 12: 'monthly' };
 
+// Distinct from a null (underivable) coverage cadence: validation REFUSED
+// this line (contradictory cadence/visit data or a commercial program). The
+// term-creation guard fails closed on exactly this value with its own 422,
+// while underivable lines keep the older COVERAGE_UNDERIVABLE path.
+const PREPAY_COVERAGE_INVALID = 'prepay_coverage_invalid';
+
 // The lawn/palm links added 2026-08-11 are IDENTITY-ONLY (codex #3349 P1):
 // the catalog lookups below also copy default_duration_minutes onto the
 // visit, and the lawn rows carry 45 while the estimate-slot system books
@@ -2619,7 +2625,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     if (inferred !== 'semiannual'
       || !(visits == null || visits === 2)
       || (cadenceField && cadenceField !== 'semiannual')
-      || isCommercialRecurringLine(svc)) return null;
+      || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;
   }
   // Lawn contradiction mirror (codex r11 P1): { frequency: 'monthly',
   // visitsPerYear: 6 } seeds no series but would record 'monthly'
@@ -2632,7 +2638,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const cadenceField = explicitCadenceFieldForService(svc);
     if (isCommercialRecurringLine(svc)
       || (visits != null && LAWN_VISITS_PATTERNS[visits] !== inferred)
-      || (cadenceField && cadenceField !== inferred)) return null;
+      || (cadenceField && cadenceField !== inferred)) return PREPAY_COVERAGE_INVALID;
   }
   return inferred;
 }
@@ -4456,8 +4462,7 @@ const EstimateConverter = {
               // raw inferred cadence here would diverge from the real series.
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
-            } else if (cadence == null
-              && ['palm_injection', 'lawn_care'].includes(seedingFamilyKey(coverageSvc))) {
+            } else if (cadence === PREPAY_COVERAGE_INVALID) {
               // Palm validation refused the cadence (contradictory visit
               // count or a commercial line). Falling through would set
               // coverageVisitCount with an undefined cadence, and
@@ -5168,6 +5173,7 @@ module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnn
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
 module.exports.guardServiceTypeFor = guardServiceTypeFor;
+module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;
 module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;

@@ -198,8 +198,8 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     // monthly frequency + 6 visits seeds nothing — coverage must not
     // record monthly and let payment-time coverage create six monthly
     // visits.
-    expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly', visitsPerYear: 6 }, null)).toBe(null);
-    expect(annualPrepayCoverageCadence({ service: 'commercial_lawn', name: 'Commercial Lawn Care', frequency: 'bi_monthly', visitsPerYear: 6 }, null)).toBe(null);
+    expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly', visitsPerYear: 6 }, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    expect(annualPrepayCoverageCadence({ service: 'commercial_lawn', name: 'Commercial Lawn Care', frequency: 'bi_monthly', visitsPerYear: 6 }, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
     // Legacy shape without explicit visits keeps its inferred cadence.
     expect(annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', frequency: 'bi_monthly' }, null)).toBe('bimonthly');
     // Matching shape records the seeded cadence.
@@ -270,8 +270,8 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     const conflictB = { service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', cadence: 'semiannual', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(conflictA, { service_type: 'Palm Injection' }, null)).toBe(null);
     expect(converterFollowUpSeedingPattern(conflictB, { service_type: 'Palm Injection' }, null)).toBe(null);
-    expect(EstimateConverter.annualPrepayCoverageCadence(conflictA, null)).toBe(null);
-    expect(EstimateConverter.annualPrepayCoverageCadence(conflictB, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(conflictA, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    expect(EstimateConverter.annualPrepayCoverageCadence(conflictB, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
     // Duplicate spellings of the SAME cadence are not a conflict.
     const agreeing = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', cadence: 'semiannual', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
@@ -334,9 +334,9 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     // The seeding gate refused monthly + 2 visits; the prepay term must
     // not record the refused cadence (payment-time coverage would seed
     // monthly-spaced visits over an office-scheduled program).
-    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, null)).toBe(null);
-    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 4 }, null)).toBe(null);
-    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Commercial Palm Injection', visitsPerYear: 2 }, null)).toBe(null);
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 4 }, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Commercial Palm Injection', visitsPerYear: 2 }, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
     // Valid palm shapes still record semiannual.
     expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, 'quarterly')).toBe('semiannual');
     expect(annualPrepayCoverageCadence({ service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 2 }, null)).toBe('semiannual');
@@ -361,7 +361,7 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     // spelling recurringServiceCadenceKey already reads).
     const snakeSpelled = { service: 'palm_injection', name: 'Palm Injection', plan_frequency: 'monthly', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(snakeSpelled, { service_type: 'Palm Injection' }, null)).toBe(null);
-    expect(EstimateConverter.annualPrepayCoverageCadence(snakeSpelled, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(snakeSpelled, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
   });
 });
 
