@@ -1056,9 +1056,13 @@ describe('closeout route wiring — source contracts (the completion route is to
     // without an event the redeemer falls back to that placeholder
     // created_at — a row opened in-window but confirmed after expiry would
     // mint a credit the booking did not earn. The sweep (event-only)
-    // recovers once the post-commit retry lands the event.
+    // recovers once the post-commit retry lands the event. The gate accepts
+    // an ALREADY-PRESENT event too (marked === 0 — e.g. the completion
+    // transition committed it in-trx, PR #3361 r13): redeeming from an
+    // existing event uses the true moment; only a THROWN write (no event)
+    // defers to the retry + sweep.
     const markedAt = confirm.indexOf('const marked = await');
-    const gateAt = confirm.indexOf('if (marked === 1) {');
+    const gateAt = confirm.indexOf('if (marked === 1 || marked === 0) {');
     const redeemAt = confirm.indexOf("createdBy: 'system:inspection_credit_outbound_confirm'");
     expect(markedAt).toBeGreaterThan(-1);
     expect(gateAt).toBeGreaterThan(markedAt);

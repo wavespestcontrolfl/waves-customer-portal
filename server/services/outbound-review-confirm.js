@@ -166,11 +166,14 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     // was inserted when the AI opened the pending review, so without an
     // event the redeemer would fall back to that PLACEHOLDER created_at —
     // for a row opened inside the window but confirmed after expiry, that
-    // mints a credit this booking did not earn. On a failed evidence write
-    // the post-commit retry recovers the event and the hourly sweep (which
-    // only redeems FROM events) mints with the true confirmation moment.
+    // mints a credit this booking did not earn. A marker call that did not
+    // throw means the event EXISTS now (1 = inserted here, 0 = already
+    // present — e.g. the completion transition committed it in-trx, Codex
+    // #3361 r13 P1), and redeeming from an existing event uses the true
+    // moment, so both fire the fast redemption; only a THROWN write (no
+    // event) defers to the post-commit retry + hourly sweep.
     // Best-effort — the sweep remains the durable guarantee.
-    if (marked === 1) {
+    if (marked === 1 || marked === 0) {
       await require('./inspection-credit').redeemInspectionCreditForBooking({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,

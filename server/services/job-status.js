@@ -340,11 +340,32 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
-        .first('source_action', 'status', 'customer_confirmed');
+        .first('source_action', 'status', 'customer_confirmed', 'customer_id');
       legacyOutboundActivationNeeded = !!legacyRow
         && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
         && legacyRow.status === 'pending'
         && !legacyRow.customer_confirmed;
+      // COMPLETION is the billing moment: the inspection-credit booking
+      // evidence must commit WITH this transition (same #3178 r33 rule as
+      // the office-confirm branch below) — the detached activation hook
+      // races the completion route's invoice legs, and an event that only
+      // lands later leaves the invoice collecting gross over a promised
+      // credit (Codex #3361 r13 P1). The hook's own marker call stays the
+      // idempotent belt, and its fast-redeem now fires whenever the event
+      // exists, so the credit is on the account by the send-time
+      // auto-apply. Best-effort: an evidence hiccup never blocks the
+      // completion.
+      if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
+        try {
+          await require('./inspection-credit').markBookingForInspectionCredit(t, {
+            customerId: legacyRow.customer_id,
+            scheduledServiceId: jobId,
+            source: 'phone_call',
+          });
+        } catch (evidenceErr) {
+          logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
+        }
+      }
     }
 
     // Atomic guard: only update if the row is currently in fromStatus.
