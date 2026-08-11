@@ -371,6 +371,37 @@ function serviceCatalogMatch(line, serviceIndex) {
       return null;
     }
   }
+  // The symmetric contradiction (codex r18 pre-push P0): an explicit
+  // SEMIANNUAL palm key whose line data resolves anything other than a
+  // valid semiannual program ({ frequency: 'monthly', visitsPerYear: 2 })
+  // would pair the semiannual service id with a mismatched prefill
+  // cadence — the modal trusts the cadence and could create a 12-visit
+  // series on a two-application per-application program. Reject to
+  // unmatched when cadence DATA is present but invalid; a bare explicit
+  // selection (no line cadence data to contradict it) keeps the
+  // operator's choice.
+  if (explicitKey === 'palm_injection_semiannual') {
+    try {
+      const {
+        converterFollowUpSeedingPattern, visitsPerYearForRecurringService,
+        visitCountFieldsConflict, visitCountFieldsInvalid,
+        explicitCadenceFieldForService,
+      } = require('../services/estimate-converter');
+      const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
+      const hasCadenceData = !!explicitCadenceFieldForService(line || {})
+        || visitsPerYearForRecurringService(line || {}) != null
+        || visitCountFieldsConflict(line || {})
+        || visitCountFieldsInvalid(line || {});
+      if (hasCadenceData
+        && converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) !== 'semiannual') {
+        logger.warn('[admin-customers] explicit semiannual palm key with data that does not resolve a valid semiannual program — leaving line unmatched (fail closed)');
+        return null;
+      }
+    } catch (resolveErr) {
+      logger.warn(`[admin-customers] explicit semiannual palm key validation failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+      return null;
+    }
+  }
   if (!explicitKey && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
       const {

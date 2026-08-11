@@ -592,6 +592,16 @@ describe('admin customers route helpers', () => {
     // exact match.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // The symmetric contradiction: an explicit SEMIANNUAL key whose line
+    // data does not resolve a valid semiannual program stays unmatched
+    // (codex r18 pre-push P0) — the modal would pair the semiannual id
+    // with a mismatched cadence.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 0 }, serviceIndex)).toBeFalsy();
+    // A bare explicit selection (no cadence data to contradict) and a
+    // valid semiannual line both keep the operator's choice.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual' }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
     // INVALID-but-recurring palm data fails closed to NO match (codex r16
     // pre-push P0): contradictory cadence and conflicting counts are not
     // definitively one-time — the one-time profile would invoice work
