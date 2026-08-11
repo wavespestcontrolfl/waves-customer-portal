@@ -255,25 +255,29 @@ async function markEnRoute(serviceId, opts = {}) {
   // qualify, and the observed status joins the UPDATE predicate below so a
   // completion landing between this read and the write makes the heal miss.
   const healableStatus = !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status));
+  // Shared by the advanced-state heal AND the normal flip below: does this
+  // row carry lifecycle evidence from before its own scheduled day?
+  const staleEvidence = healableStatus
+    && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr)
+    && (() => {
+      const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time, svc.check_in_time]
+        .map((v) => (v ? new Date(v).getTime() : NaN))
+        .filter((ms) => Number.isFinite(ms));
+      return evidenceMs.length > 0 && etDateString(new Date(Math.max(...evidenceMs))) < scheduledDayStr;
+    })();
   if (!opts._afterStaleHeal
-    && healableStatus
-    && ['en_route', 'on_property'].includes(svc.track_state)
-    && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr)) {
-    const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time, svc.check_in_time]
-      .map((v) => (v ? new Date(v).getTime() : NaN))
-      .filter((ms) => Number.isFinite(ms));
-    if (evidenceMs.length && etDateString(new Date(Math.max(...evidenceMs))) < scheduledDayStr) {
-      const { LIVE_LIFECYCLE_RESET } = require('./rebooker');
-      const healed = await db('scheduled_services')
-        .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
-        .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
-      if (healed > 0) {
-        logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
-        return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
-      }
-      // Lost a race to a concurrent transition — fall through and let the
-      // idempotent branch report whatever state won.
+    && staleEvidence
+    && ['en_route', 'on_property'].includes(svc.track_state)) {
+    const { LIVE_LIFECYCLE_RESET } = require('./rebooker');
+    const healed = await db('scheduled_services')
+      .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
+      .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
+    if (healed > 0) {
+      logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
+      return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
     }
+    // Lost a race to a concurrent transition — fall through and let the
+    // idempotent branch report whatever state won.
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
@@ -309,11 +313,27 @@ async function markEnRoute(serviceId, opts = {}) {
     };
   }
 
-  // Atomic guard: only flip if still 'scheduled'.
+  // Atomic guard: only flip if still 'scheduled'. A partial reset can have
+  // put track_state back to 'scheduled' while leaving the old attempt's
+  // stamps and SMS guards behind — flipping over them would let completion
+  // book a days-long duration from the stale start and would suppress
+  // today's track SMS on the stale guard. When the evidence predates the
+  // row's own scheduled day, clear those columns in the SAME atomic write.
   const now = new Date();
+  const staleFlipClears = staleEvidence
+    ? {
+      arrived_at: null,
+      actual_start_time: null,
+      check_in_time: null,
+      track_sms_sent_at: null,
+      arrival_sms_sent_at: null,
+    }
+    : {};
   const updated = await db('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
-    .update({ track_state: 'en_route', en_route_at: now, updated_at: now });
+    .update({
+      track_state: 'en_route', en_route_at: now, updated_at: now, ...staleFlipClears,
+    });
 
   if (updated === 0) {
     // Someone else won the race. Re-read and return their state.
@@ -361,8 +381,10 @@ async function markEnRoute(serviceId, opts = {}) {
 
   // SMS — guarded by track_sms_sent_at. A retap that won the UPDATE race
   // above still can't re-send because this check runs after the write.
+  // A stale guard from the aborted earlier attempt was cleared in the flip
+  // write above, so it must not suppress today's send.
   let smsSent = false;
-  if (!svc.track_sms_sent_at) {
+  if (!svc.track_sms_sent_at || staleEvidence) {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')

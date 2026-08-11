@@ -250,6 +250,78 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
   });
 
+  test('scheduled track_state with stale stamps: flip clears them atomically and un-suppresses the SMS', async () => {
+    // A partial reset put track_state back to 'scheduled' but left the old
+    // attempt's start stamp and SMS guards. The flip must clear them in the
+    // same write (or completion books a days-long duration) and the stale
+    // track_sms_sent_at must not suppress today's track SMS.
+    const partialResetSvc = {
+      id: 'job-partial',
+      customer_id: 'cust-8',
+      technician_id: null,
+      status: 'pending',
+      track_state: 'scheduled',
+      scheduled_date: todayStr,
+      en_route_at: null,
+      arrived_at: null,
+      actual_start_time: isoDaysAgo(7),
+      check_in_time: null,
+      track_sms_sent_at: isoDaysAgo(7),
+      track_view_token: 'a'.repeat(64),
+      cancelled_at: null,
+    };
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(partialResetSvc)) // loadService
+      .mockReturnValueOnce(flipUpdate); // flip UPDATE (with clears)
+
+    const result = await trackTransitions.markEnRoute('job-partial');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'en_route',
+      en_route_at: expect.any(Date),
+      arrived_at: null,
+      actual_start_time: null,
+      check_in_time: null,
+      track_sms_sent_at: null,
+      arrival_sms_sent_at: null,
+    });
+    // The stale guard did not suppress the send attempt.
+    const { sendTechEnRoute } = require('../services/twilio');
+    expect(sendTechEnRoute).toHaveBeenCalled();
+  });
+
+  test('scheduled track_state with same-day stamps flips without clearing anything', async () => {
+    const sameDayStamps = {
+      id: 'job-clean-flip',
+      customer_id: 'cust-9',
+      technician_id: null,
+      status: 'confirmed',
+      track_state: 'scheduled',
+      scheduled_date: todayStr,
+      actual_start_time: isoDaysAgo(0, 'T08:15'),
+      track_sms_sent_at: new Date().toISOString(),
+      cancelled_at: null,
+    };
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(sameDayStamps))
+      .mockReturnValueOnce(flipUpdate);
+
+    const result = await trackTransitions.markEnRoute('job-clean-flip');
+
+    expect(result.ok).toBe(true);
+    const payload = flipUpdate.update.mock.calls[0][0];
+    expect(payload).toMatchObject({ track_state: 'en_route' });
+    expect(payload).not.toHaveProperty('actual_start_time');
+    expect(payload).not.toHaveProperty('track_sms_sent_at');
+    // Recent guard still suppresses the send.
+    const { sendTechEnRoute } = require('../services/twilio');
+    expect(sendTechEnRoute).not.toHaveBeenCalled();
+  });
+
   test('stale check_in_time alone is enough evidence to heal', async () => {
     const checkInOnlySvc = {
       id: 'job-checkin',
@@ -288,6 +360,7 @@ describe('visit timeline stale-timestamp guard', () => {
     const timeline = buildVisitTimeline({
       service: {
         status: 'completed',
+        scheduled_date: todayStr,
         completed_at: isoDaysAgo(0, 'T13:28'),
         actual_start_time: isoDaysAgo(7, 'T14:54'),
         en_route_at: null,
@@ -379,11 +452,66 @@ describe('visit timeline stale-timestamp guard', () => {
     const timeline = buildVisitTimeline({
       service: {
         status: 'en_route',
+        scheduled_date: todayStr,
         en_route_at: isoDaysAgo(0, 'T12:26'),
       },
       serviceLine: 'lawn',
       config,
     });
     expect(timeline.events.find((e) => e.type === 'technician_en_route')).toBeDefined();
+  });
+
+  test('16h-gap reschedule is still caught by the scheduled-day boundary', () => {
+    // Aborted 5 PM yesterday, moved to today, completed 9 AM: only 16 hours
+    // apart, so an elapsed-gap bound alone would render it — the scheduled
+    // ET day catches it.
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        scheduled_date: todayStr,
+        completed_at: isoDaysAgo(0, 'T09:00'),
+        actual_start_time: isoDaysAgo(1, 'T17:00'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.find((e) => e.type === 'technician_on_site')).toBeUndefined();
+  });
+
+  test('overnight overdue completion keeps its previous-evening stamps', () => {
+    // Scheduled yesterday, started late evening, completed after midnight —
+    // the stamps are on the visit's own scheduled day and survive.
+    const yesterday = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), -1));
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        scheduled_date: yesterday,
+        completed_at: isoDaysAgo(0, 'T00:30'),
+        arrived_at: isoDaysAgo(1, 'T23:05'),
+        en_route_at: isoDaysAgo(1, 'T22:40'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.map((e) => e.type)).toContain('technician_on_site');
+    expect(timeline.events.map((e) => e.type)).toContain('technician_en_route');
+  });
+
+  test('early project closeout (completed before the scheduled day) keeps its stamps', () => {
+    // markComplete allowFutureDate: visit scheduled next week, deliberately
+    // completed today — completion predates the scheduled day, so the
+    // scheduled-day boundary is inert and the gap fallback governs.
+    const nextWeek = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), 7));
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        scheduled_date: nextWeek,
+        completed_at: isoDaysAgo(0, 'T15:00'),
+        arrived_at: isoDaysAgo(0, 'T13:00'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.find((e) => e.type === 'technician_on_site')).toBeDefined();
   });
 });

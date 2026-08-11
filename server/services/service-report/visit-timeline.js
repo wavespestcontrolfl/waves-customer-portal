@@ -1,4 +1,4 @@
-const { parseETDateTime } = require('../../utils/datetime-et');
+const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 const VISIT_TIMELINE_CONFIG_KEY = 'service_reports.visit_timeline';
@@ -256,30 +256,50 @@ function collapseSameTimeTimelineEvents(events = []) {
 
 // A visit that was started, aborted, and rescheduled can carry en-route /
 // arrival stamps from the earlier attempt (the reschedule paths historically
-// did not clear them). Anything more than this far before the completion
-// instant cannot belong to the same visit, so it must not render — it put a
-// week-old "on site 2:54 PM" above a 1:28 PM completion on a live customer
-// report (2026-08-11). Backfilled closeouts are unaffected: their day-scale
-// ET-noon completion sits BEFORE the real afternoon arrival, and this guard
-// only drops timestamps on the too-early side.
+// did not clear them) — a live customer report rendered a week-old
+// "on site 2:54 PM" above a 1:28 PM completion (2026-08-11). The attempt
+// boundary is the visit's OWN scheduled ET day (same rule as the tracker's
+// stale-attempt heal): a stamp from an earlier ET day than the current
+// scheduled_date belongs to a pre-reschedule attempt and must not render.
+// When no scheduled date is available, fall back to an elapsed-gap bound
+// before the completion instant — no single-day visit spans longer than
+// this, overnight overdue completions included. Backfilled closeouts are
+// unaffected either way: their day-scale ET-noon completion sits BEFORE the
+// real same-day afternoon arrival, and both predicates only drop the
+// too-early side.
 const MAX_PLAUSIBLE_VISIT_MS = 18 * 60 * 60 * 1000;
 
-function isStalePreCompletion(timestamp, completedAt) {
-  if (!timestamp || !completedAt) return false;
+function scheduledDayString(...values) {
+  for (const value of values) {
+    if (!value) continue;
+    const day = String(value instanceof Date ? value.toISOString() : value).slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
+  }
+  return null;
+}
+
+function isStaleTimestamp(timestamp, { completedAt, scheduledDay }) {
+  if (!timestamp) return false;
   const tsMs = Date.parse(timestamp);
-  const completedMs = Date.parse(completedAt);
-  if (!Number.isFinite(tsMs) || !Number.isFinite(completedMs)) return false;
-  return completedMs - tsMs > MAX_PLAUSIBLE_VISIT_MS;
+  if (!Number.isFinite(tsMs)) return false;
+  if (scheduledDay) {
+    return etDateString(new Date(tsMs)) < scheduledDay;
+  }
+  if (completedAt) {
+    const completedMs = Date.parse(completedAt);
+    if (Number.isFinite(completedMs)) return completedMs - tsMs > MAX_PLAUSIBLE_VISIT_MS;
+  }
+  return false;
 }
 
 // firstValidTimestamp with the staleness check applied PER CANDIDATE: a
 // stale canonical column (e.g. scheduled_services.actual_start_time from
 // the aborted attempt) must not shadow a genuine current-attempt timestamp
 // carried by a later source (structured / serviceData / workflow events).
-function firstPlausibleTimestamp(completedAt, values) {
+function firstPlausibleTimestamp(bounds, values) {
   for (const value of values) {
     const timestamp = validTimestamp(value);
-    if (timestamp && !isStalePreCompletion(timestamp, completedAt)) return timestamp;
+    if (timestamp && !isStaleTimestamp(timestamp, bounds)) return timestamp;
   }
   return null;
 }
@@ -319,7 +339,20 @@ function buildVisitTimeline({
     serviceData.service_completed_at,
     workflowEventTimestamp(workflowEvents, 'service_completed'),
   );
-  const enRouteAt = firstPlausibleTimestamp(completedAt, [
+  // The scheduled day is the attempt boundary ONLY when the visit ran on
+  // (or after) it. A deliberate early closeout (markComplete allowFutureDate
+  // — project visits completed ahead of a future scheduled_date) carries
+  // stamps legitimately BEFORE the scheduled day; there the completion
+  // instant anchors the gap fallback instead.
+  const scheduledDay = scheduledDayString(service.scheduled_date, scheduledService.scheduled_date);
+  const completedDayEt = completedAt ? etDateString(new Date(Date.parse(completedAt))) : null;
+  const staleBounds = {
+    completedAt,
+    scheduledDay: scheduledDay && (!completedDayEt || completedDayEt >= scheduledDay)
+      ? scheduledDay
+      : null,
+  };
+  const enRouteAt = firstPlausibleTimestamp(staleBounds, [
     service.en_route_at,
     service.scheduled_en_route_at,
     scheduledService.en_route_at,
@@ -329,7 +362,7 @@ function buildVisitTimeline({
     serviceData.en_route_at,
     workflowEventTimestamp(workflowEvents, 'technician_en_route'),
   ]);
-  const onSiteAt = firstPlausibleTimestamp(completedAt, [
+  const onSiteAt = firstPlausibleTimestamp(staleBounds, [
     service.arrived_at,
     service.actual_start_time,
     service.check_in_time,
