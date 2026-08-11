@@ -42,11 +42,19 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('google-ads-api', () => ({ GoogleAdsApi: jest.fn(), enums: { CampaignStatus: { ENABLED: 'ENABLED', PAUSED: 'PAUSED' } } }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid-1') }));
+// The bridge target must be a known synthetic number so the snapshot
+// retire arm's bridge-source discovery can qualify fixtures (no real
+// numbers in fixtures — PII rule).
+jest.mock('../config/twilio-numbers', () => ({
+  locations: { bradenton: { number: '+19415550100' } },
+}));
 // The reopen reconciliation retires through the shared history-preserving
-// primitive — pin the delegation, not a re-implementation.
+// primitives — pin the delegation, not a re-implementation.
 const mockRetire = jest.fn(async () => 1);
+const mockRetireRow = jest.fn(async () => 1);
 jest.mock('../services/ads/call-attribution', () => ({
   retireCallAttributionRow: (...a) => mockRetire(...a),
+  retireRowPreservingHistory: (...a) => mockRetireRow(...a),
 }));
 
 const {
@@ -151,6 +159,45 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mockRetire.mock.calls[0][0]).toBe(mockDb);
     expect(mockRetire.mock.calls[0][1]).toBe('call-1');
     expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
+  });
+
+  test('a PHONE-only reopen retires the interim row through the SNAPSHOT arm (audit P1 r6)', async () => {
+    // A phone-linked lead's interim organic row has NO provenance (the
+    // resolver deliberately has no phone arm), so the provenanced retire
+    // cannot see it. On a snapshotted bridge-target lead, a marker-free
+    // NULL-provenance row born after the record resolved can only be the
+    // unclaimed sweep's write — retired via the row-id history-preserving
+    // primitive.
+    listQueueByTable.bridge_ambiguous_calls = [[
+      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z' },
+    ]];
+    listQueueByTable.ad_service_attribution = [[]]; // no provenanced rows
+    listQueueByTable.lead_sources = [[
+      { id: 'src-1', twilio_phone_number: '+19415550100' }, // the bridge target
+      { id: 'src-2', twilio_phone_number: '+19415550199' }, // NOT the target
+    ]];
+    listQueueByTable.bridge_ambiguous_call_leads = [[{ lead_id: 'lead-7' }]];
+    listQueueByTable.leads = [[{ id: 'lead-7' }]]; // the lead lock read
+    listQueueByTable['ad_service_attribution as asa'] = [[{ id: 'row-42' }]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).not.toHaveBeenCalled(); // nothing provenanced
+    expect(mockRetireRow).toHaveBeenCalledTimes(1);
+    expect(mockRetireRow.mock.calls[0][0]).toBe(mockDb); // same transaction
+    expect(mockRetireRow.mock.calls[0][1]).toBe('row-42');
+    // The candidate query carries EVERY discriminator: bridge-target lead,
+    // no provenance, no web click/UTM markers, born after the resolution.
+    const asaRead = builders.find((b) => b._table === 'ad_service_attribution as asa');
+    expect(asaRead._wheres).toContainEqual(['whereIn', 'asa.lead_id', ['lead-7']]);
+    expect(asaRead._wheres).toContainEqual(['whereIn', 'l.lead_source_id', ['src-1']]);
+    expect(asaRead._wheres).toContainEqual(['whereNull', 'asa.source_call_id']);
+    ['asa.gclid', 'asa.wbraid', 'asa.gbraid', 'asa.fbclid', 'asa.fbc', 'asa.utm_campaign', 'asa.utm_term']
+      .forEach((col) => expect(asaRead._wheres).toContainEqual(['whereNull', col]));
+    expect(asaRead._wheres).toContainEqual(['where', 'asa.created_at', '>', '2026-08-10T09:00:00Z']);
+    // Repo lock order: the snapshot leads are locked before the rows are judged.
+    const leadLock = builders.find((b) => b._table === 'leads'
+      && b._wheres.some(([m]) => m === 'forUpdate'));
+    expect(leadLock).toBeTruthy();
+    expect(leadLock._wheres).toContainEqual(['whereIn', 'id', ['lead-7']]);
   });
 
   test('an OPEN row (locked but never resolved) retires nothing — no interim write can exist under a live hold', async () => {

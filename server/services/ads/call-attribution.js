@@ -1741,6 +1741,7 @@ module.exports = {
   attributeUnclaimedBridgeLeads,
   retireCallAttributionRow,
   retireAllCallAttributionRows,
+  retireRowPreservingHistory,
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },

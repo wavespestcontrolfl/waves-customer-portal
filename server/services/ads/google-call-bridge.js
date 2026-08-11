@@ -1657,7 +1657,18 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
     );
     if (reopened.length) {
       // Lazy require: this module and call-attribution require each other.
-      const { retireCallAttributionRow } = require('./call-attribution');
+      const { retireCallAttributionRow, retireRowPreservingHistory } = require('./call-attribution');
+      const resolvedAtById = new Map(existing
+        .filter((r) => r.resolved_at != null)
+        .map((r) => [String(r.call_log_id), r.resolved_at]));
+      // The snapshot retire arm needs the bridge-target source set — the
+      // same discovery the unclaimed sweep runs.
+      const sourceRows = await trx('lead_sources')
+        .whereNotNull('twilio_phone_number')
+        .select('id', 'twilio_phone_number');
+      const bridgeSourceIds = sourceRows
+        .filter((s) => { try { return isBridgeTargetNumber(s.twilio_phone_number); } catch { return false; } })
+        .map((s) => s.id);
       for (const callId of reopened) {
         const provRows = await trx('ad_service_attribution')
           .where({ source_call_id: callId })
@@ -1670,6 +1681,44 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
           // reopen and the retire can no longer strand the interim row —
           // they commit or roll back together.
           retired += await retireCallAttributionRow(trx, callId, leadId);
+        }
+        // SNAPSHOT arm (pre-push audit P1 r6): a PHONE-linked lead's
+        // interim organic row carries NO provenance — the provenance
+        // resolver deliberately has no phone arm (r25) — so the
+        // provenanced retire above cannot see it. On a snapshotted
+        // BRIDGE-TARGET lead, every other NULL-provenance writer is out:
+        // call-time attribution and claim-time backfill both suppress
+        // bridge-target calls/leads, and web rows carry click/UTM markers
+        // (the same discriminators recordCallPpcAttribution's own
+        // web_attributed guard reads). A marker-free NULL-provenance row
+        // born AFTER this record resolved can therefore only be the
+        // unclaimed sweep's interim write. History-free rows delete (the
+        // lead returns to held/unattributed); a row that accumulated
+        // stage/revenue stays as permanently-conservative legacy — the
+        // identical end-state the provenanced arm's demote produces.
+        const resolvedAt = resolvedAtById.get(callId);
+        const snapLeadIds = (await trx('bridge_ambiguous_call_leads')
+          .where({ call_log_id: callId })
+          .select('lead_id')).map((r) => String(r.lead_id));
+        if (!resolvedAt || !snapLeadIds.length || !bridgeSourceIds.length) continue;
+        // Repo lock order: leads before attribution rows.
+        await trx('leads').whereIn('id', snapLeadIds).forUpdate().select('id');
+        const interimRows = await trx('ad_service_attribution as asa')
+          .join('leads as l', 'l.id', 'asa.lead_id')
+          .whereIn('asa.lead_id', snapLeadIds)
+          .whereIn('l.lead_source_id', bridgeSourceIds)
+          .whereNull('asa.source_call_id')
+          .whereNull('asa.gclid')
+          .whereNull('asa.wbraid')
+          .whereNull('asa.gbraid')
+          .whereNull('asa.fbclid')
+          .whereNull('asa.fbc')
+          .whereNull('asa.utm_campaign')
+          .whereNull('asa.utm_term')
+          .where('asa.created_at', '>', resolvedAt)
+          .select('asa.id');
+        for (const row of interimRows) {
+          retired += await retireRowPreservingHistory(trx, row.id);
         }
       }
     }
