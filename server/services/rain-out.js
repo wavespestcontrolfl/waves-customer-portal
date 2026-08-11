@@ -130,24 +130,11 @@ function containsBareHost(text) {
   return false;
 }
 
-// The regex is textual, so hosts hidden behind encodings that a URL parser
-// (or a tapping thumb) canonicalizes back to the real hostname would slip
-// it: `bit%2ely`, fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`,
-// zero-width joins (codex PR P1). Check the shortener set against a
-// canonicalized copy too: NFKC fold, unicode dot forms → '.', zero-width
-// chars stripped, then bounded percent-decode.
-function normalizeForLinkCheck(raw) {
-  let out = String(raw).normalize('NFKC');
-  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
-  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
-  for (let i = 0; i < 3; i++) {
-    let decoded;
-    try { decoded = decodeURIComponent(out); } catch { break; }
-    if (decoded === out) break;
-    out = decoded;
-  }
-  return out;
-}
+// Hosts hidden behind encodings that a URL parser (or a tapping thumb)
+// canonicalizes back to the real hostname would slip the textual regex —
+// the shared canonicalizer lives in messaging/sms-link-policy.js (single
+// source with comms-lint; codex PR P1 provenance preserved there).
+const { normalizeForLinkCheck } = require('./messaging/sms-link-policy');
 
 // Compliance fold: compatibility normalization + default-ignorable
 // characters (soft hyphen, joiners, directional marks, variation

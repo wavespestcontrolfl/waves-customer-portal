@@ -2076,6 +2076,18 @@ function SmsTab() {
                 {agentDraft.suggestedMessage}
               </div>
             )}
+            {agentDraft?.lintFailures?.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11">
+                <div className="font-medium text-zinc-900">
+                  Failed comms-lint — review before sending
+                </div>
+                {agentDraft.lintFailures.map((f) => (
+                  <div key={f.rule} className="text-ink-secondary">
+                    {f.reason}
+                  </div>
+                ))}
+              </div>
+            )}
             {agentDraft?.inboundMessage && (
               <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11 text-ink-tertiary line-clamp-2">
                 Trigger: {agentDraft.inboundMessage}
