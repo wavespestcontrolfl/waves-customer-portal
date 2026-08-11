@@ -886,7 +886,7 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
 
   it('the reminder suppresses its cutoff on EVIDENCE even while the enforcement gate is off — a dark-period promise must survive a later flip', async () => {
     delete process.env.GATE_STICKY_CANCEL_WINDOW;
-    stubDb({ ...holdRow, no_show_fee_amount: 49 }, { rescheduleLog: [lateCustomerMove] });
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(farStart);
     const note = await cardHoldReminderNote('svc1');
     expect(note).not.toContain('cancel free until');
@@ -952,11 +952,28 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
   });
 
   it('the reminder drops its free-cancel cutoff promise once a sticky reschedule exists (generic copy stays accurate)', async () => {
-    stubDb({ ...holdRow, no_show_fee_amount: 49 }, { rescheduleLog: [lateCustomerMove] });
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(farStart);
     const note = await cardHoldReminderNote('svc1');
     expect(note).not.toContain('cancel free until');
     expect(note).toContain('fee applies only if you cancel or no one is home');
+  });
+
+  it("the reminder goes SILENT once the card is removed after a sticky reschedule — never threaten a fee the handler releases free (Codex #3342 r8 P2)", async () => {
+    // Same evidence as above, but the local payment_methods row is gone:
+    // the cancel handler treats that as revocation (free release + office
+    // alert) and the preview reports feeApplies:false — the 72h/24h SMS and
+    // appointment email must not still claim a card on file or threaten
+    // the fee.
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, null], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldReminderNote('svc1')).toBe('');
+  });
+
+  it('an unverifiable card at reminder time also suppresses the note — same posture as the handler/preview', async () => {
+    stubDb([{ ...holdRow, no_show_fee_amount: 49 }, new Error('pm lookup down')], { rescheduleLog: [lateCustomerMove] });
+    mockApptTime.mockResolvedValue(farStart);
+    expect(await cardHoldReminderNote('svc1')).toBe('');
   });
 });
 

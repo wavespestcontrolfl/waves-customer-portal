@@ -1113,6 +1113,29 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 
+  test('the disclosure echo token rides ONLY the ready payload — secured/completing/closed carry no stickyDisclosureVersion (Codex #3342 r8 P1)', async () => {
+    // A secured payload that carried the version would be latched into the
+    // client's sessionStorage; a replayed 3DS return could then upgrade a
+    // non-sticky webhook/legacy completion to sticky_window_disclosed=true
+    // from a disclosure rendered only AFTER consent.
+    const ready = await loadSecureCardPageData(REQUEST.token);
+    expect(ready.state).toBe('ready');
+    expect(ready.stickyDisclosureVersion).toBe('sticky_v1');
+
+    for (const status of ['completed', 'completing', 'satisfied']) {
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status, updated_at: new Date() });
+      const res = await loadSecureCardPageData(REQUEST.token);
+      expect(res.state).toBe('secured');
+      expect('stickyDisclosureVersion' in res).toBe(false);
+    }
+
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST });
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
+    const closed = await loadSecureCardPageData(REQUEST.token);
+    expect(closed.state).toBe('closed');
+    expect('stickyDisclosureVersion' in closed).toBe(false);
+  });
+
   test('cancelled or past visit → closed (no intent minted)', async () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
     const res = await loadSecureCardPageData(REQUEST.token);
@@ -1273,8 +1296,8 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
       // ruling) — present in ALL states, unrelated to the plan gate this test pins.
       // stickyDisclosureVersion joined 2026-08-10 (sticky cancel window) —
-      // the completing tab's echo token; present in the base payload in
-      // ALL states, unrelated to the plan gate this test pins.
+      // the completing tab's echo token; attached ONLY to the ready state
+      // (Codex #3342 r8 P1), unrelated to the plan gate this test pins.
       'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
     ]);
   });

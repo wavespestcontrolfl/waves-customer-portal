@@ -1195,11 +1195,15 @@ async function loadSecureCardPageData(token) {
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
     cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
-    // Echo token for the completing tab: present exactly when the rendered
-    // note carries the sticky-window sentence; the client returns it on
-    // POST /complete and the marker is stamped from that echo.
-    stickyDisclosureVersion: visitPriced && feeDisclosure ? STICKY_DISCLOSURE_VERSION : null,
   };
+  // Echo token for the completing tab: attached ONLY to the pending 'ready'
+  // return below — the one state that renders the card-consent form — never
+  // to base (Codex #3342 r8 P1). A secured/closed payload that carried it
+  // would be cached by the client's sessionStorage latch, and a replayed
+  // 3DS return could then upgrade a non-sticky webhook/legacy completion to
+  // sticky_window_disclosed=true from a disclosure shown only AFTER consent.
+  const readyEcho = visitPriced && feeDisclosure
+    ? { stickyDisclosureVersion: STICKY_DISCLOSURE_VERSION } : {};
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
   // already succeeded and the page POST or webhook holds the completion
@@ -1475,6 +1479,7 @@ async function loadSecureCardPageData(token) {
   return {
     state: 'ready',
     ...base,
+    ...readyEcho,
     clientSecret: intent.clientSecret,
     setupIntentId: intent.setupIntentId,
     ...(planContext ? { planContext } : {}),

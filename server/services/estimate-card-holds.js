@@ -1124,21 +1124,36 @@ async function cardHoldReminderNote(scheduledServiceId) {
     // cancel/no-show, rescheduling free) is accurate in every state, so a
     // FAILED lookup also suppresses the cutoff rather than guessing.
     let suppressCutoff = true;
+    let stickyEvidence = false;
     if (!hold.sticky_window_disclosed) {
       // Legacy consent — sticky can never charge this row, so the dated
       // free-cancel cutoff stays a promise the fee check honors.
       suppressCutoff = false;
     } else {
       try {
-        suppressCutoff = !!(await findStickyLateReschedule({
+        stickyEvidence = !!(await findStickyLateReschedule({
           scheduledServiceId,
           isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
           notBefore: hold.held_at,
           currentStart: start ? new Date(start) : null,
         }));
+        suppressCutoff = stickyEvidence;
       } catch (err) {
         logger.warn('[estimate-card-holds] reminder sticky-window lookup failed — generic copy', { error: err.message });
       }
+    }
+    // Card removal is revocation on the charge path — the reminder must
+    // agree (Codex #3342 r8 P2): with sticky evidence on file the handler
+    // releases FREE when the local payment_methods row is gone and the
+    // admin preview reports feeApplies:false, so copy threatening the fee
+    // (or claiming a card on file) would promise a charge nothing bills.
+    // A thrown lookup reaches the outer catch and returns '' — same
+    // never-threaten-what-we-can't-verify posture as the handler/preview.
+    if (stickyEvidence) {
+      const pmRow = await db('payment_methods')
+        .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+        .first('id');
+      if (!pmRow) return '';
     }
     try {
       const startMs = (!suppressCutoff && start) ? new Date(start).getTime() : NaN;
