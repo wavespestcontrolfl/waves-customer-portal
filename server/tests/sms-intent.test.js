@@ -35,10 +35,18 @@ describe('SMS intent helpers', () => {
   });
 
   // The reaction gate must not swallow a real ask that merely follows a
-  // quote — only a whole-message reaction counts.
+  // quote — only a whole-message reaction counts. The second case is the one
+  // a greedy `.+` misses (Codex #3346 P1): the trailing ask ENDS in a quote,
+  // so an unbounded match runs from the first opening delimiter to the last
+  // closing one and the whole message reads as a reaction.
   test('a genuine reschedule ask after a quote is still an ask', () => {
-    const body = 'Liked “Your service is Thursday”\n\nActually, can we reschedule to Friday?';
-    expect(isSmsReaction(body)).toBe(false);
-    expect(hasRescheduleOrAwayIntent(body)).toBe(true);
+    for (const body of [
+      'Liked “Your service is Thursday”\n\nActually, can we reschedule to Friday?',
+      'Liked “Your service is Thursday”\n\nActually, can we reschedule to “Friday”',
+      'Liked “Your service is Thursday” Actually, can we reschedule to “Friday”',
+    ]) {
+      expect(isSmsReaction(body)).toBe(false);
+      expect(hasRescheduleOrAwayIntent(body)).toBe(true);
+    }
   });
 });
