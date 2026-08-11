@@ -1725,6 +1725,34 @@ const InvoiceService = {
     // receipt or customer notification — but it moves deposit money and
     // reduces/zeroes the invoice, which is exactly the mutation the review
     // contract forbids.)
+    // The shared mint serialization, not a parallel one (pre-push P0,
+    // codex r6 round): every scheduled-service invoice writer serializes
+    // on the two-key ['schedule.invoice.mint', ssId] advisory lock with an
+    // in-lock replay re-check (scheduled-invoice-mint is the exemplar).
+    // The replay transactions below lock the visit ROW, but a Charge Now /
+    // completion mint that wins that lock and commits first would leave
+    // this transaction to wake and blindly create a SECOND collectible
+    // invoice for the same visit. Take the same advisory lock FIRST (same
+    // order as the helper: advisory → customer key-share → visit lock,
+    // the latter two inside buildParams), then adopt any invoice that
+    // landed — the caller's reuse filters ran before this transaction and
+    // cannot have seen it. Terminal invoices are not adoption candidates,
+    // same as the helper's replay filter.
+    const adoptUnderMintLock = async (trx) => {
+      if (!replayFromScheduled) return null;
+      await trx.raw(
+        "SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))",
+        ["schedule.invoice.mint", String(sr.scheduled_service_id)],
+      );
+      const replayed = await trx("invoices")
+        .where({ scheduled_service_id: sr.scheduled_service_id })
+        .whereNot("status", "void")
+        .whereNotIn("status", ["refunded", "canceled", "cancelled"])
+        .orderBy("created_at", "desc")
+        .first();
+      return replayed || null;
+    };
+
     let sourceEstimateId = null;
     if (!skipDepositCredit && sr.scheduled_service_id) {
       try {
@@ -1754,6 +1782,11 @@ const InvoiceService = {
         if (!(requested > 0)) break;
         try {
           return await db.transaction(async (trx) => {
+            // An adopted invoice already ran its own deposit/credit flow —
+            // return it untouched; the roll-forward belongs to the mint
+            // that actually created the invoice.
+            const adopted = await adoptUnderMintLock(trx);
+            if (adopted) return adopted;
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
@@ -1804,9 +1837,11 @@ const InvoiceService = {
     }
 
     if (replayFromScheduled) {
-      return db.transaction(async (trx) =>
-        this.create({ ...(await buildParams(trx)), database: trx }),
-      );
+      return db.transaction(async (trx) => {
+        const adopted = await adoptUnderMintLock(trx);
+        if (adopted) return adopted;
+        return this.create({ ...(await buildParams(trx)), database: trx });
+      });
     }
     return this.create(await buildParams(null));
   },

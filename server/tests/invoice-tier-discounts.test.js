@@ -31,6 +31,7 @@ function setupDb({
   scheduledServices = [],
   scheduledAddons = [],
   serviceRecords = [],
+  existingInvoice = null,
 }) {
   let insertedInvoice = null;
   const discountById = new Map(discounts.map((row) => [String(row.id), row]));
@@ -128,8 +129,12 @@ function setupDb({
     if (table === 'invoices') {
       const q = {
         where: jest.fn(() => q),
+        // The replay mint's in-lock adoption re-check (codex r6 round)
+        // filters terminal statuses; no invoice exists → create proceeds.
+        whereNot: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
         orderBy: jest.fn(() => q),
-        first: jest.fn(async () => null),
+        first: jest.fn(async () => existingInvoice),
         insert: jest.fn((data) => {
           insertedInvoice = data;
           return {
@@ -581,6 +586,44 @@ describe('invoice tier discounts', () => {
       // so the released resume bills the moved price.
       currentEstimatedPriceCents: 8100,
     });
+  });
+
+  // In-lock adoption (codex #3344 r6 round): the replay mint serializes on
+  // the shared schedule.invoice.mint advisory lock and adopts an invoice
+  // another writer (Charge Now / completion mint) committed first — the
+  // caller's reuse filters ran before this transaction and cannot have
+  // seen it. Creating here would double-collect the visit.
+  test('createFromService adopts an invoice another mint committed first instead of creating a duplicate', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+      existingInvoice: { id: 'inv-existing', status: 'sent', scheduled_service_id: 'scheduled-1' },
+    });
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    });
+
+    expect(invoice.id).toBe('inv-existing');
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['schedule.invoice.mint', 'scheduled-1'],
+    );
   });
 
   test('createFromService with a matching scheduledPriceBasis mints normally', async () => {

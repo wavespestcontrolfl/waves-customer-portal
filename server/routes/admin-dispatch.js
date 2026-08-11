@@ -8952,11 +8952,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // the exact negative marker). If this clear fails or the process
         // dies first, the orphaned-claim recovery above finds the minted
         // line on the next completion and heals without a second charge.
+        // Retire ONLY when the fee actually rides the invoice (codex r6
+        // round): createFromService can now ADOPT an invoice another mint
+        // committed first — the claimed fee did not ride that one, so the
+        // claim goes back positive (the recovery re-mints it on the next
+        // completion) instead of being silently retired unbilled.
         if (secureSetupFee) {
+          const feeRode = JSON.stringify(invoice?.line_items || '')
+            .toLowerCase().includes('one-time setup fee');
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
-              .update({ pending_setup_fee: null, updated_at: new Date() });
+              .update(feeRode
+                ? { pending_setup_fee: null, updated_at: new Date() }
+                : { pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+            if (!feeRode) {
+              logger.warn(`[dispatch] setup-fee claim RESTORED for series ${secureSetupFee.parentId} — the completion adopted an invoice the fee did not ride`);
+            }
           } catch (clearErr) {
             logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
           }
