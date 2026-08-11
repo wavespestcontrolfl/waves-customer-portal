@@ -5455,6 +5455,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // effects (tech_status release + customer tracker refresh) after commit.
     let liveEditMovePostCommitRow = null;
     let liveEditMoveRefreshStatus = 'confirmed';
+    // Recurring children/boosters whose tracker lifecycle was rewound by
+    // the cadence rewrite below — same post-commit cleanup, applied per
+    // row after commit with each row's unchanged status.
+    const rewoundSeriesRows = [];
 
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -5843,7 +5847,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // from an aborted attempt (manual En Route taps advance
           // track_state without syncing status), and re-dating it must not
           // carry those onto the new date.
-          const seriesEvidenceCols = ['track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time'];
+          const seriesEvidenceCols = [
+            'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+            // For the post-commit cleanup payload (tech release + refresh).
+            'technician_id', 'customer_id',
+          ];
           const pendingChildren = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: true })
             .whereIn('status', ['pending', 'confirmed'])
@@ -5908,7 +5916,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
               if (childDateChanged) {
                 const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
-                if (needsLifecycleRewind(child)) Object.assign(childUpdates, LIVE_LIFECYCLE_RESET);
+                if (needsLifecycleRewind(child)) {
+                  Object.assign(childUpdates, LIVE_LIFECYCLE_RESET);
+                  rewoundSeriesRows.push(child);
+                }
               }
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
@@ -5957,7 +5968,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
                 if (boosterDateChanged) {
                   const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
-                  if (needsLifecycleRewind(booster)) Object.assign(boosterUpdates, LIVE_LIFECYCLE_RESET);
+                  if (needsLifecycleRewind(booster)) {
+                    Object.assign(boosterUpdates, LIVE_LIFECYCLE_RESET);
+                    rewoundSeriesRows.push(booster);
+                  }
                 }
                 await trx('scheduled_services').where({ id: booster.id }).update(boosterUpdates);
                 if (boosterDateChanged) {
@@ -6373,6 +6387,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await applyLiveMovePostCommitEffects(liveEditMovePostCommitRow, { toStatus: liveEditMoveRefreshStatus });
       } catch (err) {
         logger.error(`[schedule/update-details] live-move side effects failed for ${req.params.id}: ${err.message}`);
+      }
+    }
+    for (const rewoundRow of rewoundSeriesRows) {
+      try {
+        const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+        await applyLiveMovePostCommitEffects(rewoundRow, { toStatus: String(rewoundRow.status) });
+      } catch (err) {
+        logger.error(`[schedule/update-details] track-rewind cleanup failed for series row ${rewoundRow.id}: ${err.message}`);
       }
     }
 

@@ -731,6 +731,9 @@ class SmartRebooker {
     const TERMINAL = ['completed', 'cancelled'];
     const RESCHEDULABLE = RESCHEDULABLE_STATUSES;
 
+    // Non-anchor siblings whose tracker lifecycle was rewound inside the
+    // trx — they get the shared post-commit cleanup after commit.
+    const rewoundSiblings = [];
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -903,14 +906,24 @@ class SmartRebooker {
           ? newDate
           : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
 
+        const sibRewound = isLiveAnchor || needsLifecycleRewind(sib);
         const updateData = {
           scheduled_date: date,
           window_start: win.start || sib.window_start,
           window_end: win.end || sib.window_end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
-          ...(isLiveAnchor || needsLifecycleRewind(sib) ? LIVE_LIFECYCLE_RESET : {}),
+          ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
         };
+        // Non-anchor siblings whose tracker was rewound need the same
+        // post-commit cleanup the anchor gets (tech pointer release +
+        // customer tracker refresh) — collected here, applied after the
+        // trx commits. The sibling SELECT is column-limited, so carry the
+        // series' customer_id for the refresh payload. The anchor itself
+        // is handled by the existing block below.
+        if (sibRewound && !isLiveAnchor && String(sib.id) !== String(serviceId)) {
+          rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
+        }
         // The ANCHOR may carry a caller-chosen technician (the customer
         // self-serve path validated its slot against a specific tech's
         // route — dropping that assignment would bypass the slot's
@@ -1128,6 +1141,16 @@ class SmartRebooker {
         }
       }
       emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+    }
+    // Rewound non-anchor siblings get the same cleanup: release any tech
+    // pinned to them and refresh open trackers. They all landed on
+    // 'confirmed' in the sweep. Best-effort per row.
+    for (const rewoundSib of rewoundSiblings) {
+      try {
+        await applyLiveMovePostCommitEffects(rewoundSib);
+      } catch (err) {
+        logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
+      }
     }
 
     // Same escalation check the single-visit path runs — a series re-anchor

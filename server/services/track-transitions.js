@@ -329,18 +329,18 @@ async function markEnRoute(serviceId, opts = {}) {
       arrival_sms_sent_at: null,
     }
     : {};
+  // The CAS matches the status + schedule tuple this read observed, not
+  // just track_state: completion persists operational status BEFORE its
+  // best-effort tracker flip, so a completion (or a concurrent move)
+  // committing between this function's read and this write would otherwise
+  // still match `track_state='scheduled'` and flip a finished visit back to
+  // en_route — and the stale-clear variant would additionally erase its
+  // lifecycle columns. A tuple change makes the write miss; the race path
+  // below re-reads and reports whatever state won, with no side effects.
   const updated = await db('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
-    .modify((q) => {
-      // The stale-clear variant erases lifecycle columns, so its CAS must
-      // also match the status + schedule tuple this read observed — a
-      // completion that persisted status (but hasn't run its best-effort
-      // tracker flip yet) or a concurrent move makes it miss instead of
-      // wiping a finished visit's timestamps; the race path below re-reads.
-      if (staleEvidence) {
-        q.where('status', svc.status).where('scheduled_date', svc.scheduled_date);
-      }
-    })
+    .where('status', svc.status)
+    .where('scheduled_date', svc.scheduled_date)
     .update({
       track_state: 'en_route', en_route_at: now, updated_at: now, ...staleFlipClears,
     });
