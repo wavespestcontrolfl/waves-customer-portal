@@ -256,6 +256,12 @@ exports.down = async function down(knex) {
     }
     if (await knex.schema.hasTable('scheduled_services')) {
       refs += (await knex('scheduled_services').where({ service_id: entry.id }).pluck('service_id')).length;
+      // Completion resolution also treats service_key_snapshot as durable
+      // identity evidence (codex r8 P1): a visit with the snapshot, a null
+      // service_id, and a non-alias label still resolves this row.
+      if (await knex.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+        refs += (await knex('scheduled_services').where({ service_key_snapshot: entry.key }).pluck('id')).length;
+      }
     }
     if (await knex.schema.hasTable('scheduled_service_addons')) {
       refs += (await knex('scheduled_service_addons').where({ service_id: entry.id }).pluck('service_id')).length;

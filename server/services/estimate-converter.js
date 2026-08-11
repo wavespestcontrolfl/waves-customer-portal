@@ -4365,7 +4365,7 @@ const EstimateConverter = {
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
             } else if (cadence == null
-              && RecurringAppointmentSeeder.serviceKeyFor(coverageSvc) === 'palm_injection') {
+              && seedingFamilyKey(coverageSvc) === 'palm_injection') {
               // Palm validation refused the cadence (contradictory visit
               // count or a commercial line). Falling through would set
               // coverageVisitCount with an undefined cadence, and

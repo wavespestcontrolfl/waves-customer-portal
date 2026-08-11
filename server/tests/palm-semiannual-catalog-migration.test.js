@@ -341,6 +341,15 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(db.services.find((r) => r.service_key === KEY)).toBeDefined();
   });
 
+  test('down() RETAINS on a service_key_snapshot reference — null service_id, non-alias label (codex r8 P1)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'Trunk Injection Visit', service_key_snapshot: KEY });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db)).toBeDefined();
+    expect(profileRow(db)).toBeDefined();
+  });
+
   test('down() retains on completed service records and add-on wiring too', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
