@@ -31,6 +31,11 @@ jest.mock('../services/waveguard-existing-services', () => ({
 const mockPostCreditMovement = jest.fn(async () => ({ balanceAfter: 0, entry: {} }));
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: (...args) => mockPostCreditMovement(...args),
+  // Literal duplicates of the real constants (the mock can't requireActual
+  // without dragging the db pool in); the grant-identity test below pins
+  // them against drift.
+  WAVEGUARD_EXTENSION_CREDIT_BY: 'system:waveguard_tier_extension',
+  WAVEGUARD_EXTENSION_REVERSAL_BY: 'system:waveguard_tier_extension_reversal',
 }));
 
 const { applyFrozenExistingServiceExtension } = require('../services/estimate-converter');
@@ -38,57 +43,106 @@ const { applyFrozenExistingServiceExtension } = require('../services/estimate-co
 function fakeTrx({
   concurrentPrices = {}, addonLinks = [], invoiceLinks = [], probeThrows = false,
   invoiceLinksLateMint = [], concurrentPrepaid = {}, lockThrows = false,
-  priorExtensionAudits = [], auditProbeThrows = false,
+  priorExtensionAudits = [], auditProbeThrows = false, familyLockThrows = false,
+  prepayTerms = [], concurrentStamp = {},
 } = {}) {
   const updates = [];
   const auditRows = [];
   // Prices this transaction already wrote — the frozen-price and revert
   // predicates must see our own writes, the way pg does inside one txn.
   const writtenPrices = {};
+  const writtenPrimary = {};
   let invoiceProbeCalls = 0;
+  // The live row the way pg would see it: our own prior writes win, then a
+  // concurrent override, then the fixture row.
+  const liveRow = (key) => {
+    const base = mockRowsState.rows.find((r) => String(r.id) === key);
+    if (!base) return null;
+    const row = { ...base };
+    if (Object.prototype.hasOwnProperty.call(concurrentPrices, key)) {
+      row.estimated_price = concurrentPrices[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(writtenPrices, key)) {
+      row.estimated_price = writtenPrices[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(writtenPrimary, key)) {
+      row.primary_line_price = writtenPrimary[key];
+    }
+    return row;
+  };
   const database = (table) => {
     if (table === 'scheduled_services') {
       return {
         where: (criteria) => ({
           update: async (patch) => {
-            // Honor the frozen-price predicate the way pg would: the live
-            // price is our own prior write, else the mocked row's — or a
-            // concurrent override, for the read-to-write race tests (codex
-            // #3338 r14).
+            // Honor the frozen-price predicate the way pg would (codex
+            // #3338 r14) — both price columns when the CAS pins both.
             const id = String(criteria.id);
-            const live = Object.prototype.hasOwnProperty.call(writtenPrices, id)
-              ? writtenPrices[id]
-              : (Object.prototype.hasOwnProperty.call(concurrentPrices, id)
-                ? concurrentPrices[id]
-                : mockRowsState.rows.find((r) => String(r.id) === id)?.estimated_price);
+            const live = liveRow(id) || {};
             if (criteria.estimated_price !== undefined
-              && Number(live) !== Number(criteria.estimated_price)) {
+              && Number(live.estimated_price) !== Number(criteria.estimated_price)) {
+              return 0;
+            }
+            if (criteria.primary_line_price !== undefined
+              && Number(live.primary_line_price) !== Number(criteria.primary_line_price)) {
               return 0;
             }
             writtenPrices[id] = patch.estimated_price;
+            if (patch.primary_line_price !== undefined) {
+              writtenPrimary[id] = patch.primary_line_price;
+            }
             updates.push({ id: criteria.id, ...patch });
             return 1;
           },
         }),
-        // Locked allocation re-read (codex #3338 r7): concurrentPrepaid
-        // overrides simulate an annual-prepay writer racing the accept —
-        // a partial object patches the row, null means it vanished.
+        // Two FOR-UPDATE chains live here, routed by select columns:
+        //  - family lock: whereIn().orderBy().forUpdate().select('id',
+        //    'estimated_price', 'primary_line_price') — the authoritative
+        //    price read (mint-serialization fast-follow);
+        //  - prepaid allocation lock: whereIn().forUpdate().select('id',
+        //    'prepaid_amount', ...) — concurrentPrepaid overrides simulate
+        //    an annual-prepay writer racing the accept (a partial object
+        //    patches the row, null means it vanished).
+        whereIn: (col, ids) => {
+          const lockChain = {
+            forUpdate: () => ({
+              select: async (...cols) => {
+                const isFamilyLock = cols.includes('estimated_price');
+                if (isFamilyLock && familyLockThrows) throw new Error('lock timeout');
+                if (!isFamilyLock && lockThrows) throw new Error('lock timeout');
+                return ids.map((id) => {
+                  const key = String(id);
+                  if (isFamilyLock) {
+                    // concurrentStamp models a writer (annual-prepay
+                    // activation) that committed between the unlocked
+                    // liveRows read and this lock — the locked read sees
+                    // its fields, the stale objects don't (codex #3344 r7).
+                    const base = liveRow(key);
+                    if (base && Object.prototype.hasOwnProperty.call(concurrentStamp, key)) {
+                      return { ...base, ...concurrentStamp[key] };
+                    }
+                    return base;
+                  }
+                  const base = mockRowsState.rows.find((r) => String(r.id) === key);
+                  if (!base) return null;
+                  if (Object.prototype.hasOwnProperty.call(concurrentPrepaid, key)) {
+                    const override = concurrentPrepaid[key];
+                    return override === null ? null : { ...base, ...override };
+                  }
+                  return base;
+                }).filter(Boolean);
+              },
+            }),
+          };
+          return { ...lockChain, orderBy: () => lockChain };
+        },
+      };
+    }
+    if (table === 'annual_prepay_terms') {
+      // The per-term grant's prepay-invoice anchor lookup.
+      return {
         whereIn: (col, ids) => ({
-          forUpdate: () => ({
-            select: async () => {
-              if (lockThrows) throw new Error('lock timeout');
-              return ids.map((id) => {
-                const key = String(id);
-                const base = mockRowsState.rows.find((r) => String(r.id) === key);
-                if (!base) return null;
-                if (Object.prototype.hasOwnProperty.call(concurrentPrepaid, key)) {
-                  const override = concurrentPrepaid[key];
-                  return override === null ? null : { ...base, ...override };
-                }
-                return base;
-              }).filter(Boolean);
-            },
-          }),
+          select: async () => prepayTerms.filter((t) => ids.map(String).includes(String(t.id))),
         }),
       };
     }
@@ -139,6 +193,9 @@ function fakeTrx({
     throw new Error(`unexpected table ${table}`);
   };
   database.isTransaction = true;
+  // Nested savepoints (family lock, anchor lookup) re-enter with the same
+  // client, the way knex hands the parent trx a savepoint-scoped clone.
+  database.transaction = async (cb) => cb(database);
   return { database, updates, auditRows };
 }
 
@@ -392,6 +449,36 @@ describe('applyFrozenExistingServiceExtension', () => {
       createdBy: 'system:waveguard_tier_extension',
     });
     expect(trx).toBe(database);
+  });
+
+  // Classification comes from the LOCKED row (codex #3344 r7): annual-prepay
+  // activation stamping annual_prepay_term_id between the unlocked read and
+  // the family lock must route the visit to the prepaid-difference CREDIT,
+  // not the reprice — a covered visit's list price is never invoiced, so a
+  // reprice would silently drop the promised savings.
+  test('a visit stamped prepaid between the read and the lock credits instead of repricing', async () => {
+    const { database, updates } = fakeTrx({
+      concurrentStamp: { 'row-1': { annual_prepay_term_id: 'term-9', prepaid_amount: 55 } },
+      concurrentPrepaid: { 'row-1': { annual_prepay_term_id: 'term-9', prepaid_amount: 55 } },
+      prepayTerms: [{ id: 'term-9', prepay_invoice_id: 'inv-prepay' }],
+    });
+    mockRowsState.rows = [
+      pestRow({ id: 'row-1', scheduled_date: '2099-10-28' }), // stale object: NOT prepaid
+      pestRow({ id: 'row-2', scheduled_date: '2100-01-27' }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData(), activatedTier: 'Silver',
+    });
+    // row-2 stays a reprice; row-1 must NOT be price-written…
+    expect(summary.repricedRowCount).toBe(1);
+    expect(updates).toEqual([{ id: 'row-2', estimated_price: 49.5 }]);
+    // …it credits the frozen savings off its (matching) paid allocation.
+    expect(summary.creditAmount).toBe(5.5);
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      delta: 5.5,
+      note: expect.stringContaining('(term term-9, estimate e1)'),
+    }), database);
   });
 
   test('a prepaid visit without a usable paid allocation parks instead of a guessed credit', async () => {
@@ -736,6 +823,115 @@ describe('applyFrozenExistingServiceExtension', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
     expect(summary.reviewFamilies).toEqual([
       'Pest Control (could not verify paid allocations — credit manually)',
+    ]);
+    expect(summary.dirtyFamilies).toEqual(['pest_control']);
+  });
+
+  // Refund-clawback fast-follow: grants mint one ledger movement PER TERM,
+  // each carrying the "(term <id>, estimate <id>)" marker the annual-prepay
+  // reversal selects and dedupes by, and invoice_id anchored to the term's
+  // prepay invoice for the sweep recovery leg.
+  test('credits spanning two prepay terms mint one marker-carrying grant per term', async () => {
+    const { database } = fakeTrx({
+      prepayTerms: [
+        { id: 'term-1', prepay_invoice_id: 'inv-t1' },
+        { id: 'term-2', prepay_invoice_id: 'inv-t2' },
+      ],
+    });
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+      pestRow({ id: 'pre-2', scheduled_date: '2100-01-27', annual_prepay_term_id: 'term-2', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData(), activatedTier: 'Silver',
+    });
+    expect(summary.creditAmount).toBe(9.8);
+    expect(mockPostCreditMovement).toHaveBeenCalledTimes(2);
+    const payloads = mockPostCreditMovement.mock.calls.map(([p]) => p);
+    expect(payloads).toEqual([
+      expect.objectContaining({
+        customerId: 'c1',
+        delta: 4.9,
+        source: 'adjustment',
+        invoiceId: 'inv-t1',
+        note: expect.stringContaining('(term term-1, estimate e1)'),
+        createdBy: 'system:waveguard_tier_extension',
+      }),
+      expect.objectContaining({
+        delta: 4.9,
+        invoiceId: 'inv-t2',
+        note: expect.stringContaining('(term term-2, estimate e1)'),
+        createdBy: 'system:waveguard_tier_extension',
+      }),
+    ]);
+    // Marker must satisfy the reversal's LIKE '%term <id>,%' selector.
+    expect(payloads[0].note).toContain('term term-1,');
+  });
+
+  test('a missing prepay-invoice anchor still grants — marker only, no anchor', async () => {
+    // The anchor is best-effort: an unresolvable term lookup must not park
+    // a credit the customer is owed — the marker alone still supports the
+    // in-line clawback.
+    const { database } = fakeTrx();
+    mockRowsState.rows = [
+      pestRow({ id: 'pre-1', annual_prepay_term_id: 'term-1', prepaid_amount: 49 }),
+    ];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: prepaidSnapshotData({ rowIds: ['pre-1'] }), activatedTier: 'Silver',
+    });
+    expect(summary.creditAmount).toBe(4.9);
+    expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
+    expect(mockPostCreditMovement.mock.calls[0][0]).toMatchObject({
+      delta: 4.9,
+      invoiceId: null,
+      note: expect.stringContaining('(term term-1, estimate e1)'),
+    });
+  });
+
+  // Mint-serialization fast-follow: primary_line_price is the figure
+  // invoice lines PREFER, so a reprice moves it in lockstep — or parks
+  // when it disagrees with the contracted price.
+  test('a set primary_line_price that matches the contracted price is co-repriced', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow({ id: 'row-1', primary_line_price: 55 })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(summary.applied).toBe(true);
+    expect(updates).toEqual([
+      { id: 'row-1', estimated_price: 49.5, primary_line_price: 49.5 },
+    ]);
+  });
+
+  test('a set primary_line_price that DISAGREES with the contracted price parks as drift', async () => {
+    const { database, updates } = fakeTrx();
+    mockRowsState.rows = [pestRow({ id: 'row-1', primary_line_price: 40 })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (1 visit priced differently than quoted — apply manually)',
+    ]);
+  });
+
+  test('family row lock failure parks the family before any probe or write', async () => {
+    const { database, updates, auditRows } = fakeTrx({ familyLockThrows: true });
+    mockRowsState.rows = [pestRow({ id: 'row-1' })];
+    const summary = await applyFrozenExistingServiceExtension({
+      database, customerId: 'c1', estimateId: 'e1',
+      estimateData: frozenSnapshotData({ rowIds: ['row-1'] }), activatedTier: 'Silver',
+    });
+    expect(updates).toEqual([]);
+    expect(auditRows).toEqual([]);
+    expect(summary.applied).toBe(false);
+    expect(summary.reviewFamilies).toEqual([
+      'Pest Control (could not lock appointments — apply manually)',
     ]);
     expect(summary.dirtyFamilies).toEqual(['pest_control']);
   });

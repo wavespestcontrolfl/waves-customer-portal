@@ -8911,6 +8911,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
+          // Live replay mints prove the row price hasn't moved since this
+          // completion derived its amount (codex #3344 r2) — a WaveGuard
+          // reprice landing mid-completion 409s and the retry bills fresh
+          // (for the required lane, via the release catch restamping the
+          // frozen cents from the 409's locked price — codex r5 P1).
+          // Frozen-money lanes bypass replay entirely and keep their
+          // provable frozen figure.
+          scheduledPriceBasis: svc.estimated_price,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
@@ -8993,7 +9001,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
-            svc,
+            // A REQUIRED resume mints the FROZEN amount — and PROVES it
+            // (codex r7 P0): the guard compares the caller snapshot to the
+            // locked row, so the resume passes the frozen cents AS the
+            // snapshot price. Frozen ≡ locked row is the typed lane's money
+            // identity (the freeze stamps estimated_price at commit and the
+            // r5 catch restamps it from every reprice refusal), so a match
+            // mints the provable frozen figure and ANY divergence — a
+            // reprice after the restamp, or a restamp write that failed —
+            // 409s back into the refresh→release loop instead of silently
+            // billing the stale freeze. primary_line_price is NULL on the
+            // synthetic snapshot (r9-round pre-push P0): invoice lines
+            // PREFER primary_line_price, so the frozen single line at
+            // estimated_price is provable money ONLY for a visit with no
+            // primary line — null makes the guard PROVE that absence, and
+            // a primary-carrying locked row 409s instead of silently
+            // billing the wrong single-line total. First runs keep the
+            // live snapshot: a mid-flight reprice 409s, the catch restamps
+            // the frozen cents from the locked price, and the resume bills
+            // the moved price.
+            svc: useReplayLines
+              ? svc
+              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
+            allowPriceMovement: false,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -9008,7 +9038,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           invoice = minted.invoice;
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
-          invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          try {
+            invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          } catch (mintErr) {
+            // Typed reprice refusal on a NON-required live lane (codex r6
+            // P1): these lanes' failure posture is non-blocking — the
+            // completion finalizes succeeded — so without an in-place retry
+            // the 409 that exists to make the retry bill fresh would
+            // instead finalize the visit with NO invoice at all (lost AR,
+            // strictly worse than the stale price it refused). Rebuild once
+            // from the price the refusal proved current (read under the
+            // mint's own row lock): amount AND basis move together, so the
+            // replay rebuilds from the moved price and a SECOND movement
+            // mid-retry 409s again and falls through to the non-blocking
+            // catch like any transient failure. Required lanes never enter
+            // this branch's 409 (backfill mints bypass replay; typed
+            // one-time mints go through the serialized helper above and
+            // release for resume on refusal).
+            if (mintErr?.code === 'SCHEDULED_PRICE_MOVED'
+              && Number.isInteger(mintErr.currentEstimatedPriceCents)
+              && mintErr.currentEstimatedPriceCents > 0) {
+              const movedPrice = mintErr.currentEstimatedPriceCents / 100;
+              logger.warn(`[dispatch] visit ${svc.id} repriced mid-mint — retrying the completion invoice at the moved price $${movedPrice.toFixed(2)}`);
+              invoice = await InvoiceService.createFromService(record.id, {
+                ...mintOptions,
+                amount: movedPrice,
+                scheduledPriceBasis: movedPrice,
+              });
+            } else {
+              throw mintErr;
+            }
+          }
+          // createFromService can ADOPT an invoice another mint committed
+          // first (codex r6 round) — fold that into the same
+          // adopted-concurrent handling as the serialized helper's
+          // `reused` flag: setup-fee claim restore, service-record
+          // back-link, and already-paid messaging all key off it.
+          if (invoice?.adopted_existing_invoice) adoptedConcurrentInvoice = true;
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on
@@ -9038,11 +9104,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // the exact negative marker). If this clear fails or the process
         // dies first, the orphaned-claim recovery above finds the minted
         // line on the next completion and heals without a second charge.
+        // Retire ONLY when the fee actually rides the invoice (codex r6
+        // round): createFromService can now ADOPT an invoice another mint
+        // committed first — the claimed fee did not ride that one, so the
+        // claim goes back positive (the recovery re-mints it on the next
+        // completion) instead of being silently retired unbilled.
         if (secureSetupFee) {
+          const feeRode = JSON.stringify(invoice?.line_items || '')
+            .toLowerCase().includes('one-time setup fee');
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
-              .update({ pending_setup_fee: null, updated_at: new Date() });
+              .update(feeRode
+                ? { pending_setup_fee: null, updated_at: new Date() }
+                : { pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+            if (!feeRode) {
+              logger.warn(`[dispatch] setup-fee claim RESTORED for series ${secureSetupFee.parentId} — the completion adopted an invoice the fee did not ride`);
+            }
           } catch (clearErr) {
             logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
           }
@@ -9130,6 +9208,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // recomputation from the by-now-mutable billing profile.
         if (backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
+          // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
+          // the resume this release promises mints the frozen cents with
+          // replay disabled — without this, the stale-price 409 the guard
+          // just raised would be replayed as the stale price itself. The
+          // required live lane's amount IS estimated_price (typed one-time
+          // requires hasVisitPrice, so completionInvoiceAmount returns it),
+          // and the attached cents were read under the mint's own row lock
+          // — the moved price is the new money truth, so restamp it as the
+          // frozen figure. A FAILED restamp is safe to release anyway
+          // (codex r7 P0): the live typed resume passes the frozen cents AS
+          // the guard's price snapshot, so a resume whose freeze disagrees
+          // with the locked row 409s right back into this refresh instead
+          // of minting the stale figure — the release IS the restamp's
+          // retry, never a stale-mint promise. Zero/absent cents never
+          // restamp — a frozen figure must stay a positive committed price.
+          if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents == null
+            && Number.isInteger(invErr.currentEstimatedPriceCents)
+            && invErr.currentEstimatedPriceCents > 0) {
+            try {
+              await mergeRecordNotesKeys(record.id, {
+                backfillMintAmountCents: invErr.currentEstimatedPriceCents,
+              });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentEstimatedPriceCents}c for ${svc.id} after mid-mint reprice — the resume bills the moved price`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen mint refresh FAILED for ${svc.id} — the resume will mint the pre-reprice freeze: ${refreshErr.message}`);
+            }
+          } else if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents != null) {
+            // Primary-carrying visit (r9-round pre-push P0): the locked row
+            // holds a primary_line_price, so estimated_price is NOT the
+            // whole bill and no single frozen figure can honestly cover it
+            // — never restamp a guess. The resume's null-primary proof
+            // 409s right back here, so the closeout stays unfinalized and
+            // parked for the operator instead of minting wrong money.
+            logger.error(`[dispatch] frozen mint NOT refreshed for ${svc.id} — the visit carries a primary line price, so a single-line freeze cannot honestly cover the bill; bill manually or clear primary_line_price, then retry the closeout`);
+          }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
             // The conditional flip found the attempt not in

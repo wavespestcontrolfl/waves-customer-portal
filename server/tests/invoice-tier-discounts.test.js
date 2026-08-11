@@ -31,6 +31,7 @@ function setupDb({
   scheduledServices = [],
   scheduledAddons = [],
   serviceRecords = [],
+  existingInvoice = null,
 }) {
   let insertedInvoice = null;
   const discountById = new Map(discounts.map((row) => [String(row.id), row]));
@@ -65,6 +66,9 @@ function setupDb({
         where: jest.fn((criteria) => { q.criteria = criteria || {}; return q; }),
         leftJoin: jest.fn(() => q),
         select: jest.fn(() => q),
+        // createFromService's replay path locks the visit row inside its
+        // mint transaction (mint-serialization, WaveGuard #3338 fast-follow).
+        forUpdate: jest.fn(() => q),
         first: jest.fn(async () => scheduledServices.find((row) => (
           !q.criteria.id || String(row.id) === String(q.criteria.id)
         ) && (
@@ -125,8 +129,12 @@ function setupDb({
     if (table === 'invoices') {
       const q = {
         where: jest.fn(() => q),
+        // The replay mint's in-lock adoption re-check (codex r6 round)
+        // filters terminal statuses; no invoice exists → create proceeds.
+        whereNot: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
         orderBy: jest.fn(() => q),
-        first: jest.fn(async () => null),
+        first: jest.fn(async () => existingInvoice),
         insert: jest.fn((data) => {
           insertedInvoice = data;
           return {
@@ -143,6 +151,11 @@ function setupDb({
 
     throw new Error(`Unexpected table query: ${table}`);
   });
+  // The replay path now mints inside a transaction (row lock) — pass the
+  // same table-routed mock through as the trx client. The lock-order guard
+  // takes the customer key-share via raw SQL before the row lock.
+  db.raw = jest.fn().mockResolvedValue({ rows: [] });
+  db.transaction = jest.fn(async (callback) => callback(db));
 
   return {
     getInsertedInvoice: () => insertedInvoice,
@@ -536,5 +549,154 @@ describe('invoice tier discounts', () => {
       [expect.objectContaining({ id: 'silver-id', discount_dollars: 10 })],
       'system'
     );
+  });
+
+  // Stale-basis refusal (codex #3344 r2): a replay caller whose amount was
+  // derived from the row price passes that basis; if the row was repriced
+  // (WaveGuard extension) before the mint's lock, the stale fallbackAmount
+  // must not silently win — refuse with the shared 409 contract instead.
+  test('createFromService 409s when scheduledPriceBasis no longer matches the locked row price', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 81, // repriced since the caller read 90
+        primary_line_price: null,
+      }],
+    });
+
+    await expect(InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'SCHEDULED_PRICE_MOVED',
+      // The locked current price rides the error (codex #3344 r5): the
+      // dispatch REQUIRED-mint catch restamps its frozen mint cents from it
+      // so the released resume bills the moved price.
+      currentEstimatedPriceCents: 8100,
+    });
+  });
+
+  // In-lock adoption (codex #3344 r6 round): the replay mint serializes on
+  // the shared schedule.invoice.mint advisory lock and adopts an invoice
+  // another writer (Charge Now / completion mint) committed first — the
+  // caller's reuse filters ran before this transaction and cannot have
+  // seen it. Creating here would double-collect the visit.
+  test('createFromService adopts an invoice another mint committed first instead of creating a duplicate', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+      existingInvoice: { id: 'inv-existing', status: 'sent', scheduled_service_id: 'scheduled-1' },
+    });
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    });
+
+    expect(invoice.id).toBe('inv-existing');
+    // Callers tell adoption apart from creation by this transient flag
+    // (codex r6 P1) — dispatch keys back-link/setup-fee/messaging off it.
+    expect(invoice.adopted_existing_invoice).toBe(true);
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['schedule.invoice.mint', 'scheduled-1'],
+    );
+  });
+
+  // Threaded caller transaction (codex #3344 r6 P1): a caller already
+  // holding the schedule.invoice.mint advisory lock (billing recovery)
+  // passes its trx — the replay mint must run as a SAVEPOINT on that
+  // session (same-session lock re-acquisition is a no-op) instead of
+  // opening a second connection that deadlocks on the caller's own lock.
+  test('createFromService runs the replay mint on a threaded caller transaction', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+    });
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = jest.fn().mockResolvedValue({ rows: [] });
+    callerTrx.transaction = jest.fn(async (fn) => fn(callerTrx));
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+      database: callerTrx,
+    });
+
+    expect(invoice.id).toBe('invoice-1');
+    expect(callerTrx.transaction).toHaveBeenCalled();
+    expect(callerTrx.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['schedule.invoice.mint', 'scheduled-1'],
+    );
+  });
+
+  test('createFromService with a matching scheduledPriceBasis mints normally', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+    });
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    });
+
+    expect(invoice.total).toBe(90);
   });
 });

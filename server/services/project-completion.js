@@ -560,7 +560,15 @@ async function completeProjectBackedService({
 
   let postCommitTrackServiceId = null;
   const result = await knex.transaction(async (trx) => {
-    const project = await trx('projects').where({ id: projectId }).first();
+    // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
+    // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
+    // then waits on the scheduled-service lock via the shared mint chain,
+    // while this transaction used to lock the visit (its UPDATE below) and
+    // the project row LAST — the classic ABBA pair Postgres resolves by
+    // aborting one side. Locking the project at entry makes every
+    // project-scoped writer agree on the one order: project → visit. The
+    // close UPDATEs below re-lock an already-held row (free).
+    const project = await trx('projects').where({ id: projectId }).forUpdate().first();
     if (!project) {
       const err = new Error('Project not found');
       err.status = 404;
