@@ -400,6 +400,12 @@ function mockTables({
     if (table === 'technicians') return chain({ first: jest.fn(async () => null) });
     if (table === 'activity_log') return chain({ insert: jest.fn(async (row) => { activityRows.push(row); return [1]; }) });
     if (table === 'service_records') return chain();
+    // The non-WDO mint locks the visit row before building lines
+    // (mint-serialization, codex #3344 r2); chain() carries forUpdate and a
+    // truthy first() row for the lock read.
+    if (table === 'scheduled_services') {
+      return chain({ first: jest.fn(async () => ({ id: 'sched-55' })) });
+    }
     throw new Error(`Unexpected table query: ${table}`);
   });
   db.transaction.mockImplementation(async (cb) => cb(db));

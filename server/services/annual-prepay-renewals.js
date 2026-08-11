@@ -2590,6 +2590,8 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       const termId = termMatch ? termMatch[1] : null;
       if (!termId || seenTerms.has(termId)) continue;
       seenTerms.add(termId);
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // collectible) out of the locked path entirely.
       const anchorInvoice = await conn('invoices')
         .where({ id: grant.invoice_id })
         .first('id', 'status');
@@ -2605,11 +2607,32 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       // the cancelled set, and a DISPUTE parks the invoice at 'overdue' —
       // never a mid-dispute clawback. The term row is only needed for its
       // identity; the reversal itself is marker-deduped and balance-capped.
-      const term = await conn('annual_prepay_terms')
-        .where({ id: termId })
-        .first('id', 'customer_id', 'status');
-      if (!term) continue;
-      summary.reversed += await reverseWaveguardExtensionCredits(term, conn);
+      //
+      // Anchor recheck UNDER LOCK (codex #3344 r2): the pre-check above can
+      // observe 'refunded' while a lost-dispute repayment is mid-flight —
+      // clawing after it commits 'paid' would remove a credit whose backing
+      // payment was just restored. Lock the anchor row and re-read inside
+      // the same transaction the reversal runs in; the repayment's own
+      // invoice UPDATE serializes on the row lock, so whichever commits
+      // first, the other sees its final state. Lock order invoice →
+      // customer matches applyAccountCreditToInvoice.
+      const clawIfStillRefunded = async (t) => {
+        const lockedAnchor = await t('invoices')
+          .where({ id: grant.invoice_id })
+          .forUpdate()
+          .first('id', 'status');
+        if (!lockedAnchor) return 0;
+        const lockedStatus = String(lockedAnchor.status || '').toLowerCase();
+        if (!INVOICE_CANCELLED_STATUSES.has(lockedStatus)) return 0;
+        const term = await t('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'customer_id', 'status');
+        if (!term) return 0;
+        return reverseWaveguardExtensionCredits(term, t);
+      };
+      summary.reversed += conn === db
+        ? await db.transaction(clawIfStillRefunded)
+        : await clawIfStillRefunded(conn);
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);

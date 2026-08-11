@@ -8780,6 +8780,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
+          // Live replay mints prove the row price hasn't moved since this
+          // completion derived its amount (codex #3344 r2) — a WaveGuard
+          // reprice landing mid-completion 409s and the retry bills fresh.
+          // Frozen-money lanes bypass replay entirely and keep their
+          // provable frozen figure.
+          scheduledPriceBasis: svc.estimated_price,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today

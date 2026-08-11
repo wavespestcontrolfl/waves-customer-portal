@@ -543,4 +543,62 @@ describe('invoice tier discounts', () => {
       'system'
     );
   });
+
+  // Stale-basis refusal (codex #3344 r2): a replay caller whose amount was
+  // derived from the row price passes that basis; if the row was repriced
+  // (WaveGuard extension) before the mint's lock, the stale fallbackAmount
+  // must not silently win — refuse with the shared 409 contract instead.
+  test('createFromService 409s when scheduledPriceBasis no longer matches the locked row price', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 81, // repriced since the caller read 90
+        primary_line_price: null,
+      }],
+    });
+
+    await expect(InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    })).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_PRICE_MOVED' });
+  });
+
+  test('createFromService with a matching scheduledPriceBasis mints normally', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+      discounts: [],
+      serviceRecords: [{
+        id: 'record-1',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'scheduled-1',
+        service_type: 'Pest Control',
+      }],
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Pest Control',
+        estimated_price: 90,
+        primary_line_price: null,
+      }],
+    });
+
+    const invoice = await InvoiceService.createFromService('record-1', {
+      amount: 90,
+      description: 'Adjusted visit',
+      useScheduledReplay: true,
+      scheduledPriceBasis: 90,
+    });
+
+    expect(invoice.total).toBe(90);
+  });
 });

@@ -492,6 +492,11 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         description: visit.service_type,
         taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
         useScheduledReplay: true,
+        // The row price this amount derived from — lets the locked replay
+        // rebuild 409 instead of silently minting a since-repriced visit at
+        // the stale figure (codex #3344 r2). Unpriced rows (per-app fee
+        // lane) have no basis to drift.
+        scheduledPriceBasis: rowPrice > 0 ? visit.estimated_price : undefined,
         dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
       });
 

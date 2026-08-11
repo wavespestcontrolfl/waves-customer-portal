@@ -1588,6 +1588,14 @@ const InvoiceService = {
       // these — this method just carries them into the same mint so the fee
       // and the visit share one invoice.
       extraLineItems = [],
+      // The estimated_price the caller's `amount` was DERIVED from (codex
+      // #3344 r2): replay callers that pre-compute a price from the row
+      // (billing recovery, live completion) pass it so the locked rebuild
+      // can prove the row hasn't been repriced since — fallbackAmount
+      // outranks the row price in the line builder, so without this check
+      // a stale amount would silently win over the freshly locked value.
+      // Omitted = the amount is its own authority (operator-typed).
+      scheduledPriceBasis = undefined,
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -1619,10 +1627,32 @@ const InvoiceService = {
     // explicit-amount path bills the operator's figure and needs no lock.
     const buildParams = async (conn = null) => {
       if (replayFromScheduled && conn) {
-        await conn("scheduled_services")
+        const lockedRow = await conn("scheduled_services")
           .where({ id: sr.scheduled_service_id })
           .forUpdate()
-          .first("id");
+          .first("id", "estimated_price");
+        // Stale-basis refusal (codex #3344 r2): when the caller's amount
+        // was derived from the row price, a locked price that no longer
+        // matches means a reprice (the WaveGuard extension) landed since —
+        // and fallbackAmount would outrank the fresh price in the line
+        // builder. Terminal 409, same contract as the shared mint helper:
+        // the retry re-reads and bills the current price.
+        if (
+          lockedRow &&
+          scheduledPriceBasis !== undefined &&
+          scheduledPriceBasis !== null
+        ) {
+          const cents = (v) =>
+            v === null || v === undefined ? null : Math.round(Number(v) * 100);
+          if (cents(lockedRow.estimated_price) !== cents(scheduledPriceBasis)) {
+            const e = new Error(
+              "Scheduled service was repriced while minting — retry to bill the current price",
+            );
+            e.status = 409;
+            e.code = "SCHEDULED_PRICE_MOVED";
+            throw e;
+          }
+        }
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
@@ -1736,6 +1766,10 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          // Stale-price/authorization refusals are terminal — retrying the
+          // same stale params can't fix them (mirrors the shared mint
+          // helper's contract).
+          if (err.status) throw err;
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );

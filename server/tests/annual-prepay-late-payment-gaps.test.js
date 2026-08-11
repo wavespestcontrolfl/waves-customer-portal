@@ -472,7 +472,10 @@ describe('annual prepay late-payment gap fixes', () => {
           query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: grants for the term
           query({ rows: [] }), // reversal: prior reversal notes
         ],
-        invoices: [query({ first: { id: 'inv-prepay', status: 'refunded' } })],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // unlocked pre-check
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // in-lock recheck
+        ],
         customers: [query({ first: { id: 'cust-1', account_credits: '10.00' } })],
       });
 
@@ -484,6 +487,32 @@ describe('annual prepay late-payment gap fixes', () => {
         delta: -4.9,
         createdBy: 'system:waveguard_tier_extension_reversal',
       }), conn);
+    });
+
+    // TOCTOU guard (codex #3344 r2): the unlocked pre-check can observe
+    // 'refunded' while a lost-dispute REPAYMENT is mid-flight — the in-lock
+    // recheck must see the repaid anchor and stand down, or the sweep would
+    // claw a credit whose backing payment was just restored.
+    test('anchor repaid between pre-check and lock → the in-lock recheck stands down', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // stale pre-check
+          query({ first: { id: 'inv-prepay', status: 'paid' } }), // repayment won the race
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
     });
 
     test('extension grant whose prepay anchor is still collectible is never clawed by the sweep', async () => {

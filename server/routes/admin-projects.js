@@ -3000,9 +3000,26 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // invoice off a different appointment than the one being reported on. Without
     // any scheduled service there's no priced line set to bill from.
     const scheduledServiceId = serviceRecord?.scheduled_service_id || project.scheduled_service_id;
+    // Mint-serialization (codex #3344 r2, WaveGuard #3338 fast-follow):
+    // this draft bills the visit's scheduled-service pricing, so it must
+    // contend on the same visit row lock every other scheduled-price mint
+    // takes — the WaveGuard extension apply holds FOR UPDATE on the rows it
+    // reprices, and an unlocked build here could line-item the old price
+    // after both of the extension's invoice probes have passed. Lock on
+    // THIS transaction and build the lines through it; the create below
+    // commits on the pooled connection while the lock (held to this trx's
+    // commit) keeps the reprice out until the invoice is visible to the
+    // extension's probes.
+    if (scheduledServiceId) {
+      await trx('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .forUpdate()
+        .first('id');
+    }
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
           fallbackDescription: serviceRecord?.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+          database: trx,
         })
       : { lineItems: [], discountIds: [] };
     // Sum the non-discount (positive) lines — a draft with no positive lines
