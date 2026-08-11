@@ -1495,12 +1495,37 @@ async function applyBridge(options = {}) {
     }
   }
 
+  // Persist this scan's AMBIGUOUS candidates HERE, on EVERY apply path
+  // (codex P1, ambiguity-record r2): the admin manual apply supports
+  // 31–90-day scans whose candidates the fixed 30-day scheduler scan can
+  // never rediscover — recording only in the cron let a manual run's
+  // strong ambiguous paid evidence evaporate before the next organic
+  // fallback. Read from `ambiguousCandidates` — the COMPLETE qualifying
+  // set (codex P1, PR #3303 r23): `alternatives` is a display preview
+  // capped at two; the preview stays the fallback for match shapes that
+  // predate the field. Resolution stays with the daily cron, which alone
+  // knows the scan's trust and window coverage. Errors PROPAGATE: in the
+  // cron they land in bridgePairError (which also skips the organic
+  // sweep), in the manual route they fail the request — never report an
+  // applied bridge whose ambiguity record silently failed.
+  const ambiguousCandidates = skipped
+    .filter((m) => m?.skipReason === 'ambiguous')
+    .flatMap((m) => ((m.ambiguousCandidates || []).length
+      ? m.ambiguousCandidates
+      : [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)]))
+    .filter(Boolean);
+  await recordAmbiguousBridgeCalls(ambiguousCandidates);
+
   return {
     ...preview,
     appliedCount: applied.length,
     skippedCount: skipped.length,
     applied,
     skipped,
+    // The day's fresh candidate ids — the cron feeds these to the phone
+    // exclusion arm (fresh-only; persisted holds take the durable arms)
+    // and to rescan_clear's "not re-reported today" test.
+    ambiguousCandidateCallIds: [...new Set(ambiguousCandidates.map((c) => c.id).filter(Boolean).map(String))],
   };
 }
 
@@ -1529,7 +1554,7 @@ function isBridgeTargetNumber(phone) {
 // on POSITIVE evidence, and feed the organic exclusions from ALL open rows.
 // ---------------------------------------------------------------------------
 
-// Upsert the day's ambiguous candidate calls. A repeat refreshes
+// Upsert a scan's ambiguous candidate calls. A repeat refreshes
 // last_seen_at; a candidate that was previously RESOLVED re-opens — today's
 // scan saying "ambiguous" supersedes any older resolution.
 async function recordAmbiguousBridgeCalls(candidates = []) {
@@ -1545,10 +1570,47 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
   }
   const rows = [...byId.values()];
   if (!rows.length) return 0;
+  // A REOPEN is evidence WITHDRAWN, not just a hold re-armed (codex P1,
+  // ambiguity-record r2): a rescan_clear lifts the hold and the same
+  // tick's organic sweep can write the linked lead's irreversible organic
+  // row — if the ambiguity then returns, the re-armed hold cannot repair
+  // that row on its own (recordCallPpcAttribution dedupes by lead and
+  // refuses a different existing source). Detect reopens BEFORE the
+  // upsert and retire the rows provenanced to those calls. Bridge-target
+  // calls are excluded from call-time attribution AND claim-time backfill,
+  // so a row carrying such a call's provenance can only be the sweep's own
+  // write — and the shared retire primitive preserves any accumulated
+  // history (reassign-else-demote). The re-held lead re-attributes when
+  // the ambiguity genuinely resolves.
+  const reopenedIds = (await db('bridge_ambiguous_calls')
+    .whereIn('call_log_id', rows.map((r) => r.call_log_id))
+    .whereNotNull('resolved_at')
+    .select('call_log_id')).map((r) => String(r.call_log_id));
   await db('bridge_ambiguous_calls')
     .insert(rows)
     .onConflict('call_log_id')
     .merge({ last_seen_at: db.fn.now(), resolved_at: null, resolve_reason: null });
+  if (reopenedIds.length) {
+    // Lazy require: this module and call-attribution require each other.
+    const { retireCallAttributionRow } = require('./call-attribution');
+    let retired = 0;
+    for (const callId of reopenedIds) {
+      const provRows = await db('ad_service_attribution')
+        .where({ source_call_id: callId })
+        .whereNotNull('lead_id')
+        .select('lead_id');
+      for (const leadId of new Set(provRows.map((r) => String(r.lead_id)))) {
+        // In a transaction PER RETIRE: the primitive's FOR UPDATE reads
+        // must stay held through its demote-vs-delete decision (the r30
+        // lock-before-judging rule) — on the bare connection each
+        // statement autocommits and the lock releases immediately.
+        retired += await db.transaction(
+          (trx) => retireCallAttributionRow(trx, callId, leadId),
+        );
+      }
+    }
+    logger.info(`[bridge-ambiguity] reopened ${reopenedIds.length} record(s), retired ${retired} interim attribution row(s)`);
+  }
   return rows.length;
 }
 

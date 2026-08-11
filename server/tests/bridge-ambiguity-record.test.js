@@ -31,11 +31,18 @@ const mockDb = jest.fn((table) => {
 });
 mockDb.raw = jest.fn((sql) => sql);
 mockDb.fn = { now: () => 'NOW()' };
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('google-ads-api', () => ({ GoogleAdsApi: jest.fn(), enums: { CampaignStatus: { ENABLED: 'ENABLED', PAUSED: 'PAUSED' } } }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid-1') }));
+// The reopen reconciliation retires through the shared history-preserving
+// primitive — pin the delegation, not a re-implementation.
+const mockRetire = jest.fn(async () => 1);
+jest.mock('../services/ads/call-attribution', () => ({
+  retireCallAttributionRow: (...a) => mockRetire(...a),
+}));
 
 const {
   recordAmbiguousBridgeCalls,
@@ -72,6 +79,25 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mergeCalls).toHaveLength(1);
     expect(mergeCalls[0].patch).toMatchObject({ resolved_at: null, resolve_reason: null });
     expect(mergeCalls[0].patch.last_seen_at).toBeTruthy();
+  });
+
+  test('a REOPEN retires the attribution rows written while the hold was lifted (codex P1 r2)', async () => {
+    // rescan_clear → same-tick organic write → ambiguity returns: the
+    // re-armed hold alone cannot repair the row (recordCallPpcAttribution
+    // dedupes by lead), so the reopen retires the interim rows through the
+    // shared history-preserving primitive.
+    listQueueByTable.bridge_ambiguous_calls = [[{ call_log_id: 'call-1' }]]; // previously RESOLVED
+    listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).toHaveBeenCalledTimes(1);
+    expect(mockRetire.mock.calls[0][1]).toBe('call-1');
+    expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
+  });
+
+  test('a FIRST sighting (never resolved) retires nothing — no interim write can exist under an open hold', async () => {
+    listQueueByTable.bridge_ambiguous_calls = [[]]; // no resolved rows among the batch
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).not.toHaveBeenCalled();
   });
 
   test('no valid candidates → no insert at all', async () => {
@@ -148,18 +174,32 @@ describe('scheduler wiring (source pins)', () => {
   const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 14000);
 
   test('the organic exclusions come from ALL OPEN persisted records, not the day\'s scan set', () => {
-    expect(block).toMatch(/organicExclusions = await require\('\.\/ads\/google-call-bridge'\)\.openAmbiguousCallExclusions\(\)/);
-    // The day's candidates are persisted BEFORE resolution and the read.
-    const rec = block.indexOf('recordAmbiguousBridgeCalls');
+    expect(block).toMatch(/\.\.\.\(await require\('\.\/ads\/google-call-bridge'\)\.openAmbiguousCallExclusions\(\)\)/);
+    // Recording lives in applyBridge (every apply path, manual included) —
+    // NOT in the cron; the cron only resolves and reads.
+    expect(block).not.toMatch(/recordAmbiguousBridgeCalls/);
     const resv = block.indexOf('resolveAmbiguousBridgeCalls');
     const open = block.indexOf('openAmbiguousCallExclusions');
-    expect(rec).toBeGreaterThan(-1);
-    expect(resv).toBeGreaterThan(rec);
+    expect(resv).toBeGreaterThan(-1);
     expect(open).toBeGreaterThan(resv);
     // ...and the read sits on EVERY sweep path, AFTER the unconfigured
     // branch — an opt-in install with pre-teardown records must still hold
     // their leads.
     expect(open).toBeGreaterThan(block.indexOf('google_ads_unconfigured'));
+  });
+
+  test('only the DAY\'S fresh candidates take the broad phone arm — persisted holds ride the durable arms (codex P1 r2)', () => {
+    expect(block).toMatch(/dayAmbiguousCallIds = r\.ambiguousCandidateCallIds \|\| \[\]/);
+    expect(block).toMatch(/excludePhoneCallIds: dayAmbiguousCallIds/);
+    // Sweep side: the phone arm consumes ONLY excludePhoneCallIds; the
+    // stamp arm keeps the (possibly indefinite) persisted ids.
+    const fs2 = require('fs');
+    const ca = fs2.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1];
+    const phoneArm = sweep.split('function phoneLinkedCallAmbiguous')[1];
+    expect(phoneArm).toMatch(/whereIn\('clp\.id', excludePhoneCallIds\)/);
+    expect(phoneArm).not.toMatch(/whereIn\('clp\.id', excludeCallIds\)/);
+    expect(sweep).toMatch(/if \(excludePhoneCallIds\.length\)/);
   });
 
   test('rescan_clear is gated on a TRUSTED scan and a coverage boundary with a one-day margin', () => {
@@ -168,6 +208,19 @@ describe('scheduler wiring (source pins)', () => {
     // One named window constant feeds BOTH the scan and the boundary — they
     // cannot drift apart.
     expect(block).toMatch(/applyBridge\(\{ days: bridgeScanDays, limit: 500 \}\)/);
+  });
+
+  test('applyBridge itself persists every scan\'s candidates — manual admin applies included (codex P1 r2)', () => {
+    const fs2 = require('fs');
+    const bridgeSrc = fs2.readFileSync(path.join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
+    const apply = bridgeSrc.split('async function applyBridge')[1].split('\nfunction isBridgeTargetNumber')[0];
+    // The complete qualifying set, preview fallback included, recorded
+    // before the return — a 31–90-day manual scan's candidates would
+    // otherwise evaporate before the next organic fallback.
+    expect(apply).toMatch(/skipReason === 'ambiguous'/);
+    expect(apply).toMatch(/m\.ambiguousCandidates \|\| \[\]/);
+    expect(apply).toMatch(/await recordAmbiguousBridgeCalls\(ambiguousCandidates\)/);
+    expect(apply).toMatch(/ambiguousCandidateCallIds:/);
   });
 });
 

@@ -562,6 +562,15 @@ async function attributeUnclaimedBridgeLeads({
   // whose only linked call carries strong-but-ambiguous paid evidence).
   excludeCallSids = [],
   excludeCallIds = [],
+  // The broad last-10 PHONE arm takes ONLY these ids — the DAY'S fresh
+  // ambiguous candidates, never the persisted indefinite holds (codex P1,
+  // ambiguity-record r2). With holds that can now live forever, routing
+  // them through the phone arm would permanently suppress every LATER,
+  // DISTINCT lead reusing the same household number — the exact r25 bug
+  // class the bare phone arm was removed from linkedCallToLead for. The
+  // durable arms above (sid, stamp) are proven call↔lead links and safely
+  // carry the indefinite holds; the phone arm stays a same-window delay.
+  excludePhoneCallIds = [],
 } = {}) {
   // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
   // module-scope import back at it would be a require cycle.
@@ -627,6 +636,8 @@ async function attributeUnclaimedBridgeLeads({
           .whereRaw("cla.metadata->>'lead_id' = l.id::text")
           .whereIn('cla.id', excludeCallIds);
       });
+    }
+    if (excludePhoneCallIds.length) {
       // PHONE-reuse linkage arm (codex P1 r18): a phone-bearing call the
       // processor linked via findReusableCallLead left neither a sid nor
       // a stamp on the lead — the only durable linkage is the caller's
@@ -634,14 +645,17 @@ async function attributeUnclaimedBridgeLeads({
       // leg (from_phone; the dialed leg is the shared office number and
       // would over-exclude every bridge-target lead) sits out until the
       // ambiguity resolves. Deliberately broader than the retire arm's
-      // ownership gating: this exclusion only DELAYS an irreversible
-      // organic label and lifts the day the ambiguity clears, so
-      // shared-number over-match costs a day of waiting, never a wrong
-      // row. NULL/short lead phones must PASS (same rule as the NULL-sid
-      // arm): the length guard empties the subquery for them.
+      // ownership gating — which is exactly why it takes ONLY the day's
+      // fresh candidate ids, never the persisted indefinite holds (see
+      // the excludePhoneCallIds parameter doc): a fresh candidate
+      // re-reports every scan until it resolves, so this stays a delay
+      // bounded by the scan window, never a permanent suppression of a
+      // later distinct lead on a shared number. NULL/short lead phones
+      // must PASS (same rule as the NULL-sid arm): the length guard
+      // empties the subquery for them.
       qb.whereNotExists(function phoneLinkedCallAmbiguous() {
         this.select(1).from('call_log as clp')
-          .whereIn('clp.id', excludeCallIds)
+          .whereIn('clp.id', excludePhoneCallIds)
           .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
           .whereRaw("RIGHT(regexp_replace(COALESCE(clp.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)");
       });

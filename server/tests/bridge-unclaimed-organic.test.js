@@ -222,11 +222,12 @@ describe('scheduler wiring', () => {
 
   test('ambiguous matches exclude ONLY their linked leads from the fallback — scoped, not a global block (codex P1 r14 + pre-push P1 r18)', () => {
     const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 12000);
-    // Candidate calls collected from the day's ambiguous matches (best +
-    // alternatives) and passed to the sweep; no global bridgeBlockedReason
+    // Candidate calls are collected by applyBridge itself (every apply
+    // path, manual included — codex P1, ambiguity-record r2) and reach the
+    // sweep via the persisted-record read; no global bridgeBlockedReason
     // arm — one persistent shared-SID ambiguity must not starve every
     // unrelated organic lead.
-    expect(block).toMatch(/skipReason === 'ambiguous'/);
+    expect(block).toMatch(/r\.ambiguousCandidateCallIds/);
     expect(block).toMatch(/organicExclusions/);
     expect(block).toMatch(/attributeUnclaimedBridgeLeads\(\{ olderThanDays: days, \.\.\.organicExclusions \}\)/);
     expect(block).not.toMatch(/bridgeBlockedReason = 'ambiguous_matches'/);
@@ -247,7 +248,9 @@ describe('scheduler wiring', () => {
     const sweep = ca.split('async function attributeUnclaimedBridgeLeads')[1].split('.orderBy(')[0];
     const phoneArm = sweep.split('function phoneLinkedCallAmbiguous')[1];
     expect(phoneArm).toBeTruthy();
-    expect(phoneArm).toMatch(/whereIn\('clp\.id', excludeCallIds\)/);
+    // The DAY'S fresh candidates only — persisted indefinite holds must
+    // never ride the broad phone arm (codex P1, ambiguity-record r2).
+    expect(phoneArm).toMatch(/whereIn\('clp\.id', excludePhoneCallIds\)/);
     // CALLER leg only — the dialed leg is the shared office number and
     // would exclude every bridge-target lead.
     expect(phoneArm).toMatch(/clp\.from_phone/);
@@ -395,7 +398,6 @@ describe('r23 ambiguity + linkage completeness', () => {
   const fs = require('fs');
   const path = require('path');
   const bridge = fs.readFileSync(path.join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
-  const sched = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
 
   test('the exclusion set is built from EVERY qualifying candidate, not the two-item display preview', () => {
     // buildMatches truncates `alternatives` to slice(1, 3) for the UI; a
@@ -405,8 +407,10 @@ describe('r23 ambiguity + linkage completeness', () => {
     // The margin is named once and shared with the ambiguity test itself.
     expect(bridge).toMatch(/const AMBIGUITY_SCORE_MARGIN = 10;/);
     expect(bridge).not.toMatch(/best\.score - second\.score < 10\b/);
-    // The sweep reads the complete set, with the preview only as fallback.
-    expect(sched).toMatch(/\(m\.ambiguousCandidates \|\| \[\]\)\.length/);
+    // The persistence path reads the complete set, with the preview only
+    // as fallback — the flatMap lives in applyBridge now (codex P1,
+    // ambiguity-record r2: manual applies must persist too).
+    expect(bridge).toMatch(/\(m\.ambiguousCandidates \|\| \[\]\)\.length/);
   });
 
   test('the cleared-link proof also checks provenance and stamp-less phone linkage', () => {
