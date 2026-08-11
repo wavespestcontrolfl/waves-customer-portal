@@ -334,11 +334,15 @@ function explicitCadenceFieldForService(svc = {}) {
   // read (codex r7 P1: a palm row { cadence: 'monthly', visitsPerYear: 2 }
   // must count as cadence-bearing so the forced rule stands down and the
   // contradictory data declines through normal validation).
+  // Field vocabulary mirrors recurringServiceCadenceKey below (codex r8
+  // P1: plan_frequency snake_case included) minus its visit-count
+  // fallbacks — visit counts are exactly what this reader must NOT infer
+  // from.
   return [
     svc.frequency, svc.frequencyKey, svc.frequency_key,
     svc.recurringPattern, svc.recurring_pattern,
     svc.cadence, svc.cadenceKey, svc.cadence_key,
-    svc.planFrequency,
+    svc.planFrequency, svc.plan_frequency,
   ]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
     .find(Boolean) || null;
@@ -3793,7 +3797,14 @@ const EstimateConverter = {
               // Fail-open: an absent row (env not yet migrated) keeps
               // today's behavior, id included.
               {
-                const reservedFam = RecurringAppointmentSeeder.serviceKeyFor({ service_type: reservedStart.service_type });
+                // Family via the CONVERTER's resolver, not the seeder's
+                // (codex r8 P1): serviceKeyFor checks tree tokens before
+                // palm, so an adopted appointment labeled "Palm Tree
+                // Injections" — an alias estimate-public explicitly
+                // supports during adoption — classifies tree_shrub and
+                // the relink never fires. recurringServiceKey puts palm
+                // first, exactly for labels like this.
+                const reservedFam = recurringServiceKey({ name: reservedStart.service_type });
                 const reservedCatalogKey = reservedFam === 'palm_injection'
                   ? (reservedSeedingPattern === 'semiannual' ? 'palm_injection_semiannual' : null)
                   : reservedFam === 'lawn_care'

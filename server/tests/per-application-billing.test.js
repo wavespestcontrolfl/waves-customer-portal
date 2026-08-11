@@ -262,6 +262,11 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     // and declines, never forced.
     const cadenceSpelled = { service: 'palm_injection', name: 'Palm Injection', cadence: 'monthly', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(cadenceSpelled, { service_type: 'Palm Injection' }, null)).toBe(null);
+    // Snake-case plan_frequency counts too (codex r8 P1 — the persisted
+    // spelling recurringServiceCadenceKey already reads).
+    const snakeSpelled = { service: 'palm_injection', name: 'Palm Injection', plan_frequency: 'monthly', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(snakeSpelled, { service_type: 'Palm Injection' }, null)).toBe(null);
+    expect(EstimateConverter.annualPrepayCoverageCadence(snakeSpelled, null)).toBe(null);
   });
 });
 
