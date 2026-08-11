@@ -725,6 +725,33 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
     expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
   });
 
+  it('a LATER company move supersedes earlier sticky evidence — cancelling the slot WE picked stays free', async () => {
+    stubDb(holdRow, {
+      rescheduleLog: [
+        lateCustomerMove, // customer late-move: sticky evidence...
+        { original_date: '2026-07-02', original_window: '09:00:00-11:00:00', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: '2026-07-02T10:00:00Z' }, // ...then Waves rain-outs the new slot
+      ],
+    });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  it('a customer late-move AFTER the company move re-arms sticky from scratch', async () => {
+    stubDb([holdRow, chargeRow, { id: 'pmrow1' }], {
+      rescheduleLog: [
+        lateCustomerMove,
+        { original_date: '2026-07-02', original_window: '09:00:00-11:00:00', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: '2026-07-02T10:00:00Z' },
+        // Waves-picked slot 2026-07-03 10:00 ET (14:00Z); customer moves it
+        // again at 12:00Z — 2 hours' notice, a fresh late move.
+        { ...lateCustomerMove, original_date: '2026-07-03', created_at: '2026-07-03T12:00:00Z' },
+      ],
+    });
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+  });
+
   it('the WAVES rain-out move itself (weather_auto actor) never sticks — company moves reset the clock', async () => {
     stubDb(holdRow, { rescheduleLog: [{ ...lateCustomerMove, initiated_by: 'weather_auto', reason_code: 'weather_rain' }] });
     const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', serviceStart: farStart, now });

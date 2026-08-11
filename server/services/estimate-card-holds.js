@@ -929,16 +929,16 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
   if (!isStickyCancelWindowEnabled()) return null;
   const boundary = notBefore instanceof Date ? notBefore : (notBefore ? new Date(notBefore) : null);
   if (!boundary || Number.isNaN(boundary.getTime())) return null;
+  // ALL rows, chronologically — company rows are needed too: a later
+  // Waves-initiated move SUPERSEDES prior sticky evidence (Codex #3342 r3
+  // P1). The authoritative classification lives in JS so unit doubles
+  // exercise it.
   const rows = await db('reschedule_log')
     .where({ scheduled_service_id: scheduledServiceId })
-    // SQL prefilter only — the authoritative classification is re-applied
-    // in JS below so unit doubles exercise it too.
-    .where((qb) => qb
-      .where('initiated_by', 'like', 'customer%')
-      .orWhere('reason_code', 'like', 'customer_request%'))
     .orderBy('created_at', 'asc')
     .select('original_date', 'original_window', 'reason_code', 'initiated_by', 'created_at');
   const { parseETDateTime } = require('../utils/datetime-et');
+  let sticky = null;
   for (const row of rows || []) {
     // Customer-initiated = a customer ACTOR (self-serve page, SMS reply) OR
     // a staff-assisted move recorded with the customer_request reason — the
@@ -948,12 +948,19 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     // reschedule-sms.js keeps the pending move's reason on the customer's
     // OWN pick, and reschedule-public.js classifies that pick as the
     // customer's move, not a Waves one — an SMS pick made inside the window
-    // is exactly as sticky as the same pick on the reschedule page. Waves
-    // actors (tech, admin, weather_auto, auto_dispatch, system) with ops or
-    // weather reasons never stick.
+    // is exactly as sticky as the same pick on the reschedule page.
     const customerInitiated = /^customer/.test(String(row.initiated_by || ''))
       || /^customer_request/.test(String(row.reason_code || ''));
-    if (!customerInitiated) continue;
+    if (!customerInitiated) {
+      // A Waves move (tech, admin, weather_auto, auto_dispatch, system with
+      // ops/weather reasons) resets the clock — documented policy — so it
+      // also invalidates any earlier sticky evidence: WE chose the slot the
+      // customer would now be cancelling. A later customer late-move can
+      // re-arm sticky from scratch.
+      sticky = null;
+      continue;
+    }
+    if (sticky) continue; // earliest surviving evidence wins
     // Same DATE+TIME → ET-instant composition as scheduledServiceApptTime:
     // original_window logs as '<window_start>-<window_end>' raw TIME values.
     const datePart = row.original_date instanceof Date
@@ -966,9 +973,9 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     const rescheduledAt = row.created_at ? new Date(row.created_at) : null;
     if (!rescheduledAt || Number.isNaN(rescheduledAt.getTime())) continue;
     if (rescheduledAt.getTime() < boundary.getTime()) continue; // pre-consent move — terms not yet accepted
-    if (isWithinWindow(originalStart, rescheduledAt)) return { originalStart, rescheduledAt };
+    if (isWithinWindow(originalStart, rescheduledAt)) sticky = { originalStart, rescheduledAt };
   }
-  return null;
+  return sticky;
 }
 
 // Single entry for the cancel path: charge the late-cancel fee if the
