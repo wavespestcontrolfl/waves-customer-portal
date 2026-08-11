@@ -3085,10 +3085,20 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
   });
 
   test('the confirmation must concern re-entry timing, not an appointment (Codex #3348)', () => {
-    const appointment = guardrails.evaluate({ body: 'The treatment is safe once dry. The technician will confirm the timing of your next visit.' }, {});
-    expect(appointment.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
-    const reentryObject = guardrails.evaluate({ body: 'The treatment is safe once dry. The technician will confirm the timing of re-entry.' }, {});
-    expect(reentryObject.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    for (const body of [
+      'The treatment is safe once dry. The technician will confirm the timing of your next visit.',
+      'The treatment is safe once dry. The tech will confirm the timing of the next application.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'The treatment is safe once dry. The technician will confirm the timing of re-entry.',
+      'It is safe once dry; the technician will confirm timing after the application before re-entry.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
   });
 
   test('dries-for durations and hazard-negation predicates block (Codex PR r14)', () => {

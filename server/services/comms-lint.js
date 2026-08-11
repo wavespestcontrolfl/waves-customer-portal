@@ -141,10 +141,12 @@ function smsSegmentCount(text) {
 // character list here would drift from it.
 const { findTypographicChar } = require('./messaging/gsm-normalize');
 
-// "Reply to this message" only counts as boilerplate in CLOSER position
-// (followed by end/punctuation or a courtesy tail) — "reply to this message
-// with the gate code" is a legitimate instruction, not a sign-off.
-const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)\s*(?:[.!,)]|$|if\s|with any|for any|anytime)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
+// "Reply to this message" only counts as boilerplate in CLOSER position:
+// end of message, terminal punctuation, or a genuine courtesy tail ("if
+// you have any questions", "with any concerns", "anytime"). Actionable
+// instructions — "reply to this message with the gate code", "reply to
+// this message if Tuesday works" — are not sign-offs and never match.
+const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)\s*(?:[.!]|$|anytime\b|if\s+you\s+have\s+any\b|with\s+any\s+(?:questions?|concerns?)\b|for\s+any\s+(?:questions?|concerns?)\b)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
 
 /**
  * Each rule: { name, applies(ctx) => bool, check(text, ctx) => reason|null }.

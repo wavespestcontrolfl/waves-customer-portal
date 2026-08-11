@@ -193,8 +193,10 @@ describe('lintComms mechanics', () => {
   });
 
   it('does not read a mid-message reply instruction as a sign-off closer', () => {
-    const r = lintComms('Please reply to this message with the gate code so the technician can enter.', { channel: 'sms', audience: 'customer' });
-    expect(r.failures.map((f) => f.rule)).not.toContain('no-signoff-boilerplate');
+    for (const msg of ['Please reply to this message with the gate code so the technician can enter.', 'Reply to this message if Tuesday works so I can schedule it.']) {
+      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).not.toContain('no-signoff-boilerplate');
+    }
     const closer = lintComms('All set for Friday. Reply to this message if you have any questions.', { channel: 'sms', audience: 'customer' });
     expect(closer.failures.map((f) => f.rule)).toContain('no-signoff-boilerplate');
   });
