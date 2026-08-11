@@ -154,7 +154,9 @@ const RULES = [
   {
     name: 'per-application-wording',
     applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial,
-    check: (text) => (/\bper\s+visit\b/i.test(text)
+    // "per visit", "per-visit", and the price-slash form "$117/visit" (the
+    // slash variant requires a preceding digit so URL paths never match).
+    check: (text) => (/\bper[\s-]+visit\b|\d\s*\/\s*visit\b/i.test(text)
       ? 'says "per visit" — recurring pricing is always "per application" (commercial accounts exempt)'
       : null),
   },
