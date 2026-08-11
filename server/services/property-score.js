@@ -37,7 +37,7 @@ const {
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
-const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+const { loadActiveRecurringServiceRows } = require('./waveguard-existing-services');
 // Best-effort: the tree/shrub module also carries vision plumbing — a load
 // failure degrades that component to raw overall_score, never the endpoint.
 let formatAssessmentScores = null;
@@ -67,35 +67,15 @@ function movementReason(delta) {
   return 'Holding steady since your last assessment.';
 }
 
-// Active recurring coverage for a service line, from existing mechanisms
-// end to end: NON-TERMINAL rows only (the canonical terminal set from
-// project-completion.js — cancelled/completed/skipped/no_show are not live
-// coverage; a 'rescheduled' phantom still evidences the series, only its
-// stale date is untrustworthy, which this never reads), classified by the
-// canonical detectServiceLine, and required to resolve to an affirmative
-// `recurring` billing profile (resolveCompletionProfileForScheduledService —
-// the same catalog resolution the pest one-time exclusion uses). The
-// resolver's null fallback never reads as a program. service_key_snapshot +
-// is_recurring ride along per the resolver's projection contract (undefined
-// would force its slow-path reload).
+// Active recurring coverage for a service line — the canonical
+// loadActiveRecurringServiceRows loader (inactive-customer guard, full
+// TERMINAL_STATUSES set including 'rescheduled' phantoms, is_recurring
+// rows only, unlimited), classified by the canonical detectServiceLine.
+// No parallel predicate: both halves are the exact mechanisms the
+// WaveGuard estimate flow and the report stack already use.
 async function hasActiveRecurringLine(customerId, line, knex) {
-  const rows = await knex('scheduled_services as ss')
-    .where('ss.customer_id', customerId)
-    .whereNotIn('ss.status', ['cancelled', 'completed', 'skipped', 'no_show'])
-    .orderBy('ss.scheduled_date', 'desc')
-    .limit(25)
-    .select('ss.id', 'ss.service_id', 'ss.service_type', 'ss.service_key_snapshot', 'ss.is_recurring')
-    .catch(() => []);
-  for (const svc of rows) {
-    if (detectServiceLine(svc.service_type) !== line) continue;
-    try {
-      const profile = await resolveCompletionProfileForScheduledService(svc, knex);
-      if (String(profile?.billingType || '').toLowerCase() === 'recurring') return true;
-    } catch {
-      // Unresolvable profile: skip the row rather than claim an active program.
-    }
-  }
-  return false;
+  const rows = await loadActiveRecurringServiceRows(knex, customerId).catch(() => []);
+  return rows.some((svc) => detectServiceLine(svc?.service_type) === line);
 }
 
 async function lawnComponent(customerId, knex) {
