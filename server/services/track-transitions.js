@@ -358,8 +358,16 @@ async function markEnRoute(serviceId, opts = {}) {
     });
 
   if (updated === 0) {
-    // Someone else won the race. Re-read and return their state.
+    // Someone else won the race. Re-read and report THEIR state — not a
+    // blanket success: the status/date CAS can also miss when a concurrent
+    // reschedule or completion moved the tuple while track_state stayed
+    // 'scheduled'. In that shape nobody went en route and no SMS fired, so
+    // claiming ok would make the caller report a flip that never happened —
+    // surface a conflict instead and let the caller retry on fresh state.
     const fresh = await loadService(serviceId);
+    if (fresh?.track_state === 'scheduled') {
+      return { ok: false, reason: 'concurrent_update' };
+    }
     if (fresh?.technician_id && fresh.track_state === 'en_route') {
       try {
         await setTechJobStatus({
@@ -376,7 +384,7 @@ async function markEnRoute(serviceId, opts = {}) {
       state: fresh?.track_state || 'en_route',
       enRouteAt: fresh?.en_route_at || null,
       smsSent: false,
-      alreadyEnRoute: true,
+      alreadyEnRoute: fresh?.track_state === 'en_route' || !fresh,
     };
   }
 

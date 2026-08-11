@@ -252,6 +252,30 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
   });
 
+  test('CAS miss with the row still scheduled surfaces a conflict, not success', async () => {
+    // A concurrent reschedule moved the status/date tuple between the read
+    // and the flip while track_state stayed 'scheduled': nobody went en
+    // route, no SMS fired — the caller must not be told it succeeded.
+    const svc = {
+      id: 'job-cas-miss',
+      customer_id: 'cust-11',
+      technician_id: null,
+      status: 'confirmed',
+      track_state: 'scheduled',
+      scheduled_date: todayStr,
+      cancelled_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // flip UPDATE misses (tuple changed)
+      .mockReturnValueOnce(query({ ...svc, scheduled_date: null, track_state: 'scheduled' })); // re-read: still scheduled
+
+    const result = await trackTransitions.markEnRoute('job-cas-miss');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('concurrent_update');
+  });
+
   test('completion racing the heal cannot be flipped en route (status-first window)', async () => {
     // The exact race the heal recursion creates: heal reset track_state to
     // 'scheduled', a concurrent completion then persisted status='completed'
