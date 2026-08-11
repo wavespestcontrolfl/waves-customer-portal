@@ -3447,7 +3447,11 @@ const EstimateConverter = {
             return {
               // Normalized name ON the unit (same rule as the mosquito
               // promotion): the insert below reads only unit.service.name.
-              service: { ...line, name: lineName },
+              // The computed pattern rides frequency too (codex r3 P2): a
+              // builder palm line has none, and the note builder below
+              // would fall back to "Frequency: recurring" on every child
+              // while the series actually seeds semiannual.
+              service: { ...line, name: lineName, frequency: line.frequency || pattern },
               catalogServiceKey: fam === 'palm_injection'
                 ? 'palm_injection_semiannual'
                 : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),

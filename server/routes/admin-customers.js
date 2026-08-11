@@ -318,6 +318,27 @@ function serviceCatalogMatch(line, serviceIndex) {
     ...(SERVICE_KEY_ALIASES[labelKey] || []),
   ].filter(Boolean);
 
+  // Recurring palm (owner ruling 2026-08-11, codex #3349 r3 P1): the
+  // estimator's two-application palm line carries service 'palm_injection',
+  // whose exact-key match is the active ONE-TIME row — an admin-booked
+  // semiannual palm plan would inherit its one-time billing and token_only
+  // completion posture. Gate on the converter's OWN seeding resolver (the
+  // same gate the converter paths use) so a semiannual line routes to the
+  // recurring row while 1x and cadence-less palm lines keep the one-time
+  // match. No explicitKey guard needed: an explicit serviceKey selection
+  // stays candidate #1 ahead of this, mirroring the seasonal-mosquito rule.
+  if (!explicitKey && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
+    try {
+      const { converterFollowUpSeedingPattern } = require('../services/estimate-converter');
+      const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
+      if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
+        candidates.unshift('palm_injection_semiannual');
+      }
+    } catch (resolveErr) {
+      // Fail-open to the existing exact-key behavior.
+    }
+  }
+
   for (const key of candidates) {
     const exact = serviceIndex.byKey.get(normalizeServiceKey(key)) || serviceIndex.byName.get(normalizeServiceKey(key));
     if (exact) return exact;

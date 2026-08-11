@@ -560,6 +560,28 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ name: 'Termite bait stations' }, serviceIndex)?.service_key).toBe('termite_bait');
   });
 
+  test('two-application palm lines route to the semiannual recurring row; 1x and cadence-less keep the one-time match (codex #3349 r3 P1)', () => {
+    const serviceIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 2, service_key: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Service', short_name: 'Semiannual Palm', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2 },
+    ]);
+
+    // The estimator's two-application palm supplement (no frequency field)
+    // must land the recurring row, not the exact-key one-time match.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // One-application and cadence-less palm lines keep the one-time lane.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // An explicit serviceKey selection still wins outright.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection');
+    // Envs without the semiannual row (not yet migrated) fall back to the
+    // one-time match rather than no-match.
+    const legacyIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection' },
+    ]);
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, legacyIndex)?.service_key).toBe('palm_injection');
+  });
+
   test('rodent bait falls back to monthly monitoring when the catalog lacks the quarterly row', () => {
     const legacyIndex = indexServicesForSchedule([
       { id: 2, service_key: 'rodent_monitoring', name: 'Rodent Monitoring (Monthly)', short_name: 'Rodent Monitor' },

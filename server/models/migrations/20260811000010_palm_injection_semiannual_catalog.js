@@ -108,6 +108,34 @@ exports.up = async function up(knex) {
 
   const inserted = { services: [], profiles: [] };
 
+  // Roll-forward after a rollback that RETAINED the row (exemplar
+  // 20260809000000): down() deactivates a referenced row and records it
+  // under `retained` — reactivate exactly that row and resume tracking it
+  // in the removable set. Without this, up() would see the key exists,
+  // skip, and leave the program dark.
+  if (await knex.schema.hasTable('system_settings')) {
+    let priorRetained = [];
+    const priorRow = await knex('system_settings').where({ key: STATE_KEY }).first();
+    if (priorRow) {
+      try { ({ retained: priorRetained = [] } = JSON.parse(priorRow.value)); } catch { priorRetained = []; }
+    }
+    for (const entry of priorRetained) {
+      if (!entry || !entry.id) continue;
+      const row = await knex('services').where({ id: entry.id }).first();
+      if (!row) {
+        console.warn(`[palm-semiannual] roll-forward: previously retained row ${entry.key} (${entry.id}) is gone — skipping`);
+        continue;
+      }
+      if (row.is_active === true) {
+        console.log(`[palm-semiannual] roll-forward: previously retained row ${entry.key} already active — no-op`);
+      } else {
+        await knex('services').where({ id: entry.id }).update({ is_active: true });
+        console.log(`[palm-semiannual] roll-forward: reactivated previously retained row ${entry.key} (${entry.id})`);
+      }
+      inserted.services.push({ key: entry.key, id: entry.id });
+    }
+  }
+
   const exists = await knex('services').where({ service_key: SERVICE.service_key }).first();
   if (exists) {
     console.warn(`[palm-semiannual] ${SERVICE.service_key}: services row already exists — leaving untouched`);
@@ -254,7 +282,11 @@ exports.down = async function down(knex) {
     }
     if (refs > 0) {
       retainedKeys.add(entry.key);
-      console.warn(`[palm-semiannual] down: ${entry.key} (${entry.id}) is referenced by ${refs} visit/record/add-on/package/discount row(s) — retaining row and profile (live identity preserved)`);
+      // Retain-AND-DEACTIVATE (exemplar 20260809000000): the rollback must
+      // actually disable the program for new sales while existing links
+      // keep resolving — the profile stays active for exactly that reason.
+      await knex('services').where({ id: entry.id }).update({ is_active: false });
+      console.warn(`[palm-semiannual] down: ${entry.key} (${entry.id}) has ${refs} visit/record/add-on/package/discount reference(s) — service retained+deactivated, profile left active (links keep resolving)`);
     } else {
       removableIds.push(entry.id);
     }
@@ -281,6 +313,15 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('system_settings')) {
-    await knex('system_settings').where({ key: STATE_KEY }).del();
+    // Retained rows keep their provenance so a later roll-forward can
+    // reactivate exactly the rows this migration created; a clean rollback
+    // (nothing retained) clears the record entirely (exemplar doctrine).
+    const retained = state.services.filter((entry) => entry && retainedKeys.has(entry.key));
+    if (retained.length > 0) {
+      await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify({ services: [], profiles: [], retained }) });
+      console.warn(`[palm-semiannual] down: recorded ${retained.length} retained row(s) for roll-forward reactivation`);
+    } else {
+      await knex('system_settings').where({ key: STATE_KEY }).del();
+    }
   }
 };

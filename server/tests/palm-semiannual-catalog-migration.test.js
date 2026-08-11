@@ -211,18 +211,39 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(stateValue(db)).toBeUndefined();
   });
 
-  test('down() RETAINS the row and profile when live palm visits reference it (rollback must not orphan identity)', async () => {
+  test('down() RETAINS+DEACTIVATES the row when live palm visits reference it; profile and links survive; provenance recorded', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     const insertedId = svcRow(db).id;
     db.scheduled_services.push({ id: 'v1', service_id: insertedId });
     await migration.down(fakeKnex(db));
 
-    // A rollback after an accepted palm series keeps identity intact:
-    // row, typed profile, and the visit's service_id all survive.
+    // A rollback after an accepted palm series keeps identity intact —
+    // row (deactivated so nothing new sells it), ACTIVE typed profile
+    // (existing links keep resolving), and the visit's service_id — and
+    // records the retained row for roll-forward (exemplar 20260809000000).
     expect(svcRow(db)).toBeDefined();
+    expect(svcRow(db).is_active).toBe(false);
     expect(profileRow(db)).toBeDefined();
+    expect(profileRow(db).active).toBe(true);
     expect(db.scheduled_services[0].service_id).toBe(insertedId);
+    expect((stateValue(db).retained || []).map((e) => e.key)).toEqual([KEY]);
+  });
+
+  test('roll-forward: up() after a retaining rollback REACTIVATES the row and resumes tracking it', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const insertedId = svcRow(db).id;
+    db.scheduled_services.push({ id: 'v1', service_id: insertedId });
+    await migration.down(fakeKnex(db));
+    expect(svcRow(db).is_active).toBe(false);
+
+    await migration.up(fakeKnex(db));
+    expect(svcRow(db).is_active).toBe(true);
+    expect(profileRow(db)).toBeDefined();
+    // The reactivated row re-enters the removable set (a future clean
+    // rollback can remove it again once nothing references it).
+    expect((stateValue(db).services || []).map((e) => e.id)).toContain(insertedId);
   });
 
   test('down() RETAINS on a NAME-ONLY visit reference — no service_id, service_type matches the row name (codex P1)', async () => {
