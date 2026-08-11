@@ -201,9 +201,27 @@ router.post('/:id/en-route', async (req, res, next) => {
           await runOutboundReviewConfirmHook(db, svc, 'tech-track');
         }
 
-        // Phase 3 — advance. The atomic guard catches anything that moved
-        // the row between phases; surfaced as 409 refresh-and-retry.
+        // Phase 3 — advance. The status CAS alone is NOT enough here (Codex
+        // P1 round 2): the phase-2 hook leaves a real window in which
+        // dispatch can reassign the visit (technician_id only — status stays
+        // 'confirmed') or reschedule it to a future date (date/window only),
+        // and either stale advance would text the customer a tracking
+        // notice. Re-read row-locked and re-run both guards inside the trx.
         await db.transaction(async (trx) => {
+          const fresh = await trx('scheduled_services')
+            .where({ id: svc.id })
+            .forUpdate()
+            .first('technician_id', 'scheduled_date');
+          if (!fresh || fresh.technician_id !== req.technicianId) {
+            const e = new Error('Not assigned to this service');
+            e.code = 'TECH_OWNERSHIP_LOST';
+            throw e;
+          }
+          if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
+            const e = new Error('Rescheduled to a future date');
+            e.code = 'FUTURE_SCHEDULED_DATE';
+            throw e;
+          }
           await transitionJobStatus({
             jobId: svc.id,
             fromStatus: autoConfirmReview ? 'confirmed' : fromStatus,
@@ -216,6 +234,13 @@ router.post('/:id/en-route', async (req, res, next) => {
         if (err && err.code === 'TECH_OWNERSHIP_LOST') {
           // Same contract as the pre-trx check above.
           return res.status(403).json({ error: 'Not assigned to this service' });
+        }
+        if (err && err.code === 'FUTURE_SCHEDULED_DATE') {
+          // Same contract as the pre-trx stale-tap guard above.
+          return res.status(409).json({
+            error: 'This job has been rescheduled to a future date. Refresh your route.',
+            code: 'future_scheduled_date',
+          });
         }
         if (err && err.code === 'REVIEW_STATE_CHANGED') {
           return res.status(409).json({
@@ -350,8 +375,25 @@ router.post('/:id/on-site', async (req, res, next) => {
           await runOutboundReviewConfirmHook(db, svc, 'tech-track');
         }
 
-        // Phase 3 — advance to on_site with the lifecycle stamps.
+        // Phase 3 — advance to on_site with the lifecycle stamps. Same
+        // row-locked ownership + future-date recheck as the en-route leg
+        // (Codex P1 round 2): the phase-2 window admits a reassignment or a
+        // future-date reschedule that the status CAS alone can't see.
         await db.transaction(async (trx) => {
+          const fresh = await trx('scheduled_services')
+            .where({ id: svc.id })
+            .forUpdate()
+            .first('technician_id', 'scheduled_date');
+          if (!fresh || fresh.technician_id !== req.technicianId) {
+            const e = new Error('Not assigned to this service');
+            e.code = 'TECH_OWNERSHIP_LOST';
+            throw e;
+          }
+          if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
+            const e = new Error('Rescheduled to a future date');
+            e.code = 'FUTURE_SCHEDULED_DATE';
+            throw e;
+          }
           const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
           if (Object.keys(lifecycleUpdates).length > 0) {
             await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
@@ -368,6 +410,12 @@ router.post('/:id/on-site', async (req, res, next) => {
         // Same error translations as the en-route leg above.
         if (err && err.code === 'TECH_OWNERSHIP_LOST') {
           return res.status(403).json({ error: 'Not assigned to this service' });
+        }
+        if (err && err.code === 'FUTURE_SCHEDULED_DATE') {
+          return res.status(409).json({
+            error: 'This job has been rescheduled to a future date. Refresh your route.',
+            code: 'future_scheduled_date',
+          });
         }
         if (err && err.code === 'REVIEW_STATE_CHANGED') {
           return res.status(409).json({

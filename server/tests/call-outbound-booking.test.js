@@ -89,6 +89,14 @@ describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection'
     expect(isPendingOutboundReviewBooking(base)).toBe(true);
   });
 
+  test('is ONE function shared with the source-action module (no second copy to drift)', () => {
+    // The shared writer's guard (job-status.js) and the tech-route bypass both
+    // import the classifier from call-booking-source-actions — the re-export
+    // here must be the same function object, not a reimplementation.
+    const sourceActions = require('../services/call-booking-source-actions');
+    expect(isPendingOutboundReviewBooking).toBe(sourceActions.isPendingOutboundReviewBooking);
+  });
+
   test('does NOT match other source_actions, non-pending status, confirmed rows, or missing rows', () => {
     expect(isPendingOutboundReviewBooking({ ...base, source_action: 'ai_call_pipeline' })).toBe(false);
     expect(isPendingOutboundReviewBooking({ ...base, source_action: CALL_FOLLOWUP_SOURCE_ACTION })).toBe(false);
