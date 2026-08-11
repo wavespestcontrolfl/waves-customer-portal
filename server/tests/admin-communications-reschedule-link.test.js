@@ -394,6 +394,7 @@ describe('POST /admin/communications/reschedule-link', () => {
       expect(await res.json()).toEqual({
         url: GOOD_LINK.url,
         line: GOOD_LINK.line,
+        firstName: null,
         appointment: {
           id: 'svc-1',
           scheduledDate: '2099-08-04',
@@ -403,6 +404,50 @@ describe('POST /admin/communications/reschedule-link', () => {
         },
       });
       expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: CUSTOMER_UUID });
+    });
+  });
+
+  test('the recipient first name rides the response for the greeting prefill (both resolution paths)', async () => {
+    const visit = {
+      id: 'svc-1',
+      customer_id: CUSTOMER_UUID,
+      scheduled_date: '2099-08-04',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+      service_type: 'lawn care',
+      status: 'confirmed',
+    };
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+
+    // Phone path: several rows can share the number within one account — the
+    // pick is the first NAMED row in id-sorted order, trimmed. The name is
+    // the RECIPIENT row's, independent of which row owns the visit.
+    const byPhone = makeCustomersBuilder({
+      selectResults: [
+        [
+          { id: 'cust-b', account_id: 'acct-1', first_name: 'Krista ' },
+          { id: 'cust-a', account_id: 'acct-1', first_name: '  ' },
+        ],
+        [{ id: CUSTOMER_UUID }],
+      ],
+    });
+    wireDb({ customers: byPhone, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBe('Krista');
+    });
+
+    // customerId path: the selected row's own name.
+    const byId = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: CUSTOMER_UUID, first_name: 'Walt' },
+      selectResults: [[{ id: CUSTOMER_UUID }]],
+    });
+    wireDb({ customers: byId, services: makeServicesBuilder([[visit]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(res.status).toBe(200);
+      expect((await res.json()).firstName).toBe('Walt');
     });
   });
 

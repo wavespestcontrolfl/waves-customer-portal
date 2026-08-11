@@ -1196,21 +1196,27 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 
     const customerId = req.body?.customerId;
     let customerIds = [];
+    // The RECIPIENT's first name, for the composer's greeting prefill. Always
+    // the row the phone/selection resolved to — on a multi-property account a
+    // sibling row may own the visit under a different contact name, but the
+    // text still goes to the phone's owner.
+    let recipientFirstName = null;
     if (customerId && UUID_RE.test(String(customerId))) {
       const customer = await db('customers')
         .where({ id: customerId })
         .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
+        .first('id', 'phone', 'account_id', 'first_name');
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
       if (fullPhoneLast10(customer.phone) !== last10) {
         return res.status(400).json({ error: 'phone must match the selected customer' });
       }
+      recipientFirstName = String(customer.first_name || '').trim() || null;
       customerIds = await customerIdsForAccount(customer.account_id || customer.id);
     } else {
       const matches = await db('customers')
         .whereNull('deleted_at')
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
+        .select('id', 'account_id', 'first_name');
       if (!matches.length) {
         return res.status(404).json({ error: 'No customer found for that number' });
       }
@@ -1220,6 +1226,12 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
           error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
         });
       }
+      // Several rows can share the phone within the one account; pick the
+      // first named row in a deterministic (id-sorted) order.
+      const named = [...matches]
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .find((m) => String(m.first_name || '').trim());
+      recipientFirstName = named ? String(named.first_name).trim() : null;
       customerIds = await customerIdsForAccount(accountKeys[0]);
     }
     if (!customerIds.length) {
@@ -1278,6 +1290,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     res.json({
       url,
       line,
+      firstName: recipientFirstName,
       appointment: {
         id: svc.id,
         scheduledDate: scheduledDateStr(svc.scheduled_date),
@@ -1318,21 +1331,26 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 
     const customerId = req.body?.customerId;
     let customerIds = [];
+    // Recipient first name for the greeting prefill — same contract as
+    // /reschedule-link: the phone/selection row names the person texted,
+    // whichever sibling row ends up owning the eligible lane.
+    let recipientFirstName = null;
     if (customerId && UUID_RE.test(String(customerId))) {
       const customer = await db('customers')
         .where({ id: customerId })
         .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
+        .first('id', 'phone', 'account_id', 'first_name');
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
       if (fullPhoneLast10(customer.phone) !== last10) {
         return res.status(400).json({ error: 'phone must match the selected customer' });
       }
+      recipientFirstName = String(customer.first_name || '').trim() || null;
       customerIds = await customerIdsForAccount(customer.account_id || customer.id);
     } else {
       const matches = await db('customers')
         .whereNull('deleted_at')
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
+        .select('id', 'account_id', 'first_name');
       if (!matches.length) {
         return res.status(404).json({ error: 'No customer found for that number' });
       }
@@ -1342,6 +1360,10 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
           error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
         });
       }
+      const named = [...matches]
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .find((m) => String(m.first_name || '').trim());
+      recipientFirstName = named ? String(named.first_name).trim() : null;
       customerIds = await customerIdsForAccount(accountKeys[0]);
     }
     if (!customerIds.length) {
@@ -1382,7 +1404,7 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     const { url, line } = await buildReserviceLink(eligible.id);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
-    res.json({ url, line, customerId: eligible.id, lanes });
+    res.json({ url, line, customerId: eligible.id, lanes, firstName: recipientFirstName });
   } catch (err) {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
