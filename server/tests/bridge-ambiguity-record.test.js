@@ -350,40 +350,34 @@ describe('openAmbiguousCallExclusions', () => {
     expect(res).toEqual({
       excludeCallIds: ['call-1', 'call-2'],
       excludeCallSids: ['CA1'],
-      excludeLeadIds: [],
     });
   });
 
-  test('held leads come from the snapshot rows of OPEN records — the indefinite phone hold (audit P1 r3)', async () => {
+  test('the held-LEAD side is deliberately NOT a returned list — the sweep applies correlated arms instead (codex GH r6 + audit r13)', async () => {
+    // A lead list captured before the sweep is stale by the time its
+    // under-lock recheck runs (concurrent age-unlimited force-reprocess
+    // can phone-link a new lead in the gap), so the hold lives in TWO
+    // correlated arms inside applyAmbiguityExclusions: the persisted
+    // snapshot rows of open records, and the snapshot predicate itself
+    // evaluated live — both fresh in the recheck statement.
     listQueueByTable.bridge_ambiguous_calls = [[
       { call_log_id: 'call-1', twilio_call_sid: 'CA1' },
     ]];
-    listQueueByTable['bridge_ambiguous_call_leads as bal'] = [[
-      { lead_id: 'lead-7' },
-      { lead_id: 'lead-7' }, // two calls holding the same lead — dedupe
-      { lead_id: 'lead-8' },
-    ]];
     const res = await openAmbiguousCallExclusions();
-    expect(res.excludeLeadIds).toEqual(['lead-7', 'lead-8']);
-    // The read joins to the PARENT record's open state — resolution drops
-    // the hold without touching the snapshot rows.
-    const read = builders.find((b) => b._table === 'bridge_ambiguous_call_leads as bal');
-    expect(read._wheres).toContainEqual(['whereNull', 'bac.resolved_at']);
-  });
-
-  test('open snapshots are REFRESHED before the held-lead read — post-window reprocessing is picked up (codex P1 GH r6)', async () => {
-    // A force-reprocess has no age limit, but applyBridge scans cap at 90
-    // days, so an open ambiguity older than that is never re-recorded; the
-    // pre-sweep refresh re-runs the snapshot against the call's CURRENT
-    // processing evidence on every sweep path, before the exclusions are
-    // read — refresh-then-read-then-sweep leaves no gap.
-    listQueueByTable.bridge_ambiguous_calls = [[
-      { call_log_id: 'call-old', twilio_call_sid: 'CA-old' },
-    ]];
-    await openAmbiguousCallExclusions();
-    const refresh = mockDb.raw.mock.calls.find(([sql]) => /INSERT INTO bridge_ambiguous_call_leads/.test(sql));
-    expect(refresh).toBeTruthy();
-    expect(refresh[1]).toEqual([7 * 24 * 60 * 60, 'call-old']);
+    expect(res.excludeLeadIds).toBeUndefined();
+    const fs2 = require('fs');
+    const path2 = require('path');
+    const ca = fs2.readFileSync(path2.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    const arms = ca.split('const applyAmbiguityExclusions')[1];
+    expect(arms).toMatch(/function persistedPhoneHold\(\)/);
+    expect(arms).toMatch(/from\('bridge_ambiguous_call_leads as bal'\)/);
+    expect(arms).toMatch(/whereNull\('bac\.resolved_at'\)/);
+    expect(arms).toMatch(/bal\.lead_id = l\.id/);
+    expect(arms).toMatch(/function livePhoneHold\(\)/);
+    expect(arms).toMatch(/clh\.from_phone/);
+    expect(arms).toMatch(/COALESCE\(clh\.processing_started_at \+ interval '10 minutes', clh\.created_at \+ make_interval\(secs => \?\)\)/);
+    // Never an array-based lead arm.
+    expect(arms).not.toMatch(/whereNotIn\('l\.id'/);
   });
 });
 
@@ -421,8 +415,9 @@ describe('scheduler wiring (source pins)', () => {
     expect(phoneArm).toMatch(/whereIn\('clp\.id', excludePhoneCallIds\)/);
     expect(phoneArm).not.toMatch(/whereIn\('clp\.id', excludeCallIds\)/);
     expect(sweep).toMatch(/if \(excludePhoneCallIds\.length\)/);
-    expect(sweep).toMatch(/if \(excludeLeadIds\.length\)/);
-    expect(sweep).toMatch(/whereNotIn\('l\.id', excludeLeadIds\)/);
+    // The held-lead hold is correlated arms, never an array (audit r13).
+    expect(sweep).toMatch(/function persistedPhoneHold\(\)/);
+    expect(sweep).toMatch(/function livePhoneHold\(\)/);
   });
 
   test('applyBridge itself persists AND resolves every scan\'s ambiguities — manual admin applies included (codex P1s r2+r3)', () => {

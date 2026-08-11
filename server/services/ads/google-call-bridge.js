@@ -1906,28 +1906,19 @@ async function openAmbiguousCallExclusions() {
   const open = await db('bridge_ambiguous_calls')
     .whereNull('resolved_at')
     .select('call_log_id', 'twilio_call_sid');
-  // REFRESH the snapshots BEFORE reading them (codex P1, r6 GH round): an
-  // open ambiguity older than the 90-day max scan window is never
-  // re-recorded by applyBridge, but an admin force-reprocess has no age
-  // limit and can attach a NEW phone-reuse lead to such a call — the
-  // temporal bound follows the bumped processing_started_at, yet nothing
-  // re-ran the snapshot. Every sweep path calls this read immediately
-  // before attributing, so refresh-then-read-then-sweep leaves no gap; a
-  // refresh failure throws to bridgePairError, which also skips the sweep.
-  const openIds = [...new Set(open.map((r) => String(r.call_log_id)))];
-  if (openIds.length) await insertPhoneLinkageSnapshot(db, openIds);
-  // The phone-linkage snapshot for OPEN records: the exact leads each
-  // indefinite hold covers (see recordAmbiguousBridgeCalls) — the durable
-  // replacement for routing persisted holds through the broad phone arm
-  // (pre-push audit P1 r3).
-  const heldLeads = await db('bridge_ambiguous_call_leads as bal')
-    .join('bridge_ambiguous_calls as bac', 'bac.call_log_id', 'bal.call_log_id')
-    .whereNull('bac.resolved_at')
-    .select('bal.lead_id');
+  // The held-LEAD side deliberately returns NOTHING here (codex P1s, r6 GH
+  // round + pre-push r13): a lead list captured before the sweep is stale
+  // by the time its under-lock recheck runs — a concurrent force-reprocess
+  // (age-unlimited) can phone-link a new lead in that gap, and an open
+  // ambiguity older than the 90-day max scan window is never re-recorded
+  // to catch it. The sweep instead applies TWO correlated arms inside
+  // applyAmbiguityExclusions — the persisted bridge_ambiguous_call_leads
+  // rows of open records, plus the snapshot predicate itself evaluated
+  // live — both re-evaluated fresh in the recheck statement under the
+  // lead lock.
   return {
-    excludeCallIds: openIds,
+    excludeCallIds: [...new Set(open.map((r) => String(r.call_log_id)))],
     excludeCallSids: [...new Set(open.map((r) => r.twilio_call_sid).filter(Boolean))],
-    excludeLeadIds: [...new Set(heldLeads.map((r) => String(r.lead_id)))],
   };
 }
 

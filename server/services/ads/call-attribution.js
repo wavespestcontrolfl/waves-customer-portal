@@ -571,14 +571,6 @@ async function attributeUnclaimedBridgeLeads({
   // durable arms above (sid, stamp) are proven call↔lead links and safely
   // carry the indefinite holds; the phone arm stays a same-window delay.
   excludePhoneCallIds = [],
-  // The exact leads the persisted holds cover — the phone-linkage snapshot
-  // taken when each ambiguity was observed (pre-push audit P1 r3). This is
-  // the indefinite-safe form of the phone arm: it names the leads that
-  // matched the caller's number WHILE the ambiguity was live, so a
-  // findReusableCallLead association (no sid, no stamp) keeps its hold
-  // after the call ages past the scan window without ever suppressing a
-  // later, distinct lead minted on the same household number.
-  excludeLeadIds = [],
 } = {}) {
   // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
   // module-scope import back at it would be a require cycle.
@@ -632,13 +624,46 @@ async function attributeUnclaimedBridgeLeads({
     });
   };
 
+  // The retry-window fallback for the live phone-hold arm — same constant
+  // the snapshot INSERT binds (shared with the processor's in-flight test).
+  const { CALL_EXTRACTION_RETRY_WINDOW_MS } = require('../../utils/estimate-claim-sql');
+
   const applyAmbiguityExclusions = (qb) => {
-    if (excludeLeadIds.length) {
-      // Exact persisted call→lead phone linkage (see the excludeLeadIds
-      // parameter doc) — the indefinite hold for the one linkage mode that
-      // leaves neither a sid nor a stamp on the lead.
-      qb.whereNotIn('l.id', excludeLeadIds);
-    }
+    // The phone-linkage HOLD for the one reuse mode that leaves neither a
+    // sid nor a stamp on the lead — TWO correlated arms, never a JS array
+    // (pre-push audit P1 r13: an array captured before the sweep is stale
+    // by the time the under-lock recheck runs, and a concurrent
+    // force-reprocess can phone-link a new lead in that gap). Correlated
+    // subqueries re-evaluate against a fresh snapshot in the recheck
+    // statement — the exact property the sid/stamp arms already rely on.
+    // Arm 1 — the PERSISTED snapshot rows of OPEN records: leads captured
+    // when their ambiguity was recorded/reopened, held even if the lead's
+    // phone has since changed away (the historical linkage evidence
+    // stands; a hold is recoverable, the organic label is not).
+    qb.whereNotExists(function persistedPhoneHold() {
+      this.select(1)
+        .from('bridge_ambiguous_call_leads as bal')
+        .join('bridge_ambiguous_calls as bac', 'bac.call_log_id', 'bal.call_log_id')
+        .whereNull('bac.resolved_at')
+        .whereRaw('bal.lead_id = l.id');
+    });
+    // Arm 2 — the SAME predicate the snapshot INSERT uses, evaluated LIVE
+    // against every open record: covers a lead linked by a processing pass
+    // AFTER the last snapshot write (no row exists yet), bounded by the
+    // call's current processing evidence so later distinct same-number
+    // leads still pass.
+    qb.whereNotExists(function livePhoneHold() {
+      this.select(1)
+        .from('bridge_ambiguous_calls as bac')
+        .join('call_log as clh', 'clh.id', 'bac.call_log_id')
+        .whereNull('bac.resolved_at')
+        .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
+        .whereRaw("RIGHT(regexp_replace(COALESCE(clh.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)")
+        .whereRaw(
+          "l.created_at < COALESCE(clh.processing_started_at + interval '10 minutes', clh.created_at + make_interval(secs => ?))",
+          [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000],
+        );
+    });
     if (excludeCallSids.length) {
       qb.where(function sidNotAmbiguous() {
         this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);
