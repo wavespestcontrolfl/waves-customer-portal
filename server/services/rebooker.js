@@ -58,6 +58,31 @@ const LIVE_LIFECYCLE_RESET = {
   arrival_sms_sent_at: null,
 };
 
+// Live TRACK states the rewind test recognizes alongside the operational
+// statuses above. `status` alone under-detects: the manual En Route taps
+// advance track_state and stamp lifecycle columns WITHOUT syncing status
+// (track-transitions' syncOperationalStatus is opt-in and only the geofence
+// handler passes it), and a partially-rewound row can carry stale stamps
+// under a pending/rescheduled status. A moved row keeping any of this
+// evidence makes the new day's markEnRoute a silent no-op — no en_route_at,
+// no track SMS — and leaks the aborted attempt's timestamps into the
+// customer report's visit timeline (live incident 2026-08-11).
+const LIVE_TRACK_STATES = new Set(['en_route', 'on_property']);
+
+// Should a date move rewind this row's tracker lifecycle? True on live
+// operational status, live track_state, or any leftover lifecycle stamp.
+// Callers gate movability separately (terminal rows never reach this).
+function needsLifecycleRewind(service = {}) {
+  if (LIVE_OVERRIDE_STATUSES.has(service.status)) return true;
+  if (LIVE_TRACK_STATES.has(service.track_state)) return true;
+  return Boolean(
+    service.en_route_at
+    || service.arrived_at
+    || service.actual_start_time
+    || service.check_in_time,
+  );
+}
+
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
   if (!safe) return opts;
@@ -362,7 +387,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: 'confirmed',
-      ...(wasLive ? LIVE_LIFECYCLE_RESET : {}),
+      ...(needsLifecycleRewind(service) ? LIVE_LIFECYCLE_RESET : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -716,7 +741,13 @@ class SmartRebooker {
         .where('scheduled_date', '>=', service.scheduled_date)
         .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
-        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+        .select(
+          'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Rewind evidence for needsLifecycleRewind below — a pending
+          // sibling can still carry stale tracker stamps from an aborted
+          // attempt that a partial reset left behind.
+          'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+        );
 
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
@@ -868,7 +899,7 @@ class SmartRebooker {
           window_end: win.end || sib.window_end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
-          ...(isLiveAnchor ? LIVE_LIFECYCLE_RESET : {}),
+          ...(isLiveAnchor || needsLifecycleRewind(sib) ? LIVE_LIFECYCLE_RESET : {}),
         };
         // The ANCHOR may carry a caller-chosen technician (the customer
         // self-serve path validated its slot against a specific tech's
@@ -1190,6 +1221,7 @@ module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.needsLifecycleRewind = needsLifecycleRewind;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;

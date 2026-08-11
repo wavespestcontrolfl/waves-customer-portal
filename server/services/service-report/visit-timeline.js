@@ -254,6 +254,24 @@ function collapseSameTimeTimelineEvents(events = []) {
   });
 }
 
+// A visit that was started, aborted, and rescheduled can carry en-route /
+// arrival stamps from the earlier attempt (the reschedule paths historically
+// did not clear them). Anything more than this far before the completion
+// instant cannot belong to the same visit, so it must not render — it put a
+// week-old "on site 2:54 PM" above a 1:28 PM completion on a live customer
+// report (2026-08-11). Backfilled closeouts are unaffected: their day-scale
+// ET-noon completion sits BEFORE the real afternoon arrival, and this guard
+// only drops timestamps on the too-early side.
+const MAX_PLAUSIBLE_VISIT_MS = 18 * 60 * 60 * 1000;
+
+function dropStalePreCompletion(timestamp, completedAt) {
+  if (!timestamp || !completedAt) return timestamp;
+  const tsMs = Date.parse(timestamp);
+  const completedMs = Date.parse(completedAt);
+  if (!Number.isFinite(tsMs) || !Number.isFinite(completedMs)) return timestamp;
+  return completedMs - tsMs > MAX_PLAUSIBLE_VISIT_MS ? null : timestamp;
+}
+
 function buildVisitTimeline({
   service = {},
   scheduledService = {},
@@ -272,7 +290,7 @@ function buildVisitTimeline({
   const normalizedLine = normalizeTimelineServiceLine(serviceLine || service.service_line, serviceType || service.service_type);
   const completedReport = isCompletedReport({ service, structured, serviceData, workflowEvents });
 
-  const enRouteAt = firstValidTimestamp(
+  const rawEnRouteAt = firstValidTimestamp(
     service.en_route_at,
     service.scheduled_en_route_at,
     scheduledService.en_route_at,
@@ -282,7 +300,7 @@ function buildVisitTimeline({
     serviceData.en_route_at,
     workflowEventTimestamp(workflowEvents, 'technician_en_route'),
   );
-  const onSiteAt = firstValidTimestamp(
+  const rawOnSiteAt = firstValidTimestamp(
     service.arrived_at,
     service.actual_start_time,
     service.check_in_time,
@@ -316,6 +334,8 @@ function buildVisitTimeline({
     serviceData.service_completed_at,
     workflowEventTimestamp(workflowEvents, 'service_completed'),
   );
+  const enRouteAt = dropStalePreCompletion(rawEnRouteAt, completedAt);
+  const onSiteAt = dropStalePreCompletion(rawOnSiteAt, completedAt);
   const reportGeneratedAt = firstValidTimestamp(
     service.report_generated_at,
     structured.reportPublishedAt,

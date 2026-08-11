@@ -4494,6 +4494,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (wasLive) {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
+              } else {
+                // Stale lifecycle evidence without a live status (track_state
+                // advanced by a manual En Route tap that never synced status,
+                // or stamps a partial reset left behind) rewinds the tracker
+                // too — status stays untouched, matching this path's no-flip
+                // contract for non-live rows.
+                const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                if (needsLifecycleRewind(svc)) Object.assign(updates, LIVE_LIFECYCLE_RESET);
               }
               // Compare-and-swap on the OBSERVED status + schedule fields:
               // the terminal guard and the wasLive classification above came
@@ -5428,6 +5436,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // reschedule text after commit. start stays null for date-only visits
     // (no fabricated 08:00 goes into a customer text).
     let scheduleMoveForNotice = null;
+    // Live (en_route/on_site) row moved to a new date through this edit —
+    // captured inside the trx; drives the rebooker-parity post-commit
+    // effects (tech_status release + customer tracker refresh) after commit.
+    let liveEditMovePostCommitRow = null;
 
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -5501,6 +5513,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // making later resolution tuple-independent. Ambiguous soft-join
         // matches stay untouched — stamping one of several same-day rows
         // could bind the wrong visit; FK-carrying records need no heal.
+        let preTupleRow = null;
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
           // FOR UPDATE first (codex P2 #3152 round 20): the correction and
           // costing paths lock scheduled_services and then touch
@@ -5508,7 +5521,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // then the tuple update below) deadlocks against them. Taking the
           // scheduled-service lock up front puts all three paths in one
           // lock order.
-          const preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+          preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
           const srCols = await trx('service_records').columnInfo();
           // Completed visits only (codex P2 #3152 round 20): the soft-join
           // resolves records by (customer, date, type) — an OPEN visit
@@ -5525,6 +5538,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
+        // A date move through this edit modal was the one mover with NO
+        // tracker-lifecycle rewind: an en_route/on_site visit (or one
+        // carrying stale stamps from an aborted attempt) kept
+        // track_state + en_route_at/arrived_at/actual_start_time onto the
+        // new date, so the new day's En Route tap silently no-op'd and the
+        // customer report rendered the old attempt's timestamps (live
+        // incident 2026-08-11). Mirror the bulk board move: live status →
+        // full rewind + land on 'confirmed' (+ history/post-commit parity
+        // below); stale evidence without live status → rewind only.
+        // Same-date edits never rewind — a tech can be on site while the
+        // office edits notes/price, and wiping the live attempt would
+        // orphan it. Completed/terminal rows keep their lifecycle: the
+        // stamps ARE the service record.
+        const dateActuallyMoves = updates.scheduled_date !== undefined
+          && preTupleRow
+          && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))
+          && dateOnly(updates.scheduled_date) !== dateOnly(preTupleRow.scheduled_date);
+        let liveEditMoveRow = null;
+        if (dateActuallyMoves) {
+          const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+          const editWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
+          if (editWasLive) {
+            Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
+            liveEditMoveRow = preTupleRow;
+          } else if (needsLifecycleRewind(preTupleRow)) {
+            Object.assign(updates, LIVE_LIFECYCLE_RESET);
+          }
+        }
         // When the appointment's own date or arrival window changes, resync its
         // reminder row in the same transaction — otherwise the 72h/24h cron
         // texts the customer the old date/time. (Recurring children get the
@@ -5534,6 +5575,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // Rebooker-parity live-move bookkeeping (same split as the bulk
+        // board move): the job_status_history audit row is atomic with the
+        // flip on the trx; the tech_status release + customer tracker
+        // refresh are externally visible and run only after commit.
+        if (liveEditMoveRow) {
+          const { applyLiveMoveHistory } = require('../services/rebooker');
+          await applyLiveMoveHistory(trx, liveEditMoveRow, { actor: req.technicianId || null });
+          liveEditMovePostCommitRow = liveEditMoveRow;
+        }
         if (updates.scheduled_date !== undefined && reminderBefore) {
           callFollowUpShiftFrom = reminderBefore.scheduled_date;
         }
@@ -6276,6 +6326,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
     });
+
+    // Rebooker-parity post-commit half of the live-move rewind above:
+    // tech_status release + customer tracker refresh. Best-effort — the
+    // move is committed; a side-effect failure must not fail the edit.
+    if (liveEditMovePostCommitRow) {
+      try {
+        const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+        await applyLiveMovePostCommitEffects(liveEditMovePostCommitRow);
+      } catch (err) {
+        logger.error(`[schedule/update-details] live-move side effects failed for ${req.params.id}: ${err.message}`);
+      }
+    }
 
     // Trimmed visits: finalize their cancellation-notice claims SILENTLY.
     // The claims were minted suppressed inside the trx, so this closes them

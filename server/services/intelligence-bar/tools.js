@@ -1755,9 +1755,12 @@ async function rescheduleAppointment(input) {
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, needsLifecycleRewind } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
-  const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+  // Rewind on stale evidence too, not just live status — see
+  // needsLifecycleRewind in rebooker.js. The status flip and post-commit
+  // side effects below stay keyed on wasLive.
+  const liveReset = wasLive || needsLifecycleRewind(appt) ? LIVE_LIFECYCLE_RESET : {};
 
   // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
   // guard and the wasLive classification above came from the initial read —

@@ -1,0 +1,287 @@
+/**
+ * Stale tracker-lifecycle rewind on reschedule (2026-08-11 incident).
+ *
+ * A visit started on an earlier day, aborted, and moved to a new date could
+ * keep the old attempt's track_state + lifecycle stamps. The next day's En
+ * Route tap then silently no-op'd (markEnRoute's atomic guard saw an
+ * "already advanced" state): no en_route_at, no track-link SMS, and the
+ * customer report rendered the aborted attempt's timestamps.
+ *
+ * Three layers under test:
+ *  1. rebooker.needsLifecycleRewind — evidence-based rewind test the movers
+ *     use instead of status-only wasLive.
+ *  2. track-transitions.markEnRoute self-heal — day-of tap on a row whose
+ *     lifecycle evidence predates today ET rewinds and takes a fresh flip.
+ *  3. visit-timeline stale-timestamp guard — en-route/on-site timestamps
+ *     implausibly far before completion never render.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/twilio', () => ({
+  sendTechEnRoute: jest.fn().mockResolvedValue({ success: false }),
+  sendTechArrived: jest.fn().mockResolvedValue({ success: false }),
+}));
+jest.mock('../services/tech-status', () => ({
+  setTechJobStatus: jest.fn().mockResolvedValue({}),
+  clearTechCurrentJob: jest.fn().mockResolvedValue({}),
+}));
+jest.mock('../services/job-status', () => ({
+  transitionJobStatus: jest.fn().mockResolvedValue({}),
+}));
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
+}));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+}));
+jest.mock('../services/recurring-app-intro-email', () => ({
+  maybeSendOnEnRoute: jest.fn().mockResolvedValue(undefined),
+}));
+
+const db = require('../models/db');
+const trackTransitions = require('../services/track-transitions');
+const { needsLifecycleRewind, LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
+const { buildVisitTimeline } = require('../services/service-report/visit-timeline');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+
+function query(result) {
+  const q = {
+    where: jest.fn().mockReturnThis(),
+    whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    update: jest.fn().mockResolvedValue(result),
+    first: jest.fn().mockResolvedValue(result),
+  };
+  q.modify = jest.fn((fn) => { fn(q); return q; });
+  q.whereRaw = jest.fn().mockReturnValue(q);
+  return q;
+}
+
+// Dynamic dates: hardcoded fixtures time-bomb suites when the calendar
+// catches up (see rebooker-live-reschedule-override.test.js).
+const todayStr = etDateString();
+const isoDaysAgo = (n, time = 'T14:00') => parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), -n))}${time}`).toISOString();
+
+describe('needsLifecycleRewind', () => {
+  test('live operational status rewinds', () => {
+    expect(needsLifecycleRewind({ status: 'en_route' })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'on_site' })).toBe(true);
+  });
+
+  test('live track_state rewinds even when status was never synced', () => {
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'en_route' })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'pending', track_state: 'on_property' })).toBe(true);
+  });
+
+  test('any leftover lifecycle stamp rewinds (partial-reset residue)', () => {
+    expect(needsLifecycleRewind({ status: 'pending', track_state: 'on_property', actual_start_time: isoDaysAgo(7) })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', en_route_at: isoDaysAgo(1) })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', arrived_at: isoDaysAgo(1) })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', check_in_time: isoDaysAgo(1) })).toBe(true);
+  });
+
+  test('clean scheduled row does not rewind', () => {
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled' })).toBe(false);
+    expect(needsLifecycleRewind({ status: 'pending' })).toBe(false);
+  });
+});
+
+describe('markEnRoute stale-attempt self-heal', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('stale on_property from an earlier ET day is rewound and the flip proceeds', async () => {
+    // The incident row's shape: track_state advanced, en_route_at/arrived_at
+    // wiped by a partial reset, actual_start_time still carrying the aborted
+    // attempt. Scheduled today so the future-date guard passes.
+    const staleSvc = {
+      id: 'job-stale',
+      customer_id: 'cust-1',
+      technician_id: null,
+      status: 'pending',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      en_route_at: null,
+      arrived_at: null,
+      actual_start_time: isoDaysAgo(7),
+      track_sms_sent_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const healedSvc = {
+      ...staleSvc,
+      track_state: 'scheduled',
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    };
+    const healUpdate = query(1);
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(staleSvc)) // loadService (first call)
+      .mockReturnValueOnce(healUpdate) // stale-heal rewind UPDATE
+      .mockReturnValueOnce(query(healedSvc)) // loadService (recursed call)
+      .mockReturnValueOnce(flipUpdate); // en-route flip UPDATE
+
+    const result = await trackTransitions.markEnRoute('job-stale');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(result.alreadyEnRoute).toBe(false);
+    expect(result.enRouteAt).toEqual(expect.any(Date));
+    // The heal wrote the full lifecycle rewind, guarded on the observed state.
+    expect(healUpdate.where).toHaveBeenCalledWith({ id: 'job-stale', track_state: 'on_property' });
+    expect(healUpdate.update.mock.calls[0][0]).toMatchObject(LIVE_LIFECYCLE_RESET);
+    // The fresh flip stamped en_route_at.
+    expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'en_route',
+      en_route_at: expect.any(Date),
+    });
+  });
+
+  test('same-day evidence is a genuine re-tap: no heal, idempotent path', async () => {
+    const sameDaySvc = {
+      id: 'job-today',
+      customer_id: 'cust-2',
+      technician_id: null,
+      status: 'en_route',
+      track_state: 'en_route',
+      scheduled_date: todayStr,
+      en_route_at: new Date().toISOString(),
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(sameDaySvc));
+
+    const result = await trackTransitions.markEnRoute('job-today');
+
+    expect(result.ok).toBe(true);
+    expect(result.alreadyEnRoute).toBe(true);
+    // Only the loadService call — no heal UPDATE, no second flip.
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('advanced state with no evidence stamps is left alone', async () => {
+    const noEvidenceSvc = {
+      id: 'job-bare',
+      customer_id: 'cust-3',
+      technician_id: null,
+      status: 'pending',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      en_route_at: null,
+      arrived_at: null,
+      actual_start_time: null,
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(noEvidenceSvc));
+
+    const result = await trackTransitions.markEnRoute('job-bare');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('complete track_state never heals', async () => {
+    const completeSvc = {
+      id: 'job-done',
+      customer_id: 'cust-4',
+      technician_id: null,
+      status: 'completed',
+      track_state: 'complete',
+      scheduled_date: todayStr,
+      actual_start_time: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(completeSvc));
+
+    const result = await trackTransitions.markEnRoute('job-done');
+
+    expect(result.state).toBe('complete');
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('visit timeline stale-timestamp guard', () => {
+  const config = { enabled: true, showOnCustomerReports: true };
+
+  test('on-site from a week before completion never renders (incident shape)', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        completed_at: isoDaysAgo(0, 'T13:28'),
+        actual_start_time: isoDaysAgo(7, 'T14:54'),
+        en_route_at: null,
+        arrived_at: null,
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    const onSite = timeline.events.find((e) => e.type === 'technician_on_site');
+    expect(onSite).toBeUndefined();
+    const completed = timeline.events.find((e) => e.type === 'service_completed');
+    expect(completed).toBeDefined();
+  });
+
+  test('stale en-route is dropped too', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        completed_at: isoDaysAgo(0, 'T13:28'),
+        en_route_at: isoDaysAgo(7, 'T14:36'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.find((e) => e.type === 'technician_en_route')).toBeUndefined();
+  });
+
+  test('same-day timestamps render normally', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        completed_at: isoDaysAgo(0, 'T13:28'),
+        en_route_at: isoDaysAgo(0, 'T12:26'),
+        arrived_at: isoDaysAgo(0, 'T12:40'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.map((e) => e.type)).toEqual([
+      'technician_en_route',
+      'technician_on_site',
+      'service_completed',
+    ]);
+  });
+
+  test('backfill day-only closeout keeps its same-day afternoon arrival', () => {
+    // Backdated quiet closeout: completion is the day-scale ET-noon instant,
+    // which sits BEFORE the real afternoon arrival. The guard only drops
+    // timestamps implausibly far BEFORE completion, so this shape survives.
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        completed_at: isoDaysAgo(3, 'T12:00'),
+        arrived_at: isoDaysAgo(3, 'T14:54'),
+      },
+      structured: { backfill: true },
+      serviceLine: 'lawn',
+      config,
+    });
+    const onSite = timeline.events.find((e) => e.type === 'technician_on_site');
+    expect(onSite).toBeDefined();
+    const completed = timeline.events.find((e) => e.type === 'service_completed');
+    expect(completed.occurredAt).toBeNull();
+  });
+
+  test('in-progress visit (no completion) keeps its timestamps', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'en_route',
+        en_route_at: isoDaysAgo(0, 'T12:26'),
+      },
+      serviceLine: 'lawn',
+      config,
+    });
+    expect(timeline.events.find((e) => e.type === 'technician_en_route')).toBeDefined();
+  });
+});

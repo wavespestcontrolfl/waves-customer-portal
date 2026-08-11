@@ -482,7 +482,7 @@ async function moveStopsToDay(input) {
   }
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, needsLifecycleRewind } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
@@ -494,7 +494,10 @@ async function moveStopsToDay(input) {
     // A live (en_route/on_site) stop being moved rewinds its tracker
     // lifecycle exactly like the rebooker's live override does.
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
-    const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+    // Rewind on stale evidence too, not just live status — see
+    // needsLifecycleRewind in rebooker.js. The status flip and post-commit
+    // side effects below stay keyed on wasLive.
+    const liveReset = wasLive || needsLifecycleRewind(s) ? LIVE_LIFECYCLE_RESET : {};
     // Compare-and-swap on the OBSERVED status + schedule fields: everything
     // below (the wasLive classification, the lifecycle rewind, the
     // 'confirmed' restamp) was derived from the initial read — if the stop
