@@ -64,7 +64,6 @@ async function mintScheduledServiceInvoiceWithDeposit({
         // window where dispatch reassigns the visit before this lock
         // lands, letting the FORMER tech mint and receive the invoice's
         // bearer payment token.
-        if (assertEligibleInTrx) await assertEligibleInTrx(trx);
         // Lock-order guard (codex r3 P1): the invoice insert's customer FK
         // takes KEY SHARE on the customer row AFTER we hold the visit row —
         // while the extension accept locks the customer FOR UPDATE at entry
@@ -74,10 +73,14 @@ async function mintScheduledServiceInvoiceWithDeposit({
         // would take anyway — hoisted, not strengthened. The subquery read
         // of the visit row locks nothing (locking clauses don't reach
         // subqueries), so the visit lock below is still the first one.
+        // BEFORE assertEligibleInTrx — the Charge Now ownership recheck
+        // reads (and may lock) the visit row, which would re-invert the
+        // order this guard exists to hold.
         await trx.raw(
           'SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) FOR KEY SHARE',
           [svc.id],
         );
+        if (assertEligibleInTrx) await assertEligibleInTrx(trx);
         // Mint-path row lock (WaveGuard #3338 pre-enable fast-follow): the
         // caller's svc row and line items were read WITHOUT a lock, so a
         // concurrent reprice could land between that read and this mint —
