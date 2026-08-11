@@ -202,60 +202,44 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
   });
 
-  test('a PHONE-only reopen retires the interim row through the SNAPSHOT arm (audit P1 r6)', async () => {
-    // A phone-linked lead's interim organic row has NO provenance (the
-    // resolver deliberately has no phone arm), so the provenanced retire
-    // cannot see it. On a snapshotted bridge-target lead, a marker-free
-    // NULL-provenance row born after the record resolved can only be the
-    // unclaimed sweep's write — retired via the row-id history-preserving
-    // primitive.
+  test('a PHONE-only reopen retires the interim row by WRITER MARKER (audit r6 → codex GH r7/r8 → marker)', async () => {
+    // A phone-linked lead's interim row does not carry this call's
+    // provenance (the resolver has no phone arm; a reused lead's original
+    // sid gets borrowed instead), and every reconstruction of "which
+    // writer created this row" left a corner where another writer's
+    // legitimate row matched. The sweep stamps attribution_basis on its
+    // inserts; marker + snapshotted lead + born-after-resolution is exact.
     listQueueByTable.bridge_ambiguous_calls = [[
       { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z', resolve_reason: 'rescan_clear' },
     ]];
-    listQueueByTable.ad_service_attribution = [[]]; // no provenanced rows
-    listQueueByTable.lead_sources = [[
-      { id: 'src-1', twilio_phone_number: '+19415550100' }, // the bridge target
-      { id: 'src-2', twilio_phone_number: '+19415550199' }, // NOT the target
-    ]];
+    listQueueByTable.ad_service_attribution = [[]]; // no exact-provenance rows
     listQueueByTable.bridge_ambiguous_call_leads = [[{ lead_id: 'lead-7' }]];
     listQueueByTable.leads = [[{ id: 'lead-7' }]]; // the lead lock read
     listQueueByTable['ad_service_attribution as asa'] = [[{ id: 'row-42' }]];
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
-    expect(mockRetire).not.toHaveBeenCalled(); // nothing provenanced
+    expect(mockRetire).not.toHaveBeenCalled(); // nothing exact-provenanced
     expect(mockRetireRow).toHaveBeenCalledTimes(1);
     expect(mockRetireRow.mock.calls[0][0]).toBe(mockDb); // same transaction
     expect(mockRetireRow.mock.calls[0][1]).toBe('row-42');
-    // The candidate query carries EVERY discriminator: bridge-target lead,
-    // no provenance, no web click/UTM markers, born after the resolution.
     const asaRead = builders.find((b) => b._table === 'ad_service_attribution as asa');
     expect(asaRead._wheres).toContainEqual(['whereIn', 'asa.lead_id', ['lead-7']]);
-    expect(asaRead._wheres).toContainEqual(['whereIn', 'l.lead_source_id', ['src-1']]);
-    // Provenance discriminator lives in the interimProvenance group (NULL
-    // OR borrowed non-bridged — pinned below).
-    expect(asaRead._wheres.some(([m, fn]) => m === 'where' && typeof fn === 'function' && fn.name === 'interimProvenance')).toBe(true);
-    ['asa.gclid', 'asa.wbraid', 'asa.gbraid', 'asa.fbclid', 'asa.fbc', 'asa.utm_campaign', 'asa.utm_term']
-      .forEach((col) => expect(asaRead._wheres).toContainEqual(['whereNull', col]));
+    expect(asaRead._wheres).toContainEqual(['where', 'asa.attribution_basis', 'bridge_unclaimed_sweep']);
     expect(asaRead._wheres).toContainEqual(['where', 'asa.created_at', '>', '2026-08-10T09:00:00Z']);
     // Repo lock order: the snapshot leads are locked before the rows are judged.
     const leadLock = builders.find((b) => b._table === 'leads'
       && b._wheres.some(([m]) => m === 'forUpdate'));
     expect(leadLock).toBeTruthy();
     expect(leadLock._wheres).toContainEqual(['whereIn', 'id', ['lead-7']]);
-    // BORROWED-FROM-HISTORY provenance is retired too (codex P1s GH
-    // r7+r8): the sweep's organic write on a phone-reused lead resolves
-    // the lead's ORIGINAL sid call as provenance — a call predating the
-    // resolution. A provenanced row qualifies only when its source call
-    // lacks the paid claim AND predates resolvedAt; a later non-bridge
-    // call's own legitimate row (post-resolution provenance) is preserved.
-    const asaRead2 = builders.find((b) => b._table === 'ad_service_attribution as asa');
-    const provArm = asaRead2._wheres.find(([m, fn]) => m === 'where' && typeof fn === 'function' && fn.name === 'interimProvenance');
-    expect(provArm).toBeTruthy();
-    const src2 = require('fs').readFileSync(require('path').join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
-    const interim = src2.split('function interimProvenance')[1].slice(0, 700);
-    expect(interim).toMatch(/whereNull\('asa\.source_call_id'\)/);
-    expect(interim).toMatch(/orWhereExists\(function borrowedFromHistory\(\)/);
-    expect(interim).toMatch(/whereNull\('clb\.google_ads_call_resource_name'\)/);
-    expect(interim).toMatch(/where\('clb\.created_at', '<', resolvedAt\)/);
+    // Writer side: the sweep self-identifies, and the marker is
+    // INSERT-only in the shared recorder.
+    const fs3 = require('fs');
+    const path3 = require('path');
+    const ca = fs3.readFileSync(path3.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    expect(ca).toMatch(/attributionBasis: 'bridge_unclaimed_sweep'/);
+    expect(ca).toMatch(/attribution_basis: attributionBasis/);
+    // Never patched onto existing rows — only the insert carries it.
+    const patchBlock = ca.split('const patch = {}')[1].split('await dbc(\'ad_service_attribution\').insert')[0];
+    expect(patchBlock).not.toMatch(/attribution_basis/);
   });
 
   test('an OPEN row (locked but never resolved) retires nothing — no interim write can exist under a live hold', async () => {
@@ -514,5 +498,15 @@ describe('migration (source pins)', () => {
     expect(leadsSrc).toMatch(/references\('id'\)\.inTable\('leads'\)\.onDelete\('CASCADE'\)/);
     expect(leadsSrc).toMatch(/t\.primary\(\['call_log_id', 'lead_id'\]\)/);
     expect(leadsSrc).toMatch(/hasTable\('bridge_ambiguous_call_leads'\)/);
+  });
+
+  test('the writer-marker column is nullable, guarded, and reversible (audit r16)', () => {
+    const basisSrc = fs.readFileSync(
+      path.join(__dirname, '../models/migrations/20260811000003_ad_service_attribution_basis.js'),
+      'utf8',
+    );
+    expect(basisSrc).toMatch(/hasColumn\('ad_service_attribution', 'attribution_basis'\)/);
+    expect(basisSrc).toMatch(/t\.string\('attribution_basis', 40\)/);
+    expect(basisSrc).toMatch(/dropColumn\('attribution_basis'\)/);
   });
 });

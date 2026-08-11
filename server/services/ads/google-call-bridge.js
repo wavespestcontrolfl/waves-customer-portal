@@ -1756,14 +1756,6 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
       const resolvedAtById = new Map(existing
         .filter((r) => r.resolved_at != null && r.resolve_reason !== 'bridged')
         .map((r) => [String(r.call_log_id), r.resolved_at]));
-      // The snapshot retire arm needs the bridge-target source set — the
-      // same discovery the unclaimed sweep runs.
-      const sourceRows = await trx('lead_sources')
-        .whereNotNull('twilio_phone_number')
-        .select('id', 'twilio_phone_number');
-      const bridgeSourceIds = sourceRows
-        .filter((s) => { try { return isBridgeTargetNumber(s.twilio_phone_number); } catch { return false; } })
-        .map((s) => s.id);
       for (const callId of reconcileIds) {
         if (bridgedCalls.has(callId)) continue;
         // PROVENANCED arm — reopens AND first sightings. On a non-bridged
@@ -1790,26 +1782,26 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         // provenance resolver deliberately has no phone arm (r25), and
         // when the reused lead kept its ORIGINAL call's sid the resolver
         // borrows THAT provenance instead (codex P1, r7 GH round) — so
-        // the exact-call retire above cannot see it either way. On a
-        // snapshotted BRIDGE-TARGET lead, every other writer of a
-        // marker-free row born AFTER this record resolved is out:
-        // call-time attribution and claim-time backfill both suppress
-        // bridge-target calls/leads, web rows carry click/UTM markers
-        // (the same discriminators recordCallPpcAttribution's own
-        // web_attributed guard reads), and a paid claim's row is guarded
-        // by its call's live bridge evidence below. What remains can only
-        // be the unclaimed sweep's interim write. History-free rows
-        // delete (the lead returns to held/unattributed); a row that
-        // accumulated stage/revenue stays as permanently-conservative
-        // legacy — the identical end-state the provenanced arm's demote
-        // produces.
+        // the exact-call retire above cannot see it either way. The row
+        // is identified by its WRITER MARKER, not reconstruction (codex
+        // P1s GH r7/r8 + audit r15/r16): the unclaimed sweep stamps
+        // attribution_basis = 'bridge_unclaimed_sweep' on its inserts,
+        // and every reconstruction from provenance, web markers, and
+        // source-call timestamps left a corner where some other writer's
+        // legitimate row matched (a later non-bridge call's own row; a
+        // pre-resolution call processed late). Marker + snapshotted lead
+        // + born after this record's resolution = exactly the sweep's
+        // lift-window write. retireRowPreservingHistory handles both
+        // shapes: history-free rows delete (the lead returns to
+        // held/unattributed); history-bearing rows demote to
+        // permanently-conservative legacy — the identical end-state the
+        // provenanced arm's demote produces.
         // REOPENS ONLY, deliberately: the born-after-resolution bound is
-        // what proves the row is the sweep's post-lift write. A first
-        // sighting has no such anchor, and an unanchored NULL-provenance
-        // match could be a pre-provenance-era legacy row — which doctrine
-        // holds permanently conservative and untouchable.
+        // what proves the row is the sweep's post-lift write, and marker
+        // rows predating the PR's records cannot exist (the table and the
+        // marker deploy together).
         const resolvedAt = resolvedAtById.get(callId);
-        if (!resolvedAt || !bridgeSourceIds.length) continue;
+        if (!resolvedAt) continue;
         const snapLeadIds = (await trx('bridge_ambiguous_call_leads')
           .where({ call_log_id: callId })
           .select('lead_id')).map((r) => String(r.lead_id));
@@ -1817,40 +1809,8 @@ async function recordAmbiguousBridgeCalls(candidates = []) {
         // Repo lock order: leads before attribution rows.
         await trx('leads').whereIn('id', snapLeadIds).forUpdate().select('id');
         const interimRows = await trx('ad_service_attribution as asa')
-          .join('leads as l', 'l.id', 'asa.lead_id')
           .whereIn('asa.lead_id', snapLeadIds)
-          .whereIn('l.lead_source_id', bridgeSourceIds)
-          // NULL provenance OR BORROWED-FROM-HISTORY provenance (codex
-          // P1s, r7+r8 GH rounds): the sweep's organic write on a
-          // phone-reused lead resolves the lead's ORIGINAL sid call as
-          // provenance — not the ambiguous call that reused it — so the
-          // exact-call retirement misses it and a NULL-only filter here
-          // did too. Borrowed provenance always points at a call that
-          // PREDATES the resolution (the lead's founding call), so a
-          // provenanced row qualifies only when its source call both
-          // lacks the durable paid claim AND predates resolvedAt — a
-          // later inbound call on a NON-bridge tracking number (whose
-          // call-time attribution is NOT suppressed) writes a legitimate
-          // row provenanced to itself, post-resolution on both counts,
-          // and must be preserved. retireRowPreservingHistory handles
-          // both retired shapes: history-free rows delete, history-
-          // bearing rows demote to legacy.
-          .where(function interimProvenance() {
-            this.whereNull('asa.source_call_id')
-              .orWhereExists(function borrowedFromHistory() {
-                this.select(1).from('call_log as clb')
-                  .whereRaw('clb.id = asa.source_call_id')
-                  .whereNull('clb.google_ads_call_resource_name')
-                  .where('clb.created_at', '<', resolvedAt);
-              });
-          })
-          .whereNull('asa.gclid')
-          .whereNull('asa.wbraid')
-          .whereNull('asa.gbraid')
-          .whereNull('asa.fbclid')
-          .whereNull('asa.fbc')
-          .whereNull('asa.utm_campaign')
-          .whereNull('asa.utm_term')
+          .where('asa.attribution_basis', 'bridge_unclaimed_sweep')
           .where('asa.created_at', '>', resolvedAt)
           .select('asa.id');
         for (const row of interimRows) {

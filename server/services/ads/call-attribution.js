@@ -135,6 +135,13 @@ async function recordCallPpcAttribution({
   // delete another call's first-touch row (codex P1 r2) — legacy NULL
   // rows stay untouched and are never reconciled.
   sourceCallId = null,
+  // Writer self-identification, INSERT-only (codex/audit rounds on the
+  // bridge-ambiguity PR): the unclaimed→organic sweep stamps
+  // 'bridge_unclaimed_sweep' so the ambiguity-reopen reconciliation can
+  // retire exactly its own lift-window rows — reconstructing the writer
+  // from provenance/markers/timestamps always left a corner where another
+  // writer's legitimate row matched. Never patched onto existing rows.
+  attributionBasis = null,
   // Transaction handle for the ad_service_attribution statements. The
   // google-call bridge attributes while holding a FOR UPDATE lock on the
   // lead; this table's lead_id foreign-key check takes FOR KEY SHARE on
@@ -293,6 +300,7 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       source_call_id: sourceCallId,
+      attribution_basis: attributionBasis,
       funnel_stage: 'lead',
       // Calls carry no click ids (gclid/fbclid), so this flag — not a cookie — is
       // how the paid filters count them: a paid-number call (google_ads/facebook)
@@ -857,6 +865,9 @@ async function attributeUnclaimedBridgeLeads({
           serviceInterest: locked.service_interest || null,
           isPaid: lockedChannel.isPaid, // main_site → false: unclaimed ⇒ organic
           sourceCallId: prov.sourceCallId,
+          // Self-identify: the reopen reconciliation retires exactly this
+          // writer's lift-window rows by marker, not reconstruction.
+          attributionBasis: 'bridge_unclaimed_sweep',
           dbc: trx,
         });
       });
