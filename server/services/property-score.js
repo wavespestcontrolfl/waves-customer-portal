@@ -68,21 +68,23 @@ function movementReason(delta) {
 }
 
 // Active recurring coverage for a service line, from existing mechanisms
-// end to end: LIVE rows only (pending/confirmed, today or later — terminal
-// completed/cancelled rows are not live coverage, and 'rescheduled' is a
-// phantom placeholder per routes/schedule.js), classified by the canonical
-// detectServiceLine, and required to resolve to an affirmative `recurring`
-// billing profile (resolveCompletionProfileForScheduledService — the same
-// catalog resolution the pest one-time exclusion uses). The resolver's null
-// fallback never reads as a program.
+// end to end: NON-TERMINAL rows only (the canonical terminal set from
+// project-completion.js — cancelled/completed/skipped/no_show are not live
+// coverage; a 'rescheduled' phantom still evidences the series, only its
+// stale date is untrustworthy, which this never reads), classified by the
+// canonical detectServiceLine, and required to resolve to an affirmative
+// `recurring` billing profile (resolveCompletionProfileForScheduledService —
+// the same catalog resolution the pest one-time exclusion uses). The
+// resolver's null fallback never reads as a program. service_key_snapshot +
+// is_recurring ride along per the resolver's projection contract (undefined
+// would force its slow-path reload).
 async function hasActiveRecurringLine(customerId, line, knex) {
   const rows = await knex('scheduled_services as ss')
     .where('ss.customer_id', customerId)
-    .whereIn('ss.status', ['pending', 'confirmed'])
-    .where('ss.scheduled_date', '>=', etDateString())
-    .orderBy('ss.scheduled_date', 'asc')
+    .whereNotIn('ss.status', ['cancelled', 'completed', 'skipped', 'no_show'])
+    .orderBy('ss.scheduled_date', 'desc')
     .limit(25)
-    .select('ss.id', 'ss.service_id', 'ss.service_type')
+    .select('ss.id', 'ss.service_id', 'ss.service_type', 'ss.service_key_snapshot', 'ss.is_recurring')
     .catch(() => []);
   for (const svc of rows) {
     if (detectServiceLine(svc.service_type) !== line) continue;
