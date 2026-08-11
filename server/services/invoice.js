@@ -1739,35 +1739,21 @@ const InvoiceService = {
     // reduces/zeroes the invoice, which is exactly the mutation the review
     // contract forbids.)
     // The shared mint serialization, not a parallel one (pre-push P0,
-    // codex r6 round): every scheduled-service invoice writer serializes
-    // on the two-key ['schedule.invoice.mint', ssId] advisory lock with an
-    // in-lock replay re-check (scheduled-invoice-mint is the exemplar).
-    // The replay transactions below lock the visit ROW, but a Charge Now /
-    // completion mint that wins that lock and commits first would leave
-    // this transaction to wake and blindly create a SECOND collectible
-    // invoice for the same visit. Take the same advisory lock FIRST (same
-    // order as the helper: advisory → customer key-share → visit lock,
-    // the latter two inside buildParams), then adopt any invoice that
-    // landed — the caller's reuse filters ran before this transaction and
-    // cannot have seen it. Terminal invoices are not adoption candidates,
-    // same as the helper's replay filter.
+    // codex r6 round; consolidated into scheduled-invoice-mint in r8):
+    // every scheduled-service invoice writer serializes on the two-key
+    // ['schedule.invoice.mint', ssId] advisory lock with an in-lock replay
+    // re-check. The replay transactions below lock the visit ROW, but a
+    // Charge Now / completion mint that wins that lock and commits first
+    // would leave this transaction to wake and blindly create a SECOND
+    // collectible invoice for the same visit. Take the same advisory lock
+    // FIRST (same order as the helper: advisory → customer key-share →
+    // visit lock, the latter two inside buildParams), then adopt any
+    // non-terminal invoice that landed — the caller's reuse filters ran
+    // before this transaction and cannot have seen it.
     const adoptUnderMintLock = async (trx) => {
       if (!replayFromScheduled) return null;
-      await trx.raw(
-        "SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))",
-        ["schedule.invoice.mint", String(sr.scheduled_service_id)],
-      );
-      const replayed = await trx("invoices")
-        .where({ scheduled_service_id: sr.scheduled_service_id })
-        .whereNot("status", "void")
-        .whereNotIn("status", ["refunded", "canceled", "cancelled"])
-        .orderBy("created_at", "desc")
-        .first();
-      // Adoption metadata (codex r6 P1): callers must be able to tell an
-      // adopted concurrent invoice from one this call created — dispatch
-      // keys its back-link, setup-fee restore, and already-paid messaging
-      // off it. Transient JS property, never persisted.
-      return replayed ? { ...replayed, adopted_existing_invoice: true } : null;
+      const { adoptScheduledInvoiceUnderMintLock } = require("./scheduled-invoice-mint");
+      return adoptScheduledInvoiceUnderMintLock(trx, sr.scheduled_service_id);
     };
 
     let sourceEstimateId = null;

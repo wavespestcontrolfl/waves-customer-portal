@@ -481,21 +481,31 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
   const fs = require('fs');
   const source = fs.readFileSync(require.resolve('../routes/admin-projects.js'), 'utf8');
 
-  test('advisory lock → customer key-share → visit lock → in-lock reuse/billed re-checks → create', () => {
-    const advisoryAt = source.indexOf("'schedule.invoice.mint', String(scheduledServiceId)");
-    const keyShareAt = source.indexOf('FOR KEY SHARE', advisoryAt);
-    const visitLockAt = source.indexOf('.forUpdate()', keyShareAt);
+  test('shared lock chain → in-lock reuse/billed re-checks → create', () => {
+    // The lock ORDER (advisory → customer key-share → visit FOR UPDATE) is
+    // owned by scheduled-invoice-mint's chain helper (codex #3344 r8 P1) —
+    // this route imports it instead of keeping a drift-prone local copy.
+    expect(source).toMatch(/const \{ acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES \} = require\('\.\.\/services\/scheduled-invoice-mint'\);/);
+    const chainAt = source.indexOf('await acquireScheduledMintLockChain(trx, {');
     const reuseRecheckAt = source.indexOf('const lockedReuse =');
     const billedRecheckAt = source.indexOf('const lockedBilled =');
     const createAt = source.indexOf('const createdNonWdo = await InvoiceService.create({');
-    expect(advisoryAt).toBeGreaterThan(-1);
-    expect(keyShareAt).toBeGreaterThan(advisoryAt);
-    expect(visitLockAt).toBeGreaterThan(keyShareAt);
-    expect(reuseRecheckAt).toBeGreaterThan(visitLockAt);
+    expect(chainAt).toBeGreaterThan(-1);
+    expect(reuseRecheckAt).toBeGreaterThan(chainAt);
     expect(billedRecheckAt).toBeGreaterThan(reuseRecheckAt);
     expect(createAt).toBeGreaterThan(billedRecheckAt);
-    // The canonical shared lock shape, not a project-private key.
-    expect(source).toContain('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    // No project-private lock statement survives the consolidation.
+    expect(source).not.toContain('SELECT pg_advisory_xact_lock');
+    // The chain itself holds the canonical order in the ONE shared module.
+    const chain = fs.readFileSync(require.resolve('../services/scheduled-invoice-mint.js'), 'utf8');
+    const chainDefAt = chain.indexOf('async function acquireScheduledMintLockChain');
+    const chainAcquireAt = chain.indexOf('await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);', chainDefAt);
+    const chainKeyShareAt = chain.indexOf('FOR KEY SHARE', chainAcquireAt);
+    const chainVisitLockAt = chain.indexOf('.forUpdate()', chainKeyShareAt);
+    expect(chainDefAt).toBeGreaterThan(-1);
+    expect(chainAcquireAt).toBeGreaterThan(chainDefAt);
+    expect(chainKeyShareAt).toBeGreaterThan(chainAcquireAt);
+    expect(chainVisitLockAt).toBeGreaterThan(chainKeyShareAt);
     // The create stays on the lock transaction (self-deadlock guard).
     const createBlock = source.slice(createAt, source.indexOf('});', createAt));
     expect(createBlock).toContain('database: trx');

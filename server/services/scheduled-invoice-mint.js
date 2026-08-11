@@ -37,6 +37,92 @@ function priceMovedBetween(callerSvc, lockedSvc, col) {
   return cents(callerSvc[col]) !== cents(lockedSvc[col]);
 }
 
+// The ONE advisory-lock namespace every scheduled-service invoice writer
+// keys on. Key derivation must stay byte-identical across the writers or
+// they silently stop contending — import these helpers, never re-declare
+// the raw lock statement (codex #3344 r8 P1).
+const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule.invoice.mint';
+
+// Terminal invoices (refunded/cancelled — every payment route rejects them)
+// are never replay/adoption candidates: returning one would resurrect a dead
+// invoice the caller's reuse filter just skipped, instead of minting the
+// replacement. 'void' is excluded by its own whereNot below (kept as the
+// historical two-clause shape so the query is byte-stable for the writers).
+const TERMINAL_INVOICE_STATUSES = ['refunded', 'canceled', 'cancelled'];
+
+async function acquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId)],
+  );
+}
+
+// The ONE lock chain every scheduled-price invoice writer takes, in the ONE
+// order: advisory mint lock → customer KEY SHARE → (caller eligibility
+// hook) → visit row FOR UPDATE.
+// - Lock-order guard (codex r3 P1): the invoice insert's customer FK takes
+//   KEY SHARE on the customer row AFTER we hold the visit row — while the
+//   extension accept locks the customer FOR UPDATE at entry and THEN this
+//   same visit row (ABBA deadlock). Take the customer key-share FIRST so
+//   every scheduled-price path agrees: customer before scheduled service.
+//   KEY SHARE is exactly the lock the FK would take anyway — hoisted, not
+//   strengthened. In the derived form, the subquery read of the visit row
+//   locks nothing (locking clauses don't reach subqueries), so the visit
+//   lock below is still the first one.
+// - assertEligibleInTrx runs AFTER the key-share, BEFORE the visit lock —
+//   the Charge Now ownership recheck reads (and may lock) the visit row,
+//   which would re-invert the order this chain exists to hold.
+// - Visit row FOR UPDATE (WaveGuard #3338 fast-follow): the advisory lock
+//   only serializes mint-vs-mint; THIS lock serializes mint-vs-reprice
+//   (the extension apply holds FOR UPDATE on the rows it rewrites from
+//   before its probe until its savepoint commits). Taken before any
+//   replay/reuse re-check so ordering holds for adoption too.
+async function acquireScheduledMintLockChain(trx, {
+  scheduledServiceId, customerId = null, assertEligibleInTrx = null, visitColumns = ['id'],
+}) {
+  await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+  if (customerId != null) {
+    await trx.raw(
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE',
+      [customerId],
+    );
+  } else {
+    await trx.raw(
+      'SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) FOR KEY SHARE',
+      [scheduledServiceId],
+    );
+  }
+  if (assertEligibleInTrx) await assertEligibleInTrx(trx);
+  return trx('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .forUpdate()
+    .first(...visitColumns);
+}
+
+// Replay = the double-tap window returning the FIRST request's fresh
+// invoice; adoption = a replay transaction waking under the mint lock to
+// find another writer (Charge Now / completion mint) already committed one.
+// Same predicate either way — the ONE terminal-status filter.
+function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
+  return trx('invoices')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereNot('status', 'void')
+    .whereNotIn('status', TERMINAL_INVOICE_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first();
+}
+
+// Take the mint lock, adopt whatever non-terminal invoice landed first.
+// Adoption metadata (codex r6 P1): callers must be able to tell an adopted
+// concurrent invoice from one their call created — dispatch keys its
+// back-link, setup-fee restore, and already-paid messaging off it.
+// Transient JS property, never persisted.
+async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
+  await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+  const replayed = await findAdoptableScheduledInvoice(trx, scheduledServiceId);
+  return replayed ? { ...replayed, adopted_existing_invoice: true } : null;
+}
+
 // allowPriceMovement: the frozen-money-truth resume lanes (dispatch REQUIRED
 // backfill mints) bill a FROZEN amount by design — by-now-mutable row fields
 // must not block that mint (lost AR). Everyone else fails closed: a 409 with
@@ -55,60 +141,23 @@ async function mintScheduledServiceInvoiceWithDeposit({
     const withDeposit = attempt < 2 && !!sourceEstimateId;
     try {
       return await db.transaction(async (trx) => {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['schedule.invoice.mint', String(svc.id)],
-        );
-        // Caller-supplied in-lock authorization recheck (technician
-        // ownership): the caller's pre-transaction SELECT alone leaves a
-        // window where dispatch reassigns the visit before this lock
-        // lands, letting the FORMER tech mint and receive the invoice's
-        // bearer payment token.
-        // Lock-order guard (codex r3 P1): the invoice insert's customer FK
-        // takes KEY SHARE on the customer row AFTER we hold the visit row —
-        // while the extension accept locks the customer FOR UPDATE at entry
-        // and THEN this same visit row (ABBA deadlock). Take the customer
-        // key-share FIRST so every scheduled-price path agrees: customer
-        // before scheduled service. KEY SHARE is exactly the lock the FK
-        // would take anyway — hoisted, not strengthened. The subquery read
-        // of the visit row locks nothing (locking clauses don't reach
-        // subqueries), so the visit lock below is still the first one.
-        // BEFORE assertEligibleInTrx — the Charge Now ownership recheck
-        // reads (and may lock) the visit row, which would re-invert the
-        // order this guard exists to hold.
-        await trx.raw(
-          'SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) FOR KEY SHARE',
-          [svc.id],
-        );
-        if (assertEligibleInTrx) await assertEligibleInTrx(trx);
-        // Mint-path row lock (WaveGuard #3338 pre-enable fast-follow): the
-        // caller's svc row and line items were read WITHOUT a lock, so a
-        // concurrent reprice could land between that read and this mint —
-        // billing the pre-extension price. The advisory lock above only
-        // serializes mint-vs-mint; THIS lock serializes mint-vs-reprice
-        // (the extension apply holds FOR UPDATE on the rows it rewrites
-        // from before its probe until its savepoint commits). Taken before
-        // the replay check so ordering holds for adoption too.
-        const lockedSvc = await trx('scheduled_services')
-          .where({ id: svc.id })
-          .forUpdate()
-          .first('id', 'estimated_price', 'primary_line_price');
+        // The shared lock chain (advisory → customer key-share → caller
+        // eligibility hook → visit FOR UPDATE). The hook is the caller's
+        // in-lock authorization recheck (technician ownership): the
+        // caller's pre-transaction SELECT alone leaves a window where
+        // dispatch reassigns the visit before this lock lands, letting the
+        // FORMER tech mint and receive the invoice's bearer payment token.
+        const lockedSvc = await acquireScheduledMintLockChain(trx, {
+          scheduledServiceId: svc.id,
+          assertEligibleInTrx,
+          visitColumns: ['id', 'estimated_price', 'primary_line_price'],
+        });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
           e.status = 404;
           throw e;
         }
-        // Replay = the double-tap window returning the FIRST request's fresh
-        // invoice. Terminal invoices (refunded/cancelled — every payment
-        // route rejects them) are not replay candidates: returning one here
-        // would resurrect a dead invoice the caller's reuse filter just
-        // skipped, instead of minting the replacement.
-        const replayed = await trx('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
-          .orderBy('created_at', 'desc')
-          .first();
+        const replayed = await findAdoptableScheduledInvoice(trx, svc.id);
         if (replayed) return { invoice: replayed, reused: true };
         // Stale-price refusal — CREATE only (an adopted replay invoice is
         // the extension probe/re-probe's problem, handled there). Both
@@ -173,4 +222,12 @@ async function mintScheduledServiceInvoiceWithDeposit({
   throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
 }
 
-module.exports = { mintScheduledServiceInvoiceWithDeposit };
+module.exports = {
+  SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
+  TERMINAL_INVOICE_STATUSES,
+  acquireScheduledInvoiceMintLock,
+  acquireScheduledMintLockChain,
+  findAdoptableScheduledInvoice,
+  adoptScheduledInvoiceUnderMintLock,
+  mintScheduledServiceInvoiceWithDeposit,
+};

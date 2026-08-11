@@ -67,6 +67,7 @@ const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { normalizeAddendumPhoto } = require('../services/pdf/addendum-photo');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
+const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('../services/scheduled-invoice-mint');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { isEnabled } = require('../config/feature-gates');
@@ -3012,27 +3013,15 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // extension's probes.
     if (scheduledServiceId) {
       // The shared mint serialization, not a parallel one (pre-push P0,
-      // codex r5 round): every other scheduled-service invoice writer
-      // (completion mint, Charge Now, checkout) serializes on the two-key
-      // ['schedule.invoice.mint', ssId] advisory lock — taken FIRST, same
-      // as scheduled-invoice-mint, so this path contends in the same order.
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['schedule.invoice.mint', String(scheduledServiceId)],
-      );
-      // Lock-order guard (codex r3 P1): customer key-share BEFORE the visit
-      // row lock — the create() below inserts the invoice on this trx and
-      // its customer FK takes KEY SHARE regardless; taking it first keeps
-      // the global customer→scheduled-service order the extension accept
-      // path establishes (customer FOR UPDATE at entry, then visit rows).
-      await trx.raw(
-        'SELECT id FROM customers WHERE id = ? FOR KEY SHARE',
-        [project.customer_id],
-      );
-      await trx('scheduled_services')
-        .where({ id: scheduledServiceId })
-        .forUpdate()
-        .first('id');
+      // codex r5 round; consolidated in r8): every other scheduled-service
+      // invoice writer (completion mint, Charge Now, checkout) takes the
+      // SAME chain in the SAME order — advisory mint lock → customer
+      // key-share → visit row lock — owned by scheduled-invoice-mint, so
+      // this path contends identically and cannot drift.
+      await acquireScheduledMintLockChain(trx, {
+        scheduledServiceId,
+        customerId: project.customer_id,
+      });
       // In-lock replay re-check (pre-push P0, codex r5 round): the reuse and
       // already-billed checks above ran BEFORE these locks — a canonical
       // mint that held them first can commit an invoice for this visit and
@@ -3046,8 +3035,9 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         // Terminal invoices are NOT adoption candidates (codex r7 P1) —
         // adopting a refunded/cancelled invoice would link the project to
         // a dead bill and block the replacement the shared mint paths
-        // deliberately allow. Same filter as createFromService's adoption.
-        .whereNotIn('status', ['void', 'paid', 'refunded', 'canceled', 'cancelled'])
+        // deliberately allow. THE shared terminal filter (r8), plus 'paid'
+        // — a paid invoice is the lockedBilled check's business below.
+        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
         .where(function invoiceLinkage() {
           this.orWhere({ scheduled_service_id: scheduledServiceId });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });

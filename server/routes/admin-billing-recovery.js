@@ -42,12 +42,13 @@ const {
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Reuse the SAME advisory-lock key the scheduled-service invoice-mint path uses
-// (admin-schedule.js: 'schedule.invoice.mint') so a recovery Bill serializes not
-// just against another recovery Bill/dismiss but against Charge-now / completion
-// mints too. invoices.scheduled_service_id is NOT unique, so a private namespace
-// would let a recovery Bill and a concurrent mint both create duplicate drafts.
-const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule.invoice.mint';
+// Reuse the SAME advisory lock the scheduled-service invoice-mint path uses
+// (services/scheduled-invoice-mint) so a recovery Bill serializes not just
+// against another recovery Bill/dismiss but against Charge-now / completion
+// mints too. invoices.scheduled_service_id is NOT unique, so a private
+// namespace would let a recovery Bill and a concurrent mint both create
+// duplicate drafts. Imported, never re-declared (codex #3344 r8).
+const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -453,7 +454,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     // Serialize concurrent bills on the same visit, recheck inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
     const invoice = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
+      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
 
       const existingInvoice = await trx('invoices')
         .where(function () {
@@ -544,7 +545,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
     // eligibility is re-validated INSIDE the lock so a stale UI / direct request
     // can't permanently exclude a future, uncompleted, or already-invoiced visit.
     await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
+      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
 
       const visit = await trx({ ss: 'scheduled_services' })
         .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')

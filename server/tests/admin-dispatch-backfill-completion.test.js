@@ -2474,7 +2474,10 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/const minted = await mintScheduledServiceInvoiceWithDeposit\(\{[\s\S]{0,1400}svc: useReplayLines/);
     expect(source).toMatch(/adoptedConcurrentInvoice = minted\.reused === true;/);
     const mintServiceSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
-    expect(mintServiceSource).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\n\s*\['schedule\.invoice\.mint', String\(svc\.id\)\],/);
+    // The raw advisory statement lives ONLY in the shared acquire helper
+    // (codex #3344 r8 P1) — every writer imports it, never re-declares it.
+    expect(mintServiceSource).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\n\s*\[SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String\(scheduledServiceId\)\],/);
+    expect(mintServiceSource).toMatch(/const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule\.invoice\.mint';/);
     expect(mintServiceSource).toMatch(/database: trx,/);
     const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(scheduleSource).toMatch(/require\('\.\.\/services\/scheduled-invoice-mint'\)/);
