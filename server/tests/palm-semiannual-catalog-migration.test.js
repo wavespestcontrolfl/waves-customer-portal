@@ -295,6 +295,25 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(svcRow(db).id).not.toBe(insertedId);
   });
 
+  test('post-retention replacement row keeps its profile on the next rollback (codex r9 P2)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const insertedId = db.services.find((r) => r.service_key === KEY).id;
+    db.scheduled_services.push({ id: 'v1', service_id: insertedId });
+    await migration.down(fakeKnex(db));
+    // Admin repurposes the retained UUID AND creates a fresh replacement
+    // under the original key before the next roll-forward.
+    db.services.find((r) => r.id === insertedId).service_key = 'admin_custom_palm';
+    db.services.push({ id: 'admin-replacement', service_key: KEY, name: 'Semiannual Palm Injection Service', is_active: true });
+    await migration.up(fakeKnex(db));
+    db.scheduled_services = [];
+    await migration.down(fakeKnex(db));
+
+    // The replacement and its typed profile both survive.
+    expect(db.services.find((r) => r.id === 'admin-replacement')).toBeDefined();
+    expect(profileRow(db)).toBeDefined();
+  });
+
   test('retain → roll-forward → references clear → second rollback removes BOTH row and profile (no orphan marker profile)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));

@@ -2185,8 +2185,12 @@ function remainingUnitCatalogKey(svc = {}) {
 }
 
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
-  const rowKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: scheduledRow.service_type });
-  return recurringServices.find((svc) => RecurringAppointmentSeeder.serviceKeyFor(svc) === rowKey)
+  // Palm-first family matching (codex r9 P1): an adopted reserved row
+  // labeled 'Palm Tree Injections' beside a Tree & Shrub line would
+  // otherwise match the T&S line through the tree-first seeder resolver
+  // and seed the WRONG cadence onto the palm parent.
+  const rowKey = seedingFamilyKey({}, scheduledRow);
+  return recurringServices.find((svc) => seedingFamilyKey(svc) === rowKey)
     || recurringServices.find((svc) => recurringServiceKey(svc) === 'pest_control')
     || recurringServices[0]
     || { service_type: scheduledRow.service_type };
@@ -2502,8 +2506,14 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   // to office scheduling instead of being overridden.
   if (seedingFamilyKey(svc, parentRow) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
-    && !explicitCadenceFieldForService(svc)
+    && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc, parentRow)) {
+    // Cadence-less OR semiannual-agreeing field both force (codex r9 P1):
+    // a line whose cadence lives only in `cadence`/`planFrequency` —
+    // spellings inferRecurringPattern never reads — would otherwise
+    // resolve the plan fallback and the gate would decline a VALID
+    // semiannual palm line. A disagreeing field still falls through and
+    // declines via the gate's contradiction check.
     return 'semiannual';
   }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -2537,7 +2547,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // cadence-field restriction as the seeding rule (codex r4 P1).
   if (seedingFamilyKey(svc) === 'palm_injection'
     && visitsPerYearForRecurringService(svc) === 2
-    && !explicitCadenceFieldForService(svc)
+    && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
     && !isCommercialRecurringLine(svc)) {
     return 'semiannual';
   }
@@ -5084,6 +5094,8 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane

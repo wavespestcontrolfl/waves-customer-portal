@@ -322,10 +322,17 @@ exports.down = async function down(knex) {
       // recreated the service, keeping the marker profile), deleting the
       // shared profile by key would strip the replacement row's typed
       // completion behavior.
+      // ANY live same-key row that is not in the removable set keeps the
+      // profile (codex r9 P2 widened the r7 guard): after a retaining
+      // rollback an admin can repurpose the retained UUID AND create a
+      // fresh replacement under this key before the next roll-forward —
+      // up() then skips both rows and tracks nothing, so a
+      // "did-we-insert-it" condition would leave the replacement's typed
+      // profile unprotected on the following rollback. A profile is only
+      // deletable when no live service row answers to its key.
       const currentService = await knex('services').where({ service_key: key }).first();
-      const weInsertedTheService = state.services.some((entry) => entry && entry.key === key);
-      if (currentService && !removableIds.includes(currentService.id) && weInsertedTheService) {
-        console.warn(`[palm-semiannual] down: profile ${key} serves an admin-recreated service row (${currentService.id}) — leaving untouched`);
+      if (currentService && !removableIds.includes(currentService.id)) {
+        console.warn(`[palm-semiannual] down: profile ${key} serves a live service row (${currentService.id}) — leaving untouched`);
         continue;
       }
       const profile = await knex('service_completion_profiles').where({ service_key: key }).first();

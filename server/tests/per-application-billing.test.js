@@ -225,6 +225,26 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(supportsConverterFollowUpSeeding({ name: 'Bi-Monthly Tree & Shrub Care Service', visitsPerYear: 6 }, {}, 'bimonthly')).toBe(true);
   });
 
+  test('a VALID semiannual palm cadence spelled only as `cadence` still seeds against a monthly/quarterly plan fallback (codex r9 P1)', () => {
+    // inferRecurringPattern never reads `cadence`/`planFrequency` and
+    // checks the plan fallback before the visit count — without the
+    // agreeing-field force, this valid line would decline.
+    const agreeing = { service: 'palm_injection', name: 'Palm Injection', cadence: 'semiannual', visitsPerYear: 2 };
+    expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
+    expect(converterFollowUpSeedingPattern({ ...agreeing, cadence: undefined, plan_frequency: 'semiannual' }, { service_type: 'Palm Injection' }, 'quarterly')).toBe('semiannual');
+    expect(EstimateConverter.annualPrepayCoverageCadence(agreeing, 'monthly')).toBe('semiannual');
+  });
+
+  test('an adopted "Palm Tree Injections" row matches the PALM line, not a Tree & Shrub sibling (codex r9 P1)', () => {
+    const { recurringServiceForScheduledRow } = EstimateConverter;
+    const tsLine = { name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 };
+    const palmLine = { name: 'Palm Injection', service: 'palm_injection', visitsPerYear: 2 };
+    const picked = recurringServiceForScheduledRow([tsLine, palmLine], { service_type: 'Palm Tree Injections' });
+    expect(picked).toBe(palmLine);
+    // A real T&S row still matches the T&S line.
+    expect(recurringServiceForScheduledRow([tsLine, palmLine], { service_type: 'Tree & Shrub Care' })).toBe(tsLine);
+  });
+
   test('"Palmetto" is NOT palm — the bare /palm/ substring hit declines on every surface (codex r8 P1)', () => {
     const palmetto = { service: 'pest_initial_palmetto_knockdown', name: 'Palmetto Roach Knockdown', visitsPerYear: 2 };
     expect(converterFollowUpSeedingPattern(palmetto, { service_type: 'Palmetto Roach Knockdown' }, 'quarterly')).toBe(null);
