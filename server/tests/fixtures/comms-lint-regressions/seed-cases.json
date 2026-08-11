@@ -177,6 +177,20 @@
       "provenance": "2026-08-11 codex round on #3348: the detector only knew reply/text/txt STOP — purpose-form tails are the same unwanted line on the #3343 transactional class"
     },
     {
+      "name": "plan total on a non-monthly account",
+      "text": "The quarterly plan comes out to $117/mo if that helps compare.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": false },
+      "expect": { "pass": false, "rules": ["no-plan-total"] },
+      "provenance": "2026-08-11 codex round on #3348: owner rule re-affirmed 2026-07-23 — no combined plan totals in customer copy; monthly-billed legacy plans keep /mo (lane caller-asserted)"
+    },
+    {
+      "name": "monthly member hears their real dues",
+      "text": "Your membership dues are $98.50/mo, same as always.",
+      "context": { "channel": "sms", "audience": "customer", "monthlyBilled": true },
+      "expect": { "pass": true },
+      "provenance": "2026-08-11: the monthly lane is the ONE case a plan price may be spoken (codex #3128 r6/r9 lineage)"
+    },
+    {
       "name": "bare third-party host beyond g.page",
       "text": "You can also find us on yelp.com if that is easier.",
       "context": { "channel": "sms", "audience": "customer" },

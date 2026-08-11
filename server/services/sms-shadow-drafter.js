@@ -959,11 +959,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // accounts are exempt from the per-application wording rule, so the
     // lint context carries the customer's class.
     const commsLint = require('./comms-lint');
+    // Billing lane comes from the aggregator's authoritative field: monthly
+    // members legitimately hear their "/mo" dues, so the plan-total rule
+    // only arms when the lane POSITIVELY says not-monthly. An absent lane
+    // (caller predates the aggregator) is unknown — the rule skips.
+    const billingLane = context?.customer?.billingLane;
     const lint = commsLint.lintComms(parsed.reply, {
       channel: 'sms',
       audience: 'customer',
       stopExpected: false,
       commercial: isCommercialProperty(customer),
+      monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
     });
 
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically

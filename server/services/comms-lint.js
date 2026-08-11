@@ -119,8 +119,10 @@ function smsSegmentCount(text) {
 }
 
 // Typographic characters the house voice bans outright: they read as
-// machine-written AND silently flip SMS encoding to UCS-2.
-const TYPOGRAPHIC_RE = /[\u2018\u2019\u201C\u201D\u2013\u2014\u2026]/;
+// machine-written AND silently flip SMS encoding to UCS-2. Classification
+// delegates to the canonical GSM-7 normalizer's replacement set \u2014 a local
+// character list here would drift from it.
+const { findTypographicChar } = require('./messaging/gsm-normalize');
 
 const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)|thank you for choosing waves|questions or requests\?|simply reply\b/i;
 
@@ -177,6 +179,19 @@ const RULES = [
         : null),
   },
   {
+    name: 'no-plan-total',
+    // Combined plan totals ("$X/mo" / "$X/yr") never appear in customer
+    // copy (owner rule re-affirmed 2026-07-23) — EXCEPT true monthly-billed
+    // legacy plans, where the dues figure IS their price, and commercial
+    // proposals. Only checkable when the caller can assert the billing lane
+    // (monthlyBilled === false); unknown skips, never guesses.
+    applies: (ctx) => ctx.audience === 'customer' && !ctx.commercial && ctx.monthlyBilled === false,
+    check: (text) => {
+      const m = text.match(/(?:\$\s*|\busd\s+)\d[\d.,]*\s*(?:\/\s*|(?:per|a|each|every)\s+)(?:mo|month|yr|year)\b/i);
+      return m ? `quotes a combined plan total "${m[0].trim()}" — plan totals never appear in customer copy (monthly-billed legacy plans exempt)` : null;
+    },
+  },
+  {
     name: 'reentry-language',
     // Delegates wholesale to the publish gate's REENTRY_SAFETY_CLAIM
     // predicate (content-guardrails): unconditional "safe" claims, the
@@ -203,8 +218,8 @@ const RULES = [
     name: 'plain-punctuation',
     applies: (ctx) => ctx.audience === 'customer',
     check: (text) => {
-      const hit = text.match(TYPOGRAPHIC_RE);
-      return hit ? `typographic character "${hit[0]}" — plain keyboard punctuation only (also silently doubles SMS segments)` : null;
+      const hit = findTypographicChar(text);
+      return hit ? `typographic character "${hit}" — plain keyboard punctuation only (also silently doubles SMS segments)` : null;
     },
   },
   {

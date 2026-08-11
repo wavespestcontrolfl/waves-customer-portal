@@ -125,6 +125,26 @@ describe('lintComms mechanics', () => {
     expect(ok.failures.map((f) => f.rule)).not.toContain('per-application-wording');
   });
 
+  it('flags plan totals only when the lane positively says not-monthly', () => {
+    for (const msg of ['Your plan is $117/mo.', 'That works out to $1,404/yr.', 'It runs $98 per month.']) {
+      const fail = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: false });
+      expect(fail.failures.map((f) => f.rule)).toContain('no-plan-total');
+      const monthlyMember = lintComms(msg, { channel: 'sms', audience: 'customer', monthlyBilled: true });
+      expect(monthlyMember.failures.map((f) => f.rule)).not.toContain('no-plan-total');
+      const unknownLane = lintComms(msg, { channel: 'sms', audience: 'customer' });
+      expect(unknownLane.checked).not.toContain('no-plan-total');
+    }
+  });
+
+  it('delegates typographic detection to the canonical GSM normalizer set', () => {
+    for (const ch of ['‒', '•', '′', '…']) {
+      const r = lintComms(`Plain text with ${ch} inside`, { channel: 'sms', audience: 'customer' });
+      expect(r.failures.map((f) => f.rule)).toContain('plain-punctuation');
+    }
+    const clean = lintComms("Plain text - with 'quotes' and \"doubles\".", { channel: 'sms', audience: 'customer' });
+    expect(clean.failures.map((f) => f.rule)).not.toContain('plain-punctuation');
+  });
+
   it('recognizes STOP tails beyond the reply/text verb forms', () => {
     for (const msg of ['Your service is confirmed. STOP to unsubscribe', 'Send STOP to opt out anytime.', 'Msg&data rates may apply. Stop to end.']) {
       const r = lintComms(msg, { channel: 'sms', audience: 'customer', stopExpected: false });
