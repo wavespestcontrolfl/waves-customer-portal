@@ -295,6 +295,17 @@ exports.down = async function down(knex) {
   if (state.profiles.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
     for (const key of state.profiles) {
       if (retainedKeys.has(key)) continue;
+      // Admin-recreated row guard (exemplar 20260809000000): if our UUID is
+      // gone but the key lives on under a NEW UUID (admin deleted and
+      // recreated the service, keeping the marker profile), deleting the
+      // shared profile by key would strip the replacement row's typed
+      // completion behavior.
+      const currentService = await knex('services').where({ service_key: key }).first();
+      const weInsertedTheService = state.services.some((entry) => entry && entry.key === key);
+      if (currentService && !removableIds.includes(currentService.id) && weInsertedTheService) {
+        console.warn(`[palm-semiannual] down: profile ${key} serves an admin-recreated service row (${currentService.id}) — leaving untouched`);
+        continue;
+      }
       const profile = await knex('service_completion_profiles').where({ service_key: key }).first();
       if (!profile) continue;
       if (!String(profile.notes || '').includes(PROFILE_MARKER)) {

@@ -262,6 +262,20 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(db2.services.find((r) => r.service_key === KEY)).toBeDefined();
   });
 
+  test('down() leaves the profile when an admin recreated the service under a NEW UUID (codex P1)', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    // Admin deletes our row and recreates the key under a new UUID,
+    // keeping the marker-bearing profile.
+    db.services = db.services.filter((r) => r.service_key !== KEY);
+    db.services.push({ id: 'admin-new-uuid', service_key: KEY, name: 'Semiannual Palm Injection Service', is_active: true });
+    await migration.down(fakeKnex(db));
+
+    // The replacement row keeps its typed completion behavior.
+    expect(profileRow(db)).toBeDefined();
+    expect(db.services.find((r) => r.service_key === KEY)).toBeDefined();
+  });
+
   test('down() retains on completed service records and add-on wiring too', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
