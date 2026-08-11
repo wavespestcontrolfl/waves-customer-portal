@@ -252,13 +252,18 @@ function lintComms(text, context = {}) {
   return { pass: failures.length === 0, failures, checked };
 }
 
-/** flags-array entries for a draft row, in the shape consumers already render. */
-function lintFlags(text, context = {}) {
-  return lintComms(text, context).failures.map((f) => ({
+/** flags-array entries for a lintComms result, in the shape consumers already render. */
+function toFlags(result) {
+  return result.failures.map((f) => ({
     severity: 'warn',
     type: `comms_lint:${f.rule}`,
     detail: f.reason,
   }));
 }
 
-module.exports = { lintComms, lintFlags, smsSegmentCount, isGsm7, findBareThirdPartyHost, RULES, URL_SHORTENER_HOSTS };
+/** flags-array entries for a draft row, in the shape consumers already render. */
+function lintFlags(text, context = {}) {
+  return toFlags(lintComms(text, context));
+}
+
+module.exports = { lintComms, lintFlags, toFlags, smsSegmentCount, isGsm7, findBareThirdPartyHost, RULES, URL_SHORTENER_HOSTS };

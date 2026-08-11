@@ -942,6 +942,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       schedulingIntent,
     });
 
+    // Deterministic comms-lint verdict for this draft, computed once and
+    // used twice: recorded as flags on every row, and consulted before the
+    // autonomous rung below. These drafts are replies on an existing
+    // customer thread — the transactional class under the #3343 STOP-line
+    // ruling — so stopExpected is a known false, never a guess.
+    const commsLint = require('./comms-lint');
+    const lint = commsLint.lintComms(parsed.reply, { channel: 'sms', audience: 'customer', stopExpected: false });
+
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
     // with the decision insert inside publishSuggestion's locked
     // transaction. A crash between this insert and the publish leaves a
@@ -957,11 +965,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         intent_confidence: intent?.confidence ?? null,
         context_summary: context.summary || null,
         // Account flags from context, plus comms-lint failures on the draft
-        // itself (advisory: recorded for cohort readouts and the composer
-        // card, never blocking here — delivery-mode decisions stay above).
+        // itself. Advisory on every human-reviewed surface (cohort readouts,
+        // the composer card); the autonomous rung below additionally requires
+        // a clean verdict before auto-sending.
         flags: JSON.stringify([
           ...(context.flags || []),
-          ...require('./comms-lint').lintFlags(parsed.reply, { channel: 'sms', audience: 'customer' }),
+          ...commsLint.toFlags(lint),
         ]),
         status: SHADOW_STATUS,
         drafter: DRAFTER,
@@ -1060,7 +1069,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
     if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount) {
-      if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+      if (deliveryMode === suggestMode.AUTO_SEND_MODE && lint.pass) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
           customer,
@@ -1114,7 +1123,15 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
         }
-      } else if (deliveryMode === 'suggest') {
+      } else if (deliveryMode === 'suggest' || deliveryMode === suggestMode.AUTO_SEND_MODE) {
+        // suggest mode, or an auto-send-mode draft the deterministic lint
+        // harness flagged: a flagged draft never rides the autonomous rung —
+        // it fails closed to the human composer card (same autonomy boundary
+        // as the placeholder and ungrounded-amount withholds), where the
+        // recorded flags are visible to the reviewer.
+        if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+          logger.warn(`[sms-shadow] comms-lint failed (${lint.failures.map((f) => f.rule).join(',')}) — auto-send demoted to composer card (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+        }
         const decisionId = await suggestMode.publishSuggestion({
           draftId: row.id,
           customerId: customer.id,

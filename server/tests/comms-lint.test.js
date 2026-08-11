@@ -107,6 +107,13 @@ describe('lintComms mechanics', () => {
     }
   });
 
+  it('toFlags on a lintComms result matches lintFlags (single-lint callers must not drift)', () => {
+    const { toFlags } = require('../services/comms-lint');
+    const text = 'So excited!! 🎉 Book at bit.ly/x';
+    const ctx = { channel: 'sms', audience: 'customer', stopExpected: false };
+    expect(toFlags(lintComms(text, ctx))).toEqual(lintFlags(text, ctx));
+  });
+
   it('handles empty and non-string input without throwing', () => {
     expect(lintComms('', {}).pass).toBe(true);
     expect(lintComms(null, {}).pass).toBe(true);
