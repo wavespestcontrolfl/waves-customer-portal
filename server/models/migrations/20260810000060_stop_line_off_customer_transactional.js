@@ -117,7 +117,9 @@ exports.up = async function up(knex) {
       continue;
     }
     if (next !== row.body) {
-      await knex('sms_templates').where({ id: row.id }).update({ body: next, updated_at: new Date() });
+      // Compare-and-swap on the body we read: an admin save landing between
+      // the read and this update wins instead of being overwritten.
+      await knex('sms_templates').where({ id: row.id, body: row.body }).update({ body: next, updated_at: new Date() });
     }
   }
 
@@ -142,7 +144,7 @@ exports.up = async function up(knex) {
         continue;
       }
       if (next !== v.body) {
-        await knex('sms_template_variants').where({ id: v.id }).update({ body: next, updated_at: new Date() });
+        await knex('sms_template_variants').where({ id: v.id, body: v.body }).update({ body: next, updated_at: new Date() });
       }
     }
   }
@@ -163,7 +165,9 @@ exports.up = async function up(knex) {
         }
       }
       if (Object.keys(patch).length) {
-        await knex('referral_program_settings').where({ id: row.id }).update({ ...patch, updated_at: new Date() });
+        let q = knex('referral_program_settings').where({ id: row.id });
+        for (const col of Object.keys(patch)) q = q.where(col, row[col]);
+        await q.update({ ...patch, updated_at: new Date() });
       }
     }
   }
@@ -171,14 +175,27 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   // Copy-only migration: restore the audited bodies where the current body
-  // matches what up() set. Mechanical-pass rows, variant edits, and the
+  // matches what up() set — base rows AND exact-match variants (getTemplate
+  // prefers an active variant over the base body, so leaving a rewritten
+  // variant behind would defeat the rollback). Mechanical-pass rows and the
   // legacy referral columns are not restored (no snapshot of their prior
   // state) — same contract as 20260730000020.
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   for (const [key, expect, set] of SWAPS) {
     const row = await knex('sms_templates').where({ template_key: key }).first('id', 'body');
     if (!row || row.body !== set) continue;
-    await knex('sms_templates').where({ id: row.id }).update({ body: expect, updated_at: new Date() });
+    await knex('sms_templates').where({ id: row.id, body: set }).update({ body: expect, updated_at: new Date() });
+  }
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    for (const [key, expect, set] of SWAPS) {
+      const variants = await knex('sms_template_variants')
+        .where({ template_key: key })
+        .select('id', 'body');
+      for (const v of variants) {
+        if (v.body !== set) continue;
+        await knex('sms_template_variants').where({ id: v.id, body: set }).update({ body: expect, updated_at: new Date() });
+      }
+    }
   }
 };
 
