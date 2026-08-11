@@ -1172,14 +1172,19 @@ function agreedFirstName(rows) {
     : null;
 }
 
-// All live rows sharing the phone's exact last-10 digits — the agreement set
-// for the greeting. The composer's customerId is NOT proof of an explicit
-// operator pick (opening a thread auto-selects whichever row the latest
-// message happened to carry — codex P2 #3340), so BOTH resolution paths
-// must clear name agreement across every row on the number.
-async function firstNameForPhone(last10) {
+// The agreement set for the greeting: live rows that BOTH match the phone's
+// exact last-10 digits AND belong to the resolved account (customerIds).
+// The composer's customerId is NOT proof of an explicit operator pick
+// (opening a thread auto-selects whichever row the latest message happened
+// to carry — codex P2 #3340), so BOTH resolution paths clear name agreement
+// across the number. The account scope matters on the customerId path:
+// phone-only resolution 409s on a cross-account number, but customerId
+// deliberately proceeds as the operator's disambiguation — a stranger's row
+// sharing a reused number must never supply the greeting (codex P1 r2).
+async function firstNameForPhone(last10, customerIds) {
   const rows = await db('customers')
     .whereNull('deleted_at')
+    .whereIn('id', customerIds)
     .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
     .select('first_name');
   return agreedFirstName(rows);
@@ -1250,12 +1255,12 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
 
-    // The greeting name for the prefill: agreement across every live row on
-    // this NUMBER, on both resolution paths — see firstNameForPhone. Never
-    // the visit owner's row: on a multi-property account a sibling row may
-    // own the visit under a different contact name, but the text still goes
-    // to the phone's owner.
-    const recipientFirstName = await firstNameForPhone(last10);
+    // The greeting name for the prefill: agreement across this ACCOUNT's
+    // rows on this NUMBER, on both resolution paths — see firstNameForPhone.
+    // Never the visit owner's row: on a multi-property account a sibling row
+    // may own the visit under a different contact name, but the text still
+    // goes to the phone's owner.
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
 
     // Candidate visits, soonest first. ET day frame: scheduled_date is a
     // DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
@@ -1380,10 +1385,11 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
 
-    // Greeting name = agreement across every live row on this NUMBER, on
-    // both resolution paths (see firstNameForPhone) — whichever sibling row
-    // ends up owning the eligible lane, the text goes to the phone's owner.
-    const recipientFirstName = await firstNameForPhone(last10);
+    // Greeting name = agreement across this ACCOUNT's rows on this NUMBER,
+    // on both resolution paths (see firstNameForPhone) — whichever sibling
+    // row ends up owning the eligible lane, the text goes to the phone's
+    // owner.
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
 
     // The operator-selected row is checked FIRST — the /reservice page
     // builds availability around the token row's ADDRESS, so on a
