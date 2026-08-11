@@ -10885,6 +10885,14 @@ export function CompletionPanel({
     backfillCloseout,
     backfillTimeOnSite,
     adjustedTimeOnSite,
+    // Moved re-entry steppers are operator input (codex P1 #3360 r2): the
+    // effect must rerun on a stepper-only change or the draft never saves
+    // it. Dirty flags ride along so a seed arriving late (flipping dirty
+    // false without changing the value) also re-evaluates hasDraftContent.
+    reentryExtMinutes,
+    reentryIntMinutes,
+    reentryExtDirty,
+    reentryIntDirty,
     visitOutcome,
     customerRecap,
     recapSource,
