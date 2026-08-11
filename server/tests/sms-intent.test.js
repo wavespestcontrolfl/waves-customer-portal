@@ -26,7 +26,7 @@ describe('SMS intent helpers', () => {
   // the reaction read as prose and its quoted "Reschedule here:" line raised
   // a reschedule flag + owner bell against a still-armed visit.
   test('detects tapbacks quoting a multi-line message', () => {
-    const reminder = 'Hello Jennifer! Your Quarterly Pest Control Service is this Thursday, between 2:00 PM and 4:00 PM.\n\nReschedule here: https://wav.es/ab12c';
+    const reminder = 'Hello there! Your Quarterly Pest Control Service is this Thursday, between 2:00 PM and 4:00 PM.\n\nReschedule here: https://wav.es/ab12c';
     const tapback = `Liked “${reminder}”`;
     expect(isSmsReaction(tapback)).toBe(true);
     expect(hasRescheduleOrAwayIntent(tapback)).toBe(false);
