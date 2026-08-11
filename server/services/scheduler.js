@@ -3853,60 +3853,142 @@ function initScheduledJobs() {
   cron.schedule('20 6 * * *', async () => {
     try {
       await runExclusive('google-call-bridge-organic', async () => {
-        const googleAds = require('./ads/google-ads');
-        // The fallback below may only run after a COMPLETE, HEALTHY bridge
-        // pass — an organic row can never be flipped to paid later, so any
-        // doubt about the day's claim means the fallback waits a day.
-        let bridgeBlockedReason = null;
-        if (googleAds.isConfigured()) {
-          logger.info('Running: Google Ads call→campaign bridge');
-          const callBridge = require('./ads/google-call-bridge');
-          // limit 500 = the existing CRM-side cap in fetchCrmCalls(); keep the
-          // Google scan symmetric (was 200) so the cron isn't the narrower side.
-          // Both sides are bounded by design — warn if either hits the cap (older
-          // calls would go unbridged and need pagination, a wider refactor that's
-          // unwarranted today at ~0 Google-Ads-driven calls).
-          const r = await callBridge.applyBridge({ days: 30, limit: 500 });
-          const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
-          if (capHit) {
-            logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
+        // The bridge/organic pair gets its OWN catch (codex P2 r13): an
+        // exception from applyBridge or the organic candidate query used to
+        // jump straight to the cron's outer catch and skip the transfer
+        // sweep below — a persistent bridge-specific failure must not
+        // starve the retry lane for calls the bridge never scans. The
+        // error is CAPTURED, not swallowed (codex P2 r15): rethrown after
+        // the sweep so runExclusive's job-health record still counts the
+        // failed tick — a swallowed throw cleared last_error/
+        // consecutive_failures and made a persistent outage look healthy.
+        let bridgePairError = null;
+        // The organic pass degrades internally too (source-scan catch →
+        // zeroed summary, per-lead catches → summary.failed) so it never
+        // throws on its own — same shape as the transfer sweep's P2 (codex
+        // P2 r29). Inspect the summary and surface degradation in the
+        // job-health record; captured separately so it can never mask a
+        // bridge error.
+        let organicError = null;
+        try {
+          const googleAds = require('./ads/google-ads');
+          // The fallback below may only run after a COMPLETE, HEALTHY bridge
+          // pass — an organic row can never be flipped to paid later, so any
+          // doubt about the day's claim means the fallback waits a day.
+          let bridgeBlockedReason = null;
+          // Leads tied to the day's AMBIGUOUS bridge matches are excluded
+          // from the organic fallback (scoped, see below).
+          let organicExclusions = { excludeCallSids: [], excludeCallIds: [] };
+          if (googleAds.isConfigured()) {
+            logger.info('Running: Google Ads call→campaign bridge');
+            const callBridge = require('./ads/google-call-bridge');
+            // limit 500 = the existing CRM-side cap in fetchCrmCalls(); keep the
+            // Google scan symmetric (was 200) so the cron isn't the narrower side.
+            // Both sides are bounded by design — warn if either hits the cap (older
+            // calls would go unbridged and need pagination, a wider refactor that's
+            // unwarranted today at ~0 Google-Ads-driven calls).
+            const r = await callBridge.applyBridge({ days: 30, limit: 500 });
+            const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
+            if (capHit) {
+              logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
+            }
+            // Any write failure means a claim the bridge ATTEMPTED may not have
+            // repointed the lead yet — the sweep must not take it organic today.
+            const writeFailed = (r.skipped || []).some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
+            // Ambiguity is uncertainty, not absence (codex P1 r14) — but
+            // SCOPED, not global (pre-push P1 r18): an 'ambiguous' match
+            // means the scan found strong but non-unique paid-call
+            // evidence and deliberately left the CRM call unclaimed, and
+            // sweeping ITS lead organic would irreversibly mislabel a
+            // probably-paid lead. The bridge preserves shared-SID
+            // ambiguities indefinitely though, so blocking the WHOLE
+            // fallback on one starved every unrelated organic lead.
+            // Instead, only the leads linked to an ambiguous match's
+            // candidate calls are excluded; the exclusion lifts the day the
+            // ambiguity resolves. Read from `ambiguousCandidates` — the
+            // COMPLETE qualifying set (codex P1 r23): `alternatives` is a
+            // display preview capped at two, so with four-plus equally
+            // plausible candidates the extras were omitted and took the
+            // irreversible organic label. The preview stays the fallback
+            // for any match shape that predates the field.
+            const ambiguousCalls = (r.skipped || [])
+              .filter((m) => m?.skipReason === 'ambiguous')
+              .flatMap((m) => ((m.ambiguousCandidates || []).length
+                ? m.ambiguousCandidates
+                : [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)]))
+              .filter(Boolean);
+            const ambiguousExcludeSids = [...new Set(ambiguousCalls.map((c) => c.twilioCallSid).filter(Boolean))];
+            const ambiguousExcludeCallIds = [...new Set(ambiguousCalls.map((c) => c.id).filter(Boolean))];
+            organicExclusions = { excludeCallSids: ambiguousExcludeSids, excludeCallIds: ambiguousExcludeCallIds };
+            if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
+            else if (capHit) bridgeBlockedReason = 'row_cap_hit';
+            else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
+            logger.info(`[google-call-bridge cron] ${JSON.stringify({
+              configured: r.configured,
+              scanFailed: !!r.scanFailed,
+              applied: r.appliedCount,
+              skipped: r.skippedCount,
+              googleCalls: r.summary?.googleCalls,
+              crmMainLineCalls: r.summary?.crmMainLineCalls,
+              ambiguous: r.summary?.ambiguous || 0,
+            })}`);
+          } else if (process.env.BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED !== 'true') {
+            // Fail closed on an UNCONFIGURED Google Ads API: a missing/rotated
+            // GOOGLE_ADS_* secret is indistinguishable from a genuine
+            // organic-only install, and the organic write is irreversible. An
+            // install that truly runs no Google Ads API (so no call could ever
+            // be claimed) opts in with BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED=true.
+            bridgeBlockedReason = 'google_ads_unconfigured';
           }
-          // Any write failure means a claim the bridge ATTEMPTED may not have
-          // repointed the lead yet — the sweep must not take it organic today.
-          const writeFailed = (r.skipped || []).some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
-          if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
-          else if (capHit) bridgeBlockedReason = 'row_cap_hit';
-          else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
-          logger.info(`[google-call-bridge cron] ${JSON.stringify({
-            configured: r.configured,
-            scanFailed: !!r.scanFailed,
-            applied: r.appliedCount,
-            skipped: r.skippedCount,
-            googleCalls: r.summary?.googleCalls,
-            crmMainLineCalls: r.summary?.crmMainLineCalls,
-          })}`);
-        } else if (process.env.BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED !== 'true') {
-          // Fail closed on an UNCONFIGURED Google Ads API: a missing/rotated
-          // GOOGLE_ADS_* secret is indistinguishable from a genuine
-          // organic-only install, and the organic write is irreversible. An
-          // install that truly runs no Google Ads API (so no call could ever
-          // be claimed) opts in with BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED=true.
-          bridgeBlockedReason = 'google_ads_unconfigured';
+
+          // AFTER the bridge has had the day's claim: unclaimed bridge-target
+          // leads older than the window become organic. Any doubt about the
+          // day's claim — outage, row cap, write failure, unconfigured API
+          // without the explicit opt-in — blocks it; those leads simply age
+          // one more day.
+          if (bridgeBlockedReason) {
+            logger.warn(`[bridge-unclaimed] skipped — bridge pass incomplete (${bridgeBlockedReason}); unclaimed leads age another day`);
+          } else if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED !== 'true') {
+            const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
+            const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
+            const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days, ...organicExclusions });
+            logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}, failed ${s.failed || 0}`);
+            if (s.scanFailed) organicError = new Error('[bridge-unclaimed] source scan failed');
+            else if (s.failed > 0) organicError = new Error(`[bridge-unclaimed] ${s.failed} lead(s) failed`);
+          }
+        } catch (err) {
+          bridgePairError = err;
         }
 
-        // AFTER the bridge has had the day's claim: unclaimed bridge-target
-        // leads older than the window become organic. Any doubt about the
-        // day's claim — outage, row cap, write failure, unconfigured API
-        // without the explicit opt-in — blocks it; those leads simply age
-        // one more day.
-        if (bridgeBlockedReason) {
-          logger.warn(`[bridge-unclaimed] skipped — bridge pass incomplete (${bridgeBlockedReason}); unclaimed leads age another day`);
-        } else if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED !== 'true') {
-          const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
-          const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
-          const s = await attributeUnclaimedBridgeLeads({ olderThanDays: days });
-          logger.info(`[bridge-unclaimed] candidates ${s.candidates}, recorded ${s.recorded}, skipped ${s.skipped}`);
+        // Retry lane for processor repoints blocked by a legacy
+        // (NULL-provenance) row (codex P1, PR #3303 r12): dedicated/organic
+        // calls have no rescan of their own, so a durable
+        // metadata.attribution_transfer_pending marker defers the funnel
+        // write until the operator resolves the blocking row; this drain
+        // completes it against the live stamped lead. Self-guarded and
+        // independent of the day's bridge health — it repairs calls the
+        // bridge never scans, so a blocked bridge pass must not starve it.
+        let sweepError = null;
+        try {
+          const { sweepPendingAttributionTransfers } = require('./ads/call-attribution');
+          const s = await sweepPendingAttributionTransfers({ limit: 100 });
+          // The sweep degrades internally (scan catch → zeroed summary,
+          // per-row catches → summary.failed), so a stalled retry lane
+          // never throws on its own (codex P2 r16) — inspect the summary
+          // and surface degradation in the job-health record.
+          if (s.scanFailed) sweepError = new Error('[attribution-transfer-sweep] scan failed');
+          else if (s.failed > 0) sweepError = new Error(`[attribution-transfer-sweep] ${s.failed} transfer(s) failed`);
+        } catch (err) {
+          sweepError = err;
+          logger.warn(`[attribution-transfer-sweep] failed: ${err.message}`);
         }
+
+        // Both halves ran — now surface any failure so the outer catch
+        // logs it and the lease records a failed tick (bridge error takes
+        // precedence; a swallowed throw cleared last_error on outages).
+        if (bridgePairError) throw bridgePairError;
+        if (organicError) throw organicError;
+        if (sweepError) throw sweepError;
       });
     } catch (err) {
       logger.error(`Google Ads call bridge / unclaimed-organic sweep failed: ${err.message}`);
