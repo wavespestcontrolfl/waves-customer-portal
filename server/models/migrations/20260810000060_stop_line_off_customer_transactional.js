@@ -58,7 +58,7 @@ const SWAPS = [
     'Hi {first_name}! To finish booking your {service_type} visit{date_line}, add a card on file: {secure_link}\n\nNothing is charged today, only after the service is done.{cancel_fee_line}\nWe never take card numbers by phone.'],
   ['secure_appointment_card_plans',
     "Hi {first_name}! To finish booking your {service_type} visit{date_line}, pick how you'd like to pay - prepay the year and save, or pay per visit with a card on file. Nothing is charged today unless you choose to prepay: {secure_link}{cancel_fee_line}\nWe never take card numbers by phone. Reply STOP to opt out.",
-    "Hi {first_name}! To finish booking your {service_type}{date_line}: prepay the year and save, or pay per visit with a card on file. Nothing is charged today unless you prepay: {secure_link}{cancel_fee_line}\nWe never take card numbers by phone."],
+    "Hi {first_name}! To finish booking your {service_type}{date_line}: prepay the year and save, or pay per application with a card on file. Nothing is charged today unless you prepay: {secure_link}{cancel_fee_line}\nWe never take card numbers by phone."],
   ['upsell_interest_confirmation',
     "Hello {first_name}! Thanks for your interest in {service_name}. We'll follow up within 24 hours to get you set up, and your {new_tier} WaveGuard discount applies automatically.\n\nReply STOP to opt out.",
     "Hello {first_name}! Thanks for your interest in {service_name}. We'll follow up within 24 hours to get you set up, and your {new_tier} WaveGuard discount applies automatically."],
