@@ -350,7 +350,7 @@ function MessageMediaV2({ media = [], inverted = false }) {
           )}
         >
           {" "}
-          {failed[idx] ? (
+          {failed[item.url] ? (
             <span
               className={cn(
                 "flex items-center justify-center h-12 px-2 text-11",
@@ -365,7 +365,9 @@ function MessageMediaV2({ media = [], inverted = false }) {
               alt={item.fileName || `SMS attachment ${idx + 1}`}
               className="h-28 w-full object-cover"
               loading="lazy"
-              onError={() => setFailed((f) => ({ ...f, [idx]: true }))}
+              onError={() =>
+                setFailed((f) => ({ ...f, [item.url]: true }))
+              }
             />
           )}{" "}
         </a>
@@ -569,9 +571,12 @@ function ConversationViewV2({
               >
                 {" "}
                 <div className="text-13 leading-normal whitespace-pre-wrap break-words">
-                  {/* trim: a whitespace-only body (stray newlines) rendered as
-                      a giant empty bubble under whitespace-pre-wrap */}
-                  {(typeof m.body === "string" ? m.body.trim() : "") ||
+                  {/* a whitespace-only body (stray newlines) rendered as a
+                      giant empty bubble under whitespace-pre-wrap — blank it;
+                      bodies with content render verbatim */}
+                  {(typeof m.body === "string" && m.body.trim()
+                    ? m.body
+                    : "") ||
                     (Array.isArray(m.media) && m.media.length ? "Photo" : "")}
                 </div>{" "}
                 <MessageMediaV2 media={m.media} inverted={isOut} />{" "}
