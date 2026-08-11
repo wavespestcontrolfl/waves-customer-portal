@@ -108,7 +108,7 @@ describe('recordAmbiguousBridgeCalls', () => {
     // subset is derived from the locked read, not a second filter.
     expect(lockedRead._wheres).toContainEqual(['whereIn', 'call_log_id', ['call-1']]);
     expect(lockedRead._wheres.some(([m, col]) => m === 'whereNotNull' && col === 'resolved_at')).toBe(false);
-    expect(lockedRead._wheres).toContainEqual(['select', 'call_log_id', 'resolved_at']);
+    expect(lockedRead._wheres).toContainEqual(['select', 'call_log_id', 'resolved_at', 'resolve_reason']);
   });
 
   test('records SNAPSHOT the leads matching the caller leg — the durable identity for the indefinite phone hold (audit P1 r3)', async () => {
@@ -128,19 +128,37 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(snap[0]).toMatch(/cl\.from_phone/);
     expect(snap[0]).toMatch(/RIGHT\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(snap[0]).toMatch(/LENGTH\(regexp_replace\(COALESCE\(l\.phone, ''\), '\[\^0-9\]', '', 'g'\)\) >= 10/);
-    // TEMPORALLY BOUNDED (audit P1 r4): a reused lead existed by the
-    // call's last possible processing pass — created_at anchored to the
-    // immutable call time plus the shared extraction retry window, so
-    // repeat/reopen re-records can never add a later, distinct lead.
-    expect(snap[0]).toMatch(/l\.created_at < cl\.created_at \+ make_interval\(secs => \?\)/);
+    // TEMPORALLY BOUNDED (audit P1 r4) and EVIDENCE-ANCHORED (codex P1 GH
+    // r3): the automatic retry lane ends at created_at + the shared retry
+    // window, but an admin force-reprocess has no age limit — any
+    // processing pass writes the call row, so updated_at covers it.
+    expect(snap[0]).toMatch(/l\.created_at < GREATEST\(cl\.created_at \+ make_interval\(secs => \?\), cl\.updated_at\)/);
     expect(snap[1]).toEqual([7 * 24 * 60 * 60, 'call-1', 'call-2']);
   });
 
-  test('a repeat REOPENS a previously resolved record — today\'s scan supersedes an old resolution', async () => {
+  test('a repeat REOPENS a rescan_clear resolution — but BRIDGED resolutions are STICKY (codex P1 GH r3)', async () => {
+    // The paid claim on the call row is durable positive evidence; an
+    // already-bridged call scoring ambiguously against a DIFFERENT google
+    // call must not reopen (and retire its valid paid attribution).
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
     expect(mergeCalls).toHaveLength(1);
-    expect(mergeCalls[0].patch).toMatchObject({ resolved_at: null, resolve_reason: null });
     expect(mergeCalls[0].patch.last_seen_at).toBeTruthy();
+    // The merge clears resolution ONLY for non-bridged records (raw CASE
+    // keyed on the EXISTING row's resolve_reason).
+    expect(String(mergeCalls[0].patch.resolved_at)).toMatch(/CASE WHEN bridge_ambiguous_calls\.resolve_reason = 'bridged' THEN bridge_ambiguous_calls\.resolved_at ELSE NULL END/);
+    expect(String(mergeCalls[0].patch.resolve_reason)).toMatch(/CASE WHEN bridge_ambiguous_calls\.resolve_reason = 'bridged' THEN bridge_ambiguous_calls\.resolve_reason ELSE NULL END/);
+  });
+
+  test('a BRIDGED-resolved record never enters the retirement loop (codex P1 GH r3)', async () => {
+    listQueueByTable.bridge_ambiguous_calls = [[
+      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z', resolve_reason: 'bridged' },
+    ]];
+    // Even with a provenanced row present, nothing is retired — the row IS
+    // the call's valid paid attribution.
+    listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
+    await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
+    expect(mockRetire).not.toHaveBeenCalled();
+    expect(mockRetireRow).not.toHaveBeenCalled();
   });
 
   test('a REOPEN retires the attribution rows written while the hold was lifted (codex P1 r2)', async () => {
@@ -150,7 +168,7 @@ describe('recordAmbiguousBridgeCalls', () => {
     // shared history-preserving primitive — in the SAME transaction as the
     // reopen upsert, so a crash cannot strand the interim row (audit P1 r3).
     listQueueByTable.bridge_ambiguous_calls = [[
-      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z' }, // previously RESOLVED
+      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z', resolve_reason: 'rescan_clear' },
     ]];
     listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
@@ -169,7 +187,7 @@ describe('recordAmbiguousBridgeCalls', () => {
     // unclaimed sweep's write — retired via the row-id history-preserving
     // primitive.
     listQueueByTable.bridge_ambiguous_calls = [[
-      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z' },
+      { call_log_id: 'call-1', resolved_at: '2026-08-10T09:00:00Z', resolve_reason: 'rescan_clear' },
     ]];
     listQueueByTable.ad_service_attribution = [[]]; // no provenanced rows
     listQueueByTable.lead_sources = [[
@@ -208,10 +226,20 @@ describe('recordAmbiguousBridgeCalls', () => {
     expect(mockRetire).not.toHaveBeenCalled();
   });
 
-  test('a FIRST sighting (no existing row) retires nothing', async () => {
-    listQueueByTable.bridge_ambiguous_calls = [[]]; // nothing existing for the batch
+  test('a FIRST sighting reconciles provenanced rows — late-discovered ambiguity undoes the earlier organic write (codex P1 GH r3)', async () => {
+    // A 31–90-day manual scan can discover ambiguous paid evidence AFTER
+    // the seven-day fallback already wrote the call's provenanced organic
+    // row; per-lead dedupe would block the eventual paid attribution
+    // forever if the first sighting did not retire it.
+    listQueueByTable.bridge_ambiguous_calls = [[]]; // nothing existing = first sighting
+    listQueueByTable.ad_service_attribution = [[{ lead_id: 'lead-9' }]];
     await recordAmbiguousBridgeCalls([{ id: 'call-1', twilioCallSid: 'CA1' }]);
-    expect(mockRetire).not.toHaveBeenCalled();
+    expect(mockRetire).toHaveBeenCalledTimes(1);
+    expect(mockRetire.mock.calls[0][1]).toBe('call-1');
+    expect(mockRetire.mock.calls[0][2]).toBe('lead-9');
+    // The SNAPSHOT arm stays reopen-only: without the born-after-resolution
+    // anchor a NULL-provenance match could be an untouchable legacy row.
+    expect(mockRetireRow).not.toHaveBeenCalled();
   });
 
   test('no valid candidates → no insert at all', async () => {
@@ -329,16 +357,16 @@ describe('scheduler wiring (source pins)', () => {
 
   test('the organic exclusions come from ALL OPEN persisted records, not the day\'s scan set', () => {
     expect(block).toMatch(/\.\.\.\(await require\('\.\/ads\/google-call-bridge'\)\.openAmbiguousCallExclusions\(\)\)/);
-    // Recording lives in applyBridge (every apply path, manual included) —
-    // NOT in the cron; the cron only resolves and reads.
+    // Recording AND resolution live in applyBridge (every apply path,
+    // manual included — codex P1s, r2+r3 GH rounds: a 31–90-day manual
+    // scan reaches calls the ~29-day cron window never re-sees, for both
+    // purposes). The cron ONLY reads.
     expect(block).not.toMatch(/recordAmbiguousBridgeCalls/);
-    const resv = block.indexOf('resolveAmbiguousBridgeCalls');
-    const open = block.indexOf('openAmbiguousCallExclusions');
-    expect(resv).toBeGreaterThan(-1);
-    expect(open).toBeGreaterThan(resv);
+    expect(block).not.toMatch(/resolveAmbiguousBridgeCalls/);
     // ...and the read sits on EVERY sweep path, AFTER the unconfigured
     // branch — an opt-in install with pre-teardown records must still hold
     // their leads.
+    const open = block.indexOf('openAmbiguousCallExclusions');
     expect(open).toBeGreaterThan(block.indexOf('google_ads_unconfigured'));
   });
 
@@ -359,22 +387,7 @@ describe('scheduler wiring (source pins)', () => {
     expect(sweep).toMatch(/whereNotIn\('l\.id', excludeLeadIds\)/);
   });
 
-  test('rescan_clear is gated on a TRUSTED scan, a coverage boundary with a one-day margin, and a DB-clock scan start', () => {
-    expect(block).toMatch(/rescanTrusted: !r\.scanFailed && !capHit && !writeFailed/);
-    expect(block).toMatch(/\(bridgeScanDays - 1\) \* 24 \* 60 \* 60 \* 1000/);
-    // One named window constant feeds BOTH the scan and the boundary — they
-    // cannot drift apart.
-    expect(block).toMatch(/applyBridge\(\{ days: bridgeScanDays, limit: 500 \}\)/);
-    // The freshness boundary is captured from the DB clock BEFORE the scan
-    // (last_seen_at is DB-clock too) and passed through (audit P1 r3).
-    expect(block).toMatch(/SELECT now\(\) AS db_now/);
-    const captured = block.indexOf('bridgeScanStartedAt =');
-    expect(captured).toBeGreaterThan(-1);
-    expect(captured).toBeLessThan(block.indexOf('applyBridge({ days: bridgeScanDays'));
-    expect(block).toMatch(/scanStartedAt: bridgeScanStartedAt/);
-  });
-
-  test('applyBridge itself persists every scan\'s candidates — manual admin applies included (codex P1 r2)', () => {
+  test('applyBridge itself persists AND resolves every scan\'s ambiguities — manual admin applies included (codex P1s r2+r3)', () => {
     const fs2 = require('fs');
     const bridgeSrc = fs2.readFileSync(path.join(__dirname, '../services/ads/google-call-bridge.js'), 'utf8');
     const apply = bridgeSrc.split('async function applyBridge')[1].split('\nfunction isBridgeTargetNumber')[0];
@@ -384,7 +397,16 @@ describe('scheduler wiring (source pins)', () => {
     expect(apply).toMatch(/skipReason === 'ambiguous'/);
     expect(apply).toMatch(/m\.ambiguousCandidates \|\| \[\]/);
     expect(apply).toMatch(/await recordAmbiguousBridgeCalls\(ambiguousCandidates\)/);
-    expect(apply).toMatch(/ambiguousCandidateCallIds:/);
+    // Resolution rides the same path with the scan's OWN trust, window,
+    // and DB-clock start (a cron-only resolver left manual-scan records
+    // permanently unclearable — its window never reaches them).
+    expect(apply).toMatch(/SELECT now\(\) AS db_now/);
+    expect(apply.indexOf('scanStartedAt =')).toBeLessThan(apply.indexOf('await previewBridge(options)'));
+    expect(apply).toMatch(/await resolveAmbiguousBridgeCalls\(\{/);
+    expect(apply).toMatch(/ambiguousCallIds: ambiguousCandidateCallIds/);
+    expect(apply).toMatch(/\(scanDays - 1\) \* 24 \* 60 \* 60 \* 1000/);
+    expect(apply).toMatch(/scanStartedAt,/);
+    expect(apply).toMatch(/rescanTrusted: !preview\.scanFailed && !capHit && !writeFailed/);
   });
 });
 
