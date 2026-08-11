@@ -402,22 +402,18 @@ function rowCommittedToTerm(term, row) {
 // the one-time palm identity (id or snapshot), estimate provenance is
 // NOT commitment; only a direct term link or prepaid stamp is. Rows
 // without the one-time identity keep the full commitment set.
-function palmRowCommittedToTerm(term, row, oneTimePalmId) {
-  const carriesOneTimeIdentity = (oneTimePalmId && row.service_id === oneTimePalmId)
-    || String(row.service_key_snapshot || '') === 'palm_injection';
+function palmRowCommittedToTerm(term, row) {
+  // Commitment matrix (codex r19 P0, both passes): direct evidence (term
+  // link or prepaid stamp) always commits. Estimate provenance commits
+  // ONLY rows that READ recurring (is_recurring / recurring_pattern /
+  // recurring_parent_id — stamped at seeding) — regardless of identity:
+  // a legacy payment-pending parent still carrying the one-time palm id
+  // WITH markers is the sold program's visit (the backfill retargets it),
+  // while a genuine one-time reservation — name-only or id-carrying —
+  // never carries recurring markers and keeps its separate billing.
   const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
     || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
-  if (carriesOneTimeIdentity) return directCommitment;
   if (directCommitment) return true;
-  // Estimate provenance alone commits only rows that READ recurring
-  // (codex r19 P0, second pass): a mixed estimate's genuine one-time palm
-  // reservation can be NAME-ONLY, and a shared source_estimate_id cannot
-  // tell the program's visit from the one-time item's. The recurring
-  // markers (is_recurring / recurring_pattern / recurring_parent_id) are
-  // the tiebreaker — the sold program's reserved parent carries them
-  // after seeding, and office bookings pick catalog services (id
-  // stamped), so a bare name-only row without markers is not provably
-  // the program's visit.
   const readsRecurring = row.is_recurring === true
     || !!row.recurring_pattern
     || !!row.recurring_parent_id;
@@ -472,16 +468,14 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // instead (fail closed).
   if (coverageFamilyIsPalm(coverageServiceType)) {
     let semiannualPalmId = null;
-    let oneTimePalmId = null;
     try {
       semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
-      oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
     } catch { semiannualPalmId = null; }
     const carriesRecurringPalmIdentity = (row) =>
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
     matching = matching.filter((row) => carriesRecurringPalmIdentity(row)
-      || palmRowCommittedToTerm(term, row, oneTimePalmId));
+      || palmRowCommittedToTerm(term, row));
   }
   if (matching.length <= coverageVisitCount) return matching;
 
@@ -846,7 +840,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // suppressed. Only a row already attached to THIS term retargets;
       // rows with no identity evidence at all (name-only) remain the
       // original r15 case.
-      const committedToTerm = (row) => palmRowCommittedToTerm(term, row, staleOneTimePalmId);
+      const committedToTerm = (row) => palmRowCommittedToTerm(term, row);
       const retargetable = (row) => row && row.id
         && (
           (!row.service_id && !row.service_key_snapshot)
@@ -989,7 +983,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     && (!coverageIsPalm
       || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
-      || palmRowCommittedToTerm(term, row, staleOneTimePalmId));
+      || palmRowCommittedToTerm(term, row));
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
