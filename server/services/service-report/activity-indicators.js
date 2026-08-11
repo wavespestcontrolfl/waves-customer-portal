@@ -2510,8 +2510,10 @@ const STATION_AUX_GAP_SRC = '(?:\\s+(?:were|was|have|has|had|been|all|now|alread
 // A restrictive qualifier after the noun marks a SUBSET, not the checked
 // total (codex r5 on #3358): "we inspected 2 bait stations WITH damaged
 // lids" describes the two repaired stations, and claiming 2 against a
-// corrected stations_checked of 12 dropped accurate copy.
-const STATION_SUBSET_QUALIFIER_GUARD_SRC = '(?!\\s+(?:with|that|which)\\b)';
+// corrected stations_checked of 12 dropped accurate copy. Prepositional
+// LOCATION qualifiers restrict the same way (codex r6): "inspected 2
+// stations NEAR the garage and checked the other ten".
+const STATION_SUBSET_QUALIFIER_GUARD_SRC = '(?!\\s+(?:with|that|which|near|behind|beside|by|under|along|inside|outside|in|on|at|around)\\b)';
 const STATION_CHECKED_ACTIVE_RE = new RegExp(
   `\\b(?:checked|inspected)\\s+(?:all\\s+|the\\s+)?${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b${STATION_SUBSET_QUALIFIER_GUARD_SRC}`,
   'gi',
@@ -2561,7 +2563,10 @@ const STATION_ACTIVITY_WITH_RE = new RegExp(
 // on #3358): "there are 2 bait stations WITH ACTIVITY on the property"
 // restricts the assertion to the active subset and claims no total.
 const STATION_TOTAL_RE = new RegExp(
-  `\\bthere\\s+(?:are|is)\\s+${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b${STATION_SUBSET_QUALIFIER_GUARD_SRC}`
+  // The existential total keeps its location tail ("there are 20 stations
+  // ON the property" IS the roster assertion) — only subset markers void
+  // it, not the location prepositions the checked-active guard excludes.
+  `\\bthere\\s+(?:are|is)\\s+${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b(?!\\s+(?:with|that|which|showing|showed|had)\\b)`
   + `|\\b${STATION_PARTITIVE_GUARD_SRC}${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\s+(?:are\\s+|were\\s+)?(?:installed|in\\s+place)\\b`,
   'gi',
 );
@@ -2570,9 +2575,12 @@ const STATION_INACCESSIBLE_RE = new RegExp(
   'gi',
 );
 // Active inaccessible claims (codex r3 on #3358): "we could not access 2
-// bait stations", "we were unable to reach 2 stations".
+// bait stations", "we were unable to reach 2 stations". PHYSICAL access
+// verbs only (codex r6): "unable to SERVICE 2 stations before rain" is a
+// work stoppage, not an access failure, and must not feed the
+// inaccessible count.
 const STATION_INACCESSIBLE_ACTIVE_RE = new RegExp(
-  `\\b(?:could\\s+not|couldn['’]t|(?:was|were)\\s+unable\\s+to|unable\\s+to)\\s+(?:access|reach|check|inspect|open|service)\\s+(?:all\\s+|the\\s+)?${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b`,
+  `\\b(?:could\\s+not|couldn['’]t|(?:was|were)\\s+unable\\s+to|unable\\s+to)\\s+(?:access|reach|get\\s+to)\\s+(?:all\\s+|the\\s+)?${STATION_NUM_SRC}\\s+${STATION_NOUN_SRC}\\b`,
   'gi',
 );
 const CAUGHT_CLAIM_RE = new RegExp(
@@ -2695,6 +2703,27 @@ function claimedCounts(text, patterns) {
   return claims;
 }
 
+// Station claims scope to the CURRENT visit (codex r6 on #3358): "At the
+// LAST SERVICE, we inspected 12 bait stations; this visit a locked gate
+// limited us to ten" is trend copy — a count whose sentence lead
+// references a prior visit claims nothing against today's values.
+const STATION_PRIOR_VISIT_RE = /\b(?:last|previous|prior|earlier)\s+(?:visit|service|stop|check|inspection|time|month|quarter)\b/i;
+function stationClaimedCounts(text, patterns) {
+  const claims = new Set();
+  for (const pattern of patterns) {
+    const re = new RegExp(pattern.source, 'gi');
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const lead = text.slice(0, match.index).split(/[.!?;]/).pop();
+      if (STATION_PRIOR_VISIT_RE.test(lead)) continue;
+      const [, first, second, filler] = match;
+      if (/\bof\b/i.test(filler || '')) continue;
+      claims.add(Number(second != null ? second : first));
+    }
+  }
+  return claims;
+}
+
 /**
  * Returns the count claims in `text` that contradict the FINAL structured
  * values (empty when clean or unverifiable).
@@ -2745,18 +2774,18 @@ function countContradictions(text, values = {}) {
   // nouns. Unverifiable (blank/missing) values screen nothing, and two
   // competing totals bail, exactly like the trap rules above.
   check(
-    claimedCounts(str, [STATION_CHECKED_ACTIVE_RE, STATION_CHECKED_PASSIVE_RE]),
+    stationClaimedCounts(str, [STATION_CHECKED_ACTIVE_RE, STATION_CHECKED_PASSIVE_RE]),
     values.stations_checked,
     'station_count_mismatch',
   );
   check(
-    claimedCounts(str, [STATION_ACTIVITY_AT_RE, STATION_ACTIVITY_WITH_RE]),
+    stationClaimedCounts(str, [STATION_ACTIVITY_AT_RE, STATION_ACTIVITY_WITH_RE]),
     values.stations_with_activity,
     'station_activity_count_mismatch',
   );
-  check(claimedCounts(str, [STATION_TOTAL_RE]), values.total_stations, 'station_total_mismatch');
+  check(stationClaimedCounts(str, [STATION_TOTAL_RE]), values.total_stations, 'station_total_mismatch');
   check(
-    claimedCounts(str, [STATION_INACCESSIBLE_RE, STATION_INACCESSIBLE_ACTIVE_RE]),
+    stationClaimedCounts(str, [STATION_INACCESSIBLE_RE, STATION_INACCESSIBLE_ACTIVE_RE]),
     values.stations_inaccessible,
     'station_inaccessible_mismatch',
   );
@@ -2955,7 +2984,9 @@ function intentGovernsLevelClaim(before) {
 // includes causal/scheduling tokens like "due to", and "Heavy activity
 // DUE TO moisture was observed today" asserts current heavy — only true
 // modals and expectation verbs read backward onto their subject.
-const LEVEL_CLAIM_AFTER_INTENT_RE = /\b(?:will|shall|may|might|could|can|should|expect(?:s|ed|ing)?|anticipate[sd]?|typical(?:ly)?|usual(?:ly)?)\b/i;
+// Possibility predicates join the after-set (codex r6 on #3358): "heavy
+// activity is POSSIBLE" is a forecast, not an observation.
+const LEVEL_CLAIM_AFTER_INTENT_RE = /\b(?:will|shall|may|might|could|can|should|expect(?:s|ed|ing)?|anticipate[sd]?|typical(?:ly)?|usual(?:ly)?|possible|possibly|likely|unlikely|potential(?:ly)?)\b/i;
 function intentGovernsLevelClaimFromAfter(afterText) {
   const re = new RegExp(LEVEL_CLAIM_AFTER_INTENT_RE.source, 'gi');
   const first = re.exec(afterText);
@@ -2971,10 +3002,21 @@ function levelBandForScore(score) {
   if (score === 3) return 2;
   return 1;
 }
+// A clause OPENED by a conditional marker is hypothetical throughout
+// (codex r6 on #3358): "If conditions worsen heavy activity is possible"
+// has a substantive antecedent the filler allowlist can never enumerate,
+// so the opener governs the whole clause.
+const LEVEL_CLAIM_CONDITIONAL_OPEN_RE = /^\s*(?:if|unless|in\s+case|should|when)\b/i;
+// Directly negated claims assert ABSENCE, not the level (codex r6 on
+// #3358): "NO heavy activity was observed" / "heavy activity was NOT
+// observed" are truthful zero-findings and must not read as heavy claims.
+const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$/i;
+const LEVEL_CLAIM_NEGATED_AFTER_RE = /^\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\b/i;
 function activityLevelContradictions(text, finalBand) {
   if (!finalBand) return [];
   const found = [];
   for (const clause of clauses(String(text || ''))) {
+    if (LEVEL_CLAIM_CONDITIONAL_OPEN_RE.test(clause)) continue;
     // Both bindings collect into one claim list; the exemption machinery
     // then runs per claim against its own before/after spans.
     const claims = [];
@@ -2990,6 +3032,7 @@ function activityLevelContradictions(text, finalBand) {
       const before = clause.slice(0, claim.index);
       const afterClause = clause.slice(claim.index + claim.length);
       const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
+      if (LEVEL_CLAIM_NEGATED_BEFORE_RE.test(before) || LEVEL_CLAIM_NEGATED_AFTER_RE.test(afterClause)) continue;
       if (intentGovernsLevelClaim(before) || intentGovernsLevelClaimFromAfter(afterClause)) continue;
       if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
       found.push(`level_claim_mismatch:${word}`);

@@ -477,10 +477,13 @@ describe('typed snapshot — technician report body in the generic tail composit
       visitSequence: 2,
     };
     // Stale roster: draft says 12, final typed value says 10 → refused.
+    // (Location-free phrasing: a trailing location preposition is a
+    // subset qualifier since codex r6 and voids the claim — the
+    // location-tailed stale roster is an accepted leak under the ruling.)
     const staleRoster = buildTodaysResult({
       ...base,
       values: { stations_checked: '10', bait_consumption: 'Light' },
-      technicianReportBody: 'We checked 12 bait stations around the home and refreshed the bait. '
+      technicianReportBody: 'We checked 12 bait stations and refreshed the bait. '
         + 'Light feeding was noted.',
     });
     expect(staleRoster.body).not.toContain('12 bait stations');
@@ -489,7 +492,7 @@ describe('typed snapshot — technician report body in the generic tail composit
     const matching = buildTodaysResult({
       ...base,
       values: { stations_checked: '12', bait_consumption: 'Light' },
-      technicianReportBody: 'We checked 12 bait stations around the home and refreshed the bait. '
+      technicianReportBody: 'We checked 12 bait stations and refreshed the bait. '
         + 'Light feeding was noted.',
     });
     expect(matching.bodySource).toBe('technician_report');
@@ -665,6 +668,37 @@ describe('typed snapshot — technician report body in the generic tail composit
       .not.toEqual([]);
     expect(countContradictions('We checked 12 bait stations.', { stations_checked: '10' }))
       .not.toEqual([]);
+  });
+
+  // Round-6 #3358 (owner: "fix 5, freeze, merge") — the final hardening
+  // round before the guard freeze; all five were copy-dropping false
+  // positives.
+  test('round 6: negated observations, location subsets, prior visits, work stoppages, and conditionals never claim', () => {
+    const { activityLevelContradictions, countContradictions } = require('../services/service-report/activity-indicators');
+    // Directly negated level observations are truthful zero-findings.
+    expect(activityLevelContradictions('No heavy activity was observed today.', 1)).toEqual([]);
+    expect(activityLevelContradictions('Heavy activity was not observed today.', 1)).toEqual([]);
+    // A conditional opener governs its whole clause.
+    expect(activityLevelContradictions('If conditions worsen heavy activity is possible.', 1)).toEqual([]);
+    // Location-qualified inspections are subsets, not the checked total.
+    expect(countContradictions(
+      'We inspected 2 bait stations near the garage and checked the other stations.',
+      { stations_checked: '12' },
+    )).toEqual([]);
+    // Prior-visit counts are trend copy, not today's claim.
+    expect(countContradictions(
+      'At the last service, we inspected 12 bait stations; this visit a locked gate limited us.',
+      { stations_checked: '10' },
+    )).toEqual([]);
+    // A work stoppage is not an access failure.
+    expect(countContradictions(
+      'We were unable to service 2 bait stations before rain forced us to stop.',
+      { stations_inaccessible: '0' },
+    )).toEqual([]);
+    // The unnegated, unqualified, current-visit claims still screen.
+    expect(activityLevelContradictions('Cockroach activity was heavy in the kitchen today.', 1)).not.toEqual([]);
+    expect(countContradictions('We checked 12 bait stations.', { stations_checked: '10' })).not.toEqual([]);
+    expect(countContradictions('We could not access 2 bait stations today.', { stations_inaccessible: '1' })).not.toEqual([]);
   });
 
   test('negated and subject-position intent qualifiers stay governed (codex #3358)', () => {
