@@ -95,17 +95,34 @@ describe('runBondRenewalSweep blocked-send handling', () => {
     }));
   });
 
-  test('"Renew my bond" CTA deep-links to the My Plan bond card, not bare login', async () => {
+  test('gate ON: "Renew my bond" CTA deep-links to the My Plan bond card', async () => {
     // The portal bond card lives on the My Plan tab
     // (GATE_PORTAL_TERMITE_BOND); /login?next= round-trips the tab param
     // for logged-out clicks. "View my account" stays on plain login.
+    process.env.GATE_PORTAL_TERMITE_BOND = 'true';
+    try {
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+
+      await runBondRenewalSweep();
+
+      const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+      expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/?tab=plan');
+      expect(args.payload.customer_portal_url).toBe('https://portal.wavespestcontrol.com/login');
+    } finally {
+      delete process.env.GATE_PORTAL_TERMITE_BOND;
+    }
+  });
+
+  test('gate OFF (dark rollout): renewal CTA keeps the legacy login landing', async () => {
+    // Until the bond card is live, the deep-link would strand customers on
+    // a Plan tab with no bond on it (codex #3362 P2) — hold at /login.
+    delete process.env.GATE_PORTAL_TERMITE_BOND;
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
 
     await runBondRenewalSweep();
 
     const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
-    expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/?tab=plan');
-    expect(args.payload.customer_portal_url).toBe('https://portal.wavespestcontrol.com/login');
+    expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/login');
   });
 
   test('first attempt uses the STABLE key (sent-but-unstamped rows dedupe, no double email)', async () => {
