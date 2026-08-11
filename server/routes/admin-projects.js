@@ -3043,7 +3043,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // pre-lock pass could only see project.scheduled_service_id.
       const lockedReuse = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        .whereNotIn('status', ['void', 'paid'])
+        // Terminal invoices are NOT adoption candidates (codex r7 P1) —
+        // adopting a refunded/cancelled invoice would link the project to
+        // a dead bill and block the replacement the shared mint paths
+        // deliberately allow. Same filter as createFromService's adoption.
+        .whereNotIn('status', ['void', 'paid', 'refunded', 'canceled', 'cancelled'])
         .where(function invoiceLinkage() {
           this.orWhere({ scheduled_service_id: scheduledServiceId });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });

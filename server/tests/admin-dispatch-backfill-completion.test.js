@@ -1991,6 +1991,17 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(invoiceSource).toMatch(/e\.currentEstimatedPriceCents = cents\(lockedRow\.estimated_price\);/);
     });
 
+    test('the required live RESUME proves the frozen cents against the locked row (codex #3344 r7 P0)', () => {
+      // The resume passes the frozen amount AS the guard's price snapshot
+      // with the guard ON — frozen ≡ locked row is the typed lane's money
+      // identity, so a freeze that disagrees (failed restamp, second
+      // reprice) 409s back into the refresh→release loop instead of
+      // minting the stale figure. A released retry can therefore never
+      // bill a price the locked row does not carry.
+      expect(source).toMatch(/svc: useReplayLines\s*\n\s*\? svc\s*\n\s*: \{ \.\.\.svc, estimated_price: mintInvoiceAmount, primary_line_price: undefined \},\s*\n\s*allowPriceMovement: false,/);
+      expect(source).not.toMatch(/allowPriceMovement: !useReplayLines/);
+    });
+
     test('a SCHEDULED_PRICE_MOVED refusal on a NON-required live mint retries in place at the moved price (codex #3344 r6 P1)', () => {
       // Non-required lanes are non-blocking on mint failure — the completion
       // finalizes succeeded — so the reprice 409 must retry in place or the
@@ -2457,7 +2468,10 @@ describe('completion route wiring (source contracts)', () => {
     // definition lives in the service module; admin-schedule imports it
     // (no drifting local copy).
     expect(source).toMatch(/const \{ mintScheduledServiceInvoiceWithDeposit \} = require\('\.\.\/services\/scheduled-invoice-mint'\);/);
-    expect(source).toMatch(/const minted = await mintScheduledServiceInvoiceWithDeposit\(\{\s*\n\s*svc,/);
+    // The svc arg became a conditional in the codex r7 P0 round: first runs
+    // pass the live snapshot; resumes pass the frozen cents as the guard's
+    // price basis (pinned by its own contract test below).
+    expect(source).toMatch(/const minted = await mintScheduledServiceInvoiceWithDeposit\(\{[\s\S]{0,1400}svc: useReplayLines/);
     expect(source).toMatch(/adoptedConcurrentInvoice = minted\.reused === true;/);
     const mintServiceSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
     expect(mintServiceSource).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\n\s*\['schedule\.invoice\.mint', String\(svc\.id\)\],/);

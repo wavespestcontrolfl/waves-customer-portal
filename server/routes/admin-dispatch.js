@@ -8870,14 +8870,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
-            svc,
-            // A REQUIRED resume mints the FROZEN amount — the money truth
-            // this block documents above — so the helper's stale-price 409
-            // must not block it. First runs bill live values and keep the
-            // guard: a mid-flight reprice 409s, the release catch restamps
-            // the frozen cents from the 409's locked price (codex r5 P1),
-            // and the resume's frozen mint IS the moved price.
-            allowPriceMovement: !useReplayLines,
+            // A REQUIRED resume mints the FROZEN amount — and PROVES it
+            // (codex r7 P0): the guard compares the caller snapshot to the
+            // locked row, so the resume passes the frozen cents AS the
+            // snapshot price. Frozen ≡ locked row is the typed lane's money
+            // identity (the freeze stamps estimated_price at commit and the
+            // r5 catch restamps it from every reprice refusal), so a match
+            // mints the provable frozen figure and ANY divergence — a
+            // reprice after the restamp, or a restamp write that failed —
+            // 409s back into the refresh→release loop instead of silently
+            // billing the stale freeze. primary_line_price is undefined on
+            // the synthetic snapshot (frozen single-line mints don't read
+            // it; undefined never trips the guard). First runs keep the
+            // live snapshot: a mid-flight reprice 409s, the catch restamps
+            // the frozen cents from the locked price, and the resume bills
+            // the moved price.
+            svc: useReplayLines
+              ? svc
+              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: undefined },
+            allowPriceMovement: false,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -9064,16 +9075,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
           // the resume this release promises mints the frozen cents with
-          // replay disabled and price movement allowed — without this, the
-          // stale-price 409 the guard just raised would be replayed as the
-          // stale price itself. The required live lane's amount IS
-          // estimated_price (typed one-time requires hasVisitPrice, so
-          // completionInvoiceAmount returns it), and the attached cents were
-          // read under the mint's own row lock — the moved price is the new
-          // money truth, so restamp it as the frozen figure. Best-effort:
-          // a failed merge keeps the old freeze (the committed money) rather
-          // than blocking the release; zero/absent cents never restamp — a
-          // frozen figure must stay a positive committed price.
+          // replay disabled — without this, the stale-price 409 the guard
+          // just raised would be replayed as the stale price itself. The
+          // required live lane's amount IS estimated_price (typed one-time
+          // requires hasVisitPrice, so completionInvoiceAmount returns it),
+          // and the attached cents were read under the mint's own row lock
+          // — the moved price is the new money truth, so restamp it as the
+          // frozen figure. A FAILED restamp is safe to release anyway
+          // (codex r7 P0): the live typed resume passes the frozen cents AS
+          // the guard's price snapshot, so a resume whose freeze disagrees
+          // with the locked row 409s right back into this refresh instead
+          // of minting the stale figure — the release IS the restamp's
+          // retry, never a stale-mint promise. Zero/absent cents never
+          // restamp — a frozen figure must stay a positive committed price.
           if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
             && Number.isInteger(invErr.currentEstimatedPriceCents)
             && invErr.currentEstimatedPriceCents > 0) {
