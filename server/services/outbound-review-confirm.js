@@ -40,6 +40,14 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
  * @param {string} [routeTag] label for log lines ('admin-schedule' / 'admin-dispatch')
  */
 async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review') {
+  // Reported to callers that use the stamp-on-success activation pattern
+  // (activateLegacyOutboundReviewRowIfNeeded): true only when every CORE
+  // leg (reminders, lead conversion, triage resolve) ran without error.
+  // The credit-evidence and card-request legs stay warn-only — each has
+  // its own durable recovery (the hourly sweep; the pre-visit card
+  // backstop). Existing callers that ignore the return value are
+  // unaffected.
+  let coreLegsOk = true;
   // 1. Arm the 72h/24h reminders that were deferred at booking time.
   // Idempotent (registerAppointment dedupes by scheduled_service_id);
   // sendConfirmation:false = arm reminders only, the office owns any
@@ -55,7 +63,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       { sendConfirmation: false },
     );
     logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
-  } catch (e) { logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
+  } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
   // 1a. Inspection-credit booking evidence — written HERE, not at the AI
   // booking insert (pre-push P0): a pending outbound-review row is not a
@@ -163,7 +171,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       });
       logger.info(`[${routeTag}] Converted lead ${leadId} (keepOpenForQuote=${keepOpenForQuote}) for confirmed outbound-review booking ${svc.id}`);
     }
-  } catch (e) { logger.error(`[${routeTag}] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
+  } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
 
   // 3. Resolve the outbound_booking_review Needs-Review card — otherwise it
   // lingers in the queue as already-handled.
@@ -181,7 +189,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
           .update({ status: 'resolved', updated_at: trx.fn.now() });
       });
     }
-  } catch (e) { logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
+  } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
 
   // 4. Card-on-file request (Codex #2771 r2): the AI booking path skips
   // the card funnel for pending outbound-review rows, and without this the
@@ -194,18 +202,22 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     const { requestCardForAppointment } = require('./appointment-card-request');
     await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm' });
   } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+
+  return coreLegsOk;
 }
 
 /**
  * Lazy activation for a LEGACY outbound-review row (created pending before
  * the 2026-08-11 review-hold removal, PR #3361) touched by a writer that
  * does NOT go through transitionJobStatus — the direct reschedule writers
- * (SmartRebooker, admin-schedule update-details) and the shared
- * reschedule-notice sender. Guarded by a conditional UPDATE on
- * customer_confirmed so concurrent callers (or a racing transitionJobStatus
- * activation) run the hook at most once. No-op for every other row — one
- * indexed read. Best-effort by contract: the caller's move/notice must
- * never fail on an activation hiccup.
+ * (SmartRebooker, admin-schedule update-details, the bulk paths) and the
+ * shared reschedule-notice sender. The hook runs BEFORE the stamp and the
+ * stamp lands only when every core leg succeeded — so a transient leg
+ * failure leaves the row unstamped and the next touch retries (hook legs
+ * are idempotent, so retries and concurrent double-runs are safe); the
+ * conditional UPDATE keeps the stamp itself at-most-once. No-op for every
+ * other row — one indexed read. Best-effort by contract: the caller's
+ * move/notice must never fail on an activation hiccup.
  *
  * @returns {Promise<boolean>} true when THIS call performed the activation
  */
@@ -226,12 +238,22 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     if (['cancelled', 'skipped', 'completed', 'no_show'].includes(String(row.status || ''))) {
       return false;
     }
+    // Hook FIRST, stamp on success: the customer_confirmed stamp is the
+    // completion marker, so stamping before the hook would make a
+    // transiently-failed leg unretryable forever (Codex #3361 r3 P1).
+    // Every hook leg is idempotent (registration dedupes, lead conversion
+    // is ownership-guarded, the card resolve no-ops), so both a retry
+    // after partial completion and a concurrent double-run are safe; the
+    // guarded UPDATE below still keeps the stamp itself at-most-once.
+    const coreLegsOk = await runOutboundReviewConfirmHook(db, row, routeTag);
+    if (!coreLegsOk) {
+      logger.warn(`[${routeTag}] legacy outbound activation for ${serviceId}: a core hook leg failed — leaving unstamped so the next touch retries`);
+      return false;
+    }
     const stamped = await db('scheduled_services')
       .where({ id: serviceId, customer_confirmed: false })
       .update({ customer_confirmed: true, confirmed_at: new Date() });
-    if (!stamped) return false; // a concurrent activation won — its hook runs
-    await runOutboundReviewConfirmHook(db, row, routeTag);
-    return true;
+    return stamped > 0;
   } catch (e) {
     logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
     return false;

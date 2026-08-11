@@ -591,6 +591,16 @@ async function moveStopsToDay(input) {
   // per stop; failures land in notification_failures.
   for (const s of movable) {
     if (!movedIds.has(s.id)) continue;
+    // Activate a moved LEGACY outbound-review row regardless of the notify
+    // flag (Codex #3361 r3 P0 — same gap as the admin bulk path): this
+    // writer moves rows directly, and a legacy row has no reminder row, so
+    // the notify branch below would report "no reminder record" without
+    // ever reaching the notice sender's activation belt. No-op for every
+    // other row; best-effort by the helper's contract.
+    try {
+      await require('../outbound-review-confirm')
+        .activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
+    } catch { /* helper is internally best-effort; never strand the batch */ }
     // Opt-in customer text — LAST: after the live-job release and the
     // reschedule_log audit, so a slow
     // SMS provider can never hold tech_status/tracker on the moved job.

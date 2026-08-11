@@ -412,6 +412,14 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     }
     if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
 
+    // delivery 'none' = the caller wanted ONLY the non-messaging work above
+    // (policy exemption + saved-card auto-secure) — the AI call pipeline
+    // uses it when the call-level TCPA verdict blocked messaging, so this
+    // path must never mint a token or send a card link on stored consent
+    // (Codex #3361 r3 P1). The pre-visit sweep and a later cleared trigger
+    // remain the ask's delivery surfaces.
+    if (delivery === 'none') return skip('delivery_suppressed');
+
     // Owner rule 2026-07-30: the card ask is for FIRST-TIME customers only.
     // An existing customer with completed service history has an established
     // payment relationship — "add a card to finish booking" reads wrong and

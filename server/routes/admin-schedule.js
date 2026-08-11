@@ -4598,6 +4598,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // mark/re-arm. Default stays the silent resync this branch
                 // always did.
                 const bulkNotify = payload?.notifyCustomer === true;
+                // Activate a moved LEGACY outbound-review row BEFORE the
+                // reminder lookup below (Codex #3361 r3 P0): such a row has
+                // no reminder row until activation, so notifyThisRow would
+                // read false and the notice sender's own belt call — the
+                // only other activation seam on this path — would never
+                // run; a silent bulk move skipped activation entirely.
+                // No-op for every other row; at-most-once via the helper.
+                await require('../services/outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, id, 'bulk-reschedule');
                 // handleReschedule claims a still-pending creation
                 // confirmation (its reschedule notice normally replaces
                 // it), but with sendNotification:false no notice goes

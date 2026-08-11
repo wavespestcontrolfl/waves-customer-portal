@@ -11666,14 +11666,30 @@ const CallRecordingProcessor = {
                 } catch (replayErr) {
                   logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
                 }
+              } else if (!['pending', 'confirmed', 'rescheduled'].includes(String(svc.status || ''))) {
+                // Same-key replay reusing a row that is no longer pre-visit
+                // live (skipped / no_show / completed / mid-visit): arming
+                // reminders or re-arming a confirmation would message a
+                // customer about a visit that already resolved (Codex #3361
+                // r3 P1). Redemption stays — it is evidence-gated and the
+                // money seam must still settle.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
               } else {
-                // Same-key REPLAY of this call's OWN booking (idempotency
-                // conflict): the first attempt committed the visit but may
-                // have died before its side effects ran (Codex #3178 r37 P2;
-                // #3361 r2 P2) — repair BOTH rails, not just redemption.
-                // registerScheduleSideEffects is idempotent (registration
-                // dedupes by scheduled_service_id; redemption is
-                // evidence-gated), so a replay whose first attempt did
+                // Same-key REPLAY of this call's OWN still-live booking
+                // (idempotency conflict): the first attempt committed the
+                // visit but may have died before its side effects ran (Codex
+                // #3178 r37 P2; #3361 r2 P2) — repair BOTH rails, not just
+                // redemption. registerScheduleSideEffects is idempotent
+                // (registration dedupes by scheduled_service_id; redemption
+                // is evidence-gated), so a replay whose first attempt did
                 // complete is a no-op.
                 const replayDate = svc.scheduled_date instanceof Date
                   ? svc.scheduled_date.toISOString().split('T')[0]
@@ -11689,27 +11705,34 @@ const CallRecordingProcessor = {
                 // below never re-sends inline, and selfHealMissingReminderRows
                 // marks recreated rows confirmation_sent=true — so a
                 // confirmation lost to the crash would stay lost. Re-arm onto
-                // the 15-min stranded-confirmation sweep ONLY when no
-                // per-visit delivery evidence exists and the visit is still
-                // in the future (a late reprocess must not text a past
-                // visit); the sweep's canonical send owns fan-out and cannot
-                // double-text a customer the first attempt reached.
-                try {
-                  const confirmationDelivered = await db('messaging_audit_log')
-                    .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
-                    .whereNotNull('sent_at')
-                    .first('id');
-                  if (!confirmationDelivered) {
-                    const rearmed = await db('appointment_reminders')
-                      .where({ scheduled_service_id: svc.id, cancelled: false })
-                      .where('appointment_time', '>', new Date())
-                      .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-                    if (rearmed > 0) {
-                      logger.info(`[call-proc] replay of ${svc.id}: no confirmation evidence — re-armed for the stranded-confirmation sweep`);
+                // the 15-min stranded-confirmation sweep ONLY when THIS run's
+                // call-level SMS verdict cleared on EXPLICIT consent (the
+                // sweep's sender has no v2SmsBlocked/clearance context of its
+                // own — a consent-blocked booking must stay off it, Codex
+                // #3361 r3 P1; and an implied-consent clearance is excluded
+                // outright because it is personal to the inbound ANI, a
+                // recipient decision the sweep cannot re-derive), no
+                // per-visit delivery evidence exists, and the visit is still
+                // in the future; the sweep's canonical send owns fan-out and
+                // cannot double-text a customer the first attempt reached.
+                if (!v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                  try {
+                    const confirmationDelivered = await db('messaging_audit_log')
+                      .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
+                      .whereNotNull('sent_at')
+                      .first('id');
+                    if (!confirmationDelivered) {
+                      const rearmed = await db('appointment_reminders')
+                        .where({ scheduled_service_id: svc.id, cancelled: false })
+                        .where('appointment_time', '>', new Date())
+                        .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                      if (rearmed > 0) {
+                        logger.info(`[call-proc] replay of ${svc.id}: no confirmation evidence — re-armed for the stranded-confirmation sweep`);
+                      }
                     }
+                  } catch (confirmRepairErr) {
+                    logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                   }
-                } catch (confirmRepairErr) {
-                  logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                 }
               }
               if (!svc.technician_id) {
@@ -12009,20 +12032,20 @@ const CallRecordingProcessor = {
             }
           } else if (scheduledServiceId) {
             // No call-level SMS clearance (TCPA gate blocked, or the
-            // implied-consent leg is held): the funnel's NON-messaging side
-            // still matters — a consented saved card auto-secures before any
-            // text (appointment-card-request step 2), and the ask itself
-            // rides the funnel's canonical send path, which enforces STORED
-            // consent + suppression — the same bare call the office-confirm
-            // hook makes (Codex #3361 P1). Deliberately NO
+            // implied-consent leg is held): run ONLY the funnel's
+            // non-messaging side — the policy exemption + saved-card
+            // auto-secure (appointment-card-request step 2). delivery 'none'
+            // exits before any token mint or send, so the call-level verdict
+            // that just blocked messaging cannot be bypassed on stored
+            // consent (Codex #3361 r1+r3 P1). Deliberately NO
             // call_sms_cleared_at stamp and NO call-recipient override:
             // call-level clearance was not given, so the stamp the pre-visit
             // backstop keys on must not assert it.
             try {
               const { requestCardForAppointment } = require('./appointment-card-request');
-              await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline' });
+              await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline', delivery: 'none' });
             } catch (cardErr) {
-              logger.warn(`[call-proc] card-request funnel (stored-consent path) failed for visit ${scheduledServiceId}: ${cardErr.message}`);
+              logger.warn(`[call-proc] card-request funnel (auto-secure-only path) failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
           }
           // Only send the confirmation if the schedule row landed. A

@@ -195,10 +195,13 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 
-  test('a lost stamp race (0 rows) skips the hook — the winner owns it', async () => {
+  test('a lost stamp race (0 rows) reports false — hook legs ran but are idempotent by contract', async () => {
+    // Hook-first, stamp-on-success (Codex #3361 r3 P1): the loser of the
+    // stamp race has already run the idempotent hook legs; the guarded
+    // UPDATE keeps the stamp itself at-most-once.
     const db = makeDb({ ...legacyRow }, { stampRows: 0 });
     expect(await activateLegacyOutboundReviewRowIfNeeded(db, 'svc1', 'test')).toBe(false);
-    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
   });
 });
 
