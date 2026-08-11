@@ -1119,6 +1119,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               confidence: intent?.confidence ?? null,
               model: draftModel,
               promptVersion: PROMPT_VERSION,
+              lintFailures: lint.failures,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -1142,6 +1143,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           confidence: intent?.confidence ?? null,
           model: draftModel,
           promptVersion: PROMPT_VERSION,
+          lintFailures: lint.failures,
         });
         if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
       }

@@ -914,6 +914,10 @@ router.get('/agent-draft', async (req, res, next) => {
         reasoningSummary: row.reasoning_summary || null,
         scenarioLabel: input?.reply_training_hint?.scenarioLabel || null,
         inboundMessage: input?.sms?.body || null,
+        // Deterministic comms-lint failures recorded at publish time — the
+        // card must show WHY a draft was flagged (it may have been demoted
+        // from auto-send), never present it as clean.
+        lintFailures: Array.isArray(input?.comms_lint) ? input.comms_lint : [],
         createdAt: row.created_at,
       },
     });
