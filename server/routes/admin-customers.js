@@ -343,7 +343,16 @@ function serviceCatalogMatch(line, serviceIndex) {
           || null;
       }
     } catch (resolveErr) {
-      // Fail-open to the existing exact-key behavior.
+      // Resolver UNCERTAINTY also fails closed for REAL palm lines (codex
+      // r15 pre-push P0): falling through would book the one-time row for
+      // what may be a recurring plan. Word-boundary scope keeps
+      // 'Palmetto…' labels (which reach here via the bare /palm/ substring
+      // test above) on their normal matching path.
+      const labelText = String(line?.name || line?.label || line?.displayName || '');
+      if (rawKey === 'palm_injection' || /\bpalms?\b|palm\s*injection|palm\s*tree/i.test(labelText)) {
+        logger.warn(`[admin-customers] palm catalog resolution failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+        return null;
+      }
     }
   }
 

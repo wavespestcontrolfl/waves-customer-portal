@@ -368,8 +368,22 @@ function explicitCadenceFieldForService(svc = {}) {
 // Conflicting visit-count aliases (mirror of the cadence-field conflict
 // rule): { visitsPerYear: 2, visits: 4 } must decline, not seed whichever
 // alias firstPositiveNumber happens to read first.
+// The ONE alias list every visit-count consumer reads (codex r15 pre-push
+// P0: the reader and the conflict check must never disagree on vocabulary,
+// and persisted lines carry snake_case spellings too — same lesson as the
+// r8 plan_frequency cadence fix). Camel-before-snake preserves the
+// pre-existing precedence for camelCase rows.
+function visitCountAliasValues(svc = {}) {
+  return [
+    svc.visitsPerYear, svc.visits_per_year,
+    svc.appsPerYear, svc.apps_per_year,
+    svc.visits, svc.apps,
+    svc.treatmentsPerYear, svc.treatments_per_year,
+  ];
+}
+
 function visitCountFieldsConflict(svc = {}) {
-  const values = [svc.visitsPerYear, svc.appsPerYear, svc.visits, svc.apps, svc.treatmentsPerYear]
+  const values = visitCountAliasValues(svc)
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 0);
   return new Set(values).size > 1;
@@ -2137,13 +2151,9 @@ function firstPositiveNumber(...values) {
 }
 
 function visitsPerYearForRecurringService(svc = {}) {
-  return firstPositiveNumber(
-    svc.visitsPerYear,
-    svc.appsPerYear,
-    svc.visits,
-    svc.apps,
-    svc.treatmentsPerYear,
-  );
+  // Vocabulary lives in visitCountAliasValues — the conflict check reads
+  // the SAME list, so a spelling can never count for one and not the other.
+  return firstPositiveNumber(...visitCountAliasValues(svc));
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {

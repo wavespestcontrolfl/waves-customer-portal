@@ -582,6 +582,18 @@ describe('admin customers route helpers', () => {
       { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection' },
     ]);
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, legacyIndex)).toBeFalsy();
+
+    // Resolver UNCERTAINTY also fails closed for real palm lines (codex
+    // r15 pre-push P0): an error must not fall through to the one-time
+    // candidate.
+    const EstimateConverter = require('../services/estimate-converter');
+    const spy = jest.spyOn(EstimateConverter, 'converterFollowUpSeedingPattern')
+      .mockImplementation(() => { throw new Error('resolver down'); });
+    try {
+      expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('rodent bait falls back to monthly monitoring when the catalog lacks the quarterly row', () => {

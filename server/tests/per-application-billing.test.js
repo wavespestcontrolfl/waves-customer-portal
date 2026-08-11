@@ -291,6 +291,20 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
   });
 
+  test('snake_case visit-count spellings count everywhere — reader AND conflict check (codex r15 pre-push P0)', () => {
+    // A persisted { visits_per_year: 2 } palm line must seed its program;
+    // treated as count-less it would decline to office scheduling and the
+    // name-only row misfiles to the one-time identity at completion.
+    const snakePalm = { service: 'palm_injection', name: 'Palm Injection', visits_per_year: 2 };
+    expect(converterFollowUpSeedingPattern(snakePalm, { service_type: 'Palm Injection' }, 'quarterly')).toBe('semiannual');
+    expect(supportsConverterFollowUpSeeding(snakePalm, {}, 'semiannual')).toBe(true);
+    // Cross-spelling conflicts are conflicts (reader and conflict check
+    // share one alias list).
+    expect(supportsConverterFollowUpSeeding({ ...snakePalm, visits: 4 }, {}, 'semiannual')).toBe(false);
+    const snakeLawn = { service: 'lawn_care', name: 'Bi-Monthly Lawn Care Service', frequency: 'bi_monthly', apps_per_year: 6 };
+    expect(supportsConverterFollowUpSeeding(snakeLawn, {}, 'bimonthly')).toBe(true);
+  });
+
   test('an UNRECOGNIZED populated cadence field declines — never treated as cadence-less (pre-push r12 P1)', () => {
     // normalizeRecurringPattern can't read 'every_4_months'; filtered out
     // as absent, the forced palm/lawn branches would seed from the visit
