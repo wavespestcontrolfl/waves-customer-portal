@@ -697,6 +697,42 @@ describe('annual prepay renewal helpers', () => {
     expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved', 'v-legacy-parent']);
   });
 
+  test('a LEGACY quarterly nutritional palm term seeds normally — never the injection deferral (codex r20 pre-push P0)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const parentInsert = query({ returning: [{ id: 'svc-n1', scheduled_date: '2026-06-15' }] });
+    const childInserts = [
+      query({ returning: [{ id: 'svc-n2', scheduled_date: '2026-09-15' }] }),
+      query({ returning: [{ id: 'svc-n3', scheduled_date: '2026-12-15' }] }),
+      query({ returning: [{ id: 'svc-n4', scheduled_date: '2027-03-15' }] }),
+    ];
+    setDbQueues({
+      // NO services queue: the injection identity lookups must never run
+      // for the nutritional program (the fake db throws on unqueued
+      // tables, so this pins the exclusion).
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined }), parentInsert, ...childInserts],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-nutritional',
+      customer_id: 'customer-nut',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Tree Nutritional Treatment',
+      coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 4,
+    });
+  });
+
   test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {
     const columnQuery = query({
       columnInfo: {

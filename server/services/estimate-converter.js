@@ -2634,6 +2634,25 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
 // one-time spellings) carry no evidence and keep their one-time lane.
 // COMMERCIAL palm is deliberately excluded: commercial recurring keeps
 // its owner-designed office lane (r6 bell), like every commercial family.
+// The palm FAMILY resolver deliberately captures every palm-worded label
+// (alias durability), but the legacy `palm_treatment` service — "Palm
+// Tree Nutritional Treatment", the archived quarterly nutritional-fert
+// program — is a DISTINCT identity the injection doctrine must not touch
+// (codex r20 pre-push P0): its lines keep their prior office-scheduled
+// path, its admin matching keeps the palm_treatment row, and its prepay
+// terms keep gap-filling. Every INJECTION-specific gate asks here instead
+// of the raw family resolver.
+const PALM_NUTRITIONAL_RE = /nutritional|fertil/i;
+function isPalmInjectionFamily(svc = {}, parentRow = {}) {
+  if (seedingFamilyKey(svc, parentRow) !== 'palm_injection') return false;
+  const labels = [
+    svc.service, svc.serviceKey, svc.key,
+    svc.name, svc.serviceName, svc.service_name, svc.displayName, svc.label,
+    parentRow?.service_type,
+  ].map((value) => String(value || ''));
+  return !labels.some((value) => value === 'palm_treatment' || PALM_NUTRITIONAL_RE.test(value));
+}
+
 function palmRecurringEvidence(svc = {}, parentRow = {}) {
   if (isCommercialRecurringLine(svc, parentRow)) return false;
   const visits = visitsPerYearForRecurringService(svc);
@@ -4178,7 +4197,7 @@ const EstimateConverter = {
         // Same refusal contract as the off-season check above — OUTSIDE
         // the fail-soft seeding try, so the acceptance rolls back.
         if (!reservedSeedingPattern
-          && seedingFamilyKey(reservedGuardSvc || {}, reservedStart) === 'palm_injection'
+          && isPalmInjectionFamily(reservedGuardSvc || {}, reservedStart)
           && palmRecurringEvidence(reservedGuardSvc || {}, reservedStart)) {
           throw palmRecurringLineInvalidError();
         }
@@ -4388,7 +4407,7 @@ const EstimateConverter = {
         // palm lines carry no evidence and proceed as before; commercial
         // keeps its own bell lane (see palmRecurringEvidence).
         if (unit.catalogServiceKey !== 'palm_injection_semiannual'
-          && seedingFamilyKey(svc) === 'palm_injection'
+          && isPalmInjectionFamily(svc)
           && palmRecurringEvidence(svc)) {
           notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit (invalid recurring data)',
             `Accepted estimate #${estimateId} has a palm line with contradictory recurring data (cadence and visit count disagree), so it was not auto-scheduled — review the line and schedule the palm program manually.`);
@@ -5528,6 +5547,7 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.isPalmInjectionFamily = isPalmInjectionFamily;
 module.exports.guardServiceTypeFor = guardServiceTypeFor;
 module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;
 module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;

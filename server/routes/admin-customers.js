@@ -429,7 +429,7 @@ function serviceCatalogMatch(line, serviceIndex) {
   if ((!explicitKey || !explicitKeyResolves) && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
       const {
-        converterFollowUpSeedingPattern, seedingFamilyKey,
+        converterFollowUpSeedingPattern, isPalmInjectionFamily,
         visitsPerYearForRecurringService, visitCountFieldsConflict,
         visitCountFieldsInvalid, explicitCadenceFieldForService,
         explicitlyOneTimeCadence,
@@ -456,7 +456,7 @@ function serviceCatalogMatch(line, serviceIndex) {
       // the one-time match. seedingFamilyKey gates this to real palm —
       // 'Palmetto…' labels (here via the bare /palm/ substring) classify
       // palm_substring_mismatch and keep their normal matching path.
-      if (seedingFamilyKey(line || {}, { service_type: lineName }) === 'palm_injection') {
+      if (isPalmInjectionFamily(line || {}, { service_type: lineName })) {
         const visits = visitsPerYearForRecurringService(line || {});
         // An EXPLICITLY one-time cadence ('one_time'/'once') is not
         // recurring evidence (codex r17 P2) — the unrecognized-cadence

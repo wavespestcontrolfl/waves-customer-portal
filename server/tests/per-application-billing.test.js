@@ -291,6 +291,17 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(converterFollowUpSeedingPattern(agreeing, { service_type: 'Palm Injection' }, 'monthly')).toBe('semiannual');
   });
 
+  test('isPalmInjectionFamily excludes the legacy nutritional palm_treatment identity (codex r20 pre-push P0)', () => {
+    const { isPalmInjectionFamily } = EstimateConverter;
+    expect(isPalmInjectionFamily({ service: 'palm_injection', name: 'Palm Injection' })).toBe(true);
+    expect(isPalmInjectionFamily({ name: 'Palm Tree Injections' })).toBe(true);
+    // The DISTINCT legacy quarterly nutritional-fert program — injection
+    // gates must not touch its lines, matching, or prepay terms.
+    expect(isPalmInjectionFamily({ service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment' })).toBe(false);
+    expect(isPalmInjectionFamily({ name: 'Palm Tree Nutritional Treatment' })).toBe(false);
+    expect(isPalmInjectionFamily({ name: 'Pest Initial Palmetto Knockdown' })).toBe(false);
+  });
+
   test('a POPULATED invalid visit count declines — never read as a legacy count-less line (codex r18 P1)', () => {
     // { visitsPerYear: 0 } (or non-numeric text) is malformed data, not an
     // absent count: the count-less compatibility case must not seed from it.

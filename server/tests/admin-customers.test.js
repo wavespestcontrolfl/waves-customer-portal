@@ -635,6 +635,14 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time' }, serviceIndex)?.service_key).toBe('palm_injection');
     // …but a one-time spelling beside a >1 visit count still fails closed.
     expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    // The legacy NUTRITIONAL palm program is a distinct identity (codex
+    // r20 pre-push P0): its quarterly lines keep matching palm_treatment,
+    // never tripping the injection evidence gate.
+    const nutritionalIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 4, service_key: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', short_name: 'Palm Nutrition' },
+    ]);
+    expect(serviceCatalogMatch({ service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', frequency: 'quarterly', visitsPerYear: 4 }, nutritionalIndex)?.service_key).toBe('palm_treatment');
     // 'Palmetto…' labels reach this branch via the bare /palm/ substring
     // but are NOT palm — they keep their normal matching path.
     const palmettoIndex = indexServicesForSchedule([

@@ -426,12 +426,16 @@ function palmRowCommittedToTerm(term, row) {
 // seeding identity guard (codex r18 pre-push P0/P1): word-boundary
 // fallback keeps 'Palmetto…' service types out when the resolver errors.
 function coverageFamilyIsPalm(coverageServiceType) {
+  // INJECTION-scoped (codex r20 pre-push P0): the broad family resolver
+  // also captures the distinct legacy palm_treatment nutritional program,
+  // whose quarterly prepay terms must keep gap-filling untouched.
   try {
-    const { seedingFamilyKey } = require('./estimate-converter');
-    return seedingFamilyKey({ name: coverageServiceType, service_type: coverageServiceType }) === 'palm_injection';
+    const { isPalmInjectionFamily } = require('./estimate-converter');
+    return isPalmInjectionFamily({ name: coverageServiceType, service_type: coverageServiceType });
   } catch (familyErr) {
     logger.warn(`[annual-prepay] palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
-    return /\bpalm\b/i.test(String(coverageServiceType || ''));
+    return /\bpalm\b/i.test(String(coverageServiceType || ''))
+      && !/nutritional|fertil/i.test(String(coverageServiceType || ''));
   }
 }
 
