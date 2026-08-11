@@ -253,7 +253,21 @@ function normalizeServiceKey(value) {
 }
 
 function cadenceFromEstimateLine(line, fallback = 'one_time') {
-  const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
+  // The full shared cadence-field vocabulary (codex r18 pre-push P0):
+  // reading only frequency/freq/cadence let a valid
+  // { frequencyKey: 'semiannual' } palm line pass catalog validation but
+  // prefill the quarterly fallback — the modal would create a quarterly
+  // series on the two-application service. First non-blank wins, same
+  // precedence as the converter's readers; `freq` is this reader's own
+  // legacy alias.
+  const frequency = String(
+    line?.frequency || line?.freq || line?.cadence
+    || line?.frequencyKey || line?.frequency_key
+    || line?.recurringPattern || line?.recurring_pattern
+    || line?.cadenceKey || line?.cadence_key
+    || line?.planFrequency || line?.plan_frequency
+    || ''
+  ).toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
   // Seasonal mosquito (9 visits): its quote rows carry frequency

@@ -455,6 +455,12 @@ describe('admin customers route helpers', () => {
     expect(cadenceFromEstimateLine({ frequencyKey: 'one_time' }, 'quarterly')).toBe('one_time');
     expect(cadenceFromEstimateLine({ recurring_pattern: 'once' }, 'quarterly')).toBe('one_time');
     expect(cadenceFromEstimateLine({ freq: 'one-time' }, 'quarterly')).toBe('one_time');
+    // RECURRING aliases read the same shared vocabulary (codex r18
+    // pre-push P0): { frequencyKey: 'semiannual' } must not fall to the
+    // quarterly default while catalog validation passes the line.
+    expect(cadenceFromEstimateLine({ frequencyKey: 'semiannual' }, 'quarterly')).toBe('semiannual');
+    expect(cadenceFromEstimateLine({ recurring_pattern: 'bi_monthly' }, 'quarterly')).toBe('bimonthly');
+    expect(cadenceFromEstimateLine({ planFrequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
     expect(cadenceFromEstimateLine({ frequency: 'Bi-Monthly' }, 'quarterly')).toBe('bimonthly');
     expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
     expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
