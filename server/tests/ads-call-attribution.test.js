@@ -217,6 +217,9 @@ describe('recordCallPpcAttribution', () => {
       lead_source_detail: 'Waves - GBP Search',
       funnel_stage: 'lead',
       is_paid: true, // call-sourced rows are inherently paid (paid tracking number)
+      // Writer marker: NULL for every caller except the unclaimed sweep's
+      // self-identified writes (ambiguity-reopen retirement reads it).
+      attribution_basis: null,
     });
   });
 

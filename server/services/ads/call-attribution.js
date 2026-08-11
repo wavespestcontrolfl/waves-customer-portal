@@ -135,6 +135,13 @@ async function recordCallPpcAttribution({
   // delete another call's first-touch row (codex P1 r2) — legacy NULL
   // rows stay untouched and are never reconciled.
   sourceCallId = null,
+  // Writer self-identification, INSERT-only (codex/audit rounds on the
+  // bridge-ambiguity PR): the unclaimed→organic sweep stamps
+  // 'bridge_unclaimed_sweep' so the ambiguity-reopen reconciliation can
+  // retire exactly its own lift-window rows — reconstructing the writer
+  // from provenance/markers/timestamps always left a corner where another
+  // writer's legitimate row matched. Never patched onto existing rows.
+  attributionBasis = null,
   // Transaction handle for the ad_service_attribution statements. The
   // google-call bridge attributes while holding a FOR UPDATE lock on the
   // lead; this table's lead_id foreign-key check takes FOR KEY SHARE on
@@ -293,6 +300,7 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       source_call_id: sourceCallId,
+      attribution_basis: attributionBasis,
       funnel_stage: 'lead',
       // Calls carry no click ids (gclid/fbclid), so this flag — not a cookie — is
       // how the paid filters count them: a paid-number call (google_ads/facebook)
@@ -562,6 +570,15 @@ async function attributeUnclaimedBridgeLeads({
   // whose only linked call carries strong-but-ambiguous paid evidence).
   excludeCallSids = [],
   excludeCallIds = [],
+  // The broad last-10 PHONE arm takes ONLY these ids — the DAY'S fresh
+  // ambiguous candidates, never the persisted indefinite holds (codex P1,
+  // ambiguity-record r2). With holds that can now live forever, routing
+  // them through the phone arm would permanently suppress every LATER,
+  // DISTINCT lead reusing the same household number — the exact r25 bug
+  // class the bare phone arm was removed from linkedCallToLead for. The
+  // durable arms above (sid, stamp) are proven call↔lead links and safely
+  // carry the indefinite holds; the phone arm stays a same-window delay.
+  excludePhoneCallIds = [],
 } = {}) {
   // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
   // module-scope import back at it would be a require cycle.
@@ -615,7 +632,46 @@ async function attributeUnclaimedBridgeLeads({
     });
   };
 
+  // The retry-window fallback for the live phone-hold arm — same constant
+  // the snapshot INSERT binds (shared with the processor's in-flight test).
+  const { CALL_EXTRACTION_RETRY_WINDOW_MS } = require('../../utils/estimate-claim-sql');
+
   const applyAmbiguityExclusions = (qb) => {
+    // The phone-linkage HOLD for the one reuse mode that leaves neither a
+    // sid nor a stamp on the lead — TWO correlated arms, never a JS array
+    // (pre-push audit P1 r13: an array captured before the sweep is stale
+    // by the time the under-lock recheck runs, and a concurrent
+    // force-reprocess can phone-link a new lead in that gap). Correlated
+    // subqueries re-evaluate against a fresh snapshot in the recheck
+    // statement — the exact property the sid/stamp arms already rely on.
+    // Arm 1 — the PERSISTED snapshot rows of OPEN records: leads captured
+    // when their ambiguity was recorded/reopened, held even if the lead's
+    // phone has since changed away (the historical linkage evidence
+    // stands; a hold is recoverable, the organic label is not).
+    qb.whereNotExists(function persistedPhoneHold() {
+      this.select(1)
+        .from('bridge_ambiguous_call_leads as bal')
+        .join('bridge_ambiguous_calls as bac', 'bac.call_log_id', 'bal.call_log_id')
+        .whereNull('bac.resolved_at')
+        .whereRaw('bal.lead_id = l.id');
+    });
+    // Arm 2 — the SAME predicate the snapshot INSERT uses, evaluated LIVE
+    // against every open record: covers a lead linked by a processing pass
+    // AFTER the last snapshot write (no row exists yet), bounded by the
+    // call's current processing evidence so later distinct same-number
+    // leads still pass.
+    qb.whereNotExists(function livePhoneHold() {
+      this.select(1)
+        .from('bridge_ambiguous_calls as bac')
+        .join('call_log as clh', 'clh.id', 'bac.call_log_id')
+        .whereNull('bac.resolved_at')
+        .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
+        .whereRaw("RIGHT(regexp_replace(COALESCE(clh.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)")
+        .whereRaw(
+          "l.created_at < COALESCE(clh.processing_started_at + interval '10 minutes', clh.created_at + make_interval(secs => ?))",
+          [CALL_EXTRACTION_RETRY_WINDOW_MS / 1000],
+        );
+    });
     if (excludeCallSids.length) {
       qb.where(function sidNotAmbiguous() {
         this.whereNull('l.twilio_call_sid').orWhereNotIn('l.twilio_call_sid', excludeCallSids);
@@ -627,6 +683,8 @@ async function attributeUnclaimedBridgeLeads({
           .whereRaw("cla.metadata->>'lead_id' = l.id::text")
           .whereIn('cla.id', excludeCallIds);
       });
+    }
+    if (excludePhoneCallIds.length) {
       // PHONE-reuse linkage arm (codex P1 r18): a phone-bearing call the
       // processor linked via findReusableCallLead left neither a sid nor
       // a stamp on the lead — the only durable linkage is the caller's
@@ -634,14 +692,17 @@ async function attributeUnclaimedBridgeLeads({
       // leg (from_phone; the dialed leg is the shared office number and
       // would over-exclude every bridge-target lead) sits out until the
       // ambiguity resolves. Deliberately broader than the retire arm's
-      // ownership gating: this exclusion only DELAYS an irreversible
-      // organic label and lifts the day the ambiguity clears, so
-      // shared-number over-match costs a day of waiting, never a wrong
-      // row. NULL/short lead phones must PASS (same rule as the NULL-sid
-      // arm): the length guard empties the subquery for them.
+      // ownership gating — which is exactly why it takes ONLY the day's
+      // fresh candidate ids, never the persisted indefinite holds (see
+      // the excludePhoneCallIds parameter doc): a fresh candidate
+      // re-reports every scan until it resolves, so this stays a delay
+      // bounded by the scan window, never a permanent suppression of a
+      // later distinct lead on a shared number. NULL/short lead phones
+      // must PASS (same rule as the NULL-sid arm): the length guard
+      // empties the subquery for them.
       qb.whereNotExists(function phoneLinkedCallAmbiguous() {
         this.select(1).from('call_log as clp')
-          .whereIn('clp.id', excludeCallIds)
+          .whereIn('clp.id', excludePhoneCallIds)
           .whereRaw("LENGTH(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g')) >= 10")
           .whereRaw("RIGHT(regexp_replace(COALESCE(clp.from_phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(l.phone, ''), '[^0-9]', '', 'g'), 10)");
       });
@@ -804,6 +865,9 @@ async function attributeUnclaimedBridgeLeads({
           serviceInterest: locked.service_interest || null,
           isPaid: lockedChannel.isPaid, // main_site → false: unclaimed ⇒ organic
           sourceCallId: prov.sourceCallId,
+          // Self-identify: the reopen reconciliation retires exactly this
+          // writer's lift-window rows by marker, not reconstruction.
+          attributionBasis: 'bridge_unclaimed_sweep',
           dbc: trx,
         });
       });
@@ -1713,6 +1777,7 @@ module.exports = {
   attributeUnclaimedBridgeLeads,
   retireCallAttributionRow,
   retireAllCallAttributionRows,
+  retireRowPreservingHistory,
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },

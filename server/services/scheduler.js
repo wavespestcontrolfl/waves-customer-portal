@@ -3876,9 +3876,13 @@ function initScheduledJobs() {
           // pass — an organic row can never be flipped to paid later, so any
           // doubt about the day's claim means the fallback waits a day.
           let bridgeBlockedReason = null;
-          // Leads tied to the day's AMBIGUOUS bridge matches are excluded
-          // from the organic fallback (scoped, see below).
+          // Leads tied to AMBIGUOUS bridge matches are excluded from the
+          // organic fallback (scoped, see below). The day's fresh candidate
+          // ids are tracked separately: only THEY may take the broad phone
+          // exclusion arm — persisted indefinite holds ride the durable
+          // sid/stamp arms alone (codex P1, ambiguity-record r2).
           let organicExclusions = { excludeCallSids: [], excludeCallIds: [] };
+          let dayAmbiguousCallIds = [];
           if (googleAds.isConfigured()) {
             logger.info('Running: Google Ads call→campaign bridge');
             const callBridge = require('./ads/google-call-bridge');
@@ -3887,7 +3891,8 @@ function initScheduledJobs() {
             // Both sides are bounded by design — warn if either hits the cap (older
             // calls would go unbridged and need pagination, a wider refactor that's
             // unwarranted today at ~0 Google-Ads-driven calls).
-            const r = await callBridge.applyBridge({ days: 30, limit: 500 });
+            const bridgeScanDays = 30;
+            const r = await callBridge.applyBridge({ days: bridgeScanDays, limit: 500 });
             const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
             if (capHit) {
               logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
@@ -3900,26 +3905,19 @@ function initScheduledJobs() {
             // means the scan found strong but non-unique paid-call
             // evidence and deliberately left the CRM call unclaimed, and
             // sweeping ITS lead organic would irreversibly mislabel a
-            // probably-paid lead. The bridge preserves shared-SID
-            // ambiguities indefinitely though, so blocking the WHOLE
-            // fallback on one starved every unrelated organic lead.
-            // Instead, only the leads linked to an ambiguous match's
-            // candidate calls are excluded; the exclusion lifts the day the
-            // ambiguity resolves. Read from `ambiguousCandidates` — the
-            // COMPLETE qualifying set (codex P1 r23): `alternatives` is a
-            // display preview capped at two, so with four-plus equally
-            // plausible candidates the extras were omitted and took the
-            // irreversible organic label. The preview stays the fallback
-            // for any match shape that predates the field.
-            const ambiguousCalls = (r.skipped || [])
-              .filter((m) => m?.skipReason === 'ambiguous')
-              .flatMap((m) => ((m.ambiguousCandidates || []).length
-                ? m.ambiguousCandidates
-                : [m.callLog, ...(m.alternatives || []).map((a) => a?.callLog)]))
-              .filter(Boolean);
-            const ambiguousExcludeSids = [...new Set(ambiguousCalls.map((c) => c.twilioCallSid).filter(Boolean))];
-            const ambiguousExcludeCallIds = [...new Set(ambiguousCalls.map((c) => c.id).filter(Boolean))];
-            organicExclusions = { excludeCallSids: ambiguousExcludeSids, excludeCallIds: ambiguousExcludeCallIds };
+            // probably-paid lead — while blocking the WHOLE fallback on one
+            // persistent ambiguity starved every unrelated organic lead.
+            // PERSISTED ambiguity (owner ruling 2026-08-11, GH-r24 P1):
+            // applyBridge itself records every scan's candidates AND
+            // resolves open records on POSITIVE evidence, on every apply
+            // path — manual admin applies included, since their 31–90-day
+            // windows reach calls this 30-day cron never re-sees for
+            // either purpose (codex P1s, ambiguity-record r2+r3 GH
+            // rounds). The cron only feeds the sweep from ALL open
+            // records; a failure throws to bridgePairError, which also
+            // skips the organic sweep — never sweep with a partial
+            // exclusion set.
+            dayAmbiguousCallIds = r.ambiguousCandidateCallIds || [];
             if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
             else if (capHit) bridgeBlockedReason = 'row_cap_hit';
             else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
@@ -3940,6 +3938,17 @@ function initScheduledJobs() {
             // be claimed) opts in with BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED=true.
             bridgeBlockedReason = 'google_ads_unconfigured';
           }
+
+          // ALL OPEN persisted ambiguity holds, on EVERY sweep path — the
+          // unconfigured-with-opt-in branch runs no scan, but records from
+          // before a teardown must still hold their leads. A read failure
+          // throws to bridgePairError, which also skips the sweep: never
+          // sweep with a partial exclusion set. The phone arm gets the
+          // DAY'S ids only (empty on scan-less paths).
+          organicExclusions = {
+            ...(await require('./ads/google-call-bridge').openAmbiguousCallExclusions()),
+            excludePhoneCallIds: dayAmbiguousCallIds,
+          };
 
           // AFTER the bridge has had the day's claim: unclaimed bridge-target
           // leads older than the window become organic. Any doubt about the
