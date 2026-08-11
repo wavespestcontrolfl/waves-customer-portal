@@ -353,7 +353,7 @@ function MessageMediaV2({ media = [], inverted = false }) {
           {failed[item.url] ? (
             <span
               className={cn(
-                "flex items-center justify-center h-12 px-2 text-11",
+                "flex items-center justify-center h-12 px-2 text-14",
                 inverted ? "text-white/80" : "text-ink-secondary",
               )}
             >
