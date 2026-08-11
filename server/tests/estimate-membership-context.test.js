@@ -1040,6 +1040,82 @@ describe('current-spend cadence and stamped billing basis', () => {
     expect(service.contracts.map((contract) => contract.perVisit)).toEqual([100, 100]);
   });
 
+  test('a COMBINED invoice never becomes one component\'s per-application price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'c1', service_type: 'Quarterly Pest + Termite Bait Station', scheduled_date: '2099-01-05', estimated_price: 150 },
+      ],
+      // One charge covering pest AND termite — filed under pest_control by
+      // accountServiceKey, so using it would quote the bundle as pest's price.
+      paidInvoices: [{ service_type: 'Quarterly Pest + Termite Bait Station', total: 150, paid_at: '2026-05-20' }],
+      catalogRows: [{ id: 'c1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].spendSource).not.toBe('last_paid_invoice');
+  });
+
+  test('an active prepaid allocation outranks a superseded per-visit invoice', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114 },
+      ],
+      // Paid BEFORE the customer moved onto the annual-prepay term — the
+      // annual-prepay invoice itself carries no service_type, so this older
+      // row is what survives in lastPaidByKey.
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 114,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('the live series cadence overrides the catalog default', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', recurring_pattern: 'monthly' },
+      ],
+      // Catalog says quarterly; the live series runs monthly. Reading the
+      // catalog would label it 4/yr AND turn $100/mo into $300/application.
+      // catalogRows model the JOINED row, so they carry s.recurring_pattern
+      // alongside the catalog columns.
+      catalogRows: [{ id: 'p1', recurring_pattern: 'monthly', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Monthly',
+      visitsPerYear: 12,
+      currentPerVisit: 100,
+      spendSource: 'monthly_rate_derived',
+    }));
+  });
+
+  test('an unresolvable series pattern falls back to the catalog cadence', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, recurring_pattern: 'custom' },
+      ],
+      catalogRows: [{ id: 'p1', recurring_pattern: 'custom', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Quarterly',
+      visitsPerYear: 4,
+    }));
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.

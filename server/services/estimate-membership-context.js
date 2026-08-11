@@ -354,6 +354,15 @@ async function loadLastPaidSpendByKey(database, customerId) {
     for (const row of rows) {
       const key = accountServiceKey(row.service_type);
       if (!key || spend[key] != null) continue;
+      // A COMBINED invoice ("Quarterly Pest + Termite Bait Station") is one
+      // charge covering several families, but accountServiceKey files it
+      // under the FIRST component alone — so using it as that component's
+      // per-application basis presents the whole bundle as Pest Control's
+      // price (codex #3353 r3). This is the invoice-path twin of the
+      // component-count guard on the customer-level stamps below, and it
+      // matters more because last-paid takes precedence over every other
+      // basis. Withhold rather than mis-attribute.
+      if (accountServiceKeys(row.service_type).length > 1) continue;
       const amount = invoiceServiceAmount(row);
       if (amount != null) {
         spend[key] = {
@@ -380,11 +389,33 @@ async function loadCadenceByRowId(database, customerId) {
     const rows = await database('scheduled_services as s')
       .leftJoin('services as svc', 's.service_id', 'svc.id')
       .where({ 's.customer_id': customerId })
-      .select('s.id', 'svc.frequency', 'svc.visits_per_year');
-    return new Map(rows.map((row) => [row.id, {
-      frequency: row.frequency || null,
-      visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
-    }]));
+      .select('s.id', 's.recurring_pattern', 'svc.frequency', 'svc.visits_per_year');
+    // The LIVE series wins over the catalog default (codex #3353 r3): a
+    // series whose scheduled_services.recurring_pattern overrides its
+    // catalog frequency really runs at the overridden cadence, and reading
+    // the catalog alone would both mislabel it and divide the monthly rate
+    // by the wrong visit count (a $100/mo monthly series read as quarterly
+    // becomes "$300 per application"). Resolution goes through
+    // billing-cadence.normalizeFrequencyKey — the repo's existing cadence
+    // mechanism (AGENTS.md: extend it, never build a parallel one) — so
+    // every spelling the schedule writes ('every_other_month', 'bimonthly',
+    // a raw visit count) resolves the same way it does everywhere else.
+    // A pattern it cannot resolve (custom, seasonal, annual) falls back to
+    // the catalog rather than guessing.
+    const { normalizeFrequencyKey, billingIntervalMonthsForFrequencyKey } = require('./billing-cadence');
+    return new Map(rows.map((row) => {
+      const liveKey = normalizeFrequencyKey(row.recurring_pattern);
+      if (liveKey) {
+        return [row.id, {
+          frequency: liveKey,
+          visitsPerYear: 12 / billingIntervalMonthsForFrequencyKey(liveKey),
+        }];
+      }
+      return [row.id, {
+        frequency: row.frequency || null,
+        visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
+      }];
+    }));
   } catch {
     return new Map();
   }
@@ -392,8 +423,11 @@ async function loadCadenceByRowId(database, customerId) {
 
 // Customer-facing cadence wording. "Every other month" beats the catalog's
 // "bimonthly", which reads as twice-a-month to half the people who see it.
+// 'bi_monthly' is billing-cadence's normalized key; 'bimonthly' is the
+// catalog's spelling of the same cadence — both land on the same wording.
 const CADENCE_LABEL = {
   monthly: 'Monthly',
+  bi_monthly: 'Every other month',
   bimonthly: 'Every other month',
   quarterly: 'Quarterly',
   annual: 'Annual',
@@ -609,7 +643,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       && visitsPerYear > 0)
       ? round2((Number(customer.monthly_rate) * 12) / visitsPerYear)
       : null;
-    const currentPerVisit = usableLastPaid?.amount
+    // An ACTIVE uniformly-prepaid contract outranks paid-invoice history
+    // (codex #3353 r3): the annual-prepay invoice itself carries no
+    // service_type, so a customer who paid per-visit invoices BEFORE moving
+    // to prepay still has those older rows in lastPaidByKey — and they
+    // describe a superseded billing arrangement. The allocation describes
+    // the term the customer is on now, so it wins.
+    const activePrepaidBasis = contracts.some((contract) => contract.prepaid)
+      ? effectivePerVisit
+      : null;
+    const currentPerVisit = activePrepaidBasis
+      ?? usableLastPaid?.amount
       ?? effectivePerVisit
       ?? stampedPerApplication
       ?? monthlyDerivedPerApplication;
@@ -647,13 +691,15 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // simply omits that half; the panel never invents a cadence.
       cadenceLabel: cadenceLabelFor(cadence?.frequency),
       visitsPerYear,
-      spendSource: usableLastPaid
-        ? 'last_paid_invoice'
-        : (effectivePerVisit != null
-          ? (contracts.some((contract) => contract.prepaid) ? 'prepaid_allocation' : 'scheduled_estimate')
-          : (stampedPerApplication != null
-            ? 'per_application_fee'
-            : (monthlyDerivedPerApplication != null ? 'monthly_rate_derived' : 'unavailable'))),
+      spendSource: activePrepaidBasis != null
+        ? 'prepaid_allocation'
+        : (usableLastPaid
+          ? 'last_paid_invoice'
+          : (effectivePerVisit != null
+            ? 'scheduled_estimate'
+            : (stampedPerApplication != null
+              ? 'per_application_fee'
+              : (monthlyDerivedPerApplication != null ? 'monthly_rate_derived' : 'unavailable')))),
       lastPaidAt: usableLastPaid?.paidAt || null,
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the

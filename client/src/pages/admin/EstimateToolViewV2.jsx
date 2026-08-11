@@ -3105,7 +3105,13 @@ export default function EstimateToolViewV2({
     // below stops a slow response for an earlier selection from landing on
     // top of the current one; this stops the stale render before it.
     setCustomerSpend(null);
-    const customerId = existingCustomerMatch?.id;
+    // The EFFECTIVE linked customer, not just a search-and-click match
+    // (codex #3353 r3): opening the builder through the existing-customer
+    // deep link (?tab=new&customerId=…) seeds form.customerId but
+    // deliberately leaves existingCustomerMatch null, so keying only off the
+    // match left the panel absent on exactly the entry path where staff
+    // already told us which customer they mean.
+    const customerId = existingCustomerMatch?.id || form.customerId;
     if (!customerId) return undefined;
     let cancelled = false;
     (async () => {
@@ -3127,7 +3133,7 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [existingCustomerMatch?.id]);
+  }, [existingCustomerMatch?.id, form.customerId]);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   // "" | "saving" | "saved" | "error" — Save-verified action in the
@@ -5805,8 +5811,10 @@ export default function EstimateToolViewV2({
                     : ""}
                 </div>
               )}
-              {existingCustomerMatch &&
-                customerSpend?.currentServices?.length > 0 && (
+              {/* Gated on the DATA, not on existingCustomerMatch — the
+                  deep-link entry path links a customer without setting a
+                  match object, and the panel must render there too. */}
+              {customerSpend?.currentServices?.length > 0 && (
                   <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">
                     <div className="px-3 py-2 border-b border-zinc-200 bg-zinc-50 text-14 font-medium text-zinc-900">
                       Currently pays per application
