@@ -2028,13 +2028,16 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
   let sticky = null;
   // sticky_window_disclosed (migration 20260810000040): only rows whose
   // consent surface stated the sticky rule may be charged on its strength.
+  // Enforcement gate checked HERE (the helper is ungated so reminder copy
+  // can see evidence while dark).
   if (!inWindow && startLive && request.sticky_window_disclosed && isApptCardFeeRailEnabled()) {
     try {
-      const { findStickyLateReschedule } = require('./estimate-card-holds');
-      sticky = await findStickyLateReschedule({
+      const { findStickyLateReschedule, isStickyCancelWindowEnabled } = require('./estimate-card-holds');
+      sticky = !isStickyCancelWindowEnabled() ? null : await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
         notBefore: request.fee_agreed_at,
+        currentStart: liveStartDate,
       });
     } catch (err) {
       logger.error(`[appt-card-request] sticky-window lookup for cancel FAILED — unresolved, parking review: ${err.message}`);
@@ -2160,16 +2163,18 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -PREVIEW_GRACE_MS;
   if (!feeApplies && isApptCardFeeRailEnabled() && previewStartLive && request.sticky_window_disclosed) {
-    // Sticky window — the preview must agree with the cancellation handler.
-    // A THROWN lookup is unresolved, not fee-free (same posture as the
-    // time-resolution catch above): the cancel path parks review on the
-    // same failure, so the prompt must surface the waiver choice.
+    // Sticky window — the preview must agree with the cancellation handler
+    // (same enforcement gate, same evidence). A THROWN lookup is
+    // unresolved, not fee-free (same posture as the time-resolution catch
+    // above): the cancel path parks review on the same failure, so the
+    // prompt must surface the waiver choice.
     try {
-      const { findStickyLateReschedule } = require('./estimate-card-holds');
-      feeApplies = !!(await findStickyLateReschedule({
+      const { findStickyLateReschedule, isStickyCancelWindowEnabled } = require('./estimate-card-holds');
+      feeApplies = !isStickyCancelWindowEnabled() ? false : !!(await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
         notBefore: request.fee_agreed_at,
+        currentStart: previewStartLive ? new Date(previewStartMs) : null,
       }));
     } catch (err) {
       logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);

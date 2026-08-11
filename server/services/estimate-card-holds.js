@@ -925,8 +925,12 @@ function isStickyCancelWindowEnabled() {
 // customer accepted the fee terms can never authorize a later fee — only
 // moves made under the agreement stick. No resolvable anchor → no sticky at
 // all (fail toward free; a fee we can't tie to consent is never charged).
-async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, notBefore }) {
-  if (!isStickyCancelWindowEnabled()) return null;
+// NOT gated internally (Codex #3342 r4 P1): enforcement call sites check
+// isStickyCancelWindowEnabled() themselves, while customer COPY (the
+// reminder's cutoff suppression) must see the evidence even while the gate
+// is off — a dated free-cancel promise sent during a dark interval must
+// never be broken by a later flip.
+async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, notBefore, currentStart = null }) {
   const boundary = notBefore instanceof Date ? notBefore : (notBefore ? new Date(notBefore) : null);
   if (!boundary || Number.isNaN(boundary.getTime())) return null;
   // ALL rows, chronologically — company rows are needed too: a later
@@ -936,7 +940,7 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
   const rows = await db('reschedule_log')
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy('created_at', 'asc')
-    .select('original_date', 'original_window', 'reason_code', 'initiated_by', 'created_at');
+    .select('original_date', 'original_window', 'new_date', 'new_window', 'reason_code', 'initiated_by', 'created_at');
   const { parseETDateTime } = require('../utils/datetime-et');
   let sticky = null;
   for (const row of rows || []) {
@@ -974,6 +978,21 @@ async function findStickyLateReschedule({ scheduledServiceId, isWithinWindow, no
     if (!rescheduledAt || Number.isNaN(rescheduledAt.getTime())) continue;
     if (rescheduledAt.getTime() < boundary.getTime()) continue; // pre-consent move — terms not yet accepted
     if (isWithinWindow(originalStart, rescheduledAt)) sticky = { originalStart, rescheduledAt };
+  }
+  if (sticky && currentStart instanceof Date && !Number.isNaN(currentStart.getTime()) && rows.length) {
+    // Unlogged-move invalidation (Codex #3342 r4 P1): series shifts update
+    // sibling visits WITHOUT a reschedule_log row (rebooker logs only the
+    // anchor), and direct admin moves can skip the log entirely — so when
+    // the newest LOGGED move did not land on the slot now being cancelled,
+    // some later unlogged move (possibly a company series shift) superseded
+    // the evidence. Unverifiable lineage never charges — fail toward free.
+    const last = rows[rows.length - 1];
+    const dateP = last.new_date instanceof Date
+      ? last.new_date.toISOString().slice(0, 10)
+      : String(last.new_date || '').slice(0, 10);
+    const timeP = String(last.new_window || '').split('-')[0].slice(0, 8);
+    const landing = (dateP && timeP) ? parseETDateTime(`${dateP}T${timeP}`) : null;
+    if (!landing || Number.isNaN(landing.getTime()) || landing.getTime() !== currentStart.getTime()) sticky = null;
   }
   return sticky;
 }
@@ -1021,19 +1040,50 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   let sticky = null;
   // sticky_window_disclosed is the FROZEN policy marker (migration
   // 20260810000040): only rows whose consent surface stated the sticky rule
-  // may be charged on its strength — legacy consents stay non-sticky.
-  if (startLive && hold.sticky_window_disclosed) {
+  // may be charged on its strength — legacy consents stay non-sticky. The
+  // enforcement gate is checked HERE, not in the helper, so the reminder's
+  // copy suppression can see evidence while the gate is dark.
+  if (startLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     try {
       sticky = await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
         notBefore: hold.held_at,
+        currentStart: startDate,
       });
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel failed — releasing free', { scheduledServiceId, error: err.message });
     }
   }
   if (sticky) {
+    // Card removal is REVOCATION (AGENTS.md, mirroring the appointment-card
+    // rail — Codex #3342 r4 P1): the sticky branch must not ride
+    // chargeNoShowFee's attach self-heal onto a card the customer
+    // deliberately removed. Missing local payment_methods row → free
+    // release + office alert; an unverifiable lookup also releases free
+    // (this rail's posture).
+    try {
+      const pmRow = await db('payment_methods')
+        .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
+        .first('id');
+      if (!pmRow) {
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Late-cancel fee not charged — card removed',
+            'A cancellation after an inside-window reschedule would have drawn the late-cancel fee, but the customer removed the saved card — treated as revocation; the hold was released. Bill manually if the fee applies.',
+            {
+              link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+              metadata: { scheduledServiceId, reason: 'sticky_payment_method_revoked' },
+            },
+          );
+        } catch (e) { logger.warn('[estimate-card-holds] sticky revocation alert failed', { error: e.message }); }
+        return releaseCardHold({ scheduledServiceId, reason: 'sticky_payment_method_revoked' });
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] sticky pm-revocation check failed — releasing free', { scheduledServiceId, error: err.message });
+      return releaseCardHold({ scheduledServiceId, reason: 'sticky_pm_check_failed' });
+    }
     // Charge against the CURRENT start — the visit being cancelled is the
     // live row (verified live just above), so the fee path's staleness
     // guard judges THIS cancel's freshness.
@@ -1070,11 +1120,21 @@ async function cardHoldReminderNote(scheduledServiceId) {
     const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
     const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
     let cutoffClause = '';
+    let start = null;
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      start = await scheduledServiceApptTime(scheduledServiceId);
+    } catch (err) {
+      logger.warn('[estimate-card-holds] reminder appt-time resolution failed — generic copy', { error: err.message });
+    }
     // Sticky window: once a customer-initiated late reschedule exists there
     // is NO free-cancel instant left to promise — a dated cutoff would
-    // promise a free cancel the fee check won't honor. The generic clause
-    // (fee on cancel/no-show, rescheduling free) is accurate either way, so
-    // a FAILED lookup also suppresses the cutoff rather than guessing.
+    // promise a free cancel the fee check won't honor. Judged on EVIDENCE,
+    // deliberately ignoring the enforcement gate (Codex #3342 r4 P1): a
+    // cutoff promised while the gate is dark must survive a later flip, so
+    // the copy assumes enforcement. The generic clause (fee on
+    // cancel/no-show, rescheduling free) is accurate in every state, so a
+    // FAILED lookup also suppresses the cutoff rather than guessing.
     let suppressCutoff = true;
     if (!hold.sticky_window_disclosed) {
       // Legacy consent — sticky can never charge this row, so the dated
@@ -1086,15 +1146,14 @@ async function cardHoldReminderNote(scheduledServiceId) {
           scheduledServiceId,
           isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
           notBefore: hold.held_at,
+          currentStart: start ? new Date(start) : null,
         }));
       } catch (err) {
         logger.warn('[estimate-card-holds] reminder sticky-window lookup failed — generic copy', { error: err.message });
       }
     }
     try {
-      const { scheduledServiceApptTime } = require('./appointment-reminders');
-      const start = suppressCutoff ? null : await scheduledServiceApptTime(scheduledServiceId);
-      const startMs = start ? new Date(start).getTime() : NaN;
+      const startMs = (!suppressCutoff && start) ? new Date(start).getTime() : NaN;
       if (Number.isFinite(startMs)) {
         const heldMs = hold.held_at ? new Date(hold.held_at).getTime() : NaN;
         const byWindow = startMs - windowHours * 3600000;
@@ -1150,16 +1209,17 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
-  if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed) {
+  if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     // Sticky window — the preview must agree with handleCardHoldCancellation
-    // or the operator's confirm prompt lies. Same fail-soft posture as the
-    // cancel path (a failed lookup there releases free, so feeApplies:false
-    // here stays coherent with the outcome).
+    // or the operator's confirm prompt lies (same enforcement gate, same
+    // evidence). Same fail-soft posture as the cancel path (a failed lookup
+    // there releases free, so feeApplies:false here stays coherent).
     try {
       feeApplies = !!(await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
         notBefore: hold.held_at,
+        currentStart: start ? new Date(start) : null,
       }));
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed', { error: err.message });
@@ -1416,6 +1476,7 @@ module.exports = {
   CARD_HOLD_POST_START_GRACE_MS,
   NO_SHOW_FEE_MAX_AGE_MS,
   findStickyLateReschedule,
+  isStickyCancelWindowEnabled,
   sendNoShowFeeReceipt,
   _private: {
     cardHoldIntentMatchesEstimate,

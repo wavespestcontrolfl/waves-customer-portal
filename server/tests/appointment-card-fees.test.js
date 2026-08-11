@@ -59,6 +59,7 @@ const mockAttach = jest.fn(async () => {});
 const mockSendFeeReceipt = jest.fn(async () => {});
 const mockResolveOrMintInvoice = jest.fn(async () => 'inv-r1');
 const mockFindSticky = jest.fn(async () => null);
+let mockStickyGateOn = true;
 jest.mock('../services/estimate-card-holds', () => ({
   CARD_HOLD_POST_START_GRACE_MS: 2 * 3600000,
   NO_SHOW_FEE_MAX_AGE_MS: 48 * 3600000,
@@ -68,6 +69,7 @@ jest.mock('../services/estimate-card-holds', () => ({
   sendNoShowFeeReceipt: (...a) => mockSendFeeReceipt(...a),
   resolveOrMintRecapCompletionInvoice: (...a) => mockResolveOrMintInvoice(...a),
   findStickyLateReschedule: (...a) => mockFindSticky(...a),
+  isStickyCancelWindowEnabled: () => mockStickyGateOn,
 }));
 jest.mock('../services/billing-lane', () => ({
   resolveBillingLane: jest.fn(() => ({ mode: 'one_time' })),
@@ -190,6 +192,7 @@ beforeEach(() => {
   mockTrxTouches = [];
   mockChargeOffSession.mockResolvedValue({ id: 'pi_fee_1' });
   mockFindSticky.mockResolvedValue(null);
+  mockStickyGateOn = true;
   mockCompletionGateOn = true;
   mockResolveOrMintInvoice.mockResolvedValue('inv-r1');
   mockChargeSavedCard.mockResolvedValue({ id: 'pi_recap_1' });
@@ -379,10 +382,12 @@ describe('sticky window on the cancellation path (reschedule-then-cancel dodge)'
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
     expect(res).toMatchObject({ handled: true, charged: true, released: true });
     expect(mockChargeOffSession).toHaveBeenCalledTimes(1);
-    // notBefore = fee_agreed_at: only reschedules made AFTER consent stick.
+    // notBefore = fee_agreed_at (only post-consent reschedules stick);
+    // currentStart = the live slot (unlogged-move lineage check).
     expect(mockFindSticky).toHaveBeenCalledWith(expect.objectContaining({
       scheduledServiceId: 'svc-1',
       notBefore: expect.any(Date),
+      currentStart: expect.any(Date),
     }));
   });
 
@@ -391,6 +396,16 @@ describe('sticky window on the cancellation path (reschedule-then-cancel dodge)'
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
     expect(res).toMatchObject({ handled: true, released: true });
     expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('gate OFF → sticky evidence is never consulted and the outside-window cancel stays a free release', async () => {
+    mockStickyGateOn = false;
+    mockApptTime = new Date(Date.now() + 240 * HOUR);
+    mockFindSticky.mockResolvedValue(STICKY());
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toMatchObject({ handled: true, released: true });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockFindSticky).not.toHaveBeenCalled();
   });
 
   test('a request consented under the OLD copy (no sticky_window_disclosed marker) can NEVER be sticky-charged', async () => {
