@@ -123,6 +123,13 @@ router.post('/:token/complete', async (req, res) => {
         // client re-renders the plan choice.
         return res.status(409).json({ error: 'Please choose how you’d like to pay first.', code: 'plan_required' });
       }
+      if (result.code === 'consent_echo_failed') {
+        // The card IS saved (row completed via webhook) but the browser's
+        // sticky-consent echo could not be recorded — a retryable failure.
+        // The client keeps its 3DS params on this NACK so a reload re-POSTs
+        // the idempotent /complete and the upgrade gets another attempt.
+        return res.status(409).json({ error: 'Your card is saved — finishing up. Please refresh this page.', code: 'consent_echo_failed' });
+      }
       if (result.code === 'completion_in_progress') {
         // The webhook (or another tab) holds the completion claim and is
         // actively saving this card — not a failure. The client shows the

@@ -213,8 +213,14 @@ export default function SecureAppointmentPage() {
           // us to the claim) fall through to the page-data fetch below —
           // the GET renders completing/completed rows as secured, so the
           // redirect race can never re-show the card form mid-save.
-          try { await complete(redirectIntent); } catch { /* fall through to page state */ }
-          if (!cancelled) {
+          // The params are stripped ONLY on success (Codex #3342 pre-push
+          // r8 P1): /complete is the sole writer of the webhook-first
+          // consent echo, and it is idempotent — keeping the params on a
+          // failed POST means a reload retries the recording instead of
+          // silently losing the disclosed sticky window.
+          let completed = false;
+          try { await complete(redirectIntent); completed = true; } catch { /* fall through to page state */ }
+          if (!cancelled && completed) {
             const cleaned = new URLSearchParams(searchParams);
             ['setup_intent', 'setup_intent_client_secret', 'redirect_status'].forEach((k) => cleaned.delete(k));
             setSearchParams(cleaned, { replace: true });

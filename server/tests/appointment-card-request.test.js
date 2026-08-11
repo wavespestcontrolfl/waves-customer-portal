@@ -693,6 +693,23 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(updates.some((p) => p.sticky_window_disclosed === true)).toBe(true);
   });
 
+  test('webhook-first race: a FAILED or zero-row echo write NACKs instead of acking — the client keeps its 3DS params and a reload retries (pre-push r8 P1)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1',
+      fee_agreed_at: new Date(), sticky_window_disclosed: false,
+    });
+    // Zero rows moved (the row changed under us) — never acked as recorded.
+    mockTableHandlers.appointment_card_requests.update = () => 0;
+    let res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+    // Thrown write — same NACK; this update is the SOLE writer of the
+    // webhook-first consent marker, so a swallowed failure would lose the
+    // disclosed sticky window permanently.
+    mockTableHandlers.appointment_card_requests.update = () => { throw new Error('db down'); };
+    res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1', disclosureVersion: 'sticky_v1' });
+    expect(res).toEqual({ ok: false, code: 'consent_echo_failed' });
+  });
+
   test('webhook-first race: a mismatched SetupIntent or missing echo records NOTHING on the completed row', async () => {
     const updates = [];
     mockTableHandlers.appointment_card_requests.first = () => ({

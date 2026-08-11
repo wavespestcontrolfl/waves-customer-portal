@@ -863,12 +863,23 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
       && request.fee_agreed_at
       && !request.sticky_window_disclosed
     ) {
+      // This write is the ONLY path that records the browser's consent for
+      // a webhook-first completion — swallowing a failure while acking
+      // success loses the disclosed sticky window for good (pre-push r8
+      // P1): the client keeps its 3DS params only on failure, so a NACK
+      // here is what makes the retry (an idempotent /complete re-POST on
+      // reload) possible. Verify exactly one row moved before acking.
       try {
-        await db('appointment_card_requests')
+        const upgraded = await db('appointment_card_requests')
           .where({ id: request.id, status: 'completed', stripe_setup_intent_id: setupIntentId })
           .update({ sticky_window_disclosed: true, updated_at: new Date() });
+        if (upgraded !== 1) {
+          logger.warn(`[appt-card-request] webhook-first consent echo matched ${upgraded} rows for request ${request.id} — not acking`);
+          return { ok: false, code: 'consent_echo_failed' };
+        }
       } catch (err) {
-        logger.warn(`[appt-card-request] webhook-first consent echo record failed (non-fatal): ${err.message}`);
+        logger.warn(`[appt-card-request] webhook-first consent echo record failed for request ${request.id}: ${err.message}`);
+        return { ok: false, code: 'consent_echo_failed' };
       }
     }
     return { ok: true, alreadyCompleted: true };
