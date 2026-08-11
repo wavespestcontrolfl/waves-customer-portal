@@ -9,6 +9,8 @@
 const {
   _SWAPS: SWAPS,
   _dropStop: dropStop,
+  _mechanical: mechanical,
+  _MECHANICAL_ONLY_KEYS: MECHANICAL_ONLY_KEYS,
 } = require('../models/migrations/20260810000060_stop_line_off_customer_transactional');
 
 const tokens = (body) => [...String(body).matchAll(/\{([a-zA-Z][a-zA-Z0-9_]*)\}/g)].map((m) => m[1]).sort();
@@ -73,5 +75,25 @@ describe('stop-line-off-transactional swap table', () => {
     expect(dropStop('We never take card numbers by phone. Reply STOP to opt out.'))
       .toBe('We never take card numbers by phone.');
     expect(dropStop('No STOP here.')).toBe('No STOP here.');
+  });
+
+  test('drifted plans bodies get the price-unit normalization, not just the STOP drop', () => {
+    const drifted = 'Admin edited: pay per visit with a card on file. Reply STOP to opt out.';
+    expect(mechanical('secure_appointment_card_plans', drifted))
+      .toBe('Admin edited: pay per application with a card on file.');
+    // Bounded to the plans key — other templates keep admin wording verbatim.
+    expect(mechanical('rain_out_moved_v3', 'Custom per visit note.\n\nReply STOP to opt out.'))
+      .toBe('Custom per visit note.');
+  });
+
+  test('reschedule-reply templates are covered mechanically (seeded with STOP in 20260707000030)', () => {
+    expect(MECHANICAL_ONLY_KEYS).toEqual([
+      'reschedule_confirmed_today',
+      'reschedule_confirmed_tomorrow',
+      'reschedule_confirmed_future',
+      'reschedule_call_requested',
+    ]);
+    expect(dropStop("No problem. We'll give you a call shortly.\n\nReply STOP to opt out."))
+      .toBe("No problem. We'll give you a call shortly.");
   });
 });

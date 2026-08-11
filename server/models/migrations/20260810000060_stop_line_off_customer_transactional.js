@@ -96,10 +96,28 @@ function dropStop(body) {
 function mechanical(key, body) {
   let next = dropStop(body);
   if (key === 'secure_appointment_card_plans') {
-    next = next.replace('unless you choose to prepay', 'unless you prepay');
+    next = next
+      .replace('unless you choose to prepay', 'unless you prepay')
+      // Price-unit rule: customer-facing copy says "per application",
+      // never "per visit" — normalize drifted/variant bodies too.
+      .replace(/\bper visit\b/g, 'per application');
   }
   return next;
 }
+
+// The reschedule-reply templates were seeded WITH the STOP line
+// (20260707000030) and cleaned by the 20260730000020 mechanical pass, so
+// every environment built from the full chain — prod included (verified
+// read-only 2026-08-10) — is already clean and this is a no-op there. The
+// keys are covered here anyway so the guarantee is structural, not an
+// accident of migration history, and so a re-seeded or hand-restored row
+// can't resurrect the STOP tail the code fallbacks no longer carry.
+const MECHANICAL_ONLY_KEYS = [
+  'reschedule_confirmed_today',
+  'reschedule_confirmed_tomorrow',
+  'reschedule_confirmed_future',
+  'reschedule_call_requested',
+];
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
@@ -145,6 +163,32 @@ exports.up = async function up(knex) {
       }
       if (next !== v.body) {
         await knex('sms_template_variants').where({ id: v.id, body: v.body }).update({ body: next, updated_at: new Date() });
+      }
+    }
+  }
+
+  // Reschedule-reply templates: STOP-drop only (see MECHANICAL_ONLY_KEYS).
+  {
+    const rows = await knex('sms_templates')
+      .whereIn('template_key', MECHANICAL_ONLY_KEYS)
+      .select('id', 'body');
+    for (const row of rows) {
+      if (typeof row.body !== 'string') continue;
+      const next = dropStop(row.body);
+      if (next !== row.body) {
+        await knex('sms_templates').where({ id: row.id, body: row.body }).update({ body: next, updated_at: new Date() });
+      }
+    }
+    if (await knex.schema.hasTable('sms_template_variants')) {
+      const variants = await knex('sms_template_variants')
+        .whereIn('template_key', MECHANICAL_ONLY_KEYS)
+        .select('id', 'body');
+      for (const v of variants) {
+        if (typeof v.body !== 'string') continue;
+        const next = dropStop(v.body);
+        if (next !== v.body) {
+          await knex('sms_template_variants').where({ id: v.id, body: v.body }).update({ body: next, updated_at: new Date() });
+        }
       }
     }
   }
@@ -201,3 +245,5 @@ exports.down = async function down(knex) {
 
 exports._SWAPS = SWAPS;
 exports._dropStop = dropStop;
+exports._mechanical = mechanical;
+exports._MECHANICAL_ONLY_KEYS = MECHANICAL_ONLY_KEYS;
