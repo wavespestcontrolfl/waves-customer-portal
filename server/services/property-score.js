@@ -36,6 +36,7 @@ const {
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
+const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { dateOnlyString } = require('../utils/date-only');
 // ET calendar discipline: elapsed-millisecond day math drifts across DST
@@ -61,17 +62,21 @@ function movementReason(delta) {
   return 'Holding steady since your last assessment.';
 }
 
-// Current program coverage for a service family (LIKE patterns, the same
-// catalog-inference idiom applyLawnServiceFilter uses), scoped to evidence
-// the program is CURRENT: an upcoming pending/confirmed visit, or a
-// completed visit within the trailing 366 ET days (annual is the longest
-// program cadence). 'cancelled' never counts; 'rescheduled' is a phantom
-// placeholder holding a stale date (see routes/schedule.js) and never
-// counts either.
+// Current RECURRING program coverage for a service family (LIKE patterns,
+// the same catalog-inference idiom applyLawnServiceFilter uses). Two
+// requirements, both from existing mechanisms:
+//   1. Currency: an upcoming pending/confirmed visit, or a completed visit
+//      within the trailing 366 ET days (annual is the longest program
+//      cadence). 'cancelled' never counts; 'rescheduled' is a phantom
+//      placeholder holding a stale date (see routes/schedule.js).
+//   2. Recurring identity: the visit's completion profile must not resolve
+//      to one_time billing (resolveCompletionProfileForScheduledService —
+//      the same catalog resolution the pest one-time exclusion uses), so
+//      One-Time Pest Control / one-off tree work never read as a program.
 async function hasServiceLike(customerId, patterns, knex) {
   const today = etDateString();
   const yearAgo = etDateString(addETDays(new Date(), -366));
-  const row = await knex('scheduled_services as ss')
+  const rows = await knex('scheduled_services as ss')
     .where('ss.customer_id', customerId)
     .where(function () {
       patterns.forEach((p, i) => {
@@ -86,9 +91,19 @@ async function hasServiceLike(customerId, patterns, knex) {
         this.where('ss.status', 'completed').andWhere('ss.scheduled_date', '>=', yearAgo);
       });
     })
-    .first('ss.id')
-    .catch(() => null);
-  return Boolean(row);
+    .orderBy('ss.scheduled_date', 'desc')
+    .limit(5)
+    .select('ss.id', 'ss.service_id', 'ss.service_type')
+    .catch(() => []);
+  for (const svc of rows) {
+    try {
+      const profile = await resolveCompletionProfileForScheduledService(svc, knex);
+      if (String(profile?.billingType || '').toLowerCase() !== 'one_time') return true;
+    } catch {
+      // Unresolvable profile: skip the row rather than claim an active program.
+    }
+  }
+  return false;
 }
 
 async function lawnComponent(customerId, knex) {
@@ -193,8 +208,10 @@ async function termiteComponent(customerId, knex) {
       reason: renews ? `Termite bond active — renews ${renews}.` : 'Termite bond active.',
     };
   }
+  // program-scoped: termite_stations also carries rodent/trapping stations,
+  // which must not activate the Termite component.
   const stationRow = await knex('termite_stations')
-    .where({ customer_id: customerId, is_active: true })
+    .where({ customer_id: customerId, is_active: true, program: 'termite' })
     .count('id as count')
     .first()
     .catch(() => null);
