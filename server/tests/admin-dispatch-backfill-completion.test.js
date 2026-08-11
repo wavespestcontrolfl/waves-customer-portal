@@ -1975,7 +1975,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // mergeRecordNotesKeys, and sits inside the required-mint catch
       // above the release call.
       const refreshMatch = source.match(
-        /if \(invErr\?\.code === 'SCHEDULED_PRICE_MOVED'\s*\n\s*&& Number\.isInteger\(invErr\.currentEstimatedPriceCents\)\s*\n\s*&& invErr\.currentEstimatedPriceCents > 0\) \{[\s\S]{0,700}mergeRecordNotesKeys\(record\.id, \{\s*\n\s*backfillMintAmountCents: invErr\.currentEstimatedPriceCents,\s*\n\s*\}\);/,
+        /if \(invErr\?\.code === 'SCHEDULED_PRICE_MOVED'\s*\n\s*&& invErr\.currentPrimaryLinePriceCents == null\s*\n\s*&& Number\.isInteger\(invErr\.currentEstimatedPriceCents\)\s*\n\s*&& invErr\.currentEstimatedPriceCents > 0\) \{[\s\S]{0,700}mergeRecordNotesKeys\(record\.id, \{\s*\n\s*backfillMintAmountCents: invErr\.currentEstimatedPriceCents,\s*\n\s*\}\);/,
       );
       expect(refreshMatch).not.toBeNull();
       const refreshAt = source.indexOf("if (invErr?.code === 'SCHEDULED_PRICE_MOVED'");
@@ -1994,15 +1994,34 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(invoiceSource).toMatch(/throw scheduledPriceMovedError\(lockedRow\);/);
     });
 
-    test('the required live RESUME proves the frozen cents against the locked row (codex #3344 r7 P0)', () => {
+    test('the required live RESUME proves the frozen cents against the locked row (codex #3344 r7 P0; primary-null proof r9 round)', () => {
       // The resume passes the frozen amount AS the guard's price snapshot
       // with the guard ON — frozen ≡ locked row is the typed lane's money
       // identity, so a freeze that disagrees (failed restamp, second
       // reprice) 409s back into the refresh→release loop instead of
       // minting the stale figure. A released retry can therefore never
       // bill a price the locked row does not carry.
-      expect(source).toMatch(/svc: useReplayLines\s*\n\s*\? svc\s*\n\s*: \{ \.\.\.svc, estimated_price: mintInvoiceAmount, primary_line_price: undefined \},\s*\n\s*allowPriceMovement: false,/);
+      // primary_line_price is NULL, not undefined (r9-round pre-push P0):
+      // invoice lines PREFER primary_line_price, so the frozen single line
+      // at estimated_price is provable money only for a primary-less visit
+      // — null makes the guard PROVE that absence instead of exempting the
+      // column, and a primary-carrying locked row 409s instead of billing
+      // the wrong single-line total.
+      expect(source).toMatch(/svc: useReplayLines\s*\n\s*\? svc\s*\n\s*: \{ \.\.\.svc, estimated_price: mintInvoiceAmount, primary_line_price: null \},\s*\n\s*allowPriceMovement: false,/);
       expect(source).not.toMatch(/allowPriceMovement: !useReplayLines/);
+    });
+
+    test('the frozen restamp requires a primary-less locked row; primary-carrying visits park (r9-round pre-push P0)', () => {
+      // The reprice-refusal restamp freezes ONE figure — only honest when
+      // the refusal proved no primary line exists. A primary-carrying
+      // refusal must never restamp (no single figure covers the bill) and
+      // instead leaves the closeout parked for the operator.
+      expect(source).toMatch(/if \(invErr\?\.code === 'SCHEDULED_PRICE_MOVED'\s*\n\s*&& invErr\.currentPrimaryLinePriceCents == null\s*\n\s*&& Number\.isInteger\(invErr\.currentEstimatedPriceCents\)\s*\n\s*&& invErr\.currentEstimatedPriceCents > 0\) \{/);
+      expect(source).toMatch(/frozen mint NOT refreshed for \$\{svc\.id\} — the visit carries a primary line price/);
+      // The shared error attaches the locked primary whenever the caller
+      // selected the column — the ONE constructor owns both cents fields.
+      const mintHelperSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
+      expect(mintHelperSource).toMatch(/if \('primary_line_price' in lockedSvc\) \{\s*\n\s*e\.currentPrimaryLinePriceCents = cents\(lockedSvc\.primary_line_price\);/);
     });
 
     test('a SCHEDULED_PRICE_MOVED refusal on a NON-required live mint retries in place at the moved price (codex #3344 r6 P1)', () => {

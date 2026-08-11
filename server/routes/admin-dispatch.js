@@ -8879,15 +8879,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // mints the provable frozen figure and ANY divergence — a
             // reprice after the restamp, or a restamp write that failed —
             // 409s back into the refresh→release loop instead of silently
-            // billing the stale freeze. primary_line_price is undefined on
-            // the synthetic snapshot (frozen single-line mints don't read
-            // it; undefined never trips the guard). First runs keep the
+            // billing the stale freeze. primary_line_price is NULL on the
+            // synthetic snapshot (r9-round pre-push P0): invoice lines
+            // PREFER primary_line_price, so the frozen single line at
+            // estimated_price is provable money ONLY for a visit with no
+            // primary line — null makes the guard PROVE that absence, and
+            // a primary-carrying locked row 409s instead of silently
+            // billing the wrong single-line total. First runs keep the
             // live snapshot: a mid-flight reprice 409s, the catch restamps
             // the frozen cents from the locked price, and the resume bills
             // the moved price.
             svc: useReplayLines
               ? svc
-              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: undefined },
+              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
             allowPriceMovement: false,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
@@ -9089,6 +9093,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // retry, never a stale-mint promise. Zero/absent cents never
           // restamp — a frozen figure must stay a positive committed price.
           if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents == null
             && Number.isInteger(invErr.currentEstimatedPriceCents)
             && invErr.currentEstimatedPriceCents > 0) {
             try {
@@ -9099,6 +9104,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             } catch (refreshErr) {
               logger.error(`[dispatch] frozen mint refresh FAILED for ${svc.id} — the resume will mint the pre-reprice freeze: ${refreshErr.message}`);
             }
+          } else if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents != null) {
+            // Primary-carrying visit (r9-round pre-push P0): the locked row
+            // holds a primary_line_price, so estimated_price is NOT the
+            // whole bill and no single frozen figure can honestly cover it
+            // — never restamp a guess. The resume's null-primary proof
+            // 409s right back here, so the closeout stays unfinalized and
+            // parked for the operator instead of minting wrong money.
+            logger.error(`[dispatch] frozen mint NOT refreshed for ${svc.id} — the visit carries a primary line price, so a single-line freeze cannot honestly cover the bill; bill manually or clear primary_line_price, then retry the closeout`);
           }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {

@@ -110,6 +110,15 @@ function scheduledPriceMovedError(lockedSvc) {
   e.status = 409;
   e.code = 'SCHEDULED_PRICE_MOVED';
   e.currentEstimatedPriceCents = cents(lockedSvc.estimated_price);
+  // The locked PRIMARY line price rides along when the caller selected it
+  // (r9-round pre-push P0): estimated_price is the WHOLE bill only when no
+  // primary line exists — invoice lines PREFER primary_line_price, so a
+  // primary-only reprice moves the true total while estimated_price stands
+  // still. The dispatch frozen-resume catch keys off this to refuse
+  // freezing a single-line figure for a primary-carrying visit.
+  if ('primary_line_price' in lockedSvc) {
+    e.currentPrimaryLinePriceCents = cents(lockedSvc.primary_line_price);
+  }
   return e;
 }
 
