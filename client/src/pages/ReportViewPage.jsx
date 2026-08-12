@@ -9053,6 +9053,13 @@ export default function ReportViewPage() {
         return r.json();
       })
       .then((d) => {
+        // A SUPERSEDED effect decides nothing. staffViewTokens is a module
+        // global that outlives this mount, so a cancelled response must not
+        // touch it: an in-flight staff read can resolve AFTER the reader has
+        // navigated away, lost the admin JWT, and reopened the same token,
+        // and it would then re-add a suppression the current load just
+        // cleared — the dropped-request bug below, arriving from behind.
+        if (cancelled) return;
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
         // Mirrors THIS response in both directions. The set used to be
@@ -9067,7 +9074,7 @@ export default function ReportViewPage() {
           if (d.staffViewer) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
-        if (!cancelled) setData(d);
+        setData(d);
       })
       .catch(() => {
         if (!cancelled) setLoadError(true);
