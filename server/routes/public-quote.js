@@ -279,6 +279,44 @@ function recurringLineDisplayLabel(line) {
   return RECURRING_LINE_LABELS[key] || '';
 }
 
+// The measured basis behind a lawn price, for the public quote widget.
+//
+// Lawn is priced per treatable sq ft, so the area IS the price explanation.
+// The widget renders "Priced for N sq ft" ONLY when this block is present —
+// so it must carry the figure the engine actually priced from (lawnMeta.lsf /
+// the lawn line's lawnSqFt), never the raw vision number, which the engine may
+// cap or replace (TURF_CAPPED_TO_PARCEL, plausibleMaxTurfCap).
+//
+// `source` maps the engine's turfBasis ladder onto the widget's label set.
+// Deliberately conservative: only a tech measurement or an uncapped vision
+// figure gets a definite label. Every estimated/capped/fallback basis maps to
+// the "verified on your first visit" family, because claiming satellite
+// precision for a lot-ratio guess is the same over-claim the estimate page
+// avoids by labelling a county seed "County records (estimated)".
+const TURF_BASIS_TO_PUBLIC_SOURCE = {
+  measuredTurfSf: 'measured',
+  lawnSqFt: 'confirmed',
+  estimatedTurfSf: 'ai_satellite',
+  countyPrior: 'county',
+  plausibleMaxTurfCap: 'lot_estimate',
+  lotFallback: 'lot_estimate',
+  legacyHardscapeEstimate: 'footprint_estimate',
+};
+
+function deriveLawnArea(estimate) {
+  const lawnLine = (estimate?.lineItems || []).find((l) => l && l.service === 'lawn_care');
+  if (!lawnLine) return null;
+  const turfSqFt = Number(lawnLine.lawnSqFt);
+  if (!Number.isFinite(turfSqFt) || turfSqFt <= 0) return null;
+  const basis = String(lawnLine.turfBasis || '').trim();
+  return {
+    turf_sqft: Math.round(turfSqFt),
+    // Unknown/new bases fall to the verify family rather than defaulting to a
+    // satellite claim — a basis added later must not silently inherit one.
+    source: TURF_BASIS_TO_PUBLIC_SOURCE[basis] || 'lot_estimate',
+  };
+}
+
 // Per-service per-application breakdown, so a MULTI-service quote can be
 // quoted the way it bills instead of falling back to a combined monthly
 // total — the unit rule applies to the public quote widget exactly as it does
@@ -1787,6 +1825,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // the result page uses this to avoid falling back to the combined
     // monthly total (codex 2642 r3).
     response.multi_recurring = recurringQuoteLines(estimate).length > 1;
+    // Additive: the treatable area the lawn price was computed from, so the
+    // widget can explain the per-application price instead of asserting one.
+    // Absent whenever the quote has no priced lawn line — the widget then
+    // falls back to its own estimate copy and makes no priced-basis claim.
+    const lawnArea = deriveLawnArea(estimate);
+    if (lawnArea) {
+      response.lawn_area = lawnArea;
+    }
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;
@@ -1946,6 +1992,7 @@ module.exports._internals = {
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,
+  deriveLawnArea,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
