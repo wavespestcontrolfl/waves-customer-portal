@@ -241,6 +241,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
     if ((result.alreadyIncluded || []).length) return null;
 
+    // Commercial re-check on the RESOLVED type (codex #3367 r4): the early
+    // check reads the stored column, but a blank/stale column with a trusted
+    // commercial cached-lookup classification would otherwise degrade to a
+    // quote CTA instead of the ruled no-card-at-all.
+    if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
+
     const option = result.ok ? pickOption(result.options, targetKey) : null;
     const priced = optionIsPriceable(option);
 

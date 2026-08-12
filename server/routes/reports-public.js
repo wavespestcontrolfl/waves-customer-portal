@@ -951,6 +951,13 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
+    // Cross-sell events exist only while the feature does (codex #3367 r4:
+    // a token holder must not mint events/notifications for a dark gate).
+    // Same copy as an unknown event — the gate state is not probeable.
+    if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
+      && !require('../config/feature-gates').isEnabled('reportCrossSell')) {
+      return res.status(400).json({ error: 'Unknown report event' });
+    }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
       return res.status(400).json({ error: 'Unknown report event channel' });
     }
@@ -969,26 +976,50 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     // card's button only records the request; this bell is how it reaches
     // staff). Reuses the existing bundle-inquiry trigger — same Customer-360
     // deep link staff already work add-on requests from. Best-effort: the
-    // event row above is the durable record either way. Metadata is
-    // customer-controlled input — only whitelisted display fields ride into
-    // the bell, length-clamped.
+    // event row above is the durable record either way. Abuse posture
+    // (codex #3367 r4): the offer is RECOMPUTED server-side — client
+    // metadata never reaches the bell, a report whose builder yields no
+    // offer bells nothing — and the bell fires only for the FIRST recorded
+    // request on this report (the post-insert count makes a concurrent
+    // duplicate at worst a second bell, never a flood; the 120/min limiter
+    // caps event rows themselves).
     if (eventName === 'cross_sell_requested') {
       try {
-        const customer = service.customer_id
-          ? await db('customers').where({ id: service.customer_id }).first('id', 'first_name', 'last_name')
-          : null;
-        const { triggerNotification } = require('../services/notification-triggers');
-        const clean = (value, max = 60) => String(value || '').replace(/[<>]/g, '').trim().slice(0, max);
-        const monthly = Number(metadata.monthly);
-        await triggerNotification('bundle_quote_requested', {
-          bundled: false,
-          customerId: customer?.id || null,
-          customerName: customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null,
-          suggestedService: [
-            clean(metadata.serviceLabel) || clean(metadata.serviceKey) || 'a service',
-            Number.isFinite(monthly) && monthly > 0 ? `(shown $${monthly.toFixed(2)}/mo on report)` : '(quote requested from report)',
-          ].join(' '),
-        });
+        const [{ count }] = await db('service_report_events')
+          .where({ service_record_id: service.id, event_name: 'cross_sell_requested' })
+          .count('id as count');
+        if (Number(count) <= 1) {
+          const joined = await db('service_records as sr')
+            .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+            .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+            .where('sr.id', service.id)
+            .select(
+              'sr.id', 'sr.customer_id', 'sr.service_type',
+              db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
+              db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
+              db.raw('COALESCE(ss.service_address_city, c.city) as city'),
+              db.raw('COALESCE(ss.service_address_zip, c.zip) as zip'),
+              'c.first_name', 'c.last_name',
+            )
+            .first();
+          const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+          const crossSell = joined ? await buildReportCrossSell(joined, db) : null;
+          if (crossSell) {
+            const { triggerNotification } = require('../services/notification-triggers');
+            const perApplication = Number(crossSell.option?.perVisit);
+            await triggerNotification('bundle_quote_requested', {
+              bundled: false,
+              customerId: joined.customer_id || null,
+              customerName: `${joined.first_name || ''} ${joined.last_name || ''}`.trim() || null,
+              suggestedService: [
+                crossSell.label,
+                Number.isFinite(perApplication) && perApplication > 0
+                  ? `(shown $${perApplication.toFixed(2)} per application on report)`
+                  : '(quote requested from report)',
+              ].join(' '),
+            });
+          }
+        }
       } catch (err) {
         logger.warn(`[reports-public] cross-sell bell failed: ${err.message}`);
       }

@@ -1021,6 +1021,11 @@ function summarizeProperty(context) {
     lawnSqFt: p.lawnSqFt || null,
     stories: p.stories || null,
     grassType: context.grassType || null,
+    // The RESOLVED type (stored type + trusted lookup adoption) — consumers
+    // with a commercial-suppression rule (report cross-sell) must read this,
+    // not the raw customers column, or a blank column with a commercial
+    // cached lookup slips past (codex #3367 r4).
+    propertyType: p.propertyType || null,
   };
 }
 

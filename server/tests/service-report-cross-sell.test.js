@@ -191,6 +191,17 @@ describe('buildReportCrossSell', () => {
     expect(result).toBeNull();
   });
 
+  test('commercial classification from a trusted cached lookup suppresses the card even with a blank stored type', async () => {
+    const db = dbFor({
+      customer: CUSTOMER({ property_type: null }),
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const lookup = async () => ({ enriched: { propertyType: 'Commercial', homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: lookup });
+    expect(result).toBeNull();
+  });
+
   test('multifamily property gets no card (≥5-unit ruling rides normalizePropertyType)', async () => {
     const db = dbFor({
       customer: CUSTOMER({ property_type: 'multifamily' }),

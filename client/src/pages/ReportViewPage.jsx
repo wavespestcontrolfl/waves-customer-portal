@@ -551,6 +551,25 @@ function positiveNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Awaited variant for CTAs whose UI must only confirm on a RECORDED request
+// (codex #3367 r3: a swallowed network error must not render "Request
+// received"). Staff QA views post nothing and report success so the flow is
+// previewable without polluting analytics.
+async function submitReportEvent(token, eventName, metadata = {}) {
+  if (!token || !eventName) return false;
+  if (staffViewTokens.has(token)) return true;
+  try {
+    const response = await fetch(`${API_BASE}/reports/${token}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventName, channel: 'public_report', metadata }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   // Staff reads (data payload flagged staffViewer — the /data fetch carried
@@ -2905,53 +2924,80 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
 // key means no card, never a client-side guess. The CTA books nothing and
 // charges nothing: it records the request and the office follows up (owner
 // sends all customer communications).
+// Per-application price copy is a hard owner rule (AGENTS.md, re-affirmed
+// 2026-07-23): customer-facing estimate surfaces never show "$X/mo" or
+// combined plan totals — the unit is "per application".
+function formatPerApplication(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+}
+
+function applicationsCadence(cadence) {
+  return String(cadence || '').replace(/\bvisits?\b/i, 'applications');
+}
+
 function CrossSellCard({ data, token, mode }) {
-  const [requested, setRequested] = useState(false);
+  // idle → sending → sent | failed (failed keeps the button for a retry —
+  // the UI may only confirm after the server recorded the request).
+  const [requestState, setRequestState] = useState('idle');
   const offer = data?.crossSell;
   if (mode !== 'live' || !offer?.serviceKey) return null;
-  const priced = offer.mode === 'priced' && offer.option;
   const option = offer.option || {};
-  const planChip = priced
-    ? [
-      option.estimatedPlanMonthly ? `Plan total ~$${Math.round(option.estimatedPlanMonthly)}/mo` : null,
-      option.waveguardTier ? `WaveGuard ${String(option.waveguardTier).replace(/^./, (c) => c.toUpperCase())}` : null,
-    ].filter(Boolean).join(' · ')
+  const perApplication = formatPerApplication(option.perVisit);
+  const priced = offer.mode === 'priced' && !!offer.option && !!perApplication;
+  const tierChip = priced && option.waveguardTier
+    ? `WaveGuard ${String(option.waveguardTier).replace(/^./, (c) => c.toUpperCase())}`
     : null;
-  const handleRequest = () => {
-    if (requested) return;
-    setRequested(true);
-    trackReportEvent(token, 'cross_sell_requested', {
+  const handleRequest = async () => {
+    if (requestState === 'sending' || requestState === 'sent') return;
+    setRequestState('sending');
+    const ok = await submitReportEvent(token, 'cross_sell_requested', {
       serviceKey: offer.serviceKey,
       serviceLabel: offer.label,
       optionId: option.id || null,
-      monthly: option.monthly || null,
+      perApplication: option.perVisit || null,
       offerMode: offer.mode,
     });
+    setRequestState(ok ? 'sent' : 'failed');
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
       <div className="section-eyebrow">{priced ? 'Complete your protection' : 'One more layer available'}</div>
-      <h2>{priced ? `Add ${offer.label} to your plan` : `Add ${offer.label.toLowerCase()} to your plan`}</h2>
+      <h2>{`Add ${offer.label} to your plan`}</h2>
       {priced && (
         <div className="cross-sell-price">
-          <span className="cross-sell-amount">${Math.round(option.monthly)}</span>
-          <span className="cross-sell-unit">/mo</span>
+          <span className="cross-sell-amount">{perApplication}</span>
+          <span className="cross-sell-unit">per application</span>
         </div>
       )}
-      {option.cadence ? <p className="cross-sell-cadence">{option.cadence}</p> : null}
-      {planChip ? <span className="cross-sell-chip">{planChip}</span> : null}
+      {option.cadence ? <p className="cross-sell-cadence">{applicationsCadence(option.cadence)}</p> : null}
+      {tierChip ? <span className="cross-sell-chip">{tierChip}</span> : null}
       <div className="cross-sell-cta-row">
-        {requested ? (
+        {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
             Request received — we&apos;ll confirm the details with you before anything is scheduled.
           </p>
         ) : (
-          <button type="button" data-glass-accent="" className="review-cta cross-sell-cta" onClick={handleRequest}>
-            {priced ? `Add ${offer.label}` : `Get my ${offer.label.toLowerCase()} quote`}
+          <button
+            type="button"
+            data-glass-accent=""
+            className="review-cta cross-sell-cta"
+            disabled={requestState === 'sending'}
+            onClick={handleRequest}
+          >
+            {requestState === 'sending'
+              ? 'Sending…'
+              : priced ? `Add ${offer.label}` : `Get my ${offer.label.toLowerCase()} quote`}
           </button>
         )}
       </div>
-      {!requested && (
+      {requestState === 'failed' && (
+        <p className="cross-sell-fine cross-sell-error">
+          That didn&apos;t go through — please try again, or call (941) 297-5749.
+        </p>
+      )}
+      {requestState !== 'sent' && (
         <p className="cross-sell-fine">
           {priced
             ? 'No charge today — we’ll confirm the details with you before anything is scheduled.'
@@ -7451,6 +7497,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 12.5px;
           line-height: 1.5;
+        }
+        .cross-sell-error {
+          color: var(--text);
+          font-weight: 600;
+        }
+        .cross-sell-card .cross-sell-cta:disabled {
+          opacity: 0.7;
+          cursor: default;
+          transform: none;
         }
         .sr-muted {
           margin: 12px 0 0;
