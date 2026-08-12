@@ -439,6 +439,21 @@ function visitCountFieldsInvalid(svc = {}) {
 // P1: sentinel === sentinel reads as "cadences agree").
 const CADENCE_FIELD_SENTINELS = new Set(['conflicting_cadence_fields', 'unrecognized_cadence_field']);
 
+// Lawn-scoped cadence-field reader (codex r24 P1): the Enhanced lawn
+// tier persists a NUMERIC cadence field (service-pricing emits
+// frequency: 9), which normalizeRecurringPattern buckets to 'bimonthly'
+// via the generic 6-11 visit rule — deliberately, so legacy 9-visit
+// mosquito rows never reclassify. For LAWN, nine IS the every-6-weeks
+// tier: when every populated cadence field is numeric nine, read
+// every_6_weeks instead of the generic bucket.
+function lawnCadenceFieldForService(svc = {}) {
+  const field = explicitCadenceFieldForService(svc);
+  if (field !== 'bimonthly') return field;
+  const raws = cadenceFieldRawValues(svc);
+  const allNumericNine = raws.length > 0 && raws.every((value) => Number(value) === 9);
+  return allNumericNine ? 'every_6_weeks' : field;
+}
+
 function explicitServiceCadence(svc = {}) {
   const fromFields = explicitCadenceFieldForService(svc);
   if (fromFields) return fromFields;
@@ -2560,7 +2575,7 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     // cadence-only spelling inference can't read (r7's `cadence`/
     // `planFrequency`) must not lose to a first-read alias — with a null
     // plan fallback, inference seeds straight from the visit count.
-    const lawnCadenceField = explicitCadenceFieldForService(svc);
+    const lawnCadenceField = lawnCadenceFieldForService(svc);
     if (lawnCadenceField && lawnCadenceField !== pattern) return false;
     const visits = visitsPerYearForRecurringService(svc);
     if (pattern === 'bimonthly') return visits === 6;
@@ -2836,7 +2851,7 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     && !visitCountFieldsConflict(svc)
     && !visitCountFieldsInvalid(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
-    const lawnField = explicitCadenceFieldForService(svc);
+    const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -2884,7 +2899,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     && !visitCountFieldsConflict(svc)
     && !visitCountFieldsInvalid(svc)) {
     const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
-    const lawnField = explicitCadenceFieldForService(svc);
+    const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
   const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -2915,7 +2930,7 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   // office scheduling unaffected).
   if (seedingFamilyKey(svc) === 'lawn_care') {
     const visits = visitsPerYearForRecurringService(svc);
-    const cadenceField = explicitCadenceFieldForService(svc);
+    const cadenceField = lawnCadenceFieldForService(svc);
     if (isCommercialRecurringLine(svc)
       || visitCountFieldsConflict(svc)
       // Populated-but-invalid counts are malformed data, not legacy
@@ -4019,7 +4034,12 @@ const EstimateConverter = {
               // separately-sold one-time palm item (codex r23 P1), a
               // one-time-keyed reserved row is THAT item's visit — only the
               // exact semiannual identity suppresses the promotion then.
-              if (estimateHasOneTimePalmItem && reservedKey === 'palm_injection') return identityMatch;
+              // With a one-time item sold, ANY non-semiannual palm shape
+              // (one-time key OR name-only label — legacy adoptions can
+              // carry neither id nor snapshot, codex r24 P0) may be that
+              // item's visit: only the exact semiannual identity
+              // suppresses the promotion.
+              if (estimateHasOneTimePalmItem) return identityMatch;
               return identityMatch
                 || reservedKey === 'palm_injection'
                 || isPalmInjectionFamily({}, { service_type: row.service_type });
@@ -4263,7 +4283,10 @@ const EstimateConverter = {
             const reservedRowKey = reservedStart.service_id
               ? (await database('services').where({ id: reservedStart.service_id }).first('service_key'))?.service_key
               : (String(reservedStart.service_key_snapshot || '') || null);
-            if (reservedRowKey === 'palm_injection') reservedGuardSvc = null;
+            // Name-only rows (no id, no snapshot — legacy adoption) are
+            // just as ambiguous as one-time-keyed rows (codex r24 P0):
+            // only the exact semiannual identity keeps the binding.
+            if (reservedRowKey !== 'palm_injection_semiannual') reservedGuardSvc = null;
           } catch (bindErr) {
             logger.warn(`[estimate-converter] reserved palm binding check failed (binding kept): ${bindErr.message}`);
           }

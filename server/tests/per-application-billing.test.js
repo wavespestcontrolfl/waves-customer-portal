@@ -153,6 +153,19 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(converterFollowUpSeedingPattern(sixWeekLine, { service_type: 'Lawn Care' }, null)).toBe('every_6_weeks');
   });
 
+  test('the Enhanced tier NUMERIC nine cadence reads every_6_weeks, not the generic bimonthly bucket (codex r24 P1)', () => {
+    // service-pricing emits frequency: 9 and the v1 mapper visitsPerYear: 9
+    // — the generic 6-11 bucket normalizes 9 to bimonthly (mosquito
+    // protection), but for lawn nine IS the every-6-weeks tier.
+    const enhancedNumeric = { name: 'Lawn Care', service: 'lawn_care', frequency: 9, visitsPerYear: 9 };
+    expect(converterFollowUpSeedingPattern(enhancedNumeric, { service_type: 'Lawn Care' }, 'monthly')).toBe('every_6_weeks');
+    expect(supportsConverterFollowUpSeeding(enhancedNumeric, {}, 'every_6_weeks')).toBe(true);
+    expect(EstimateConverter.annualPrepayCoverageCadence(enhancedNumeric, null)).toBe('every_6_weeks');
+    // A TEXTUAL bimonthly field with nine visits still declines (real
+    // contradiction, not the numeric bucket artifact).
+    expect(supportsConverterFollowUpSeeding({ name: 'Lawn Care', service: 'lawn_care', frequency: 'bimonthly', visitsPerYear: 9 }, {}, 'every_6_weeks')).toBe(false);
+  });
+
   test('a visit count that contradicts the cadence declines rather than guesses', () => {
     expect(supportsConverterFollowUpSeeding({ ...bimonthlyLine, visits: 9, visitsPerYear: 9 }, {}, 'bimonthly')).toBe(false);
     expect(supportsConverterFollowUpSeeding({ ...monthlyLine, visitsPerYear: 6 }, {}, 'monthly')).toBe(false);
