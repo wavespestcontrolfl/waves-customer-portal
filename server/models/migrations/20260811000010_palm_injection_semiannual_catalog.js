@@ -236,9 +236,22 @@ exports.up = async function up(knex) {
     // billing_type for the one-time invoice posture — a stale one_time
     // profile under this key would bill semiannual visits per-application
     // on top of the plan. Same deploy-block as the service-row gates.
-    if (existingProfile.billing_type && existingProfile.billing_type !== 'recurring') {
+    // FULL typed-palm posture required (codex r26 pre-push P1): an
+    // inactive profile, a wrong completion mode/project type, or a
+    // one-time portal policy all silently defeat the typed recurring
+    // behavior this migration exists to install. delivery_mode is
+    // deliberately NOT validated — it is the documented admin kill-switch
+    // surface.
+    const profileViolations = [];
+    if (existingProfile.billing_type && existingProfile.billing_type !== 'recurring') profileViolations.push(`billing_type=${existingProfile.billing_type}`);
+    if (existingProfile.active !== true) profileViolations.push(`active=${existingProfile.active}`);
+    if (existingProfile.completion_mode !== 'service_report') profileViolations.push(`completion_mode=${existingProfile.completion_mode}`);
+    if (existingProfile.project_type !== 'palm_injection') profileViolations.push(`project_type=${existingProfile.project_type}`);
+    if (existingProfile.portal_visibility !== 'customer_portal') profileViolations.push(`portal_visibility=${existingProfile.portal_visibility}`);
+    if (existingProfile.portal_attach_policy !== 'active_portal_customer') profileViolations.push(`portal_attach_policy=${existingProfile.portal_attach_policy}`);
+    if (profileViolations.length) {
       await recordState(knex, inserted);
-      throw new Error(`[palm-semiannual] existing ${SERVICE.service_key} completion profile carries billing_type=${existingProfile.billing_type} — the recurring palm identity would inherit one-time invoice posture. Fix or remove the profile, then re-run the migration.`);
+      throw new Error(`[palm-semiannual] existing ${SERVICE.service_key} completion profile violates the typed recurring posture (${profileViolations.join(', ')}) — the recurring palm identity would inherit the wrong completion/billing behavior. Fix or remove the profile, then re-run the migration.`);
     }
     console.warn(`[palm-semiannual] ${SERVICE.service_key}: completion profile already exists (recurring invariants verified) — leaving untouched`);
     await recordState(knex, inserted);

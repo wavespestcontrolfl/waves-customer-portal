@@ -350,6 +350,9 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     const zeroCount = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visitsPerYear: 0 };
     expect(supportsConverterFollowUpSeeding(zeroCount, {}, 'semiannual')).toBe(false);
     expect(EstimateConverter.annualPrepayCoverageCadence(zeroCount, null)).toBe(EstimateConverter.PREPAY_COVERAGE_INVALID);
+    // Numeric ZERO cadence is populated malformed data, not absence
+    // (codex r26 pre-push P1) — the sentinel declines it.
+    expect(supportsConverterFollowUpSeeding({ service: 'lawn_care', name: 'Lawn Care Service', frequency: 0, visits: 6 }, {}, 'bimonthly')).toBe(false);
     const textCount = { service: 'palm_injection', name: 'Palm Injection', frequency: 'semiannual', visits: 'two' };
     expect(supportsConverterFollowUpSeeding(textCount, {}, 'semiannual')).toBe(false);
     // An invalid alias BESIDE a valid count is still malformed (codex r18

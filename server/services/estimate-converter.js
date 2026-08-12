@@ -346,7 +346,11 @@ function cadenceFieldRawValues(svc = {}) {
     // prefill reader gave `freq` precedence let
     // { serviceKey: 'palm_injection', freq: 'monthly' } pass the
     // one-time identity check and book a monthly series on it.
-    .map((value) => String(value || '').trim())
+    // Numeric ZERO is a populated (malformed) cadence, not an absent one
+    // (codex r26 pre-push P1): `value || ''` would erase it and the
+    // forced branches would seed from the visit count — preserved here, it
+    // reaches the unrecognized-cadence sentinel and declines.
+    .map((value) => (value == null ? '' : String(value)).trim())
     .filter(Boolean);
 }
 

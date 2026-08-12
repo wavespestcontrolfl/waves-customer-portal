@@ -236,13 +236,20 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     const db = emptyDb();
     db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
     db.service_completion_profiles.push({ id: 'p1', service_key: KEY, billing_type: 'one_time', active: true });
-    await expect(migration.up(fakeKnex(db))).rejects.toThrow(/one-time invoice posture/);
+    await expect(migration.up(fakeKnex(db))).rejects.toThrow(/typed recurring posture/);
     // A recurring profile passes untouched.
     const db2 = emptyDb();
     db2.services.push({ id: 'admin-pre', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
-    db2.service_completion_profiles.push({ id: 'p2', service_key: KEY, billing_type: 'recurring', active: true });
+    db2.service_completion_profiles.push({ id: 'p2', service_key: KEY, billing_type: 'recurring', active: true, completion_mode: 'service_report', project_type: 'palm_injection', portal_visibility: 'customer_portal', portal_attach_policy: 'active_portal_customer' });
     await migration.up(fakeKnex(db2));
     expect(db2.service_completion_profiles.filter((r) => r.service_key === KEY)).toHaveLength(1);
+
+    // The FULL posture is required (codex r26 pre-push P1): an inactive
+    // profile or wrong completion mode blocks the deploy too.
+    const db3 = emptyDb();
+    db3.services.push({ id: 'admin-pre', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
+    db3.service_completion_profiles.push({ id: 'p3', service_key: KEY, billing_type: 'recurring', active: false, completion_mode: 'service_report', project_type: 'palm_injection', portal_visibility: 'customer_portal', portal_attach_policy: 'active_portal_customer' });
+    await expect(migration.up(fakeKnex(db3))).rejects.toThrow(/typed recurring posture/);
   });
 
   test('up() skips the profile for a row an admin deactivated (posture preserved)', async () => {

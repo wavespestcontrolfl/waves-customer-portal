@@ -484,15 +484,31 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     // that is the catalog-missing environment, where the seeding resolve
     // defers before anything is created.
     const semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
+    const oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
     const carriesRecurringPalmIdentity = (row) =>
       (semiannualPalmId && row.service_id === semiannualPalmId)
       || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
+    // Provenance/commitment fallback is only for rows the backfill can
+    // OWN (codex r26 pre-push P0): identity-less (name-only) or the KNOWN
+    // stale one-time palm identity. A row carrying any FOREIGN explicit
+    // id/snapshot is another service's visit — counting it as coverage
+    // would suppress its separate billing and seed the palm term short.
+    const carriesForeignIdentity = (row) =>
+      (row.service_id && row.service_id !== semiannualPalmId
+        && (!oneTimePalmId || row.service_id !== oneTimePalmId))
+      || (row.service_key_snapshot
+        && String(row.service_key_snapshot) !== 'palm_injection_semiannual'
+        && String(row.service_key_snapshot) !== 'palm_injection');
     // A row linked to ANOTHER term never counts (codex r21 pre-push P0,
     // fifth pass): even carrying the recurring identity, it belongs to
     // that term's coverage — counting it here seeds this term short while
     // attach/stamping refuse to move it.
-    matching = matching.filter((row) => !rowLinkedToAnotherTerm(term, row)
-      && (carriesRecurringPalmIdentity(row) || rowCommittedToTerm(term, row)));
+    matching = matching.filter((row) => {
+      if (rowLinkedToAnotherTerm(term, row)) return false;
+      if (carriesRecurringPalmIdentity(row)) return true;
+      if (carriesForeignIdentity(row)) return false;
+      return rowCommittedToTerm(term, row);
+    });
   }
   if (matching.length <= coverageVisitCount) return matching;
 
