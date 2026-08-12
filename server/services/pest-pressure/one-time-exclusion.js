@@ -11,15 +11,19 @@
  * and still deserve a score — pest_re_service and is_callback records are
  * never excluded here.
  *
- * Fail-open on lookup errors: exclusion is a pollution guard, not a
- * security boundary — a transient profile-lookup failure must not hide a
- * legitimate recurring customer's pressure card.
+ * Fail-open on lookup errors BY DEFAULT: exclusion is a pollution guard,
+ * not a security boundary — a transient profile-lookup failure must not
+ * hide a legitimate recurring customer's pressure card on the report path.
+ * Callers whose surface would rather HIDE a score than risk exposing a
+ * one-time score (the Property Score card) pass { failClosed: true } —
+ * genuine evidence-absence (no scheduled service, no callback flag) still
+ * answers false either way; only lookup ERRORS flip.
  */
 
 const db = require('../../models/db');
 const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
 
-async function isOneTimePressureExcludedRecord(serviceRecord, knex = db) {
+async function isOneTimePressureExcludedRecord(serviceRecord, knex = db, { failClosed = false } = {}) {
   try {
     if (!serviceRecord) return false;
     if (serviceRecord.is_callback) return false;
@@ -33,7 +37,7 @@ async function isOneTimePressureExcludedRecord(serviceRecord, knex = db) {
     return String(profile?.billingType || '').toLowerCase() === 'one_time'
       && profile?.serviceKey !== 'pest_re_service';
   } catch {
-    return false;
+    return failClosed;
   }
 }
 
