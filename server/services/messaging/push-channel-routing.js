@@ -140,14 +140,6 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
   return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
 }
 
-async function hasActivePushDevice(customerId, knex = db) {
-  const row = await knex('push_subscriptions')
-    .where({ customer_id: customerId, active: true })
-    .first('id')
-    .catch(() => null);
-  return Boolean(row);
-}
-
 // push_first additionally requires a FRESH device heartbeat. Provider
 // acceptance (stats.sent) proves APNs/FCM took the request, not that the
 // OS displayed it — a customer who revoked notification permission and
@@ -400,10 +392,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // Durable settlement for SCHEDULED sends: without the proof row the
       // recovery sweep would resend this already-delivered push. Mirror the
       // sweep's FULL settlement, not just a status flip: flip ONLY from
-      // 'sending' (never overwrite blocked/rescheduled states), preserve
-      // queued_at, stamp provider_message_id, and stamp finalize_pending
-      // for deferred-replay entry points so the stranded-finalization
-      // sweep still runs the owed invoice/lead/review transitions.
+      // 'sending' (never overwrite blocked/rescheduled states), re-stamp
+      // created_at to the DELIVERY time with the original preserved in
+      // queued_at (the normal settlement's ordering contract — a row left
+      // at its queue time reports last night for a morning push, and the
+      // sending-only guard means nothing can repair it later), stamp
+      // provider_message_id, and stamp finalize_pending for
+      // deferred-replay entry points so the stranded-finalization sweep
+      // still runs the owed invoice/lead/review transitions.
       if (scheduledSmsLogId) {
         try {
           const schedRow = await db('sms_log')
@@ -415,11 +411,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
               : (schedRow.metadata || {});
             const { requiresDurableFinalize } = require('./deferred-replay-registry');
             const owesFinalize = requiresDurableFinalize(meta.entry_point);
+            const settledAt = new Date();
             await db('sms_log')
               .where({ id: scheduledSmsLogId, status: 'sending' })
               .update({
                 status: 'sent',
-                updated_at: new Date(),
+                created_at: settledAt,
+                updated_at: settledAt,
                 metadata: db.raw(
                   `COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
                      'queued_at', to_jsonb(?::timestamptz),
@@ -483,11 +481,18 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
 async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
-    if (!(await hasActivePushDevice(customerId))) return;
+    if (!(await hasFreshPushDevice(customerId))) return;
     // The companion starts only after Twilio accepted the SMS, but its own
-    // fan-out can still cross the cutoff — same per-leg gate.
+    // fan-out can still cross the cutoff — same per-leg gate. It also
+    // applies the SAME heartbeat cutoff, for a different reason than
+    // push_first: not delivery confidence (the SMS goes regardless) but
+    // STALENESS — a logout whose deactivation failed offline leaves an
+    // active row under the signed-out account, and an orphaned device
+    // would otherwise keep receiving that account's appointment/billing
+    // notices indefinitely. Bounding on the heartbeat retires it.
     const { delivered } = await sendPush(customerId, messageType, body, {
       shouldContinue: windowGuardFrom(preSendCheck),
+      minUpdatedAt: heartbeatCutoff(),
     });
     if (delivered) await recordBell(customerId, messageType, body);
   } catch (err) {
