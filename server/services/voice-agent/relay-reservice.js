@@ -273,7 +273,9 @@ async function requestReserviceText(input = {}, ctx = {}) {
   // Suppress the hangup capture floor: this call produced a real service
   // request, not a new-business lead — writing a lead too would be exactly the
   // "generic lead noise" this lane exists to stop.
-  if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
+  // Floor suppressed, but this call's artifact is a TICKET — no lead was
+  // created, so the transcript must not be stamped as a captured lead.
+  if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
   if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled();
 
   // INTERNAL admin notification — the same feed + deep link the portal's own

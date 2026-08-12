@@ -205,6 +205,18 @@ describe('find_slots', () => {
 });
 
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
+  test('a SPAM capture suppresses the floor WITHOUT claiming a lead', async () => {
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'auto warranty robocall', lead_quality: 'spam' },
+      { from: '+19415551234', callSid: 'CA-spam', markCaptured }
+    );
+    expect(out).toMatch(/no lead created/i);
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: false }));
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
   // ⭐ NO LEAD IS A REAL OUTCOME. createLeadFromExtraction deliberately creates
   // nothing for a matched lifecycle customer (an ordinary support call must
   // never overwrite a won lead) — so the model must not be told a lead was

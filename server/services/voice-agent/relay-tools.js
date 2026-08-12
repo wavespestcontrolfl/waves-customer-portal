@@ -683,7 +683,8 @@ async function executeTool(name, input = {}, ctx = {}) {
       // records any truthy quality as a normal lead). Suppress the hangup capture
       // floor too so it doesn't write a fallback lead for the same call.
       if (input.lead_quality === 'spam') {
-        if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
+        // Floor suppressed, but NO lead exists — the transcript stamp must say so.
+        if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
         logger.info(`[voice-relay] capture_lead suppressed (spam) callSid=${ctx.callSid || 'n/a'}`);
         return 'Marked as spam/robocall — no lead created. Wrap up and end the call politely.';
       }
@@ -748,17 +749,35 @@ async function executeTool(name, input = {}, ctx = {}) {
       // same over-application as the email case. Only a text/SMS request — or a
       // genuinely broad "stop contacting me at all" — writes the phone-keyed
       // messaging suppression.
-      const mentionsSms = /\b(text|texts|texting|sms|message|messages|messaging)\b/i.test(preferenceText)
-        || String(input.preferred_contact_method || '') === 'sms';
-      const mentionsBroadStop = /\b(contact|contacting|reach|reaching|leave me alone|any(thing|more)?)\b/i.test(preferenceText)
-        || !preferenceText.trim(); // a bare flag with no words = the broad request
-      const smsOptOut = mentionsSms || mentionsBroadStop;
+      // ⭐ THE CHANNEL THEY ASKED TO STOP — never the one they asked FOR.
+      // `preferred_contact_method: 'sms'` means "text me instead", so reading it
+      // as an SMS opt-out silenced the exact channel the caller chose. Generic
+      // words did the same: "stop emailing me, contact me by text" contains
+      // "contact". So the SMS opt-out must be STATED — stop/no/don't next to a
+      // texting word — or the request must be an unmistakably TOTAL one. A bare
+      // flag with no words at all is the total case (the model set the boolean
+      // and quoted nothing). Anything else writes nothing and goes to a human.
+      const STOP = '(?:stop|no more|no|don\'?t|do not|quit|cease|remove|unsubscribe|take me off)';
+      const TEXTY = '(?:text|texts|texting|sms|message|messages|messaging)';
+      const statedSmsStop = new RegExp(`\\b${STOP}\\b[^.!?]{0,40}\\b${TEXTY}\\b`, 'i').test(preferenceText)
+        || new RegExp(`\\b${TEXTY}\\b[^.!?]{0,20}\\b${STOP}\\b`, 'i').test(preferenceText);
+      const totalStop = /\b(?:stop|no|don'?t|do not)\b[^.!?]{0,30}\b(?:contact|contacting|reach|reaching)\b/i.test(preferenceText)
+        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText)
+        || !preferenceText.trim();
+      // …and if the caller named a channel they WANT, the sentence is a routing
+      // preference wearing an opt-out's words ("stop emailing me, contact me by
+      // text instead") — both patterns above match it on proximity alone. That
+      // is ambiguous, and ambiguous writes nothing: it is recorded for a human,
+      // which is this lane's default for every stated preference.
+      const namesWantedChannel = /\b(instead|prefer|rather)\b/i.test(preferenceText)
+        || /\b(?:contact|reach|call|text|message|email)\s+me\s+(?:by|on|at|via)\b/i.test(preferenceText);
+      const smsOptOut = (statedSmsStop || totalStop) && !namesWantedChannel;
       const emailOnlyRequest = !smsOptOut;
       if (input.do_not_contact_request === true && emailOnlyRequest) {
         logger.warn(
-          `[voice-relay] verbal do-not-contact names a channel that is NOT SMS callSid=${ctx.callSid || 'n/a'} `
-          + '— no messaging suppression written (that would stop texts they did not ask to stop); recorded on the '
-          + 'lead for a human to action'
+          `[voice-relay] verbal do-not-contact is NOT an unambiguous SMS stop callSid=${ctx.callSid || 'n/a'} `
+          + `(${namesWantedChannel ? 'names a channel the caller WANTS' : 'names another channel'}) — no messaging `
+          + 'suppression written (that would stop texts they did not ask to stop); recorded on the lead for a human'
         );
       }
       if (input.do_not_contact_request === true && !emailOnlyRequest) {

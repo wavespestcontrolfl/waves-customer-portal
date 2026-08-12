@@ -411,7 +411,7 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       do_not_contact_request: true,
     }, CTX);
     expect(recordSuppression).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/NOT SMS/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/NOT an unambiguous SMS stop/));
   });
 
   test('a GENERAL "stop contacting me" still takes the SMS suppression, email half flagged', async () => {
@@ -424,6 +424,36 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
     expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/SMS suppression recorded/));
     expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/EMAIL: that opt-out is NOT applied here/));
+  });
+
+  // ⭐ NEVER THE CHANNEL THEY ASKED FOR. "Stop emailing me; text me instead"
+  // names SMS as the WANTED channel — suppressing it silences exactly what the
+  // caller chose.
+  test('"stop emailing me, text me instead" never suppresses SMS', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Prefers texts.',
+      contact_preference: 'stop emailing me, contact me by text instead',
+      preferred_contact_method: 'sms',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
+  test('an explicitly STATED "stop texting me" does suppress SMS', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: 'stop texting me please',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
+  test('a bare flag with no words at all is treated as the TOTAL request', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked to be left alone.',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
   test('a preference that is NOT an opt-out records nothing', async () => {
