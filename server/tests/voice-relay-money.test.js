@@ -169,14 +169,14 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   test('gate off → not registered and refuses', async () => {
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
     expect(activeTools().map((t) => t.name)).not.toContain('get_open_estimates');
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/not available/i);
     expect(db).not.toHaveBeenCalled();
   });
 
   test('matched caller → per-APPLICATION lines from buildPricingBundle().frequencies, and NO combined plan total', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     // THE mechanism is consulted, with the estimate ROW.
     expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
     // The LIVE quote engine still is not.
@@ -217,7 +217,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       }],
     });
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('Quarterly pest control at $124.50 per application');
     expect(out).not.toMatch(/per month/i);
     expect(out).not.toMatch(/per year/i);
@@ -226,7 +226,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   // The bundle offers a cadence LADDER; the sent estimate is one rung of it.
   test('the cadence spoken is the one matching the estimate row\'s own totals', async () => {
     primeDb({ estimates: [{ ...SENT_ESTIMATE, monthly_total: 58, annual_total: 696 }] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('Bi-monthly pest control at $116 per application');
     expect(out).not.toContain('Quarterly pest control at');
   });
@@ -238,7 +238,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   test('a failing bundle refuses to state a price rather than fall back to the combined totals', async () => {
     buildPricingBundle.mockRejectedValue(new Error('pool exhausted'));
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).not.toMatch(/quoted lines/);
     expect(out).toMatch(/do NOT state a price for this one/i);
     expect(out).not.toContain('$41.50');
@@ -249,13 +249,13 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   test('a bundle with no frequencies at all yields no invented lines', async () => {
     buildPricingBundle.mockResolvedValue({ frequencies: [] });
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).not.toMatch(/quoted lines/);
   });
 
   test('only sent/viewed estimates count as open, newest first', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const b = builders.estimates;
     expect(b.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed']);
     expect(relayMoney.OPEN_ESTIMATE_STATUSES).toEqual(['sent', 'viewed']);
@@ -271,7 +271,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   // shape the bundle itself.
   test('the estimate projection carries every field buildPricingBundle reads', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const selected = builders.estimates.select.mock.calls.flat();
     for (const col of ['customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data']) {
@@ -283,7 +283,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('the estimate view token is never SELECTed, and never reaches the output', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const selected = builders.estimates.select.mock.calls.flat();
     expect(selected).not.toContain('token');
     expect(out).not.toContain(SENT_ESTIMATE.token);
@@ -302,7 +302,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       expires_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     };
     primeDb({ estimates: [expired] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(isEstimateCustomerViewable).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-expired' }));
     expect(out).toMatch(/No open estimates on this account/i);
     expect(out).not.toMatch(/\$\d/);
@@ -311,7 +311,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('an ARCHIVED estimate does not even count toward the redacted "how many" answer', async () => {
     primeDb({ estimates: [{ ...SENT_ESTIMATE, id: 'est-archived', archived_at: '2026-08-05T12:00:00Z' }] });
-    const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: () => 'c-9001' };
+    const ctx = { customerId: 'c-other', customerTier: 'full', callerAttested: true, resolveLookupRef: () => 'c-9001' };
     const out = await executeTool('get_open_estimates', { customer_ref: 'C1' }, ctx);
     expect(out).toMatch(/No open estimates on this account/i);
     expect(out).not.toMatch(/1 open estimate/);
@@ -332,7 +332,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       }],
     });
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('$124.50 per application');
     expect(out).not.toContain('$149');
   });
@@ -349,7 +349,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       ],
     });
     primeDb({ estimates: [SENT_ESTIMATE] }); // totals 41.5 / 498 — matches neither
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/do NOT state a price for this one/i);
     expect(out).not.toMatch(/quoted lines:/i); // no quoted line at all…
     expect(out).not.toMatch(/\$99 per application/);
@@ -363,7 +363,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   // estimator, which this lane may never do.
   test('a NULL one-time total is never spoken as $0', async () => {
     primeDb({ estimates: [{ ...SENT_ESTIMATE, onetime_total: null }] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).not.toMatch(/\$0\b/);
     expect(out).not.toMatch(/one-time work totalling/);
   });
@@ -378,7 +378,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       expires_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
     primeDb({ estimates: [expired(1), expired(2), expired(3), expired(4), expired(5), SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/Open estimates on this account/);
     expect(out).not.toMatch(/No open estimates/);
     // …and the read asked for more rows than it will speak.
@@ -388,7 +388,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
+    const ctx = { customerId: 'c-other', customerTier: 'full', callerAttested: true, resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
     const out = await executeTool('get_open_estimates', { customer_ref: 'C1' }, ctx);
     expect(out).toMatch(/1 open estimate/);
     expect(out).toMatch(/Tuesday July 21/);
@@ -398,7 +398,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('no open estimates → says so and points at get_pricing, no invented quote', async () => {
     primeDb({ estimates: [] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/No open estimates/i);
     expect(out).not.toMatch(/\$\d/);
     expect(generateEstimate).not.toHaveBeenCalled();
@@ -414,7 +414,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
 describe('get_invoice_history — matched caller only', () => {
   test('looked-up ref → refused; unmatched caller → refused; neither reads invoices', async () => {
-    const refCtx = { customerId: CUSTOMER_ID, customerTier: 'full', resolveLookupRef: () => 'c-9001' };
+    const refCtx = { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true, resolveLookupRef: () => 'c-9001' };
     const refused = await executeTool('get_invoice_history', { customer_ref: 'C1' }, refCtx);
     expect(refused).toMatch(/only available for the account the caller's own phone number matches/i);
     const unmatched = await executeTool('get_invoice_history', {}, { customerId: null });
@@ -437,6 +437,24 @@ describe('get_invoice_history — matched caller only', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  // ⭐ THE SPLIT TIER (owner ruling 2026-08-12). Caller ID recognises you; it
+  // does not read your invoices to you. Amounts need the carrier's attestation-A
+  // vouch — and the read must not HAPPEN, not happen and get filtered.
+  test('full tier WITHOUT attestation-A → invoice amounts withheld, nothing read', async () => {
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toMatch(/not available on this call/i);
+    expect(out).not.toMatch(/\$\d/);
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // …and the reads on the OTHER side of the ruling's line still answer on the
+  // ANI match alone — a caller whose carrier signs nothing is still known.
+  test('estimates stay on the ANI match — no attestation required', async () => {
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toMatch(/not available on this call/i);
+  });
+
   test('the exported invoiceHistoryText helper itself defaults to redacted', async () => {
     const { invoiceHistoryText } = require('../services/voice-agent/relay-money');
     const out = await invoiceHistoryText(CUSTOMER_ID);
@@ -457,7 +475,7 @@ describe('get_invoice_history — matched caller only', () => {
     primeDb({
       invoices: [{ invoice_number: 'WPC-2026-0255', status: 'paid', service_type: 'Pest Control', service_date: '2026-06-01', total: 112 }],
     });
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(openBalanceSummary).toHaveBeenCalledWith(CUSTOMER_ID, expect.objectContaining({ displayLimit: relayMoney.INVOICE_HISTORY_LIMIT }));
     expect(out).toContain('WPC-2026-0301');
     expect(out).toContain('$137.50 still owed');
@@ -471,7 +489,7 @@ describe('get_invoice_history — matched caller only', () => {
 
   test('paid-side read stays self-pay (no payer-owned statements) and selects no token', async () => {
     primeDb({ invoices: [] });
-    await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const b = builders.invoices;
     expect(b.whereNull).toHaveBeenCalledWith('payer_id');
     expect(b.whereNull).toHaveBeenCalledWith('payer_statement_id');
@@ -493,7 +511,7 @@ describe('get_invoice_history — matched caller only', () => {
       ],
     });
     PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-7' });
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
       customerId: CUSTOMER_ID, scheduledServiceId: 'ss-1', throwOnError: true,
     }));
@@ -508,7 +526,7 @@ describe('get_invoice_history — matched caller only', () => {
       invoices: [{ invoice_number: 'WPC-2026-0255', status: 'paid', service_type: 'Pest Control', service_date: '2026-06-01', total: 112 }],
     });
     PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('pool exhausted'));
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).not.toContain('WPC-2026-0255');
   });
 
@@ -518,7 +536,7 @@ describe('get_invoice_history — matched caller only', () => {
       invoices: [{ invoice_number: 'WPC-2026-0311', service_date: '2026-08-01', total: 75, credit_applied: 0 }],
     });
     primeDb({ invoices: [] });
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).not.toMatch(TOKEN_LEAK_RE);
     expect(out).toMatch(/Never read out a payment link/i);
     expect(out).toMatch(/Never take a card number/i);
@@ -526,10 +544,10 @@ describe('get_invoice_history — matched caller only', () => {
   });
 
   test('paid-up account reads as paid up; a failed balance read never guesses', async () => {
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/none — the account is paid up/i);
     openBalanceSummary.mockRejectedValue(new Error('pool exhausted'));
-    const degraded = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const degraded = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(degraded).toMatch(/could not be checked right now/i);
     expect(degraded).toMatch(/do not guess/i);
   });

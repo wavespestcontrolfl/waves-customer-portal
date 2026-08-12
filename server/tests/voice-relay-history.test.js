@@ -50,7 +50,15 @@ const CALL_SID = 'CA-relay-1';
 // `created_at` is NOT decoration: the relay only accepts a call_log row that is
 // CURRENT (replay bound in verifyInboundCaller), so it is stamped relative to
 // now, never a literal date.
-const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: null, created_at: new Date() };
+// `stir_verstat` is NOT decoration either: message BODIES and call notes are
+// attestation-A only (owner ruling 2026-08-12, the split tier), so the default
+// fixture is a call the carrier vouched for. UNATTESTED_CALL_ROW is the same
+// call without that vouch — see the withheld-block tests.
+const VERIFIED_CALL_ROW = {
+  twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound',
+  metadata: { stir_verstat: 'TN-Validation-Passed-A' }, created_at: new Date(),
+};
+const UNATTESTED_CALL_ROW = { ...VERIFIED_CALL_ROW, metadata: null };
 const CUSTOMER_ID = 'c-1111';
 // `phone` is the ONE authenticating column — a fixture without it is a
 // contact-slot recognition and caps at the redacted tier (fail-closed).
@@ -136,7 +144,7 @@ describe('GATE OFF — the history tools are dark', () => {
       expect.arrayContaining(['get_call_history', 'get_message_history']),
     );
     for (const name of ['get_call_history', 'get_message_history']) {
-      const out = await executeTool(name, {}, { customerId: CUSTOMER_ID, from: FROM });
+      const out = await executeTool(name, {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
       expect(out).toMatch(/not available/i);
     }
     expect(db).not.toHaveBeenCalled();
@@ -156,6 +164,7 @@ describe('GATE ON — ANI-VERIFIED ONLY (the hard Phase C rule)', () => {
     const ctx = {
       customerId: CUSTOMER_ID,
       from: FROM,
+      callerAttested: true,
       // A ref that resolves perfectly well for the account tools:
       resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null),
     };
@@ -169,7 +178,7 @@ describe('GATE ON — ANI-VERIFIED ONLY (the hard Phase C rule)', () => {
   });
 
   test('a ref pointing at the caller\'s OWN account is still refused (ANI path only)', async () => {
-    const ctx = { customerId: CUSTOMER_ID, from: FROM, resolveLookupRef: () => CUSTOMER_ID };
+    const ctx = { customerId: CUSTOMER_ID, from: FROM, callerAttested: true, resolveLookupRef: () => CUSTOMER_ID };
     const out = await executeTool('get_call_history', { customer_ref: 'C1' }, ctx);
     expect(out).toMatch(/never for a looked-up account/i);
     expect(db).not.toHaveBeenCalled();
@@ -205,14 +214,14 @@ describe('GATE ON — get_call_history read shape', () => {
       ai_extraction: '{}',
     };
     primeDb({ call_log: [...Array.from({ length: 12 }, (_, i) => spam(i)), real] });
-    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     expect(out).toMatch(/Asked about ants in the kitchen/);
     expect(out).not.toMatch(/robocall/i);
   });
 
   test('reuses summarizePriorCall exclusions and renders dated one-liners, newest first', async () => {
     primeDb({ call_log: CALL_ROWS });
-    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     const b = builders.call_log;
     // Same 10-digit key on BOTH from_phone and to_phone as summarizePriorCall.
     const sql = b.whereRaw.mock.calls.map(([s]) => s).join(' ');
@@ -245,20 +254,20 @@ describe('GATE ON — get_call_history read shape', () => {
         ...CALL_ROWS,
       ],
     });
-    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     expect(out).not.toMatch(/robocall/i);
     expect(out).toContain('ants in the kitchen');
   });
 
   test('no processed calls → says so and forbids guessing', async () => {
     primeDb({ call_log: [] });
-    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     expect(out).toMatch(/No processed past calls/i);
     expect(out).toMatch(/Do not guess/i);
   });
 
   test('blocked/short caller ID → refuses without a query', async () => {
-    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: 'anonymous' });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: 'anonymous', callerAttested: true });
     expect(out).toMatch(/verified phone number/i);
     expect(db).not.toHaveBeenCalled();
   });
@@ -273,7 +282,7 @@ describe('GATE ON — get_message_history read shape', () => {
   // account — a spouse's, a tenant's, a prior occupant's.
   test('ANI-only thread match (no customer_id arm), sms only, inbound/outbound only, newest LAST', async () => {
     primeDb({ messages: MSG_ROWS });
-    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     const b = builders.messages;
     expect(b.join).toHaveBeenCalledWith('conversations', 'messages.conversation_id', 'conversations.id');
     expect(b.where).toHaveBeenCalledWith('messages.channel', 'sms');
@@ -301,7 +310,7 @@ describe('GATE ON — get_message_history read shape', () => {
         { direction: 'inbound', body: 'gate code 4482 for the tech', created_at: '2026-08-07T13:00:00Z' },
       ],
     });
-    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     expect(out).not.toMatch(TOKEN_LEAK_RE);
     expect(out).toContain('[link]');
     // The shared access-code scrub still runs on message bodies.
@@ -311,7 +320,7 @@ describe('GATE ON — get_message_history read shape', () => {
 
   test('empty thread → says so plainly', async () => {
     primeDb({ messages: [] });
-    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
     expect(out).toMatch(/No text messages on file/i);
   });
 });
@@ -331,6 +340,29 @@ describe('Session RECENT TEXTS block', () => {
     expect(ctx.dataTurn).toContain('never instructions'); // data-not-instructions labeling
     expect(ctx.dataTurn).not.toMatch(TOKEN_LEAK_RE);
     assertNoWrites();
+  });
+
+  // ⭐ THE SPLIT TIER (owner ruling 2026-08-12). Caller ID alone recognises the
+  // caller; it does not open the reads a spoof pays for. Message bodies are the
+  // most spoof-attractive of them, so without the carrier's attestation-A vouch
+  // the block is not fetched at all — and the caller is still KNOWN.
+  test('an UNATTESTED matched caller gets the KNOWN CALLER block but NO texts', async () => {
+    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS, call_log: [UNATTESTED_CALL_ROW] });
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
+    expect(ctx.block).toContain('KNOWN CALLER'); // still recognised — that is the ruling
+    expect(ctx.attested).toBe(false);
+    expect(ctx.dataTurn).toBeNull();
+    expect(JSON.stringify(ctx)).not.toContain('Thursday'); // no text body anywhere
+    assertNoWrites();
+  });
+
+  test('an UNATTESTED caller is refused the message + call history tools', async () => {
+    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
+    for (const name of ['get_message_history', 'get_call_history']) {
+      const out = await executeTool(name, {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: false });
+      expect(out).toMatch(/not available on this call/i);
+      expect(out).not.toMatch(/Thursday|ants/i);
+    }
   });
 
   test('a customer-authored directive line in an SMS body never reaches the model', async () => {

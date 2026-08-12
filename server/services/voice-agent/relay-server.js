@@ -22,9 +22,10 @@
  * targets this endpoint. See docs/conversationrelay-booking-plan.md.
  */
 
-const crypto = require('crypto');
 const logger = require('../logger');
-const { RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone } = require('./relay-protocol');
+const {
+  RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone, verifyCallToken, CALL_TOKEN_TTL_MS,
+} = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
 // shared with the /voice webhook). Re-exported here under the name index.js uses.
@@ -46,15 +47,27 @@ const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 const WS_IDLE_MS = 2 * 60 * 1000;        // no inbound frame for 2 min → drop
 const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
 
-// Timing-safe check of the shared-secret `key` query param against
-// VOICE_RELAY_WS_SECRET. False when either side is empty or the lengths differ.
-function isValidWsKey(provided) {
-  const secret = process.env.VOICE_RELAY_WS_SECRET || '';
-  if (!secret || !provided) return false;
-  const a = Buffer.from(String(provided));
-  const b = Buffer.from(secret);
-  if (a.length !== b.length) return false;
-  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+// ⭐ ONE SESSION PER MINTED TOKEN.
+//
+// The token proves the URL was minted for a specific CallSid by something
+// holding the secret; the burn below is what stops the SAME url being replayed
+// for its few remaining minutes of life. It is deliberately an in-process store
+// and that scope is the honest one: this burn covers the token, and a token is
+// single-call and expires on its own, so the worst a cross-instance replay can
+// buy is one duplicate session on a call that is still ringing — which the
+// CallSid claim in relay-context (a shared `call_log` burn, the authoritative
+// one-session guarantee for a caller's identity and context) then refuses.
+// Entries are dropped once the token they cover cannot be valid any more, so
+// this never grows without bound.
+const burnedCallTokens = new Map(); // token -> epoch ms after which it is moot
+
+function burnCallToken(token, now = Date.now()) {
+  for (const [t, expiresAt] of burnedCallTokens) {
+    if (expiresAt <= now) burnedCallTokens.delete(t);
+  }
+  if (burnedCallTokens.has(token)) return false; // already used — replay
+  burnedCallTokens.set(token, now + CALL_TOKEN_TTL_MS + 60 * 1000);
+  return true;
 }
 
 /**
@@ -103,10 +116,25 @@ function attachVoiceRelay(httpServer) {
     if (url.pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
     // Authenticate BEFORE accepting the upgrade — this endpoint can spend
     // Anthropic tokens and write leads, so an unauthenticated client is a P0.
-    // ConversationRelay carries the shared secret as the `key` query param
-    // (relay-protocol.appendWsKey / buildRelayTwiML embed it in the wss URL).
-    if (!isValidWsKey(url.searchParams.get('key'))) {
-      logger.warn('[voice-relay] rejected ws upgrade: missing/invalid key');
+    //
+    // ⭐ AND A REUSABLE CREDENTIAL IS NOT AUTHENTICATION HERE. This used to
+    // accept the raw VOICE_RELAY_WS_SECRET as a `key` query param: one static
+    // string, in a URL, that Twilio writes to its logs — so anyone who ever saw
+    // one URL could open unlimited sessions forever, burn Anthropic tokens and
+    // write leads, with no call behind any of it. The URL now carries a token
+    // minted for ONE CallSid that expires in minutes (relay-protocol), the
+    // secret itself never leaves the server, and each token opens exactly one
+    // session. A captured URL is then worth a single replay attempt against a
+    // call that has already hung up.
+    const callSid = String(url.searchParams.get('callSid') || '').trim();
+    const token = String(url.searchParams.get('t') || '');
+    if (!callSid || !verifyCallToken(token, callSid)) {
+      logger.warn('[voice-relay] rejected ws upgrade: missing/invalid per-call token');
+      try { socket.destroy(); } catch { /* socket already gone */ }
+      return;
+    }
+    if (!burnCallToken(token)) {
+      logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
       try { socket.destroy(); } catch { /* socket already gone */ }
       return;
     }

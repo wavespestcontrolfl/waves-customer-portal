@@ -634,6 +634,10 @@ class RelayConversation {
       // contact-slot recognition caps at 'redacted' (relay-context
       // findUniqueCustomerByAni). Fail closed when absent.
       customerTier: (this._callerContext && this._callerContext.tier === 'full') ? 'full' : 'redacted',
+      // The carrier's word on top of the ANI match (STIR/SHAKEN attestation A),
+      // decided in relay-context after every recognition rule has run. Gates the
+      // spoof-attractive reads only — see ATTESTATION_ONLY_TOOLS. Fail closed.
+      callerAttested: !!(this._callerContext && this._callerContext.attested === true),
       // The signature-verified-call flag. Account tools already need a matched
       // customerId (only set after verification), but lookup_customer is
       // reachable by an UNMATCHED caller by design — so it is the one tool that

@@ -60,18 +60,29 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
 ## Owner steps to test Phase 0 on the sandbox
 
 1. Deploy this branch (or run locally) with `VOICE_RELAY_ENABLED=true`, `ANTHROPIC_API_KEY`, and **`VOICE_RELAY_WS_SECRET`** (a long random string) set. Without the secret the ws endpoint **refuses to attach** (fail-closed) — it is otherwise public and can spend tokens / write leads.
-2. In Twilio, create a TwiML Bin with this XML (swap `<host>` for the deployed host and `<secret>` for `VOICE_RELAY_WS_SECRET`) and set it as the **Voice webhook for +19412691697 only**:
+2. Point +19412691697 at something that can MINT A PER-CALL TOKEN — a static TwiML Bin can no longer do this, which is why the sandbox runs on a Twilio Function (`voice-relay-sandbox` / `/relay-sandbox`). The URL must carry `callSid` + `t`, never the secret:
 
    ```xml
    <?xml version="1.0" encoding="UTF-8"?>
    <Response><Connect>
-     <ConversationRelay url="wss://<host>/ws/voice-agent?key=<secret>"
+     <ConversationRelay url="wss://<host>/ws/voice-agent?callSid=<CallSid>&amp;t=<token>"
        welcomeGreeting="Thanks for calling Waves Pest Control. Just so you know, this call may be recorded, and you're speaking with our automated assistant. How can I help you today?"
        welcomeGreetingInterruptible="none"
        ttsProvider="ElevenLabs" language="en-US" />
    </Connect></Response>
    ```
-   (`relay-protocol.buildRelayTwiML()` renders this exact string, auto-appending `?key=` from `VOICE_RELAY_WS_SECRET`.) The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the `key` matches — so only Twilio, carrying the secret you configured, can connect.
+
+   where the token is minted from the CallSid the Function is answering:
+
+   ```js
+   // Twilio Function — VOICE_RELAY_WS_SECRET lives in the Function's env, never in the URL
+   const exp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+   const mac = require('crypto').createHmac('sha256', process.env.VOICE_RELAY_WS_SECRET)
+     .update(`v1.${event.CallSid}.${exp}`).digest('hex').slice(0, 32);
+   const token = `v1.${exp}.${mac}`;
+   ```
+
+   (`relay-protocol.buildRelayTwiML({ wsUrl, callSid })` renders exactly this server-side, and `mintCallToken` is the same function.) The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the token verifies against that CallSid, is unexpired, and has not been used — so a captured URL is worth one replay attempt on a call that has already ended. **A URL carrying the raw secret is refused**: the whole point is that what leaks from a logged URL is no longer a working credential.
 3. Call the GA# and confirm: it answers, sounds natural, latency feels OK, and a lead lands in the Leads UI. **This call answers the build-vs-buy question.**
 
 ⚠️ On the first live call, verify the inbound `prompt` text field and outbound `text` frame against the deployed ConversationRelay version — `relay-protocol.parsePrompt()` already tolerates `voicePrompt`/`payload.text`; adjust there if needed.
@@ -101,9 +112,10 @@ the staff ring when a backstop is reachable. It was dormant only because
   Basing this on the *attach state* rather than the raw env flag means a
   half-configured relay falls through to voicemail instead of a dead endpoint.
 - When `relay`, `/voice` (answers-first) and `/call-complete` (backstop) return
-  `buildRelayTwiML()` (`<Connect><ConversationRelay url="wss://…/ws/voice-agent?key=…">`)
-  — the same wire format the TwiML Bin used, now served from the app, with the
-  shared-secret `key` that authenticates the upgrade.
+  `buildRelayTwiML({ callSid })` (`<Connect><ConversationRelay
+  url="wss://…/ws/voice-agent?callSid=…&t=…">`) — the same wire format the
+  sandbox uses, now served from the app, carrying a token minted for THAT CallSid
+  (never the secret) which authenticates the upgrade once and expires in minutes.
 - `appendAgentHandoff()` refuses a `wss://` endpoint, so a misconfig can never
   `<Dial>` a WebSocket URL as a phone number. `relay_disabled`/`none` fall through
   to the existing human/voicemail flow **byte-for-byte**.
@@ -120,8 +132,10 @@ the staff ring when a backstop is reachable. It was dormant only because
 3. `VOICE_RELAY_ENABLED=true` + `ANTHROPIC_API_KEY` + `VOICE_RELAY_WS_SECRET` —
    all required for the `/ws/voice-agent` server to actually attach; otherwise
    `agentHandoffKind` returns `relay_disabled` and the call stays on voicemail
-   (never stranded). The secret also authenticates the ws upgrade — connections
-   without the matching `?key=` are rejected before handshake.
+   (never stranded). The secret also MINTS the per-call upgrade token — a
+   connection without a valid, unused `callSid`+`t` pair for a live CallSid is
+   rejected before handshake, and the secret itself is never accepted as a
+   credential (see AGENTS.md, public-route inventory).
 
 **Owner steps to activate the backstop (after Phase 0 sandbox passes):**
 1. Re-point `+19412691697` (and any other number) **back to `/api/webhooks/twilio/voice`** — remove the standalone TwiML Bin.

@@ -1147,9 +1147,18 @@ violations at the severity noted.
   server only ATTACHES when `VOICE_RELAY_ENABLED=true` AND `ANTHROPIC_API_KEY`
   AND `VOICE_RELAY_WS_SECRET` are all set — otherwise the endpoint does not
   exist; (2) every upgrade is rejected (socket destroyed before handshake)
-  unless the `?key=` query param matches `VOICE_RELAY_WS_SECRET` via a
-  constant-time compare, so only Twilio carrying the configured secret can
-  connect. Caller PII is masked in logs; lead writes require a valid E.164
+  unless it carries a PER-CALL TOKEN — `?callSid=<sid>&t=v1.<exp>.<hmac>`, an
+  HMAC-SHA256 over that CallSid keyed by `VOICE_RELAY_WS_SECRET`, verified with a
+  constant-time compare, valid ~5 minutes, and accepted ONCE (a used token is
+  refused). **The raw secret is never put in a URL and is never accepted as a
+  credential** — it stays server-side (Railway env, and the Twilio Function env
+  that renders the sandbox TwiML), because a URL param is exactly what leaks:
+  Twilio logs request URLs, and a reusable key in one would let anyone who saw it
+  open unlimited synthetic sessions, spend Anthropic tokens and write leads with
+  no call behind them. Anything that renders this TwiML MUST mint the token
+  (`relay-protocol.mintCallToken` / `buildRelayTwiML({ callSid })`); a render
+  without a CallSid produces a URL the server refuses.
+  Caller PII is masked in logs; lead writes require a valid E.164
   caller number (`capture_lead` tool + the capture-floor on session close).
   The live `/voice` backstop only routes a call here when the relay actually
   attached (`isRelayAttached`) AND the configured endpoint's scheme/host/path are
@@ -1164,6 +1173,17 @@ violations at the severity noted.
   ships OFF: most genuine calls carry no attestation, so turning it on trades
   spoofing resistance for treating real customers as strangers, and the
   attestation is logged on every call so the distribution can be measured first.
+  **The SPLIT TIER (owner ruling 2026-08-12) is the default that does not wait
+  for that measurement**: an ANI match alone still recognises the caller and
+  answers the receptionist questions (who they are, appointments, today's ETA,
+  open estimates, service history), but the four reads a spoofed caller ID would
+  pay for — `get_invoice_history` (amounts), `get_message_history` and
+  `get_call_history` (the bodies of texts and calls), `get_service_report`
+  (what a technician found inside the home) — require attestation A, as does the
+  balance FIGURE in the KNOWN CALLER block and the session's recent-texts block
+  (not fetched at all without it). Enforced in `relay-tools.ATTESTATION_ONLY_TOOLS`
+  BEFORE the tool runs, so a new sensitive tool cannot be added without deciding
+  which side of the line it is on; fails closed on a missing flag.
   Recognition is additionally bound to a freshness window on that call_log row
   and to ONE session per CallSid — burned atomically as a metadata key on the
   row itself (`relay_session_claimed_at`), so the claim holds across instances

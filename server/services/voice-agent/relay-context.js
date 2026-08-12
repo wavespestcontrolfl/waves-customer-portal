@@ -655,7 +655,7 @@ async function loadPriorCallSummary(phone) {
 
 // ── KNOWN CALLER block ─────────────────────────────────────────────────────
 
-function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit, balance, priorCall, tier = 'redacted' }) {
+function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit, balance, priorCall, tier = 'redacted', attested = false }) {
   const redacted = tier !== 'full';
   const lines = redacted
     ? [
@@ -705,7 +705,11 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
     lines.push(`Last completed visit: ${lastVisit.date}${svc ? ` — ${svc}` : ''}`);
   }
   if (balance && Number(balance.total) > 0) {
-    lines.push(redacted
+    // ⭐ THE AMOUNT IS THE ATTESTED PART. A matched caller is told they have a
+    // balance either way — that much they can see on their own portal — but the
+    // FIGURE follows the same rule as the invoice tool it comes from: a call the
+    // carrier vouches for. Redacted (contact-slot) callers never get either.
+    lines.push(redacted || !attested
       ? 'Open balance: yes — there is an open balance. Do NOT state or estimate the amount.'
       : `Open balance: yes — ${fmtMoney(balance.total)} across ${balance.count} invoice${balance.count === 1 ? '' : 's'}`);
   } else if (balance) {
@@ -794,6 +798,16 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
       return null;
     }
     reportVerified(true);
+    // ⭐ THE SPLIT TIER (owner ruling 2026-08-12). Recognition still rests on the
+    // ANI, which is the ruling's "discuss freely with a matched caller" — but
+    // caller ID is spoofable, so the reads where a spoof pays best are held back
+    // for a call the CARRIER vouches for: invoice amounts, the bodies of texts
+    // and calls, and service-report detail (see ATTESTATION_ONLY_TOOLS in
+    // relay-tools). Everything a receptionist needs to be useful — who they are,
+    // their appointments, today's ETA, their estimates, what service they're on —
+    // stays on the ANI match, so an ordinary caller on a carrier that signs
+    // nothing still gets a receptionist who knows them.
+    const attested = isFullAttestation(verification.attestation);
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
@@ -801,22 +815,33 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
       loadNextAppointment(customer.id).catch(() => null),
       loadCompletedVisits(customer.id, 1).catch(() => []),
       loadOpenBalance(customer.id).catch(() => null),
-      loadPriorCallSummary(from).catch(() => null),
+      // The gist of the caller's LAST call is call content, so it rides the
+      // same attestation line as get_call_history — not fetched at all without
+      // it, rather than fetched and dropped.
+      attested ? loadPriorCallSummary(from).catch(() => null) : Promise.resolve(null),
       // Phase C: the last few SMS with this number, next to the KNOWN CALLER
       // block (same gate, same ANI-matched-only condition). Optional context —
       // buildRecentTextsBlock fails toward null and never blocks the session.
-      (async () => {
-        const { buildRecentTextsBlock } = require('./relay-history');
-        return buildRecentTextsBlock(from);
-      })().catch(() => null),
+      // Message BODIES are the most spoof-attractive read on the account, so
+      // this block is attested-only too (same line as get_message_history).
+      attested
+        ? (async () => {
+          const { buildRecentTextsBlock } = require('./relay-history');
+          return buildRecentTextsBlock(from);
+        })().catch(() => null)
+        : Promise.resolve(null),
     ]);
-    logger.info(`[voice-relay-context] caller ${maskPhone(from)} matched customer ${customer.id} tier=${customer.tier}`);
+    logger.info(
+      `[voice-relay-context] caller ${maskPhone(from)} matched customer ${customer.id} `
+      + `tier=${customer.tier} attested=${attested ? 'A' : 'no'}`
+    );
     const knownCallerBlock = buildKnownCallerBlock({
-      customer, services, nextAppointment, lastVisit: visits[0] || null, balance, priorCall, tier: customer.tier,
+      customer, services, nextAppointment, lastVisit: visits[0] || null, balance, priorCall, tier: customer.tier, attested,
     });
     return {
       customer: { id: customer.id, first_name: customer.first_name || null },
       tier: customer.tier,
+      attested,
       matchedColumn: customer.matchedColumn || null,
       block: knownCallerBlock,
       dataTurn: recentTexts || null,

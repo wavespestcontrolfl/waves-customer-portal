@@ -47,20 +47,103 @@ function maskPhone(value) {
 }
 
 /**
- * Append the shared-secret `key` that authenticates the ConversationRelay
- * WebSocket upgrade (validated in relay-server before handleUpgrade). Returns
- * the URL unchanged when no secret is configured or a key is already present.
+ * ⭐ THE URL CARRIES A PER-CALL TOKEN, NEVER THE SECRET ITSELF.
+ *
+ * The upgrade used to be authorized by the raw `VOICE_RELAY_WS_SECRET` in a
+ * `key` query param. That secret is REUSABLE and it is the ONE credential the
+ * endpoint has, so everything that leaks a URL leaks the endpoint: Twilio logs
+ * request URLs, and anyone holding it could open unlimited synthetic sessions,
+ * spend Anthropic tokens and write leads into the database — with no call
+ * involved at all.
+ *
+ * A token fixes that only if the URL stops carrying the minting key, which is
+ * the whole point of the change: what leaks from a URL is what is IN the URL.
+ * So the secret stays server-side (Railway env, and the Twilio Function env
+ * that renders the sandbox TwiML) and the URL carries only
+ *
+ *     v1.<expiry-epoch-seconds>.<HMAC-SHA256(secret, "v1.<callSid>.<expiry>")>
+ *
+ * which is useless twice over: it is bound to ONE CallSid, and it dies minutes
+ * after the call it was minted for. A captured URL buys an attacker a session
+ * on a call that has already ended — which the one-time claim in relay-server
+ * refuses anyway.
  */
-function appendWsKey(wsUrl, secret = process.env.VOICE_RELAY_WS_SECRET) {
-  if (!secret) return wsUrl;
+const CALL_TOKEN_VERSION = 'v1';
+// How long a minted token stays valid. The relay socket opens seconds after the
+// TwiML renders; five minutes is slack for a slow answer, not a window.
+const CALL_TOKEN_TTL_MS = 5 * 60 * 1000;
+
+function callTokenMac(callSid, expSec, secret) {
+  return require('crypto')
+    .createHmac('sha256', String(secret))
+    .update(`${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}`)
+    .digest('hex')
+    .slice(0, 32); // 128 bits — plenty against forgery, short enough for a URL
+}
+
+/**
+ * Mint the per-call upgrade token. Returns '' when no secret is configured, so
+ * a misconfigured deploy renders a URL the server will REFUSE rather than one
+ * it will silently accept.
+ */
+function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), ttlMs = CALL_TOKEN_TTL_MS } = {}) {
+  const sid = String(callSid || '').trim();
+  if (!secret || !sid) return '';
+  const expSec = Math.floor((now + ttlMs) / 1000);
+  return `${CALL_TOKEN_VERSION}.${expSec}.${callTokenMac(sid, expSec, secret)}`;
+}
+
+/**
+ * Verify a per-call token against the CallSid it must be bound to. Constant-time
+ * MAC compare; fails closed on every malformed shape.
+ *
+ * The expiry is checked in BOTH directions. A far-future `exp` is as much a red
+ * flag as a stale one — it would be a token minted to live forever — so anything
+ * beyond the TTL the minter is allowed to grant is refused, which keeps the
+ * lifetime a property of this code rather than of whoever rendered the URL.
+ */
+function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), maxTtlMs = CALL_TOKEN_TTL_MS } = {}) {
+  const sid = String(callSid || '').trim();
+  if (!secret || !sid) return false;
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3 || parts[0] !== CALL_TOKEN_VERSION) return false;
+  const expSec = Number(parts[1]);
+  if (!Number.isSafeInteger(expSec)) return false;
+  const expMs = expSec * 1000;
+  if (expMs <= now) return false; // expired
+  // Allow a minute of clock skew between the renderer and this process on top
+  // of the grant the minter is permitted.
+  if (expMs > now + maxTtlMs + 60 * 1000) return false;
+  const expected = callTokenMac(sid, expSec, secret);
+  const crypto = require('crypto');
+  const a = Buffer.from(expected);
+  const b = Buffer.from(String(parts[2]));
+  if (a.length !== b.length) return false; // timingSafeEqual throws on length mismatch
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Put the per-call credentials on the WebSocket URL: the CallSid the session
+ * claims to be, and the token that proves the URL was minted by something
+ * holding the secret for THAT CallSid. Any pre-existing `key`/`callSid`/`t`
+ * params are dropped — a stale raw secret must never survive into a rendered
+ * URL. Returns the URL unchanged when there is nothing to mint with, so the
+ * server's refusal (not a silent downgrade) is what surfaces the misconfig.
+ */
+function appendCallAuth(wsUrl, { callSid, secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now() } = {}) {
+  const token = mintCallToken(callSid, { secret, now });
+  if (!token) return wsUrl;
+  const sid = String(callSid).trim();
   try {
     const u = new URL(wsUrl);
-    u.searchParams.set('key', secret); // overwrite any stale key with the CURRENT secret
+    u.searchParams.delete('key'); // the old reusable credential — never re-emitted
+    u.searchParams.set('callSid', sid);
+    u.searchParams.set('t', token);
     return u.toString();
   } catch {
-    // Unparseable/relative — naive append, only if no key is already present.
-    if (/[?&]key=/.test(wsUrl)) return wsUrl;
-    return `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(secret)}`;
+    // Unparseable/relative — strip any existing params we own, then append.
+    const base = wsUrl.replace(/([?&])(key|callSid|t)=[^&]*/g, '$1').replace(/[?&]+$/, '');
+    return `${base}${base.includes('?') ? '&' : '?'}callSid=${encodeURIComponent(sid)}&t=${encodeURIComponent(token)}`;
   }
 }
 
@@ -166,6 +249,7 @@ function escapeXmlAttr(value) {
  */
 function buildRelayTwiML({
   wsUrl,
+  callSid, // the call this TwiML is answering — binds the upgrade token to it
   welcomeGreeting = defaultWelcomeGreeting(),
   ttsProvider = DEFAULT_TTS_PROVIDER,
   language = DEFAULT_LANGUAGE,
@@ -174,9 +258,12 @@ function buildRelayTwiML({
   wsSecret = process.env.VOICE_RELAY_WS_SECRET,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
-  // Authenticate the upgrade: the shared-secret `key` is validated in
-  // relay-server before handleUpgrade (the ws endpoint is otherwise public).
-  const authedUrl = appendWsKey(wsUrl, wsSecret);
+  // Authenticate the upgrade with a token minted for THIS CallSid — validated
+  // in relay-server before handleUpgrade (the ws endpoint is otherwise public).
+  // A render without a CallSid produces a URL with no credentials, which the
+  // server refuses: a live call must never be handed a session it did not earn,
+  // and refusing at the door is what makes the missing SID visible.
+  const authedUrl = appendCallAuth(wsUrl, { callSid, secret: wsSecret });
   const attrs = [
     `url="${escapeXmlAttr(authedUrl)}"`,
     `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"`,
@@ -214,7 +301,10 @@ module.exports = {
   defaultTtsVoice,
   isRelayEnabled,
   maskPhone,
-  appendWsKey,
+  appendCallAuth,
+  mintCallToken,
+  verifyCallToken,
+  CALL_TOKEN_TTL_MS,
   parsePrompt,
   textFrame,
   endFrame,

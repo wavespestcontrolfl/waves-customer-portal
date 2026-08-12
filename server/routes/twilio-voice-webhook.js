@@ -770,7 +770,11 @@ router.post('/voice', async (req, res) => {
           if (handoffKind === 'relay') {
             // ConversationRelay's welcomeGreeting carries the FL §934.03 +
             // automated-assistant disclosure, so no separate greeting MP3 here.
-            return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
+            // CallSid binds the upgrade token to THIS call (relay-protocol):
+            // the ws endpoint accepts no reusable credential.
+            return res.type('text/xml').send(buildRelayTwiML({
+              wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+            }));
           }
           const agentTwiml = new VoiceResponse();
           agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
@@ -919,7 +923,10 @@ router.post('/call-complete', async (req, res) => {
               await db('call_log').where('twilio_call_sid', CallSid)
                 .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
                 .catch(() => {});
-              return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
+              // CallSid binds the upgrade token to THIS call (relay-protocol).
+              return res.type('text/xml').send(buildRelayTwiML({
+                wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+              }));
             }
             if (handoffKind === 'dial') {
               logger.info(`[call-complete] AI backstop dial (${decision.reason}) for ${maskSid(CallSid)}`);

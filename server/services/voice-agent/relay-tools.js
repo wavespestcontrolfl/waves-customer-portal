@@ -538,6 +538,41 @@ function matchedCallerTier(ctx = {}) {
 }
 
 /**
+ * ⭐ THE READS THAT NEED THE CARRIER'S WORD, NOT JUST THE CALLER ID.
+ *
+ * Owner ruling 2026-08-12 (split tier). An ANI match still makes the agent a
+ * receptionist who knows you — your name, your appointments, today's ETA, your
+ * estimates, your service history all ride on it, because demanding attestation
+ * for those would make her a stranger to most real customers (plenty of carriers
+ * sign nothing).
+ *
+ * But caller ID is spoofable, and these four reads are where a spoof pays: what
+ * you owe to the cent, the contents of your texts, what was said on your calls,
+ * and the detail of what a technician found inside your home. Those need
+ * STIR/SHAKEN attestation A — the carrier vouching that the caller owns the
+ * number — and without it the agent says a human will follow up.
+ *
+ * FAIL CLOSED: an absent flag is "not attested".
+ */
+// The value is WHICH recognised callers the rule bites, because these two
+// families draw their boundary differently. Invoices and service reports are
+// account reads gated on the FULL tier, so attestation is the second lock on the
+// one tier that opens them. Call and message history are ANI-SCOPED at every
+// tier — the calling number IS the key, not the account — so for those the
+// spoofable thing is the only thing, and attestation is required of anyone the
+// session recognised at all.
+const ATTESTATION_ONLY_TOOLS = {
+  get_invoice_history: 'full-tier',
+  get_service_report: 'full-tier',
+  get_call_history: 'any-tier',
+  get_message_history: 'any-tier',
+};
+
+function callerAttested(ctx = {}) {
+  return ctx.callerAttested === true;
+}
+
+/**
  * Execute a tool call. Returns a short string (the tool_result content) telling
  * the model what happened so it can respond to the caller naturally.
  *
@@ -560,6 +595,28 @@ async function executeTool(name, input = {}, ctx = {}) {
       // these, the gate off means NO account/pricing reads — fail closed.
       if (!relayContext.isContextEnabled()) {
         return 'That lookup is not available. Tell the caller a Waves team member will follow up with the details.';
+      }
+      // ⭐ THE SPLIT TIER, ENFORCED BEFORE THE READ RUNS — not inside each tool,
+      // so a new sensitive tool cannot be added without deciding which side of
+      // this line it sits on. A matched caller whose carrier will not vouch for
+      // the number gets the same answer a stranger would: a human follows up.
+      // (The per-tool tier rules still run underneath; this only ever subtracts.)
+      // It only bites a caller the session actually RECOGNISED. An unmatched or
+      // wrong-tier caller is already refused by each tool's own rule, with the
+      // reason that fits their case — this gate exists to subtract from the
+      // callers who would otherwise have passed, and it must not restate
+      // somebody else's refusal in worse words.
+      const attestationScope = ATTESTATION_ONLY_TOOLS[name];
+      const wouldHavePassed = !!ctx.customerId
+        && (attestationScope === 'any-tier' || matchedCallerTier(ctx) === 'full');
+      if (attestationScope && wouldHavePassed && !callerAttested(ctx)) {
+        logger.info(
+          `[voice-relay] ${name} withheld — caller not attestation-A callSid=${ctx.callSid || 'n/a'} `
+          + `tier=${matchedCallerTier(ctx)}`
+        );
+        return 'That detail is not available on this call. Tell the caller you can see their account but cannot go '
+          + 'through invoice amounts, past messages, call notes or report details over the phone, and that a Waves '
+          + 'team member will follow up — they can also see all of it signed in to their portal. Do not explain why.';
       }
       // Pricing is PUBLIC website information (owner ruling, Phase B): any
       // caller — including a brand-new prospect — may be quoted engine output.
