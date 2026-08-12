@@ -633,7 +633,16 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
     excludeStatuses: ['cancelled', 'completed'],
   });
   if (!rows.length) return [];
-  const kept = rows.slice(0, TARGET_CONFLICT_LIMIT);
+  // Partition BEFORE the cap. The sheets drop flagged siblings while
+  // scope=route, so slicing in query order could spend the whole cap on
+  // rows that get filtered out and leave a definite conflict unshown —
+  // the same offer/commit mismatch this advisory exists to close, just
+  // reintroduced by the truncation. Non-siblings first (stable within
+  // each group), cap second, so a definite conflict always outranks a
+  // stop that's moving with the push.
+  const isSibling = (row) => !!routeSiblingIds?.has(String(row.id));
+  const kept = [...rows.filter((r) => !isSibling(r)), ...rows.filter(isSibling)]
+    .slice(0, TARGET_CONFLICT_LIMIT);
   const customerIds = [...new Set(kept.map((r) => r.customer_id).filter(Boolean))];
   const customers = customerIds.length
     ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
@@ -669,7 +678,7 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
       // so the sheets can drop these from the warning when scope=route
       // (codex #3375 P2). Only today's rows can carry the flag: the probe
       // is date-scoped and route siblings sit on today until commit.
-      isRouteSibling: !!routeSiblingIds?.has(String(row.id)),
+      isRouteSibling: isSibling(row),
     };
   });
 }

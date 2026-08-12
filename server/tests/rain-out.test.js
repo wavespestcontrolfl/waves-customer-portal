@@ -1965,10 +1965,53 @@ describe('rain-out service', () => {
       });
 
       expect(result.ok).toBe(true);
+      // Non-siblings sort first (the sheets drop siblings while scope=route).
       expect(result.conflicts).toEqual([
-        expect.objectContaining({ customerName: 'cust-2', isRouteSibling: true }),
         expect.objectContaining({ customerName: 'cust-77', isRouteSibling: false }),
+        expect.objectContaining({ customerName: 'cust-2', isRouteSibling: true }),
       ]);
+    });
+
+    test('the 3-row cap never hides a definite conflict behind route siblings', async () => {
+      // Three siblings ahead of the real blocker in query order: capping in
+      // that order would leave scope=route with an EMPTY warning and send
+      // the dispatcher into commit's SLOT_TAKEN — the mismatch this probe exists
+      // to close.
+      const row = (id, customerId) => ({
+        id, customer_id: customerId, status: 'pending', service_type: 'Quarterly Pest Control',
+        window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+      });
+      findConflictingVisits.mockResolvedValue([
+        row('svc-2', 'cust-2'), row('svc-3', 'cust-3'), row('svc-4', 'cust-4'), row('svc-99', 'cust-99'),
+      ]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2' }, { id: 'svc-3' }, { id: 'svc-4' }] }),
+        ],
+        customers: [chain({
+          rows: [
+            { id: 'cust-99', first_name: 'cust-99', last_name: null },
+            { id: 'cust-2', first_name: 'cust-2', last_name: null },
+            { id: 'cust-3', first_name: 'cust-3', last_name: null },
+          ],
+        })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toHaveLength(3);
+      expect(result.conflicts[0]).toEqual(expect.objectContaining({
+        customerName: 'cust-99', isRouteSibling: false,
+      }));
+      expect(result.conflicts.filter((c) => !c.isRouteSibling)).toHaveLength(1);
     });
 
     test('clear window → ok with no conflicts; bad target and missing service reject', async () => {
