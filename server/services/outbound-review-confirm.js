@@ -132,6 +132,12 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
           // recompute).
           const closedWindows = await db('appointment_reminders')
             .where({ scheduled_service_id: svc.id, cancelled: false })
+            // Atomic windowless guard (Codex #3361 r19 P2, same shape as
+            // handleReschedule's expectSchedule): a THIRD move assigning a
+            // real window between the postSlot read and this write makes
+            // the close miss instead of silencing the re-armed reminders —
+            // that move's own resync owns the row's state.
+            .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
             .update({
               reminder_72h_sent: true,
               reminder_72h_sent_at: new Date(),
@@ -140,8 +146,9 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
               updated_at: new Date(),
             });
           if (!closedWindows) {
-            coreLegsOk = false;
-            logger.warn(`[${routeTag}] windowless close after concurrent move missed for ${svc.id} — leaving retryable`);
+            // Guard miss = a real window arrived and its own sync owns the
+            // reminder state now — success, not a retryable failure.
+            logger.info(`[${routeTag}] windowless close skipped for ${svc.id} — the service regained a window; its own resync owns the state`);
           } else {
             logger.info(`[${routeTag}] reminder windows closed after concurrent windowless move for ${svc.id}`);
           }
