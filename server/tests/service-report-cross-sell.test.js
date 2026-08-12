@@ -24,8 +24,22 @@ function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
         void col;
         return rows[0] || null;
       },
+      whereNotNull() { return q; },
+      distinct() { return rows; },
       columnInfo() {
-        return table === 'scheduled_services' ? { is_recurring: {} } : {};
+        // Mirror the live scheduled_services shape: the stamped service
+        // address columns are what the ownership loader scopes on and what
+        // the single-premises proof reads, so a fake without them silently
+        // skips both.
+        return table === 'scheduled_services'
+          ? {
+            is_recurring: {},
+            service_address_line1: {},
+            service_address_line2: {},
+            service_address_city: {},
+            service_address_zip: {},
+          }
+          : {};
       },
     };
     return q;
@@ -386,18 +400,110 @@ describe('buildReportCrossSell', () => {
     // primary) applies to ownership scoping too, so lawn is NOT owned at
     // the primary and the ladder still offers it — previously the row
     // defaulted to primary and the ladder advanced to tree & shrub.
+    // The report itself is LINKED to a visit stamped at the primary: this
+    // customer has a second premises on file, and PR r11 suppresses the
+    // card for an UNLINKED report on such an account (the report address
+    // would be the customer mirror, proving nothing). Here the linked stamp
+    // proves the premises, so ownership scoping is what the test exercises.
     const db = dbFor({
       serviceTypes: ['Pest Control'],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
       stampRows: [{
+        id: 'v-primary', status: 'completed',
+        service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236',
+      }, {
         id: 'r2', service_type: 'Lawn Care', scheduled_date: FUTURE_SCHEDULED_DATE,
         status: 'scheduled', is_recurring: true, property_id: 'prop-9',
       }],
       properties: [{ id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' }],
     });
-    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'v-primary' }), db, { propertyLookup: missLookup });
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('lawn_care');
+  });
+
+  describe('an UNLINKED report must prove the account has a single premises (PR r11 P1)', () => {
+    // service_records.scheduled_service_id is nullable for historical rows
+    // whose visit could not be matched, and the route COALESCEs address_*
+    // from the CUSTOMER mirror when nothing joins — so the report address
+    // is the primary address by construction and proves nothing. On a
+    // multi-property account an old secondary-property report would
+    // otherwise display and persist a primary-profile price.
+    const singlePremisesDb = (extra = {}) => dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      ...extra,
+    });
+
+    test('a single-premises account still gets the card', async () => {
+      const result = await buildReportCrossSell(SERVICE(), singlePremisesDb(), { propertyLookup: missLookup });
+      expect(result).not.toBeNull();
+      expect(result.serviceKey).toBe('lawn_care');
+    });
+
+    test('a second premises in customer_properties suppresses it', async () => {
+      const db = singlePremisesDb({
+        properties: [
+          { id: 'prop-1', address_line1: '123 Gulf Dr', city: 'Sarasota', zip: '34236' },
+          { id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' },
+        ],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('a lone property row that is NOT the primary suppresses it', async () => {
+      const db = singlePremisesDb({
+        properties: [{ id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('the admin-set has_multi_home flag alone suppresses it', async () => {
+      // The flag is the eligibility signal the discount engine already
+      // trusts — it covers customers whose second property never made it
+      // into customer_properties.
+      const db = singlePremisesDb({ customer: CUSTOMER({ has_multi_home: true }) });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('a visit stamped at another street suppresses it even with no property rows', async () => {
+      // customer_properties is gated and empty for older accounts, so the
+      // stamped visit addresses are the second witness.
+      const db = singlePremisesDb({
+        stampRows: [{
+          id: 'v-other', status: 'completed',
+          service_address_line1: '88 Palm Ave', service_address_city: 'Venice', service_address_zip: '34285',
+        }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('a visit stamped at the primary street, and unstamped rows, keep the card', async () => {
+      // A stamp that IS the primary is not a second premises, and an
+      // unstamped row is the absence of evidence, not evidence of one.
+      const db = singlePremisesDb({
+        stampRows: [{
+          id: 'v-primary', status: 'completed',
+          service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236',
+        }],
+      });
+      const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+      expect(result).not.toBeNull();
+      expect(result.serviceKey).toBe('lawn_care');
+    });
+
+    test('a same-street stamp in a DIFFERENT city suppresses it', async () => {
+      // sameScopeKey is strict on street but wildcards a locality field
+      // either side lacks; a fully-qualified stamp in another city is a
+      // genuinely different premises.
+      const db = singlePremisesDb({
+        stampRows: [{
+          id: 'v-twin', status: 'completed',
+          service_address_line1: '123 Gulf Dr', service_address_city: 'Venice', service_address_zip: '34285',
+        }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
   });
 
   test('a property-linked row that cannot be resolved suppresses the strict scope entirely', async () => {

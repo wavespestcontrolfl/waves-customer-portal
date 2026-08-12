@@ -303,12 +303,12 @@ describe('customer pricing AI helpers', () => {
     // poolCageSize 'NONE' / nearWater 'NONE' — truthy strings that are not
     // observations. A seeded cage from the accepted estimate must survive
     // them; an OBSERVED cage answer must still win.
-    const run = (observed, features) => buildCustomerPricingResponse({
+    const run = (observed, features, poolCage = 'NO') => buildCustomerPricingResponse({
       db: null,
       propertyLookup: async () => ({
         enriched: {
           homeSqFt: 2400, lotSqFt: 8000, stories: 1,
-          pool: 'NO', poolCage: 'UNKNOWN', poolCageSize: 'NONE', nearWater: 'NONE',
+          pool: 'NO', poolCage, poolCageSize: 'NONE', nearWater: 'NONE',
           _observed: {
             propertyType: false, shrubDensity: false, treeDensity: false,
             landscapeComplexity: false, irrigationVisible: false,
@@ -331,6 +331,47 @@ describe('customer pricing AI helpers', () => {
     expect(price(synthesizedBare)).toBeGreaterThan(0);
     expect(price(synthesizedWithSeed)).toBeGreaterThan(price(synthesizedBare));
     expect(price(observedWithSeed)).toBe(price(synthesizedBare));
+  });
+
+  test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
+    // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
+    // adoption rule maps only 'YES' to true. So an observed-but-undecided
+    // read is NOT a backing: counting it as one blocked the accepted-
+    // estimate seed for a field the lookup never decided, and a previously
+    // priced cage silently became false — publishing an exact per-
+    // application price BELOW the one real money was quoted on.
+    const run = (poolCage, features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          pool: 'NO', poolCage, poolCageSize: 'NONE', nearWater: 'NONE',
+          _observed: {
+            propertyType: false, shrubDensity: false, treeDensity: false,
+            landscapeComplexity: false, irrigationVisible: false,
+            // Observed: the vision read DID supply the field — it just
+            // didn't decide it.
+            pool: true, poolCage: true, poolCageSize: true, nearWater: true,
+          },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-possible' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const seed = { poolCage: true, poolCageSize: 'large' };
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    const bare = await run('POSSIBLE', null);
+    expect(price(bare)).toBeGreaterThan(0);
+    // POSSIBLE (and any other undecided answer) leaves the seed free to fill.
+    expect(price(await run('POSSIBLE', seed))).toBeGreaterThan(price(bare));
+    expect(price(await run('UNKNOWN', seed))).toBeGreaterThan(price(bare));
+    // A DECIDED negative still outranks the seed — r8's guarantee is intact.
+    expect(price(await run('NO', seed))).toBe(price(bare));
   });
 });
 

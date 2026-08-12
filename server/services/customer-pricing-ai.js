@@ -604,13 +604,29 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         // comes from the profile's _observed provenance bits instead.
         // Legacy cached profiles without _observed keep presence semantics.
         const obs = (p._observed && typeof p._observed === 'object') ? p._observed : null;
+        // An UNCERTAIN read is not a backing (codex #3367 PR r11): the vision
+        // schema explicitly permits 'POSSIBLE' for pool and poolCage, and the
+        // adoption line below maps only 'YES' to true. Counting POSSIBLE as
+        // lookup-backed therefore blocks the accepted-estimate seed for a
+        // field the lookup never actually decided — a previously priced
+        // pool/cage silently becomes false and the report publishes an EXACT
+        // per-application price BELOW the one real money was quoted on. Only
+        // a decided answer backs the field; POSSIBLE stays open to the seed
+        // and, with no seed, keeps the estimator's own doctrine (a satellite-
+        // only pool is never charged). poolCageSize is derived from poolCage
+        // (normalizePoolCageSize returns 'NONE' unless the cage is a YES), so
+        // it is only decided when the cage itself is.
+        const decidedFeature = (value) => {
+          const v = String(value == null ? '' : value).trim().toUpperCase();
+          return v === 'YES' || v === 'NO';
+        };
         for (const [key, present] of Object.entries({
           // pool/cage/water are synthesized display STRINGS when unobserved
           // ('NO'/'UNKNOWN'/'NONE' — codex #3367 PR r8), so presence lies
           // for them exactly like the densities.
-          pool: obs ? !!obs.pool : !!p.pool,
-          poolCage: obs ? !!obs.poolCage : !!p.poolCage,
-          poolCageSize: obs ? !!obs.poolCageSize : !!p.poolCageSize,
+          pool: (obs ? !!obs.pool : !!p.pool) && decidedFeature(p.pool),
+          poolCage: (obs ? !!obs.poolCage : !!p.poolCage) && decidedFeature(p.poolCage),
+          poolCageSize: (obs ? !!obs.poolCageSize : !!p.poolCageSize) && decidedFeature(p.poolCage),
           nearWater: obs ? !!obs.nearWater : !!p.nearWater,
           shrubs: obs ? !!obs.shrubDensity : !!p.shrubDensity,
           trees: obs ? !!obs.treeDensity : !!p.treeDensity,

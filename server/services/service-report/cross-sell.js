@@ -88,6 +88,66 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 
+// True only when NOTHING on file contradicts "this customer has a single
+// premises, the primary one" (codex #3367 PR r11 P1). Used by the unlinked-
+// report branch, where the report's address is the customer mirror and so
+// carries no evidence of its own. Deliberately a PROOF of single-premises,
+// not a search for a second one: an unreadable witness throws and the outer
+// catch suppresses the card, which is the same fail-closed posture the
+// linked branches take.
+async function customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet) {
+  // The eligibility flag the discount engine already trusts for multi-home
+  // status — admins hand-set it for customers whose second property never
+  // made it into customer_properties.
+  if (customer?.has_multi_home === true) return false;
+  const linkage = require('../estimate-property-linkage');
+  const provablyPrimary = (key) => {
+    if (!key) return false;
+    if (!linkage.sameScopeKey(key, primaryStreet)) return false;
+    // Same street, but disjoint locality evidence (city-only vs zip-only)
+    // matches across cities under sameScopeKey's per-field wildcard — the
+    // r6/r7 rule. A key with NO locality at all is the legacy partial stamp:
+    // it names the primary street and nothing contradicts it, so it does not
+    // count as a second premises (the branch above already treats the
+    // report's own partial street that way).
+    if (linkage.scopeKeyLacksLocality(key)) return true;
+    return scopeKeysShareLocality(key, primaryStreet);
+  };
+  const properties = await database('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .select('address_line1', 'address_line2', 'city', 'zip');
+  if (properties.length >= 2) return false;
+  for (const row of properties) {
+    if (!provablyPrimary(linkage.normalizedStampedStreet(row.address_line1, row.address_line2, row.city, row.zip))) {
+      return false;
+    }
+  }
+  // customer_properties is gated (GATE_CUSTOMER_PROPERTIES) and empty for
+  // accounts that predate it, so the STAMPED visit addresses are the second
+  // witness: dispatch stamps the premises it routed to, and a stamp that
+  // cannot be proven to be the primary is a second premises on this account.
+  const cols = await database('scheduled_services').columnInfo();
+  if (!cols.service_address_line1) return true;
+  const stampCols = ['service_address_line1'];
+  for (const col of ['service_address_line2', 'service_address_city', 'service_address_zip']) {
+    if (cols[col]) stampCols.push(col);
+  }
+  const stamped = await database('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotNull('service_address_line1')
+    .distinct(stampCols);
+  return stamped.every((row) => {
+    // An UNSTAMPED row is not evidence of a second premises — it is the
+    // absence of evidence, and its property_id/creating-estimate resolution
+    // is already covered by the customer_properties witness above. Only a
+    // row that actually names a premises can contradict.
+    if (!String(row.service_address_line1 || '').trim()) return true;
+    return provablyPrimary(linkage.normalizedStampedStreet(
+      row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip
+    ));
+  });
+}
+
 // Stable digest of every field the card RENDERS. Key order is fixed by
 // construction, so the same visible offer always hashes identically.
 function offerFingerprint(payload = {}) {
@@ -324,6 +384,22 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         service.address_line1, service.address_line2, service.city, service.zip
       );
       if (reportStreet && !linkage.sameScopeKey(reportStreet, primaryStreet)) {
+        return null;
+      }
+      // An UNLINKED report cannot be resolved to a property at all (codex
+      // #3367 PR r11 P1). service_records.scheduled_service_id is explicitly
+      // nullable for historical rows whose visit could not be matched
+      // unambiguously (20260427000007_service_records_scheduled_service_id),
+      // and the route COALESCEs address_* from the CUSTOMER mirror whenever
+      // no scheduled row joins — so the divergence check above reads the
+      // primary address against itself and can only ever prove EQUAL. For a
+      // single-premises account that is harmless: there is one property to
+      // price. For a multi-property account it silently prices an old
+      // SECONDARY-property report from the primary profile and persists that
+      // price on the click, so the card must prove single-premises or
+      // suppress. Unprovable = no card, the same posture the linked branches
+      // above take (a throw here rides the outer catch to the same place).
+      if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
         return null;
       }
     }

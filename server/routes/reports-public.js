@@ -28,6 +28,25 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
+// Canonical (sorted-key) serializer — the repo's existing one, already shared
+// across service-report modules. Used to compare a JSONB round-trip against a
+// freshly built object without tripping over PostgreSQL's key ordering.
+const { stableStringify } = require('../services/service-report/ai-summary');
+const parseJsonOrNull = (value) => { try { return JSON.parse(value); } catch { return null; } };
+
+// Does a stored service_requests.pricing_revision already hold exactly this
+// offer snapshot? Compared STRUCTURALLY (codex #3367 PR r11 P2):
+// pricing_revision is JSONB, so PostgreSQL stores it decomposed and returns
+// its own canonical key order — and its own numeric form (114.00 → 114.00,
+// not 114). A raw string compare against a freshly serialized object
+// therefore misses on ordering alone, so an identical repeat tap would churn
+// the row and mint another event row instead of being the intended no-op.
+// Both sides are parsed to JS values and canonically serialized; an
+// unparsable stored value simply fails to match and takes the refresh path.
+function storedRevisionMatches(stored, snapshot) {
+  const prior = typeof stored === 'string' ? parseJsonOrNull(stored) : (stored ?? null);
+  return stableStringify(prior) === stableStringify(snapshot);
+}
 const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -217,13 +236,19 @@ const reportEventLimiter = rateLimit({
 // promise-wrapped limiter would leave the async handler suspended forever
 // (pre-push P1). skip() keeps every other event on the analytics limiter
 // alone — the body is already parsed when this runs.
+// skip() must read the event name EXACTLY as the handler does (codex
+// #3367 PR r11 P1): the handler trims before matching, so comparing the
+// raw body value here let `' cross_sell_requested '` skip this limiter and
+// drive the full recomputation + durable writes at the 120/min analytics
+// rate. One normalizer, both call sites.
+const normalizedEventName = (req) => String(req?.body?.eventName || '').trim();
 const crossSellActionLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => `xsell:${req.params.token || 'anon'}`,
-  skip: (req) => req.body?.eventName !== 'cross_sell_requested',
+  skip: (req) => normalizedEventName(req) !== 'cross_sell_requested',
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -1010,7 +1035,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const eventName = String(req.body?.eventName || '').trim();
+    const eventName = normalizedEventName(req);
     const channel = String(req.body?.channel || 'public_report').trim();
     if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
       return res.status(400).json({ error: 'Unknown report event' });
@@ -1151,6 +1176,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // request (start → add) while the ladder target held, the reused
           // row's subject must match the newly validated snapshot too.
           const requestSubject = `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`;
+          // One server-computed snapshot for insert, dedupe compare, AND the
+          // refresh update — the three must never drift apart.
+          const revisionSnapshot = { source: 'service_report', serviceRecordId: service.id, crossSell };
           const outcome = await db.transaction(async (trx) => {
             // Serialize per customer: the row lock makes check-then-insert
             // idempotent (the estimate flow's partial-unique index only
@@ -1172,11 +1200,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               // An IDENTICAL resubmission (same validated snapshot and
               // subject) is a pure no-op (local codex r15 P1): no row
               // churn, no extra event row — the card simply re-confirms.
-              const nextRevision = JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell });
-              const priorRevision = typeof existing.pricing_revision === 'string'
-                ? existing.pricing_revision
-                : JSON.stringify(existing.pricing_revision ?? null);
-              if (priorRevision === nextRevision && existing.subject === requestSubject) {
+              // The snapshot compare is structural (see storedRevisionMatches).
+              if (storedRevisionMatches(existing.pricing_revision, revisionSnapshot)
+                && existing.subject === requestSubject) {
                 return { deduped: true };
               }
               // Refresh the stored snapshot to THIS click's validated offer
@@ -1187,7 +1213,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               await trx('service_requests').where({ id: existing.id }).update({
                 subject: requestSubject,
                 description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
-                pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
+                pricing_revision: JSON.stringify(revisionSnapshot),
               });
               await recordEvent();
               return { deduped: true };
@@ -1203,7 +1229,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               status: 'new',
               // The server-computed offer snapshot — the shown price is the
               // honored price (sent-quote price-lock doctrine).
-              pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
+              pricing_revision: JSON.stringify(revisionSnapshot),
             }).returning('*');
             await recordEvent();
             return { request };
@@ -2182,3 +2208,4 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
+module.exports.storedRevisionMatches = storedRevisionMatches;
