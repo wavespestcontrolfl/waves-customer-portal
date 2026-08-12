@@ -274,6 +274,38 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   };
 }
 
+// ── Lookup-derived category conflict ───────────────────────────
+
+// Commercial verdicts that describe a RESIDENTIAL multifamily property —
+// detectCategory types apartment/HOA-common-area records and ≥5-unit
+// aggregates COMMERCIAL because it answers the WHOLE-PROPERTY question.
+// A resident of one unit in such a building is a residential customer, so
+// only these verdicts may be exempted for a residential-unit scope; an
+// office/retail condo's verdict (subtype office_retail) must still
+// conflict (codex r16 P1).
+const RESIDENTIAL_MULTIFAMILY_SUBTYPES = new Set([
+  'multifamily_common_area_residential',
+  'hoa_common_area_residential',
+]);
+
+/**
+ * The lookup's own COMMERCIAL verdict as a category conflict against a
+ * residential intent, or null. Pure so the rule is directly pinnable.
+ */
+function lookupCategoryConflict({
+  isCommercialIntent, enrichedCategory, commercialSubtype,
+  commercialDetectionSource, serviceScope,
+}) {
+  if (isCommercialIntent === true) return null;
+  if (String(enrichedCategory || '').toUpperCase() !== 'COMMERCIAL') return null;
+  const residentialMultifamilyVerdict =
+    RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(String(commercialSubtype || ''))
+    // The ≥5-unit stacked aggregate: a unit count, not a commercial use.
+    || commercialDetectionSource === 'property_record_unit_count';
+  if (serviceScope === 'residential_unit' && residentialMultifamilyVerdict) return null;
+  return 'lookup_category:commercial';
+}
+
 /**
  * Gate ON only: resolve a unit/suite scope's lot as NOT APPLICABLE — a
  * resolved fact, not missing data (property-facts-v2 doctrine). A lot
@@ -326,6 +358,7 @@ module.exports = {
   commercialCategoryConflict,
   resolveUnitScopeModel,
   applyUnitScopeToPropertyFacts,
+  lookupCategoryConflict,
   _private: {
     resolvePropertyUse,
     resolveCustomerRelationship,

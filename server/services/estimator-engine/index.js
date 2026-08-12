@@ -1555,7 +1555,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     try {
       const {
         unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
-        commercialCategoryConflict,
+        commercialCategoryConflict, lookupCategoryConflict,
       } = require('./unit-scope-model');
       // The cross-property fence applies only when the composer quoted a
       // genuinely DIFFERENT property. addressRegathered also fires on
@@ -1595,30 +1595,25 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // scope must be exempt or a valid second-property apartment quote
       // would always red-lane (codex r13 P2) — the exact conflation this
       // lane exists to end: a unit tenant is a residential customer.
-      // The exemption needs POSITIVE residential evidence, not merely a
-      // subpremise-promoted scope: resolveUnitScopeModel labels any
-      // residential-intent address carrying a Unit/Suite token
-      // 'residential_unit', so a lookup-verified Office at "…, Suite 2"
-      // would otherwise suppress its own COMMERCIAL verdict (codex r15
-      // P1). propertyUse comes from the record/extraction type, so only a
-      // real condo/apartment classification exempts.
-      const quotedIsResidentialUnit = unitScope.serviceScope === 'residential_unit'
-        && ['condominium', 'multifamily_rental'].includes(unitScope.propertyUse);
       // The LOOKUP's own verdict on the quoted property, applied on BOTH
       // paths (codex r14 P1: the primary path checked only the extraction,
       // so a county-typed office/warehouse with a residential-or-unknown
-      // extraction slipped through). A whole-structure multifamily owner
-      // can land here too — deliberately conservative: the operator
-      // decides whether a complex owner is a commercial client.
-      const lookupCategoryConflict = (intent.is_commercial !== true && effectiveParcelOk
-        && !quotedIsResidentialUnit
-        && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
-        ? 'lookup_category:commercial'
+      // extraction slipped through). The residential-unit exemption is
+      // decided by the VERDICT's own subtype/source, not the scope label
+      // alone — see lookupCategoryConflict (codex r15/r16 P1s).
+      const lookupConflict = effectiveParcelOk
+        ? lookupCategoryConflict({
+          isCommercialIntent: intent.is_commercial,
+          enrichedCategory: effectiveSignals.enriched?.category,
+          commercialSubtype: effectiveSignals.enriched?.commercialSubtype,
+          commercialDetectionSource: effectiveSignals.enriched?.commercialDetectionSource,
+          serviceScope: unitScope.serviceScope,
+        })
         : null;
       propertyFacts.categoryConflict = crossPropertyRegather
-        ? lookupCategoryConflict
+        ? lookupConflict
         : (commercialCategoryConflict({ extraction: context.extraction, intent })
-          || lookupCategoryConflict);
+          || lookupConflict);
       // The lot-clearing mutation runs on BOTH paths: the cross-property
       // fence already lives at the model's INPUT (extraction nulled,
       // tenancy suppressed above), so any unit scope the model still

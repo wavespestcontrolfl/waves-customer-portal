@@ -204,6 +204,54 @@ describe('commercialCategoryConflict', () => {
   });
 });
 
+describe('lookupCategoryConflict — the lookup verdict vs a residential intent', () => {
+  const { lookupCategoryConflict } = require('../services/estimator-engine/unit-scope-model');
+
+  test('a residential apartment/HOA verdict on a unit scope is exempt', () => {
+    // detectCategory types every apartment record COMMERCIAL (it answers
+    // the whole-property question) — a resident of one unit is residential.
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'multifamily_common_area_residential', serviceScope: 'residential_unit',
+    })).toBeNull();
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'hoa_common_area_residential', serviceScope: 'residential_unit',
+    })).toBeNull();
+    // The ≥5-unit stacked aggregate is a unit count, not a commercial use.
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'other', commercialDetectionSource: 'property_record_unit_count',
+      serviceScope: 'residential_unit',
+    })).toBeNull();
+  });
+
+  test('a genuinely commercial verdict conflicts even on a unit scope', () => {
+    // An office/retail condo, or a lookup-verified Office at "…, Suite 2"
+    // that the subpremise rule promoted to residential_unit (codex r16 P1).
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'office_retail', serviceScope: 'residential_unit',
+    })).toBe('lookup_category:commercial');
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'warehouse_light', serviceScope: 'entire_residential_structure',
+    })).toBe('lookup_category:commercial');
+  });
+
+  test('no conflict when the intent is commercial or the lookup is residential', () => {
+    expect(lookupCategoryConflict({
+      isCommercialIntent: true, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'office_retail', serviceScope: 'commercial_suite',
+    })).toBeNull();
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'RESIDENTIAL',
+      serviceScope: 'entire_residential_structure',
+    })).toBeNull();
+    expect(lookupCategoryConflict({ isCommercialIntent: false, enrichedCategory: null })).toBeNull();
+  });
+});
+
 describe('kill-switch isolation from the V2 gate (r12)', () => {
   const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
 
