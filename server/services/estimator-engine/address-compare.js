@@ -65,7 +65,7 @@ function canonicalizeRouteTokens(tokens) {
   return out;
 }
 
-function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
+function sameStreetAddress(a, b, { requireExactUnit = false, requireNamedUnit = false } = {}) {
   const normSegment = (s) => canonicalizeRouteTokens(String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -120,7 +120,16 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   // credential for Apt A cannot authenticate Apt B. Duplicate detection uses
   // the default conservative mode below because one missing unit is not proof
   // that two active-service records are different properties.
-  if (requireExactUnit && aa.unit !== bb.unit) return false;
+  // requireNamedUnit is the stronger form, for a caller AUTHENTICATING a
+  // unit rather than merely separating two of them: a unit credential needs
+  // an actual unit to be scoped TO, and two addresses that both lack a unit
+  // ID authenticate nothing — a building-level saved measurement would
+  // otherwise compare "exactly equal" to an apartment quote that never
+  // stated its unit, because unit-less === unit-less (codex pre-push r20
+  // P1). Duplicate detection and re-gather decisions keep the conservative
+  // default; only an explicit opt-in gets this.
+  if (requireNamedUnit && !(aa.unit && bb.unit)) return false;
+  if ((requireExactUnit || requireNamedUnit) && aa.unit !== bb.unit) return false;
   // A known-vs-unknown unit remains a possible duplicate and therefore
   // compares equal conservatively. Only two explicit, different unit IDs are
   // proven separate service addresses.

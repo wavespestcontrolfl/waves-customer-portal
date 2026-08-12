@@ -1181,3 +1181,53 @@ describe('a profile measurement cannot silence the unit no-lot review (r19)', ()
     expect(unmatched.measuredTurfUnitVerified).toBeUndefined();
   });
 });
+
+describe('requireNamedUnit — authenticating a unit needs an actual unit (r20)', () => {
+  const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+  const saved = (l1, l2) => [[l1, l2].filter(Boolean).join(' '), 'Sarasota', '34236'].filter(Boolean).join(', ');
+
+  test('two unit-less addresses authenticate nothing', () => {
+    // The saved profile is building-level (or its unit was never captured)
+    // and the quote never stated a unit — 'exactly equal' here would let a
+    // building measurement stand in for the priced apartment.
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr'), '1400 Lakefront Dr, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(false);
+    // The weaker mode still answers its own question (same parcel, no unit
+    // to separate them) — duplicate detection and re-gather are unchanged.
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr'), '1400 Lakefront Dr, Sarasota, FL 34236',
+      { requireExactUnit: true },
+    )).toBe(true);
+  });
+
+  test('one-sided and mismatched units never authenticate', () => {
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr', 'Apt 7109'), '1400 Lakefront Dr, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(false);
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr'), '1400 Lakefront Dr Apt 7109, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(false);
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr', 'Apt 7109'), '1400 Lakefront Dr Apt 5202, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(false);
+  });
+
+  test('the same named unit on both sides authenticates — including a unit saved in line2', () => {
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr', 'Apt 7109'), '1400 Lakefront Dr Apt 7109, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(true);
+  });
+
+  test('a different street is still a different property', () => {
+    expect(sameStreetAddress(
+      saved('1400 Lakefront Dr', 'Apt 7109'), '1400 Bayshore Dr Apt 7109, Sarasota, FL 34236',
+      { requireNamedUnit: true },
+    )).toBe(false);
+  });
+});

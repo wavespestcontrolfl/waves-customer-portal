@@ -1513,6 +1513,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // and consumed ONLY where a measurement can SUPPRESS review;
     // profileDescribesQuotedProperty keeps its existing tolerant semantics
     // for everything else, so no pricing input changes here.
+    // requireNamedUnit, not merely requireExactUnit: this flag has to
+    // AUTHENTICATE the priced unit, and two addresses that both lack a unit
+    // ID authenticate nothing — a building-level saved property_sqft would
+    // pass an exact-match test against an apartment quote whose unit was
+    // never stated, and the scope can still be a unit by extraction or
+    // property type (codex pre-push r20 P1). No unit on both sides ⇒ false
+    // ⇒ the draft parks, which is the correct answer for an unauthenticated
+    // measurement.
     const customerSavedUnitAddress = trustedCustomer?.address_line1
       ? [
         [trustedCustomer.address_line1, trustedCustomer.address_line2].filter(Boolean).join(' '),
@@ -1522,7 +1530,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       : null;
     const profileMeasurementUnitExact = profileDescribesQuotedProperty
       && !!(customerSavedUnitAddress && quotedAddress
-        && sameStreetAddress(customerSavedUnitAddress, quotedAddress, { requireExactUnit: true }));
+        && sameStreetAddress(customerSavedUnitAddress, quotedAddress, { requireNamedUnit: true }));
 
     // Did the composer switch to a DIFFERENT property (not merely refine
     // the same street with locality)? Computed here because BOTH the V2
