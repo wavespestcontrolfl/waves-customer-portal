@@ -1286,18 +1286,32 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 // skip the extra query. Falls back to the passed `prefs` row on any miss.
 async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
   let channelPrefs = prefs;
+  // A FAILED owner-resolution read (as distinct from "no row") must surface
+  // on the returned row (Codex #3361 r28 P1): the fallback prefs below are
+  // then the CHILD/default toggles, not the account owner's stored choices,
+  // and getReminderPrefs' `unavailable` only covered the initial child-row
+  // query — a swallowed failure here left prefsKnown=true and let the
+  // consent-blocked email fallback mail past an owner opt-out it never read.
+  // The sentinel rides the row itself (same __prefsUnavailable shape the
+  // PREFS_UNAVAILABLE marker uses) so every consumer of this resolver sees
+  // it; channel readers ignore the extra key.
+  let resolutionFailed = false;
+  const swallow = () => { resolutionFailed = true; return null; };
   const customer = (customerRow && customerRow.account_id !== undefined)
     ? customerRow
-    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
     const primary = await db('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
       .first('id')
-      .catch(() => null);
+      .catch(swallow);
     if (primary && String(primary.id) !== String(customerId)) {
-      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(() => null);
+      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
+  }
+  if (resolutionFailed) {
+    channelPrefs = { ...(channelPrefs || {}), __prefsUnavailable: true };
   }
   return channelPrefs;
 }
@@ -1314,8 +1328,11 @@ async function getReminderPrefs(customerId) {
     // email fallback) must fail CLOSED on this (Codex #3361 r22 P1).
     // Sentinel marker checked directly (same shape customer-contact's
     // prefsUnavailable() accepts) so partial test doubles of that module
-    // don't have to carry the helper.
-    unavailable: prefs?.__prefsUnavailable === true,
+    // don't have to carry the helper. Covers BOTH the child-row query and
+    // the owner-profile channel resolution (Codex #3361 r28 P1): a
+    // secondary-profile appointment whose owner lookup failed is equally
+    // unknowable.
+    unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
     smsEnabled: prefs?.sms_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,

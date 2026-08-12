@@ -65,6 +65,30 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // backstop). Existing callers that ignore the return value are
   // unaffected.
   let coreLegsOk = true;
+  // 0. Office-confirm clearance stamp — FIRST, before every best-effort leg
+  // (Codex #3361 r28 P1): the calling route already committed the
+  // confirmation, so a process exit inside any leg below leaves the row
+  // customer_confirmed with no retry rail (the legacy sweep skips stamped
+  // rows) — an unstamped clearance would then lock the card invitation out
+  // of the pre-visit sweep forever. The office confirmation IS the
+  // call-level clearance decision (the human just re-confirmed with the
+  // customer), and the sweep no longer accepts status='confirmed' as that
+  // evidence because lazy activation of a silently-rescheduled legacy row
+  // lands on the same status (r27 P1). Guarded whereNull — never overwrites
+  // a processor stamp; recipient stays with the funnel's normal resolution.
+  // Lazy-activation callers (suppressCardAskWithoutClearance) only READ the
+  // stamp, and field confirms (skipCardRequest) deliberately don't stamp:
+  // the tech collects in person, and the sweep must not text later.
+  if (!opts.suppressCardAskWithoutClearance && !opts.skipCardRequest) {
+    try {
+      await db('scheduled_services')
+        .where({ id: svc.id })
+        .whereNull('call_sms_cleared_at')
+        .update({ call_sms_cleared_at: new Date() });
+    } catch (stampErr) {
+      logger.warn(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id}: ${stampErr.message}`);
+    }
+  }
   // 1. Arm the 72h/24h reminders that were deferred at booking time.
   // Idempotent (registerAppointment dedupes by scheduled_service_id);
   // sendConfirmation:false = arm reminders only, the office owns any
@@ -302,26 +326,6 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     try {
       const { requestCardForAppointment } = require('./appointment-card-request');
       let cardCallOpts = {};
-      if (!opts.suppressCardAskWithoutClearance) {
-        // OFFICE confirmation is a call-level clearance decision — the
-        // human just re-confirmed the appointment with the customer, the
-        // same trust point that releases this leg's send. Stamp it durably
-        // BEFORE the funnel call so the pre-visit sweep can re-admit this
-        // row later: the sweep no longer treats status='confirmed' as
-        // office confirmation, because a lazily-activated legacy row
-        // (silent reschedule) carries that status too (Codex #3361 r27
-        // P1). Never overwrites a processor stamp; recipient is left to
-        // the funnel's normal resolution. Warn-only — a failed stamp only
-        // costs the sweep re-admission, and this leg's own send still runs.
-        try {
-          await db('scheduled_services')
-            .where({ id: svc.id })
-            .whereNull('call_sms_cleared_at')
-            .update({ call_sms_cleared_at: new Date() });
-        } catch (stampErr) {
-          logger.warn(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id}: ${stampErr.message}`);
-        }
-      }
       if (opts.suppressCardAskWithoutClearance) {
         // Only a durable call-level clearance stamp lets the lazy path send;
         // otherwise non-messaging mode (auto-secure still runs, the

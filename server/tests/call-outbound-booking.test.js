@@ -405,7 +405,7 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
 // select()/update() so the triage-payload path and the fallback lead lookup
 // can be exercised independently.
 function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null } = {}) {
-  const state = { triageResolved: false };
+  const state = { triageResolved: false, updates: [] };
   const fn = (table) => {
     const q = {};
     ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
@@ -415,7 +415,11 @@ function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null 
       if (table === 'leads') return leadRow;
       return null;
     });
-    q.update = jest.fn(async () => { if (table === 'triage_items') state.triageResolved = true; return 1; });
+    q.update = jest.fn(async (vals) => {
+      state.updates.push({ table, vals });
+      if (table === 'triage_items') state.triageResolved = true;
+      return 1;
+    });
     return q;
   };
   fn.fn = { now: () => new Date() };
@@ -486,10 +490,26 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     const db = confirmHookDb({ fallbackLeads: [] });
     await runOutboundReviewConfirmHook(db, svc, 'test', { skipCardRequest: true });
     expect(requestCardForAppointment).not.toHaveBeenCalled();
+    // A field confirm never stamps the call-level clearance either — the
+    // tech collects in person, and the pre-visit sweep must not text later.
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.call_sms_cleared_at)).toBe(false);
     await runOutboundReviewConfirmHook(db, svc, 'test');
     expect(requestCardForAppointment).toHaveBeenCalledWith(
       expect.objectContaining({ scheduledServiceId: 'svc1', trigger: 'outbound_review_confirm' }),
     );
+  });
+
+  test('the office-confirm clearance stamp lands FIRST — a failed leg cannot strand it (Codex r28 P1)', async () => {
+    // The calling route already committed the confirmation, so a process
+    // exit inside any best-effort leg leaves the row customer_confirmed
+    // with no retry rail (the legacy sweep skips stamped rows) — an
+    // unstamped clearance would lock the card invite out of the pre-visit
+    // sweep forever. Simulate the worst leg failure and require the stamp.
+    AppointmentReminders.registerAppointment.mockResolvedValueOnce(null);
+    const db = confirmHookDb({ fallbackLeads: [] });
+    const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(ok).toBe(false); // the failed leg still reports retryable
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.call_sms_cleared_at)).toBe(true);
   });
 
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {
@@ -646,7 +666,7 @@ describe('round 27 — clearance is stamped, side effects wait for commits, repa
     // processor stamp; the suppressed lazy path only READS the stamp.
     const hook = read('../services/outbound-review-confirm.js');
     expect(hook).toContain(".whereNull('call_sms_cleared_at')");
-    expect(hook).toContain('if (!opts.suppressCardAskWithoutClearance) {');
+    expect(hook).toContain('if (!opts.suppressCardAskWithoutClearance && !opts.skipCardRequest) {');
     const sweep = read('../services/previsit-card-request-sweep.js');
     expect(sweep).not.toContain("outboundConfirmed");
     expect(sweep).toContain("orWhereNotNull('s.call_sms_cleared_at')");

@@ -199,6 +199,36 @@ describe('getReminderPrefs account-level channel resolution', () => {
     expect(prefs.serviceReminder72h).toBe(true);
   });
 
+  test('a FAILED owner-profile resolution marks prefs unavailable — the email fallback fails closed (Codex #3361 r28 P1)', async () => {
+    // A swallowed owner-resolution failure is NOT "no row": the resolved
+    // channel/opt-out state is the child/default fallback, not the account
+    // owner's stored choices — prefsKnown must go false so the
+    // consent-blocked confirmation email fallback (which bypasses the
+    // sendCustomerMessage opt-out validator) never mails past an opt-out
+    // it never read.
+    const failingChain = () => {
+      const q = {};
+      ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => { throw new Error('conn reset'); });
+      return q;
+    };
+    setDbQueues({
+      notification_prefs: [
+        // property's own prefs read fine…
+        firstChain({ appointment_confirmation_channel: 'sms' }),
+        // …but the owner's prefs read FAILS
+        failingChain(),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: false }),
+        firstChain({ id: 'primary-1' }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('secondary-1');
+    expect(prefs.unavailable).toBe(true);
+  });
+
   test('primary profile uses its own channel without an extra lookup', async () => {
     setDbQueues({
       notification_prefs: [
