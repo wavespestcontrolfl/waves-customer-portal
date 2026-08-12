@@ -24,6 +24,10 @@ jest.mock('../utils/lead-service-interest', () => ({ composeServiceInterest: jes
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/email', () => ({ send: jest.fn() }));
+// The INTERNAL admin feed an existing customer's stated instruction lands on
+// (the same NotificationService the re-service lane files to). Internal only —
+// it is a bell/push entry for a human, never a customer-facing send.
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
@@ -277,6 +281,53 @@ describe('extracted_data is MERGED, not replaced', () => {
     await createLeadFromExtraction({ call_summary: 'Quote.' }, { phone: CALLER });
     expect(() => JSON.parse(leadUpdate().extracted_data)).not.toThrow();
     expect(JSON.parse(leadUpdate().extracted_data)).toMatchObject({ source: 'voice_agent' });
+  });
+});
+
+// ⭐ AN EXISTING LIFECYCLE CUSTOMER HAS NO LEAD TO RECORD IT ON. The writer
+// returns early for them (an ordinary support call must not reopen a won
+// customer as a lead), which took the whole captured instruction with it — a
+// caller who said "stop texting me" was answered "saved" and nothing was kept.
+// Nothing here writes consent or suppression state; the instruction is
+// SURFACED to a human on the same internal admin feed the re-service lane uses.
+describe('existing-customer contact instructions still reach a human', () => {
+  const NotificationService = require('../services/notification-service');
+  const LIFECYCLE = { id: 'c-777', pipeline_stage: 'active_customer', first_name: 'Pat' };
+
+  beforeEach(() => {
+    primeDb();
+    tables.customers = makeBuilder('customers', [LIFECYCLE]);
+    NotificationService.notifyAdmin.mockClear();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1' });
+  });
+
+  test('a DO-NOT-CONTACT request from a lifecycle customer is surfaced, not dropped', async () => {
+    const out = await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-1' },
+    );
+    expect(out).toMatchObject({ leadId: null, customerId: 'c-777' }); // still no lead work
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/DO-NOT-CONTACT request/i);
+    expect(body).toMatch(/Nothing was changed automatically/i);
+    expect(opts.metadata).toMatchObject({ customerId: 'c-777', do_not_contact_request: true, source: 'voice_agent' });
+    expect(opts.link).toContain('c-777');
+    // Still no suppression/consent write anywhere, and nothing customer-facing.
+    assertNoSuppressionWrite();
+  });
+
+  test('a lifecycle customer who stated NO preference triggers no notification', async () => {
+    await createLeadFromExtraction({ call_summary: 'Just asking about the last visit.' }, { phone: CALLER });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a notification failure never surfaces to the caller (fail-open)', async () => {
+    NotificationService.notifyAdmin.mockRejectedValue(new Error('bell down'));
+    await expect(createLeadFromExtraction(
+      { call_summary: 'Stop texting me.', do_not_contact_request: true },
+      { phone: CALLER },
+    )).resolves.toMatchObject({ leadId: null });
   });
 });
 

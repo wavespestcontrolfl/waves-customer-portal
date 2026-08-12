@@ -80,6 +80,54 @@ function contactPreferenceFields(extracted = {}) {
   };
 }
 
+/**
+ * A stated contact instruction from a caller who is an EXISTING lifecycle
+ * customer — the one case with no lead row to record it on.
+ *
+ * Nothing here writes consent, suppression or messaging-preference state (the
+ * voice agent never does — that stays a human decision). This only makes sure
+ * the instruction REACHES a human: the same internal admin notification feed
+ * the re-service lane files to, on the customer's own deep link. Internal-only
+ * and fail-open by contract — the caller is on the line and a notification
+ * hiccup can never surface to them.
+ */
+async function surfaceContactInstructionForCustomer(customer, extracted = {}, opts = {}) {
+  const instruction = contactPreferenceFields(extracted);
+  if (!customer || !customer.id || !instruction) return false;
+  const dnc = instruction.do_not_contact_request === true;
+  try {
+    const NotificationService = require('./notification-service');
+    const notif = await NotificationService.notifyAdmin(
+      'service',
+      `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
+      [
+        dnc ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.' : null,
+        instruction.preferred_contact_method ? `Preferred method: ${instruction.preferred_contact_method}.` : null,
+        instruction.contact_preference ? `In their words: "${instruction.contact_preference}"` : null,
+      ].filter(Boolean).join('\n'),
+      {
+        icon: dnc ? '🚫' : '📞',
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+        metadata: {
+          customerId: customer.id,
+          source: 'voice_agent',
+          callSid: opts.callSid || null,
+          ...instruction,
+        },
+      },
+    );
+    if (!notif) {
+      logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc})`);
+      return false;
+    }
+    logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);
+    return true;
+  } catch (err) {
+    logger.error(`[voice-agent-lead] contact instruction surfacing FAILED for customer ${customer.id}: ${err.message}`);
+    return false;
+  }
+}
+
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
 const nameCase = (v) => (v && String(v).trim() ? properCase(String(v).trim()) : null);
 
@@ -209,6 +257,14 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // proceed below.
   if (customer && !isLeadStage(customer.pipeline_stage)) {
     logger.info(`[voice-agent-lead] Skipping lead for ${maskPhone(phone)} — existing ${customer.pipeline_stage || 'lifecycle'} customer`);
+    // …but a stated CONTACT INSTRUCTION is not lead work and must not leave
+    // with it. The lead row is where these get recorded for a human to action
+    // (nothing here ever writes consent or suppression state — see the header),
+    // and a lifecycle customer has no lead: the instruction would simply
+    // vanish, which for a "stop texting me" is the one outcome that matters.
+    // Surface it on the SAME internal admin feed the re-service lane uses, so
+    // it reaches a person instead of a dropped return value.
+    await surfaceContactInstructionForCustomer(customer, extracted, opts).catch(() => {});
     return { leadId: null, customerId, created: false };
   }
 

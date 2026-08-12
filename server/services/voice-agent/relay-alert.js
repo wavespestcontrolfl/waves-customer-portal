@@ -40,6 +40,21 @@ const { maskPhone } = require('./relay-protocol');
 
 const MAX_ALERT_BODY = 480; // two-ish SMS segments; the bell/push render truncates anyway
 
+/**
+ * Did an internal alert actually LAND? services/twilio.js suppresses
+ * owner-phone `internal_alert` sends and redirects them to the admin
+ * bell/push path — and that redirect returns `success: true` even when the
+ * notification write failed (`notificationUndelivered` / `notificationError`),
+ * because the SMS fallback is deliberately not taken. Only an explicit
+ * failure marker counts as undelivered, so a plain SMS result (no redirect
+ * keys) still reads as delivered.
+ */
+function internalAlertDelivered(result) {
+  if (!result || result.success === false) return false;
+  if (result.notificationUndelivered === true || result.notificationError === true) return false;
+  return true;
+}
+
 /** The owner phone, using the SAME env precedence the alert callers use. */
 function ownerAlertPhone() {
   return String(process.env.ADAM_PHONE || '').trim() || null;
@@ -117,7 +132,21 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
 
     // The SAME sender + messageType the self-booking confirm alert uses.
     const TwilioService = require('../twilio');
-    await TwilioService.sendSMS(to, body, { messageType: 'internal_alert' });
+    const sent = await TwilioService.sendSMS(to, body, { messageType: 'internal_alert' });
+    // ⭐ `success: true` IS NOT DELIVERY ON THIS PATH. The internal-alert
+    // redirect (services/twilio.js redirectInternalAdminSmsToNotification)
+    // returns success:true with `notificationUndelivered` / `notificationError`
+    // when the bell/push write itself failed — it suppressed the SMS and had
+    // nowhere to put the alert. Latching on that consumed the one-per-call
+    // budget for an alert nobody ever saw, and blocked the retry that would
+    // have paged the owner.
+    if (!internalAlertDelivered(sent)) {
+      logger.error(
+        `[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
+        + `(${sent && sent.notificationError ? 'notification error' : 'notification undelivered'}) — latch left open for a retry`
+      );
+      return false;
+    }
     // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
     // meant a transient Twilio/DB blip PERMANENTLY consumed the one-per-call
     // budget: the retry (or the second capture_lead) saw `alreadyAlerted` and
@@ -189,7 +218,17 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
       return false;
     }
     const TwilioService = require('../twilio');
-    await TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' });
+    const sent = await TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' });
+    // Same success-is-not-delivery rule as the hot-lead path: the ticket is
+    // durable either way, but an alert that never reached the bell must say so
+    // (the whole point of this lane is reaching a human, not the queue).
+    if (!internalAlertDelivered(sent)) {
+      logger.error(
+        `[voice-relay-alert] re-service owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
+        + `request=${request.requestId || 'n/a'} — the ticket is filed but unannounced`
+      );
+      return false;
+    }
     logger.info(`[voice-relay-alert] re-service owner alert sent callSid=${ctx.callSid || 'n/a'} request=${request.requestId || 'n/a'}`);
     return true;
   } catch (err) {

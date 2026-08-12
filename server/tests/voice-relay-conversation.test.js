@@ -210,6 +210,26 @@ describe('RelayConversation — explicit end after capture', () => {
       expect(createLeadFromExtraction).not.toHaveBeenCalled(); // no duplicate lead
     });
 
+    // The drain is BOUNDED — a wedged write outlives it. createLeadFromExtraction
+    // is not idempotent on callSid, so running the floor anyway recreates the
+    // very duplicate the drain exists to prevent.
+    test('a capture_lead still in flight past the drain bound SUPPRESSES the floor', async () => {
+      const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+      createLeadFromExtraction.mockClear();
+      jest.spyOn(relayTools, 'executeTool').mockImplementation(() => new Promise(() => {})); // never settles
+      const convo = new RelayConversation({ callSid: null, from: '+19415551234', send: jest.fn() });
+      await raceWithTimers(convo._executeToolBounded('capture_lead', {}, {}));
+
+      const closing = convo.end('hangup');
+      await Promise.resolve();
+      jest.advanceTimersByTime(30000); // blow through the drain bound
+      await closing;
+
+      expect(convo._inFlightWrites.has('capture_lead')).toBe(true);
+      expect(convo.leadCaptured).toBe(false);        // the write never reported back…
+      expect(createLeadFromExtraction).not.toHaveBeenCalled(); // …and the floor still did NOT race it
+    });
+
     test('a fast tool is untouched by the bound', async () => {
       jest.useRealTimers(); // no clock nudging — the work simply wins the race
       jest.spyOn(relayTools, 'executeTool').mockResolvedValue('the real answer');

@@ -193,6 +193,32 @@ describe('the one-per-call latch survives a failed send', () => {
     expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
   });
+
+  // ⭐ `success: true` IS NOT DELIVERY HERE. services/twilio.js suppresses the
+  // owner SMS and redirects internal_alert sends to the bell/push path — and
+  // that redirect still returns success:true when the notification write itself
+  // failed (notificationUndelivered / notificationError). Latching on that
+  // burned the one-per-call budget for a page nobody ever saw.
+  test('an UNDELIVERED notification redirect does not close the latch', async () => {
+    for (const failure of [
+      { success: true, sid: 'internal-admin-notification-undelivered', suppressed: true, notificationRedirected: false, notificationUndelivered: true },
+      { success: true, sid: 'internal-admin-notification-error', suppressed: true, notificationRedirected: false, notificationError: true },
+      { success: false },
+    ]) {
+      const ctx = latchCtx();
+      TwilioService.sendSMS.mockResolvedValueOnce(failure);
+      expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
+      expect(ctx._alerted()).toBe(false); // budget NOT consumed — the retry can still page
+      expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/hot-lead owner alert NOT delivered/i));
+    }
+  });
+
+  test('a delivered redirect (notificationRedirected) still closes the latch', async () => {
+    const ctx = latchCtx();
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: 'internal-admin-notification', suppressed: true, notificationRedirected: true });
+    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
+    expect(ctx._alerted()).toBe(true);
+  });
 });
 
 // ⭐ OWNER-RULED: the ticket queue is "a proven black hole — 14 requests, zero

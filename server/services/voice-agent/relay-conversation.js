@@ -923,6 +923,16 @@ class RelayConversation {
     // matching capture_lead in relay-tools.
     const callerPhone = toE164(this.from || '');
     if (this.leadCaptured || !isLikelyE164(callerPhone)) return;
+    // ⭐ A STILL-RUNNING capture_lead OUTRANKS THE FLOOR. The drain above is
+    // BOUNDED, so a wedged write can outlive it — and createLeadFromExtraction
+    // is not idempotent on callSid, so starting a second one here is exactly
+    // the duplicate lead the drain exists to prevent. The floor's whole purpose
+    // is "this call must not end with no lead at all"; a capture_lead that is
+    // still writing is that lead, so suppress rather than race it.
+    if (this._inFlightWrites.has('capture_lead')) {
+      logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — capture_lead is still in flight past the drain bound (never race a second lead write)`);
+      return;
+    }
     try {
       await createLeadFromExtraction(
         {
