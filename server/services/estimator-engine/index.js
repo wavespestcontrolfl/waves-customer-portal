@@ -1557,13 +1557,21 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
         commercialCategoryConflict,
       } = require('./unit-scope-model');
+      // After an address re-gather the top-level extraction describes the
+      // call's PRIMARY property, not the one being quoted — its tenancy
+      // and property type must not classify the quoted property (codex r4
+      // P1: a primary-address tenant extraction + a re-gathered
+      // multifamily whole-property quote read as a leased unit and cleared
+      // the quoted property's real lot). The model is still computed from
+      // the re-gathered record for audit, marked cross-property.
       const unitScope = resolveUnitScopeModel({
         propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
-        extraction: context.extraction,
+        extraction: addressRegathered ? null : context.extraction,
         intent,
-        propertyFacts,
+        propertyFacts: addressRegathered ? { ...propertyFacts, tenant: false } : propertyFacts,
         address: intent.address || result.addressUsed || address,
       });
+      if (addressRegathered) unitScope.crossPropertyExtraction = true;
       propertyFacts.unitScope = unitScope;
       result.unitScope = unitScope;
       // Category-conflict signal, resolved HERE where the re-gather is
@@ -1576,7 +1584,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       propertyFacts.categoryConflict = addressRegathered
         ? null
         : commercialCategoryConflict({ extraction: context.extraction, intent });
-      if (unitScopeGuardrailsEnabled()) {
+      // The lot-clearing mutation also stays off after a re-gather — a
+      // scope inferred without the quoted property's own extraction must
+      // not change lot-driven pricing (codex r4 P1).
+      if (unitScopeGuardrailsEnabled() && !addressRegathered) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
       }
     } catch (err) {
@@ -1625,15 +1636,18 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         const { unitScopeGuardrailsEnabled } = require('./unit-scope-model');
         if (unitScopeGuardrailsEnabled() && !intent.is_commercial) {
           const { normalizePestPropertyType } = require('../pricing-engine/service-pricing');
-          // Every raw source buildEngineInput's fallback chain can draw
-          // from, in the same precedence — INCLUDING the matched profile
-          // (codex r3 P1: customers.property_type='multifamily' collapses
-          // through pricingSafePropertyType's /family/ branch exactly like
-          // an extraction value, and omitting it left that draft green at
-          // single-family pricing).
+          // The raw source that actually SUPPLIED engineInput.propertyType,
+          // in the exact precedence the pricing chain uses: the lookup
+          // record first (resolvePropertyFacts prefers it over the
+          // extraction — codex r4 P1: extraction-first here let a
+          // multifamily lookup priced single-family stay green), then the
+          // extraction, then the matched profile (buildEngineInput's
+          // fallback — codex r3 P1: customers.property_type='multifamily'
+          // collapses through pricingSafePropertyType's /family/ branch
+          // exactly like the others).
           const rawType = String(
-            context.extraction?.property?.property_type
-            || (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
+            (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
+            || context.extraction?.property?.property_type
             || (profileDescribesQuotedProperty ? trustedCustomer?.property_type : '')
             || '',
           ).toLowerCase();
