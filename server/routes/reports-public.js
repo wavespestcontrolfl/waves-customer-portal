@@ -998,56 +998,83 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
       return res.status(503).json({ error: 'Could not record the request — please try again' });
     }
 
-    // Cross-sell CTA → office bell (owner sends all customer comms, so the
-    // card's button only records the request; this bell is how it reaches
-    // staff). Reuses the existing bundle-inquiry trigger — same Customer-360
-    // deep link staff already work add-on requests from. Best-effort: the
-    // event row above is the durable record either way. Abuse posture
-    // (codex #3367 r4): the offer is RECOMPUTED server-side — client
-    // metadata never reaches the bell, a report whose builder yields no
-    // offer bells nothing — and the bell fires only for the FIRST recorded
-    // request on this report (the post-insert count makes a concurrent
-    // duplicate at worst a second bell, never a flood; the 120/min limiter
-    // caps event rows themselves).
+    // Cross-sell CTA → durable service_requests row + office bell (codex
+    // #3367 r6: the bell's Customer-360 deep link points at the requests
+    // panel, so the actionable row must exist there — an analytics event
+    // alone is not a workflow). Same shape/vocabulary as the estimate
+    // add-service flow, WITHOUT its customer confirmations (owner sends all
+    // customer comms; the card's own confirmation copy is the only customer
+    // feedback). Abuse posture: the offer is RECOMPUTED server-side (client
+    // metadata never reaches the row or bell; no offer → no row), and the
+    // customer-row lock + open-row check make the request idempotent — a
+    // repeat tap resolves to the existing open request. Creation failure is
+    // a 503 so the card can only confirm a durably recorded request.
     if (eventName === 'cross_sell_requested') {
       try {
-        const [{ count }] = await db('service_report_events')
-          .where({ service_record_id: service.id, event_name: 'cross_sell_requested' })
-          .count('id as count');
-        if (Number(count) <= 1) {
-          const joined = await db('service_records as sr')
-            .leftJoin('customers as c', 'sr.customer_id', 'c.id')
-            .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-            .where('sr.id', service.id)
-            .select(
-              'sr.id', 'sr.customer_id', 'sr.service_type',
-              db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
-              db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
-              db.raw('COALESCE(ss.service_address_city, c.city) as city'),
-              db.raw('COALESCE(ss.service_address_zip, c.zip) as zip'),
-              'c.first_name', 'c.last_name',
-            )
-            .first();
-          const { buildReportCrossSell } = require('../services/service-report/cross-sell');
-          const crossSell = joined ? await buildReportCrossSell(joined, db) : null;
-          if (crossSell) {
+        const joined = await db('service_records as sr')
+          .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+          .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+          .where('sr.id', service.id)
+          .select(
+            'sr.id', 'sr.customer_id', 'sr.service_type',
+            db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
+            db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
+            db.raw('COALESCE(ss.service_address_city, c.city) as city'),
+            db.raw('COALESCE(ss.service_address_zip, c.zip) as zip'),
+            'c.first_name', 'c.last_name',
+          )
+          .first();
+        const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+        const crossSell = joined?.customer_id ? await buildReportCrossSell(joined, db) : null;
+        if (crossSell) {
+          const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
+          const requestedService = normalizeRequestedServiceKey(crossSell.serviceKey) || crossSell.serviceKey;
+          const perApplication = Number(crossSell.option?.perVisit);
+          const priceText = Number.isFinite(perApplication) && perApplication > 0
+            ? `(shown $${perApplication.toFixed(2)} per application on report)`
+            : '(quote requested from report)';
+          const outcome = await db.transaction(async (trx) => {
+            // Serialize per customer: the row lock makes check-then-insert
+            // idempotent (the estimate flow's partial-unique index only
+            // covers estimate-linked rows; this path has estimate_id NULL).
+            await trx('customers').where({ id: joined.customer_id }).forUpdate().first('id');
+            const existing = await trx('service_requests')
+              .where({ customer_id: joined.customer_id, requested_service: requestedService, source: 'service_report' })
+              .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+              .first();
+            if (existing) return { deduped: true };
+            const [request] = await trx('service_requests').insert({
+              customer_id: joined.customer_id,
+              requested_service: requestedService,
+              source: 'service_report',
+              category: 'add_service',
+              subject: `Add ${crossSell.label} — requested from service report`,
+              description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
+              urgency: 'routine',
+              status: 'new',
+              // The server-computed offer snapshot — the shown price is the
+              // honored price (sent-quote price-lock doctrine).
+              pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
+            }).returning('*');
+            return { request };
+          });
+          if (!outcome.deduped) {
+            // Bell AFTER the durable row exists; a bell failure leaves the
+            // row actionable in the Customer 360 requests panel either way.
             const { triggerNotification } = require('../services/notification-triggers');
-            const perApplication = Number(crossSell.option?.perVisit);
             await triggerNotification('bundle_quote_requested', {
               bundled: false,
-              customerId: joined.customer_id || null,
+              customerId: joined.customer_id,
               customerName: `${joined.first_name || ''} ${joined.last_name || ''}`.trim() || null,
-              suggestedService: [
-                crossSell.label,
-                Number.isFinite(perApplication) && perApplication > 0
-                  ? `(shown $${perApplication.toFixed(2)} per application on report)`
-                  : '(quote requested from report)',
-              ].join(' '),
+              suggestedService: [crossSell.label, priceText].join(' '),
+            }).catch((err) => {
+              logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
             });
           }
         }
       } catch (err) {
-        logger.warn(`[reports-public] cross-sell bell failed: ${err.message}`);
+        logger.warn(`[reports-public] cross-sell request creation failed: ${err.message}`);
+        return res.status(503).json({ error: 'Could not record the request — please try again' });
       }
     }
 
