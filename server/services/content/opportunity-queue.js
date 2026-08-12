@@ -109,7 +109,7 @@ class OpportunityQueue {
         // listicle_family blog-floor ride), so previews show exactly what
         // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' THEN ?::numeric ELSE ?::numeric END`,
+          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore],
         );
       }
@@ -180,8 +180,11 @@ class OpportunityQueue {
            -- row must not ride the blog floor into a claim.
            -- rewrite_title_meta rides its own env-tunable floor for the
            -- same reason (AUTONOMOUS_REWRITE_MIN_SCORE; default = global,
-           -- so unset env leaves this branch equal to the ELSE).
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' THEN ?::numeric ELSE ?::numeric END
+           -- so unset env leaves this branch equal to the ELSE), and a
+           -- link_boost companion DERIVED from a ctr_rewrite parent rides
+           -- it too — the companion inherits the parent's score, so a
+           -- separate floor would strand it persisted-but-unclaimable.
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}

@@ -41,6 +41,7 @@ const {
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
+  materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
@@ -460,6 +461,64 @@ describe('ctrRewriteTargetFor (the selected page must itself underperform)', () 
   test('no rows → null', () => {
     expect(ctrRewriteTargetFor([])).toBe(null);
     expect(ctrRewriteTargetFor()).toBe(null);
+  });
+  test('pages outside the bucket ranking window are ineligible', () => {
+    const { THRESHOLDS: T } = require('../services/content/scoring-config');
+    // The query-level avg_position gate can be satisfied while the
+    // most-impressed URL sits far deeper — that page never met the
+    // bucket's criterion and must not collect a metadata rewrite.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/deep/', impressions: '900', clicks: '1', page_position: '31.0' },
+    ])).toBe(null);
+    // The in-window page wins even with fewer impressions.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/deep/', impressions: '900', clicks: '1', page_position: '31.0' },
+      { page_url: 'https://x/shallow/', impressions: '400', clicks: '1', page_position: String(T.ctrRewritePositionMax) },
+    ])).toBe('https://x/shallow/');
+    // Missing position → ineligible (fail closed). null/'' must not read
+    // as position 0 and sneak into the window.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/unknown/', impressions: '900', clicks: '1' },
+    ])).toBe(null);
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/null/', impressions: '900', clicks: '1', page_position: null },
+    ])).toBe(null);
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/empty/', impressions: '900', clicks: '1', page_position: '' },
+    ])).toBe(null);
+  });
+});
+
+describe('materialServingPosition (immaterial mappings do not prove serving)', () => {
+  const { THRESHOLDS: T } = require('../services/content/scoring-config');
+  const material = T.answerGapMinQueryImpressions;
+  test('a stray impression at a great position does not count as serving', () => {
+    // 1 impression at position 2 alongside the real demand at 50: the
+    // min-across-URLs would report 2 and suppress a genuine gap.
+    expect(materialServingPosition([
+      { impressions: '1', page_position: '2.0' },
+      { impressions: '400', page_position: '50.0' },
+    ])).toBe(50);
+  });
+  test('material pages report their best position', () => {
+    expect(materialServingPosition([
+      { impressions: String(material), page_position: '12.0' },
+      { impressions: '900', page_position: '4.0' },
+    ])).toBe(4);
+  });
+  test('all mappings immaterial → null (fails closed like unmapped)', () => {
+    expect(materialServingPosition([
+      { impressions: String(material - 1), page_position: '2.0' },
+    ])).toBe(null);
+    expect(materialServingPosition([])).toBe(null);
+    expect(materialServingPosition()).toBe(null);
+  });
+  test('missing positions are skipped, never read as position 0', () => {
+    // Number(null) and Number('') are both 0 — a perfect ranking — so a
+    // bare Number() here would fail OPEN and suppress a real gap.
+    expect(materialServingPosition([{ impressions: '900', page_position: null }])).toBe(null);
+    expect(materialServingPosition([{ impressions: '900', page_position: '' }])).toBe(null);
+    expect(materialServingPosition([{ impressions: '900' }])).toBe(null);
   });
 });
 

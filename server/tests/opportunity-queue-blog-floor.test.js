@@ -91,7 +91,7 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' THEN \?::numeric ELSE \?::numeric END/);
+    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
     // bindings: [claimed_at, maxAttempts, blogFloor, rewriteFloor,
     // minScore] — the lifetime-claim-budget filter binds between the claim
     // timestamp and the score floors.
@@ -157,7 +157,7 @@ describe('peek action-aware floor', () => {
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
     expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' THEN \?::numeric ELSE \?::numeric END/),
+      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/),
       [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct, THRESHOLDS.minScoreToAct],
     );
   });
@@ -237,6 +237,39 @@ describe('miner persistAll action-aware gate', () => {
     expect(persistedKeys).toContain('rw-69-open');
     expect(persistedKeys).not.toContain('rw-55');
     expect(persistedKeys).not.toContain('rf-69');
+  });
+
+  test('a ctr_rewrite-derived link_boost companion inherits the rewrite floor (both gates move together)', async () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    const persisted = await miner.persistAll([
+      // Companion carries the parent's score by design — it must clear
+      // the parent's floor, not the global one, or the parent persists
+      // while its promised link boost silently dies.
+      opp({
+        score: 69,
+        bucket: 'link_boost',
+        action_type: 'add_internal_links',
+        page_url: 'https://x/p/',
+        signal_metadata: { source_bucket: 'ctr_rewrite' },
+        dedupe_key: 'lb-from-rewrite-69',
+      }),
+      // A decay_refresh-derived companion keeps the global floor.
+      opp({
+        score: 69,
+        bucket: 'link_boost',
+        action_type: 'add_internal_links',
+        page_url: 'https://x/q/',
+        signal_metadata: { source_bucket: 'decay_refresh' },
+        dedupe_key: 'lb-from-decay-69',
+      }),
+    ]);
+
+    expect(persisted).toBe(1);
+    const persistedKeys = db.raw.mock.calls.map(([, b]) => b).map((b) => b[12]);
+    expect(persistedKeys).toContain('lb-from-rewrite-69');
+    expect(persistedKeys).not.toContain('lb-from-decay-69');
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {

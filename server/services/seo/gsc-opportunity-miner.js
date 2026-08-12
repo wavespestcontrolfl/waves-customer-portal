@@ -890,16 +890,27 @@ function noContentYetEmittable(domainPositions, thresholds = THRESHOLDS) {
 // multi-page segment aims the rewrite PR at an unrelated URL (audit P1
 // #6). Ties break on the better (lower) position. No rows → null →
 // actionForOpportunity falls through to do_not_publish (fail closed).
+// Positions arrive as pg numerics (strings), nulls, or absent. Number()
+// maps null AND '' to 0 — a perfect position-0 ranking — so every
+// position read goes through this guard: missing data must never read as
+// "ranks first" (that fails OPEN in both consumers: it would suppress a
+// no_content_yet gap and make a deep page look in-window).
+function finitePosition(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function pickCtrRewriteTargetPage(rows = []) {
   let best = null;
   for (const r of rows) {
     const impressions = parseInt(r.impressions, 10) || 0;
-    const position = Number(r.page_position);
+    const position = finitePosition(r.page_position);
     if (!r.page_url) continue;
     if (!best
       || impressions > best.impressions
-      || (impressions === best.impressions && Number.isFinite(position)
-        && (!Number.isFinite(best.position) || position < best.position))) {
+      || (impressions === best.impressions && position != null
+        && (best.position == null || position < best.position))) {
       best = { page_url: r.page_url, impressions, position };
     }
   }
@@ -913,11 +924,41 @@ function pickCtrRewriteTargetPage(rows = []) {
 // would damage a working snippet (audit P1 #9). Fail closed: no rows, no
 // pick, or a healthy pick → null → do_not_publish.
 function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
-  const url = pickCtrRewriteTargetPage(pageRows);
+  // Only pages inside the bucket's own ranking window are eligible. The
+  // gate is a query-level avg_position, which a deep secondary URL can
+  // ride: a page sitting at 30 or 50 naturally shows a terrible CTR and
+  // would collect an automated metadata rewrite it never qualified for
+  // (audit P2). A title/meta rewrite is the right lever only when the
+  // page already ranks well and still isn't earning the click.
+  const inWindow = pageRows.filter((r) => {
+    const pos = finitePosition(r.page_position);
+    return pos != null && pos <= thresholds.ctrRewritePositionMax;
+  });
+  const url = pickCtrRewriteTargetPage(inWindow);
   if (!url) return null;
-  const row = pageRows.find((r) => r.page_url === url);
+  const row = inWindow.find((r) => r.page_url === url);
   if (!row) return null;
   return recomputeCtr(row.clicks, row.impressions) < thresholds.ctrRewriteMaxCtr ? url : null;
+}
+
+// How well an owned page serves a query, counting only MATERIAL mappings.
+// An unweighted min across URLs lets a single stray impression at
+// position 2 declare the query served and suppress no_content_yet, while
+// the real demand sits on another URL at position 50. A page below
+// answerGapMinQueryImpressions is not actionable by the refresh side
+// either — mineAnswerGap ignores it — so calling it "serving" suppresses
+// a real gap on evidence no mechanism would act on (audit P2). All
+// mappings immaterial → null → fails closed, same as unmapped.
+function materialServingPosition(pages = [], thresholds = THRESHOLDS) {
+  let best = null;
+  for (const p of pages) {
+    const impressions = parseInt(p.impressions, 10) || 0;
+    if (impressions < thresholds.answerGapMinQueryImpressions) continue;
+    const pos = finitePosition(p.page_position);
+    if (pos == null) continue;
+    if (best == null || pos < best) best = pos;
+  }
+  return best;
 }
 
 // Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
@@ -1572,16 +1613,23 @@ class GscOpportunityMiner {
       .whereIn('query', queries)
       .select('query', 'domain')
       .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      // Per-page impressions ride along so immaterial mappings can be
+      // discarded before judging served-ness (materialServingPosition).
+      .sum('impressions as impressions')
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
       .groupBy('query', 'domain')
       .groupByRaw(CANON_URL_SQL);
-    const map = new Map();
+    const pagesByKey = new Map();
     for (const r of rows) {
-      const pos = parseFloat(r.page_position);
-      if (!Number.isFinite(pos) || !r.domain) continue;
+      if (!r.domain) continue;
       const key = mappedPositionKey(r.query, r.domain);
-      const prev = map.get(key);
-      if (prev == null || pos < prev) map.set(key, pos);
+      if (!pagesByKey.has(key)) pagesByKey.set(key, []);
+      pagesByKey.get(key).push(r);
+    }
+    const map = new Map();
+    for (const [key, pages] of pagesByKey) {
+      const pos = materialServingPosition(pages);
+      if (pos != null) map.set(key, pos);
     }
     return map;
   }
@@ -3148,9 +3196,23 @@ class GscOpportunityMiner {
       // (do_not_publish, or a rerouted city-service action) must NOT ride
       // the blog floor into the queue.
       const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
-      const scoreFloor = o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)
-        ? minScoreToActFor('new_supporting_blog')
-        : minScoreToActFor(o.action_type);
+      // A link_boost companion INHERITS its parent's score by design
+      // (deriveLinkBoost) so the two gates move together — which means it
+      // must inherit the parent's FLOOR too. Without this, a ctr_rewrite
+      // admitted at a lowered AUTONOMOUS_REWRITE_MIN_SCORE persists while
+      // its promised companion silently dies against the global floor
+      // (audit P2). Bounded to ctr_rewrite parents: decay_refresh parents
+      // clear the global floor themselves, so their companions already do.
+      const rewriteDerivedLinkBoost = o.bucket === 'link_boost'
+        && o.signal_metadata?.source_bucket === 'ctr_rewrite';
+      let scoreFloor;
+      if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
+        scoreFloor = minScoreToActFor('new_supporting_blog');
+      } else if (rewriteDerivedLinkBoost) {
+        scoreFloor = minScoreToActFor('rewrite_title_meta');
+      } else {
+        scoreFloor = minScoreToActFor(o.action_type);
+      }
       if (o.score < scoreFloor) {
         // Rollout hygiene for the near-me demotion: a previously persisted
         // new_supporting_blog row shares this candidate's dedupe_key, but a
@@ -3324,6 +3386,7 @@ module.exports._internals = {
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
+  materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
