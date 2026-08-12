@@ -398,21 +398,41 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
       // Durable settlement for SCHEDULED sends: without the proof row the
-      // recovery sweep would resend this already-delivered push. Settle the
-      // scheduled claim directly — the same status flip the sweep itself
-      // performs when it finds proof — with a marker naming why.
+      // recovery sweep would resend this already-delivered push. Mirror the
+      // sweep's FULL settlement, not just a status flip: flip ONLY from
+      // 'sending' (never overwrite blocked/rescheduled states), preserve
+      // queued_at, stamp provider_message_id, and stamp finalize_pending
+      // for deferred-replay entry points so the stranded-finalization
+      // sweep still runs the owed invoice/lead/review transitions.
       if (scheduledSmsLogId) {
-        await db.raw(
-          `UPDATE sms_log
-             SET status = 'sent',
-                 updated_at = now(),
-                 metadata = COALESCE(metadata, '{}'::jsonb)
-                   || jsonb_build_object('push_settled_without_proof', true)
-           WHERE id = ? AND status <> 'sent'`,
-          [scheduledSmsLogId],
-        ).catch((settleErr) => {
+        try {
+          const schedRow = await db('sms_log')
+            .where({ id: scheduledSmsLogId })
+            .first('metadata', 'created_at', 'status');
+          if (schedRow && schedRow.status === 'sending') {
+            const meta = typeof schedRow.metadata === 'string'
+              ? (() => { try { return JSON.parse(schedRow.metadata); } catch { return {}; } })()
+              : (schedRow.metadata || {});
+            const { requiresDurableFinalize } = require('./deferred-replay-registry');
+            const owesFinalize = requiresDurableFinalize(meta.entry_point);
+            await db('sms_log')
+              .where({ id: scheduledSmsLogId, status: 'sending' })
+              .update({
+                status: 'sent',
+                updated_at: new Date(),
+                metadata: db.raw(
+                  `COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                     'queued_at', to_jsonb(?::timestamptz),
+                     'push_settled_without_proof', true,
+                     'provider_message_id', ?::text,
+                     'finalize_pending', ?::boolean)`,
+                  [schedRow.created_at, 'push:delivered', owesFinalize],
+                ),
+              });
+          }
+        } catch (settleErr) {
           logger.error(`[push-routing] CRITICAL: proof row AND direct settlement failed for scheduled ${scheduledSmsLogId} — sweep may resend: ${settleErr.message}`);
-        });
+        }
       }
     }
     const notificationId = await recordBell(customerId, messageType, body);
