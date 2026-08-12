@@ -43,10 +43,18 @@ const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+
 function hasSubpremiseSignal({ address, extraction }) {
   if (address && SUBPREMISE_RE.test(String(address).replace(/,?\s*[A-Za-z .]+,\s*FL.*$/i, ''))) return true;
   const extractionAddress = extraction?.property?.service_address;
-  const rawLine = typeof extractionAddress === 'string'
-    ? extractionAddress
-    : (extractionAddress?.raw || extractionAddress?.line1 || '');
-  return !!(rawLine && SUBPREMISE_RE.test(String(rawLine)));
+  if (typeof extractionAddress === 'string') {
+    return !!(extractionAddress && SUBPREMISE_RE.test(extractionAddress));
+  }
+  // The extraction schema's field names (raw_text/street_line_1/
+  // street_line_2 — codex r6 P1: the legacy raw/line1 reads matched
+  // nothing, so a unit spoken on the call but dropped from the composed
+  // address never signaled). street_line_2 IS the unit line, so any
+  // nonempty value counts; the free-text lines still need the regex.
+  const lines = [extractionAddress?.raw_text, extractionAddress?.street_line_1,
+    extractionAddress?.raw, extractionAddress?.line1];
+  if (String(extractionAddress?.street_line_2 || '').trim()) return true;
+  return lines.some((line) => line && SUBPREMISE_RE.test(String(line)));
 }
 
 function hasUnitSignal({ tenant, address, extraction }) {

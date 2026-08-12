@@ -218,6 +218,19 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.lot.value).toBeNull();
   });
+  test('the schema street_line_2 unit field signals even when the composed address dropped it (r6)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: {
+        caller: { relationship_to_property: 'owner' },
+        property: { service_address: { raw_text: null, street_line_1: '900 Bayview Ter', street_line_2: 'Unit 12' } },
+      },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '900 Bayview Ter, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('residential_unit');
+  });
   test('a positively whole-structure type is respected over the address token', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
