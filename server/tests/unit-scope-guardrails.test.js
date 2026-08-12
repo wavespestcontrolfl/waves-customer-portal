@@ -327,6 +327,34 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.lot.value).toBeNull();
   });
+  test('a street NAMED Florida keeps its suite suffix (r30)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: true, address: '4801 Florida Ave, Suite 7, Sarasota, FL' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '4801 Florida Ave, Suite 7, Sarasota, FL',
+    });
+    expect(model.subpremiseSignal).toBe(true);
+    expect(model.serviceScope).toBe('commercial_suite');
+  });
+
+  test('a mobile-home LOT number is a whole structure, not a unit (r30)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Mobile Home' },
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      intent: { is_commercial: false, address: '100 Park Rd, Lot 5, Venice, FL 34285' },
+      propertyFacts: { tenant: true, home: { value: 1100, source: 'county_assessed' } },
+      address: '100 Park Rd, Lot 5, Venice, FL 34285',
+    });
+    expect(model.subpremiseSignal).toBe(false);
+    expect(model.serviceScope).toBe('entire_residential_structure');
+    // Its county area is the home's own — never cleared.
+    const facts = { home: { value: 1100, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBe(1100);
+  });
+
   test('a no-comma city/state address keeps its unit scope (r27)', () => {
     // "…, Parrish FL 34219" is as common as "…, Venice, FL 34285"; the
     // comma-required locality strip left the ZIP at the end and the suite

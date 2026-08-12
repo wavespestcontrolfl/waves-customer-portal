@@ -37,23 +37,40 @@ const ASSOCIATION_TYPES = /multifamily|apartment|hoa common area/i;
 // structure: tenancy, or a unit/apt/suite subpremise in the service address.
 const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+|#\s*\w+)\s*$/i;
 
-// The ADDRESS half of the unit signal alone: an explicit unit/apt/suite
-// subpremise on the service address (never tenancy — a tenant of a plain
-// single-family rental treats the whole house).
-// Strip the trailing locality so SUBPREMISE_RE sees the unit suffix at the
-// end of the string. Handles BOTH comma styles — ", Venice, FL 34285" and
-// the equally common ", Parrish FL 34219": requiring a comma before the
-// state left the ZIP at the end, so an explicit "Suite 101" lost its unit
-// scope entirely (codex r27 P1).
+// DWELLING/suite designators only — deliberately NOT lot/spc/space: a
+// mobile-home or RV LOT number identifies a whole structure on leased
+// land, and treating "100 Park Rd, Lot 5" as a unit cleared that home's
+// valid county area (codex r30 P2). hasUnitSignal keeps the broader
+// SUBPREMISE_RE (pre-existing behavior shared with the V2 shadow).
+const DWELLING_SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[\w-]+|#\s*\w+)\s*$/i;
+
+// Strip the trailing locality so the unit suffix sits at the end of the
+// string. Handles BOTH comma styles — ", Venice, FL 34285" and the equally
+// common ", Parrish FL 34219" (requiring a comma before the state left the
+// ZIP at the end, so an explicit "Suite 101" lost its unit scope — codex
+// r27 P1) — and is ANCHORED to the final locality segment(s): an earlier
+// form let the city group match a bare space, so a street NAMED Florida
+// ("4801 Florida Ave, Suite 7, Sarasota, FL") stripped everything after the
+// house number (codex r30 P1). City text carries no digits, and nothing but
+// a ZIP may follow the state.
+const TRAILING_LOCALITY_RE = new RegExp(
+  [
+    ',\\s*[A-Za-z][A-Za-z .\'-]*\\s*,\\s*(?:FL|Florida)\\b[\\s\\d-]*$', // …, Venice, FL 34285
+    ',\\s*[A-Za-z][A-Za-z .\'-]*\\s+(?:FL|Florida)\\b[\\s\\d-]*$', //     …, Parrish FL 34219
+    ',\\s*(?:FL|Florida)\\b[\\s\\d-]*$', //                               …, FL 34221
+  ].join('|'),
+  'i',
+);
+
 function stripTrailingLocality(address) {
-  return String(address || '').replace(/,?\s*[A-Za-z .'-]+,?\s*\b(?:FL|Florida)\b.*$/i, '');
+  return String(address || '').replace(TRAILING_LOCALITY_RE, '');
 }
 
 function hasSubpremiseSignal({ address, extraction }) {
-  if (address && SUBPREMISE_RE.test(stripTrailingLocality(address))) return true;
+  if (address && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(address))) return true;
   const extractionAddress = extraction?.property?.service_address;
   if (typeof extractionAddress === 'string') {
-    return !!(extractionAddress && SUBPREMISE_RE.test(stripTrailingLocality(extractionAddress)));
+    return !!(extractionAddress && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(extractionAddress)));
   }
   // The extraction schema's field names (raw_text/street_line_1/
   // street_line_2 — codex r6 P1: the legacy raw/line1 reads matched
@@ -64,7 +81,7 @@ function hasSubpremiseSignal({ address, extraction }) {
     extractionAddress?.raw, extractionAddress?.line1];
   if (String(extractionAddress?.street_line_2 || '').trim()) return true;
   // Free-text lines carry localities too (raw_text especially).
-  return lines.some((line) => line && SUBPREMISE_RE.test(stripTrailingLocality(line)));
+  return lines.some((line) => line && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(line)));
 }
 
 function hasUnitSignal({ tenant, address, extraction }) {
