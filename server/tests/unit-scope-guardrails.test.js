@@ -394,6 +394,16 @@ describe('kill-switch isolation from the V2 gate (r12)', () => {
     expect(shadowPrivate.hasPartBuildingEvidence({
       subpremiseSignal: false, aggregated: false, propertyType: 'Restaurant',
     })).toBe(false);
+    // County land-use text counts (r44 P1) — but a generic 'office building'
+    // does NOT: a tenant can lease the whole thing (r45 P1).
+    expect(shadowPrivate.hasPartBuildingEvidence({
+      subpremiseSignal: false, aggregated: false, propertyType: 'Commercial',
+      landUseDescription: 'Multiple Unit Stores',
+    })).toBe(true);
+    expect(shadowPrivate.hasPartBuildingEvidence({
+      subpremiseSignal: false, aggregated: false, propertyType: 'Commercial',
+      landUseDescription: 'Office Building',
+    })).toBe(false);
     // An AGGREGATE apartment complex bought whole is an association job, not
     // a suite — unitSignal is true for any apartment-typed record, so the
     // suite branch must not swallow it (codex r42 P1).
@@ -971,7 +981,12 @@ describe('lead webhook readiness guardrails', () => {
         },
       };
       // A form that says so outright, with a generic label and no prose.
-      for (const flag of [{ isCommercial: true }, { category: 'COMMERCIAL' }, { commercialSubtype: 'warehouse_light' }]) {
+      // Every truthy form spelling counts, not just boolean/`yes` (r45 P1).
+      for (const flag of [
+        { isCommercial: true }, { isCommercial: 'true' }, { isCommercial: '1' },
+        { isCommercial: 'on' }, { is_commercial: 'yes' },
+        { category: 'COMMERCIAL' }, { commercialSubtype: 'warehouse_light' },
+      ]) {
         const readiness = evaluateLeadEstimateAutomationReadiness({ ...base2, body: flag });
         expect(readiness.missing).toContain('commercial_category_conflict');
       }

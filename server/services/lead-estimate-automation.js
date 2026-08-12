@@ -471,8 +471,15 @@ function normalizeAddressPieces({ intake = {}, customer = {} } = {}) {
 // service label and prose stay generic, and buildLeadEngineInput hardcodes
 // isCommercial:false, so the draft stayed generated and auto-sendable at
 // residential pricing (codex r44 P1).
+// The repo's accepted truthy vocabulary for form booleans — 'true'/'1'/'on'
+// arrive as often as 'yes', and missing them let such a submission continue
+// through residential automation (codex r45 P1).
+const TRUTHY_FORM_VALUES = new Set(['true', 'yes', '1', 'on', 'y', 'commercial']);
+
 function structuredCommercialSignal(source = {}) {
-  if (source.isCommercial === true || String(source.isCommercial || '').toLowerCase() === 'yes') return true;
+  if (source.isCommercial === true) return true;
+  if (TRUTHY_FORM_VALUES.has(String(source.isCommercial ?? '').trim().toLowerCase())) return true;
+  if (TRUTHY_FORM_VALUES.has(String(source.is_commercial ?? '').trim().toLowerCase())) return true;
   if (String(source.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
   const subtype = String(source.commercialSubtype || source.commercial_subtype || '').trim().toLowerCase();
   return !!subtype && subtype !== 'none' && subtype !== 'null';

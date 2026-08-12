@@ -127,7 +127,10 @@ function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType, l
   // "Multiple Unit Stores" normalizes to a bare 'Commercial' propertyType,
   // so a suite tenant there read as a whole-building lease and V2 could
   // overwrite their stated size with the county building area (codex r44 P1).
-  const MULTI_UNIT_TEXT = /multiple\s*unit|multi.?tenant|suite|condo|strip\s*(?:mall|center)|plaza|shopping\s*(?:center|centre)|office\s*(?:park|building)/i;
+  // 'office building' is NOT multi-unit evidence — a tenant can lease an
+  // entire freestanding office (codex r45 P1). Only genuinely multi-tenant
+  // forms count; 'office park' stays because a park is many buildings.
+  const MULTI_UNIT_TEXT = /multiple\s*unit|multi.?tenant|suite|condo|strip\s*(?:mall|center)|plaza|shopping\s*(?:center|centre)|office\s*park/i;
   return subpremiseSignal === true || aggregated === true
     || MULTI_UNIT_TEXT.test(String(propertyType || ''))
     || MULTI_UNIT_TEXT.test(String(landUseDescription || ''));
