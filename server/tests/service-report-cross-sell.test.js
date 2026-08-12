@@ -56,6 +56,10 @@ const SERVICE = (overrides = {}) => ({
   address_line1: '123 Gulf Dr',
   city: 'Sarasota',
   zip: '34236',
+  // Recent by default: the report-identity guard only corroborates within
+  // one recurrence window (PR r9) — fixtures model the fresh-report case
+  // unless a test overrides the date.
+  service_date: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString().slice(0, 10),
   ...overrides,
 });
 
@@ -463,6 +467,62 @@ describe('buildReportCrossSell', () => {
     expect(optionIsPriceable({ perVisit: 42 })).toBe(true);
     expect(optionIsPriceable({ perVisit: 42, dueAtStart: 99 })).toBe(false);
     expect(optionIsPriceable({ perVisit: 42, oneTime: 150 })).toBe(false);
+  });
+
+  test('a HISTORICAL report identity does not advance the ladder without billing corroboration', async () => {
+    // Former pest customer, plan cancelled: no upcoming rows, no ledger
+    // row, and the permanent-token report is months old — pest must be
+    // offered again, not skipped for a lawn offer labeled as a plan add.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control', service_date: '2026-01-05' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.relationship).toBe('start');
+  });
+
+  test('a historical report identity STILL counts when the family carries live billing', async () => {
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      planRates: [{ family_key: 'pest_control', monthly_rate: 60 }],
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control', service_date: '2026-01-05' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('lawn_care');
+  });
+
+  test('a seeded synthetic zero tree count is dropped — it never reads as an explicit count', async () => {
+    // The v1 lookup adapter stores treeCount: 0 when nothing was observed;
+    // replayed as explicit it would let priceTreeShrub skip its density
+    // fallback and price zero trees. With the zero dropped, the seed with
+    // and without the synthetic count must price identically.
+    const estimateWith = (features) => [{
+      id: 'est-1',
+      address: '123 Gulf Dr, Sarasota, FL 34236',
+      status: 'accepted',
+      estimate_data: JSON.stringify({
+        engineInputs: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+          bedArea: 3000, bedAreaSource: 'explicit', features,
+        },
+      }),
+    }];
+    const run = async (features) => buildReportCrossSell(SERVICE(), dbFor({
+      serviceTypes: ['Pest Control', 'Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: estimateWith(features),
+    }), { propertyLookup: missLookup });
+    const withSyntheticZero = await run({ trees: 'moderate', treeCount: 0 });
+    const withoutCount = await run({ trees: 'moderate' });
+    expect(withSyntheticZero).not.toBeNull();
+    expect(withSyntheticZero.serviceKey).toBe('tree_shrub');
+    expect(withSyntheticZero.mode).toBe(withoutCount.mode);
+    expect(withSyntheticZero.option).toEqual(withoutCount.option);
   });
 
   test('report-family guard: a pest report with zero upcoming rows never offers pest', async () => {

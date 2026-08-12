@@ -172,9 +172,18 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // Non-dimensional pricing evidence rides with the dimensions (codex
     // #3367 PR r1): a pool-cage home whose accepted estimate carried the
     // modifiers must not price as a bare property on a lookup cache miss.
-    features: inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
-      ? inputs.features
-      : null,
+    features: (() => {
+      if (!inputs.features || typeof inputs.features !== 'object' || Array.isArray(inputs.features)) return null;
+      const cleaned = { ...inputs.features };
+      // The v1 lookup adapter stores treeCount: 0 when NO count was
+      // observed (codex #3367 PR r9) — replayed as-is it reads as an
+      // explicit zero, and priceTreeShrub would skip its density fallback
+      // and price zero trees. A non-positive count is never observational
+      // evidence here: drop it and let the pricer's own fallback (which
+      // carries its warning) run.
+      if (!(Number(cleaned.treeCount) > 0)) delete cleaned.treeCount;
+      return cleaned;
+    })(),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
@@ -348,7 +357,39 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     const reportRowIsOneTime = !!service.is_callback
       || (!!linkedVisit
         && (isOneTimeBookingSource(linkedVisit.source) || linkedVisit.is_recurring === false));
-    const reportFamilies = reportRowIsOneTime ? [] : ownershipKeysForRow(reportIdentity);
+    // Ledger components load BEFORE the report-identity gate (PR r9 uses
+    // them as corroboration) — their suppress/demote roles below are
+    // unchanged.
+    const { loadComponents } = require('../plan-rate-ledger');
+    const planRateFamilies = (await loadComponents(database, customerId))
+      .filter((row) => Number(row.monthly_rate) > 0)
+      .map((row) => String(row.family_key || ''))
+      .filter((key) => key && key !== 'unattributed');
+
+    let reportFamilies = reportRowIsOneTime ? [] : ownershipKeysForRow(reportIdentity);
+    // Historical reports are not ownership (codex #3367 PR r9): the
+    // report-identity guard exists for the unseeded-NEXT-visit gap, which
+    // only occurs in the window right after a service. A permanent-token
+    // report opened after the plan was cancelled must not advance the
+    // ladder. The identity counts only when the service date sits within
+    // one recurrence window (90 days — the longest recurring cadence, so
+    // the gap case always qualifies) or the family carries live billing
+    // evidence in the plan-rate ledger. An uncorroborated family drops to
+    // NOT-owned; a customer who actually still holds it is protected by
+    // the ledger suppressor below and the pricer's alreadyIncluded
+    // re-check.
+    if (reportFamilies.length) {
+      const reportDate = service.service_date || service.created_at || null;
+      const reportMs = reportDate ? new Date(reportDate).getTime() : NaN;
+      const reportRecent = Number.isFinite(reportMs)
+        && (Date.now() - reportMs) <= 90 * 24 * 3600 * 1000;
+      if (!reportRecent) {
+        const billedVocab = offerVocabulary(planRateFamilies);
+        reportFamilies = reportFamilies.filter(
+          (fam) => [...offerVocabulary([fam])].some((key) => billedVocab.has(key))
+        );
+      }
+    }
     // The catalog-enriched identity feeds the commercial gate too (codex
     // #3367 PR r5): a 'Commercial Pest Control' catalog row under stale
     // generic text with a blank property_type passed both earlier
@@ -378,12 +419,6 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // Owns the whole ladder → nothing to offer; the report still shows the
     // referral card, which is client-side and needs no payload.
     if (!targetKey) return null;
-
-    const { loadComponents } = require('../plan-rate-ledger');
-    const planRateFamilies = (await loadComponents(database, customerId))
-      .filter((row) => Number(row.monthly_rate) > 0)
-      .map((row) => String(row.family_key || ''))
-      .filter((key) => key && key !== 'unattributed');
     if (offerVocabulary(planRateFamilies).has(targetKey)) return null;
 
     const evidencedOwnedKeys = [...ladderEvidence, ...planRateFamilies];
