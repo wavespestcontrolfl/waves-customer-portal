@@ -487,6 +487,26 @@ describe('ctrRewriteTargetFor (the selected page must itself underperform)', () 
       { page_url: 'https://x/empty/', impressions: '900', clicks: '1', page_position: '' },
     ])).toBe(null);
   });
+  test('target must carry material demand, absolutely and as a share of the query', () => {
+    // The reviewer's scenario: the query qualifies on demand sitting at
+    // deep URLs, while a bystander page ranks shallow on a handful of
+    // impressions — its 0% CTR is noise, not evidence.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/shallow-tiny/', impressions: '8', clicks: '0', page_position: '4.0' },
+      { page_url: 'https://x/deep-real/', impressions: '900', clicks: '2', page_position: '40.0' },
+    ])).toBe(null);
+    // Material absolute volume but a small share of the query's demand →
+    // still a bystander.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/shallow-minor/', impressions: '50', clicks: '0', page_position: '7.8' },
+      { page_url: 'https://x/deep-major/', impressions: '900', clicks: '2', page_position: '40.0' },
+    ])).toBe(null);
+    // Carries the query: material and dominant → eligible.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/carries/', impressions: '400', clicks: '1', page_position: '3.0' },
+      { page_url: 'https://x/minor/', impressions: '60', clicks: '0', page_position: '40.0' },
+    ])).toBe('https://x/carries/');
+  });
 });
 
 describe('materialServingPosition (immaterial mappings do not prove serving)', () => {

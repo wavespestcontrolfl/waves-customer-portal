@@ -272,6 +272,53 @@ describe('miner persistAll action-aware gate', () => {
     expect(persistedKeys).not.toContain('lb-from-decay-69');
   });
 
+  test('a moved ctr_rewrite target retires the superseded row and its link-boost companion', async () => {
+    // The ranking URL for a query moves A → B between mines. B queues
+    // under a new dedupe key (page_url is in the key), so A's pending row
+    // would stay claimable for 14 days and rewrite a page the current
+    // evidence no longer selects.
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        _filters: null, _not: null, _in: null, _raw: null,
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        whereNot: jest.fn((c, v) => { q._not = [c, v]; return q; }),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn((s, b) => { q._raw = [s, b]; return q; }),
+        select: jest.fn(() => Promise.resolve([{ page_url: 'https://x/old-page/' }])),
+        update: jest.fn((u) => {
+          updates.push({ table, filters: q._filters, not: q._not, in: q._in, raw: q._raw, updates: u });
+          return Promise.resolve(1);
+        }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    const persisted = await miner.persistAll([
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm',
+        page_url: 'https://x/new-page/',
+        dedupe_key: 'ctr::new-page',
+      }),
+    ]);
+
+    expect(persisted).toBe(1);
+    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
+    expect(retirements).toHaveLength(2);
+    // 1. the superseded ctr_rewrite row for the same query, other key
+    expect(retirements[0].filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
+    expect(retirements[0].not).toEqual(['dedupe_key', 'ctr::new-page']);
+    expect(retirements[0].updates.status).toBe('expired'); // revivable, not sticky-skipped
+    // 2. its derived link-boost companion, matched on the stale page
+    expect(retirements[1].filters).toMatchObject({ bucket: 'link_boost', status: 'pending' });
+    expect(retirements[1].in).toEqual(['page_url', ['https://x/old-page/']]);
+    expect(retirements[1].raw[1]).toEqual(['ctr_rewrite']);
+  });
+
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {
     const updates = [];
     db.mockImplementation((table) => {

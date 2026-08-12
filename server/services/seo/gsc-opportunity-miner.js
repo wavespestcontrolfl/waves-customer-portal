@@ -20,10 +20,15 @@
  *   seasonal_rising     query impressions up 50%+ vs prior 14d window
  *   no_content_yet      query has impressions but NO owned page usefully
  *                       ranking for it — served-ness judged on TRUE
- *                       query→page rows (gsc_query_page_map): a mapped page
- *                       at ≤ answerGapPositionMax is refresh/answer-gap
- *                       territory and excludes the query; unmapped or
- *                       weaker-ranked demand mints new content.
+ *                       query→page rows (gsc_query_page_map). Emits ONLY
+ *                       on mapped-and-weak evidence: a materially-mapped
+ *                       page at ≤ answerGapPositionMax is refresh/answer-
+ *                       gap territory and excludes the query, while a
+ *                       materially-mapped page ranking beyond it is the
+ *                       gap this bucket mints content for. An UNMAPPED
+ *                       query (or one mapped only immaterially) is
+ *                       skipped, not emitted — absence of a mapping is
+ *                       missing evidence, not proof no page ranks.
  *
  * RETIRED buckets (removed 2026-08-12 — never emitted a row; each
  * duplicated a live first-class mechanism, and the "find the existing
@@ -923,6 +928,15 @@ function pickCtrRewriteTargetPage(rows = []) {
 // most-impressed page is perfectly healthy — rewriting that page's title
 // would damage a working snippet (audit P1 #9). Fail closed: no rows, no
 // pick, or a healthy pick → null → do_not_publish.
+// Minimum share of a query's mapped demand the rewrite target must carry.
+// The bucket's impression floor and position gate are both QUERY-level, so
+// demand sitting on deep ineligible URLs can qualify the query while a
+// bystander page that happens to rank shallow gets selected — and with a
+// handful of impressions its CTR is noise, not evidence (audit P2). A page
+// carrying under a quarter of the query's mapped demand is not what the
+// query is really landing on.
+const CTR_REWRITE_TARGET_MIN_SHARE = 0.25;
+
 function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
   // Only pages inside the bucket's own ranking window are eligible. The
   // gate is a query-level avg_position, which a deep secondary URL can
@@ -938,6 +952,15 @@ function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
   if (!url) return null;
   const row = inWindow.find((r) => r.page_url === url);
   if (!row) return null;
+  // Materiality, both absolute and relative to the query's own demand.
+  // The absolute floor is the same answerGapMinQueryImpressions that
+  // materialServingPosition uses — one notion of "enough impressions for
+  // this page+query pair to be actionable" across the module.
+  const targetImpressions = parseInt(row.impressions, 10) || 0;
+  if (targetImpressions < thresholds.answerGapMinQueryImpressions) return null;
+  const mappedTotal = pageRows.reduce((sum, r) => sum + (parseInt(r.impressions, 10) || 0), 0);
+  if (!mappedTotal) return null;
+  if (targetImpressions / mappedTotal < CTR_REWRITE_TARGET_MIN_SHARE) return null;
   return recomputeCtr(row.clicks, row.impressions) < thresholds.ctrRewriteMaxCtr ? url : null;
 }
 
@@ -3329,7 +3352,44 @@ class GscOpportunityMiner {
       );
       // ?? not || — a frozen-row conflict legitimately reports rowCount 0
       // (the WHERE guard skipped the update) and must not count as persisted.
-      count += result.rowCount ?? 0;
+      const persisted = result.rowCount ?? 0;
+      count += persisted;
+
+      // The ranking URL a query lands on MOVES between mines, and a
+      // ctr_rewrite dedupe key embeds page_url — so the new target queues
+      // under a fresh key while the previous page's row stays pending and
+      // claimable for its full 14 days, pointing the rewrite at a page the
+      // current evidence no longer selects (audit P2). Retire the
+      // superseded target and the link-boost companion derived from it.
+      // Only pending rows: claimed/review work is in flight and the
+      // upsert's own guard leaves those alone. 'expired' (not 'skipped')
+      // keeps it revivable by contract if the target moves back.
+      if (persisted && o.bucket === 'ctr_rewrite' && o.query && o.page_url) {
+        try {
+          const superseded = await runner('opportunity_queue')
+            .where({ bucket: 'ctr_rewrite', query: o.query, status: 'pending' })
+            .whereNot('dedupe_key', o.dedupe_key)
+            .select('page_url');
+          const stalePages = superseded.map((r) => r.page_url).filter((u) => u && u !== o.page_url);
+          if (superseded.length) {
+            await runner('opportunity_queue')
+              .where({ bucket: 'ctr_rewrite', query: o.query, status: 'pending' })
+              .whereNot('dedupe_key', o.dedupe_key)
+              .update({ status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date() });
+          }
+          if (stalePages.length) {
+            await runner('opportunity_queue')
+              .where({ bucket: 'link_boost', status: 'pending' })
+              .whereIn('page_url', stalePages)
+              .whereRaw("signal_metadata->>'source_bucket' = ?", ['ctr_rewrite'])
+              .update({ status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date() });
+          }
+        } catch (err) {
+          // Fail-soft like the near-me cleanup: a reconciliation error
+          // must never abort the mining pass.
+          logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (${o.query}): ${err.message}`);
+        }
+      }
     }
     return count;
   }
