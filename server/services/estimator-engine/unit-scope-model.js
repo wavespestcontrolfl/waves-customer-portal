@@ -297,6 +297,9 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     lotApplicability: lotApplicabilityFor({ propertySubtype: propertyType, ownershipType }),
     unitSignal,
     subpremiseSignal,
+    // Stacked ASSOCIATION aggregate: even a condo's figures describe the
+    // whole building here, so the per-unit-folio exception must not apply.
+    aggregated,
   };
 }
 
@@ -383,13 +386,23 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   // sub-10k building would price the whole thing for one suite (codex r28
   // P1 — the same overquote class the tenant rung exists for). Caller-
   // stated area IS suite-scoped and stays.
-  const SUITE_INCOMPATIBLE_HOME_SOURCES = new Set([
+  const BUILDING_SCOPE_HOME_SOURCES = new Set([
     'county_assessed', 'property_lookup_estimate', 'subdivision_median', 'customer_profile',
   ]);
-  if (model.serviceScope === 'commercial_suite'
+  // A residential UNIT needs the same treatment (codex r29 P1) — with ONE
+  // exception: a CONDO's county record is a per-unit parcel with its own
+  // folio, so its area IS unit-scoped and must be kept (property-facts
+  // doctrine). An apartment/flattened-single-family record, or a condo
+  // whose GIS returned the stacked ASSOCIATION aggregate, describes the
+  // whole structure.
+  const perUnitCountyRecord = model.propertyUse === 'condominium' && model.aggregated !== true;
+  const buildingAreaIncompatible = model.serviceScope === 'commercial_suite'
+    || (model.serviceScope === 'residential_unit' && !perUnitCountyRecord);
+  if (buildingAreaIncompatible
     && Number(propertyFacts?.home?.value) > 0
-    && SUITE_INCOMPATIBLE_HOME_SOURCES.has(String(propertyFacts.home.source || ''))) {
+    && BUILDING_SCOPE_HOME_SOURCES.has(String(propertyFacts.home.source || ''))) {
     const priorHome = Number(propertyFacts.home.value);
+    const label = model.serviceScope === 'commercial_suite' ? 'suite' : 'unit';
     propertyFacts.home = {
       value: null,
       source: 'unresolved',
@@ -399,10 +412,14 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
         {
           value: priorHome,
           source: propertyFacts.home.source,
-          reason: 'commercial suite scope — this area covers the whole building, not the suite',
+          reason: `${model.serviceScope} scope — this area covers the whole building, not the ${label}`,
         },
       ],
     };
+    // The audit's size basis must follow the mutation, or the rollout
+    // metrics claim a county-measured estimate that priced nothing
+    // (codex r29 P2).
+    model.sizeBasis = 'unresolved';
   }
   if (unitScoped && noIndividualLot) {
     const priorValue = Number(propertyFacts?.lot?.value) > 0 ? Number(propertyFacts.lot.value) : null;

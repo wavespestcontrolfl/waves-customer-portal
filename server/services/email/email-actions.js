@@ -86,14 +86,19 @@ function emailProseForScan(body) {
   for (const line of lines) {
     if (/^\s*>/.test(line)) continue; // quoted history
     // Structural markers (separator, reply header, forwarded header) end
-    // the sender's own text wherever they appear.
-    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s|Sent from )/i.test(line)) break;
+    // the sender's own text wherever they appear. "Sent from" counts only
+    // in its DEVICE-signature form — "Sent from our warehouse, where we
+    // need pest control" is request prose (codex r29 P1); any other
+    // "Sent from …" is handled by the content-gated group below.
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s)/i.test(line)) break;
+    if (/^\s*Sent from (?:my |an |the )?(?:iphone|ipad|ipod|android|samsung|galaxy|pixel|blackberry|windows|outlook|gmail|yahoo|mail|mobile|phone|tablet|device)\b/i.test(line)) break;
     // Courtesy signoffs count only as WHOLE lines AND only once request
     // content precedes them — "Thanks!" can OPEN a reply ("Thanks!\nWe
     // need pest control for our warehouse…"), and breaking there discarded
     // the entire request (codex r18 P1; whole-line rule from r10 P1).
     if (hasContent()
-      && /^\s*(?:best regards|kind regards|sincerely|regards|thanks|thank you|thx)[,.!]?\s*$/i.test(line)) break;
+      && (/^\s*(?:best regards|kind regards|sincerely|regards|thanks|thank you|thx)[,.!]?\s*$/i.test(line)
+        || /^\s*Sent from /i.test(line))) break;
     out.push(line);
   }
   return out.join('\n').slice(0, 2000);

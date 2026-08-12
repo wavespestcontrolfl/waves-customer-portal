@@ -491,6 +491,38 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     expect(statedFacts.home.value).toBe(1590);
   });
 
+  test('a residential unit clears whole-structure area, but a CONDO folio survives (r29)', () => {
+    // Tenant at Apt B on a flattened single-family record: the county area
+    // covers the whole subdivided structure.
+    const flattened = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Apt B, Venice, FL 34285' },
+      propertyFacts: { tenant: true, home: { source: 'county_assessed' } },
+      address: '900 Bayview Ter, Apt B, Venice, FL 34285',
+    });
+    expect(flattened.serviceScope).toBe('residential_unit');
+    const flatFacts = { home: { value: 3400, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(flatFacts, flattened);
+    expect(flatFacts.home.value).toBeNull();
+    // …and the audit's size basis follows the mutation (r29 P2).
+    expect(flattened.sizeBasis).toBe('unresolved');
+
+    // A CONDO's county record is a per-unit parcel with its own folio —
+    // that area IS unit-scoped and must be kept.
+    const condo = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Residential Condo' },
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit 12, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { source: 'county_assessed' } },
+      address: '900 Bayview Ter, Unit 12, Venice, FL 34285',
+    });
+    expect(condo.propertyUse).toBe('condominium');
+    const condoFacts = { home: { value: 1240, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(condoFacts, condo);
+    expect(condoFacts.home.value).toBe(1240);
+  });
+
   test('commercial tenant classifies as a suite', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
