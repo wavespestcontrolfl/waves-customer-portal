@@ -329,6 +329,28 @@ function smsNewOption(dateStr, startHHMM) {
   const endMin = (startMin + 120) % (24 * 60);
   return `${smsDateLabel(dateStr)}, ${fmtTime(minToHHMM(startMin))} - ${fmtTime(minToHHMM(endMin))}`;
 }
+// Mirror of the renderer's formatSmsTemplateVars for the one var a
+// dispatcher can type free-form: a value that IS exactly a bare time
+// ("09:00") or a bare range ("9:00-11:00") renders as "9:00 AM" /
+// "9:00 AM - 11:00 AM", a couple characters longer than typed (codex r7
+// P2). The other vars can't match these whole-string shapes (name,
+// service type, link clause, and the already-formatted option label all
+// fail them), so only the message needs the pass.
+function formatSmsVarMirror(value) {
+  const t = String(value).trim();
+  // Server parseHHMM validates 0-23h / 0-59m and leaves invalid values
+  // untouched — including PER SIDE inside a range.
+  const valid = (s) => {
+    const m = String(s).match(/^(\d{1,2}):(\d{2})$/);
+    return !!m && +m[1] <= 23 && +m[2] <= 59;
+  };
+  const side = (s) => (valid(s) ? fmtTime(s) : s);
+  if (valid(t)) return fmtTime(t);
+  const m = t.match(/^(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})$/);
+  if (m) return `${side(m[1])} - ${side(m[2])}`;
+  return value;
+}
+
 // Predicted body assembled from the ACTIVE template the server sent in the
 // options payload (customCompose.template) — never a hardcoded copy of the
 // migration body, which an admin template edit would silently desync from
@@ -337,7 +359,7 @@ function smsNewOption(dateStr, startHHMM) {
 function predictedCustomBody(compose, message, option) {
   const vars = {
     first_name: compose.firstName,
-    custom_message: message,
+    custom_message: formatSmsVarMirror(message),
     service_type: compose.serviceType,
     new_option: smsNewOption(option.date, option.window?.start),
     link_clause: compose.linkClause,
