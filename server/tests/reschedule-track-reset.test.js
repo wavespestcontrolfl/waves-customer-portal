@@ -663,6 +663,81 @@ describe('markEnRoute stale-attempt self-heal', () => {
   });
 });
 
+describe('markOnProperty stale-attempt repair (arrival-first signals)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.transaction = jest.fn(async (fn) => fn(db));
+  });
+
+  test('entirely-old on_property row rewinds before a fresh arrival flip', async () => {
+    const staleSvc = {
+      id: 'job-op-stale',
+      customer_id: 'cust-20',
+      technician_id: null,
+      status: 'pending',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      actual_start_time: isoDaysAgo(7),
+      arrival_sms_sent_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const healedSvc = {
+      ...staleSvc,
+      track_state: 'scheduled',
+      arrived_at: null,
+      actual_start_time: null,
+      arrival_sms_sent_at: null,
+    };
+    const healUpdate = query(1);
+    const flipUpdate = query(1);
+    const claimUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(staleSvc)) // loadService
+      .mockReturnValueOnce(healUpdate) // rewind UPDATE
+      .mockReturnValueOnce(query(healedSvc)) // recursed loadService
+      .mockReturnValueOnce(flipUpdate) // on_property flip
+      .mockReturnValueOnce(claimUpdate); // arrival SMS claim
+
+    const result = await trackTransitions.markOnProperty('job-op-stale');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(healUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'scheduled',
+      arrived_at: null,
+      actual_start_time: null,
+      arrival_sms_sent_at: null,
+    });
+    expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'on_property',
+      arrived_at: expect.any(Date),
+    });
+  });
+
+  test('flip CAS miss with a non-on_property fresh row surfaces a conflict', async () => {
+    const svc = {
+      id: 'job-op-conflict',
+      customer_id: 'cust-21',
+      technician_id: null,
+      status: 'confirmed',
+      track_state: 'en_route',
+      scheduled_date: todayStr,
+      en_route_at: isoDaysAgo(0, 'T09:00'),
+      cancelled_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // flip UPDATE misses (reschedule rewrote the row)
+      .mockReturnValueOnce(query({ ...svc, track_state: 'scheduled', en_route_at: null })); // re-read
+
+    const result = await trackTransitions.markOnProperty('job-op-conflict');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('concurrent_update');
+  });
+});
+
 describe('visit timeline stale-timestamp guard', () => {
   const config = { enabled: true, showOnCustomerReports: true };
 
