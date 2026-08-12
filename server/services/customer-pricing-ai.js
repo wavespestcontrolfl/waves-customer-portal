@@ -348,7 +348,7 @@ function lookupEnabled() {
 // Shared trust predicates — the agent draft path applies the same rule.
 const {
   lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
-  lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupFeatureReadIsFlagged, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
   lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
@@ -666,6 +666,26 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
             lookupFeatureKeys.add('poolCageSize');
           }
         }
+        // A FLAGGED vision read is a refusal, and a refusal is not a gap —
+        // the seed may not restore the older estimate's value and let the
+        // offer publish an exact price the current lookup says to verify
+        // first (codex #3367 PR r17). Same rule the dimensions and
+        // structural facts already follow.
+        //
+        // FLAG-ONLY, deliberately. This branch also covers a merely
+        // LOW-GRADED read, and that case is a ruled behavior in the other
+        // direction (pre-push r11 P0): weak imagery means fall back to
+        // other evidence — the county-backed pool still prices and the
+        // accepted-estimate seed still fills every other feature. Treating
+        // a low grade as a refusal would price a bare-property rate for a
+        // home whose accepted estimate carried the modifiers, which is the
+        // bug that test exists to prevent.
+        if (lookupFeatureReadIsFlagged(p)) {
+          for (const key of ['pool', 'poolCage', 'poolCageSize', 'nearWater',
+            'shrubs', 'trees', 'complexity', 'irrigation', 'treeCount']) {
+            if (!lookupFeatureKeys.has(key)) lookupRejectedFields.add(key);
+          }
+        }
       } else {
         // A field is lookup-backed only when the trusted payload actually
         // carried a value for it — a silent field keeps its default here
@@ -789,6 +809,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       for (const [key, value] of Object.entries(propertySeed.features)) {
         if (value === undefined || value === null || value === '') continue;
         if (lookupFeatureKeys.has(key)) continue;
+        // A feature the lookup REFUSED is not a gap either (codex #3367 PR
+        // r17) — same bookkeeping the dimensions and structural facts use.
+        if (!seedMayFill(key)) continue;
         features[key] = value;
       }
     }

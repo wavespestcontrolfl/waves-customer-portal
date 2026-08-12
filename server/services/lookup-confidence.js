@@ -59,14 +59,6 @@ function hasVerifyFlagMatching(enriched, matcher) {
   return flags.some((flag) => matcher(String(flag?.field || '').toLowerCase()));
 }
 
-// A bed area is trustworthy when the lookup neither graded itself low nor
-// flagged the bed-area read — or the turf/imagery read it came from, since
-// that is the same picture.
-// Bed area is a NEW consumption (nothing priced off it before this lane), so
-// it fails closed on a missing score: an unscored area would otherwise
-// become a medium-confidence T&S price with no review reason. A quote
-// without it simply falls back to the lot inference, which carries its own
-// review markers.
 // The FLAG half of lookupBedAreaIsTrustworthy, value-agnostic: did the
 // lookup flag the bed-area read (or the turf/imagery read it comes from —
 // same picture)? A consumer that must tell "the lookup REFUSED this read"
@@ -79,6 +71,14 @@ function lookupBedAreaReadIsFlagged(enriched) {
   ));
 }
 
+// A bed area is trustworthy when the lookup neither graded itself low nor
+// flagged the bed-area read — or the turf/imagery read it came from, since
+// that is the same picture.
+// Bed area is a NEW consumption (nothing priced off it before this lane), so
+// it fails closed on a missing score: an unscored area would otherwise
+// become a medium-confidence T&S price with no review reason. A quote
+// without it simply falls back to the lot inference, which carries its own
+// review markers.
 function lookupBedAreaIsTrustworthy(enriched) {
   const area = Number(enriched?.estimatedBedAreaSf);
   if (!Number.isFinite(area) || area <= 0) return false;
@@ -132,6 +132,19 @@ function lookupTurfZeroIsObserved(enriched) {
   return lookupTurfReadIsTrustworthy(enriched);
 }
 
+// The FLAG half of lookupFeaturesAreTrustworthy, independent of grade: did
+// the lookup explicitly flag a vision feature read? A consumer must be able
+// to tell that REFUSAL from a merely low-graded read — a low grade means
+// "this imagery is weak, fall back to other evidence" (a ruled behavior:
+// the record-backed pool still prices and the accepted-estimate seed still
+// fills the rest), while a flag means "verify this before pricing".
+function lookupFeatureReadIsFlagged(enriched) {
+  return hasVerifyFlagMatching(enriched, (field) => (
+    field.includes('estimatedturf') || field.includes('pool') || field.includes('shrub')
+    || field.includes('tree') || field.includes('landscape')
+  ));
+}
+
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
 // landscape complexity, tree count, water adjacency) all come off the same
 // imagery read. When the lookup grades that read low, none of them should
@@ -139,10 +152,7 @@ function lookupTurfZeroIsObserved(enriched) {
 function lookupFeaturesAreTrustworthy(enriched) {
   if (!enriched) return false;
   if (!lookupConfidenceIsAdequate(enriched)) return false;
-  return !hasVerifyFlagMatching(enriched, (field) => (
-    field.includes('estimatedturf') || field.includes('pool') || field.includes('shrub')
-    || field.includes('tree') || field.includes('landscape')
-  ));
+  return !lookupFeatureReadIsFlagged(enriched);
 }
 
 // Weak or conflicting core dimensions ship with their own fieldVerifyFlags
@@ -294,6 +304,7 @@ module.exports = {
   lookupConfidenceIsAdequate,
   lookupBedAreaIsTrustworthy,
   lookupBedAreaReadIsFlagged,
+  lookupFeatureReadIsFlagged,
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,

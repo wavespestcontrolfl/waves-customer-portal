@@ -445,6 +445,43 @@ describe('customer pricing AI helpers', () => {
     expect(price(await run({ garageType: '', seedGarage: true }))).toBeGreaterThan(price(baseline));
   });
 
+  test('a REJECTED vision feature is not refilled from the seed (PR r17 P1)', async () => {
+    // lookupFeaturesAreTrustworthy is exactly the flag/confidence gate for
+    // vision features. When it refuses them the values are not adopted —
+    // and the seed must not restore the older estimate's version, or the
+    // offer publishes an exact price the current lookup says to verify.
+    // Asserted on the resolved property INPUT: several of these modifiers
+    // do not move a pest price at these dimensions, so a price assertion
+    // could pass with the fix reverted.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (flags) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-feat', property_sqft: null, lot_sqft: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      propertySeed: {
+        homeSqFt: 2100,
+        features: { pool: true, poolCage: true, trees: 'heavy', shrubs: 'heavy' },
+      },
+    });
+
+    // No flags: the seed's feature evidence fills as before.
+    const clean = await resolve([]);
+    expect(clean.propertyInput.features.pool).toBe(true);
+    expect(clean.propertyInput.features.trees).toBe('heavy');
+
+    // A pool/tree/landscape flag refuses the whole vision feature read, so
+    // none of them may be restored from the seed.
+    for (const field of ['pool', 'estimatedTreeCount', 'landscapeComplexity', 'shrubDensity']) {
+      const flagged = await resolve([{ field, priority: 'high' }]);
+      expect(flagged.propertyInput.features.pool).not.toBe(true);
+      expect(flagged.propertyInput.features.poolCage).not.toBe(true);
+      expect(flagged.propertyInput.features.trees).not.toBe('heavy');
+    }
+  });
+
   test('a REJECTED structural fact is not refilled from the seed (pre-push P0)', async () => {
     // structuralFactIsTrustworthy withholds a fact whose record evidence is
     // weak or conflicting. Restoring it from an older estimate hands the
