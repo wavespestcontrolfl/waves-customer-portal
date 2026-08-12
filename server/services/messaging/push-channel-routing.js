@@ -125,6 +125,28 @@ async function hasActivePushDevice(customerId, knex = db) {
   return Boolean(row);
 }
 
+// push_first additionally requires a FRESH device heartbeat. Provider
+// acceptance (stats.sent) proves APNs/FCM took the request, not that the
+// OS displayed it — a customer who revoked notification permission and
+// never reopened the app keeps an accepting-but-silent token until the
+// next launch cleans it up. Registration re-fires on every app launch and
+// bumps the row's updated_at (routes/push.js), so a recent heartbeat means
+// the app was recently open under intact permission. Outside the window,
+// push_first falls back to SMS — costless for reliability, since
+// push-instead-of-SMS only helps customers actively using the app anyway.
+// push_and_sms is exempt: its SMS goes regardless.
+const PUSH_FIRST_HEARTBEAT_HOURS = 72;
+
+async function hasFreshPushDevice(customerId, knex = db) {
+  const cutoff = new Date(Date.now() - PUSH_FIRST_HEARTBEAT_HOURS * 3600 * 1000);
+  const row = await knex('push_subscriptions')
+    .where({ customer_id: customerId, active: true })
+    .where('updated_at', '>=', cutoff)
+    .first('id')
+    .catch(() => null);
+  return Boolean(row);
+}
+
 // messageType → the LIVE notification_prefs channel column the actual
 // senders consult (appointment-reminders.js, twilio.js en-route,
 // scheduler.js receipts). Every type in PUSH_ROUTING_POLICY must map here
@@ -304,7 +326,7 @@ async function recordBell(customerId, messageType, body) {
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return { delivered: false };
-    if (!(await hasActivePushDevice(customerId))) return { delivered: false };
+    if (!(await hasFreshPushDevice(customerId))) return { delivered: false };
     const { delivered } = await sendPush(customerId, messageType, body, windowGuardFrom(preSendCheck));
     if (!delivered) {
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);

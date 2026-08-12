@@ -54,6 +54,12 @@ router.post('/native-subscribe', async (req, res, next) => {
         subscription_data: row.subscription_data,
         device_info: row.device_info,
         active: true,
+        // Heartbeat: registration re-fires on every app launch, so bumping
+        // updated_at here makes it a "customer recently opened the app"
+        // signal — push-channel-routing requires a FRESH heartbeat before a
+        // push may replace an SMS (provider acceptance alone cannot prove
+        // the OS will display the alert).
+        updated_at: db.fn.now(),
       })
       .returning('id');
 
