@@ -238,6 +238,10 @@ module.exports = {
   createShortCode,
   createTrackedShortLink,
   existingShortUrlFor,
+  // The origin every minted short URL uses — exported so previews that
+  // estimate a not-yet-minted link (rain-out custom compose) build their
+  // placeholder from the SAME env chain as the eventual mint.
+  shortLinkBaseUrl: baseUrl,
   resolveShortCode,
   shortenOrPassthrough,
   invoiceShortCodePrefix,

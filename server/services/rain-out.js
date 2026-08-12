@@ -618,23 +618,23 @@ async function getOptions(serviceId) {
       .where({ template_key: CUSTOM_TEMPLATE_KEY })
       .first('body', 'is_active');
     if (row?.body && row.is_active !== false) {
+      // Everything link/body served here goes through the renderer's OWN
+      // stripPortalUrlScheme — never a hand-rolled strip: the renderer
+      // keeps https:// on hosts outside SCHEMELESS_SMS_HOSTS (a non-owned
+      // SHORTLINK_BASE_URL, a preview origin), and a blanket strip made
+      // the counter undercount those by 8 chars (codex r5/r6 P2).
+      const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
       let composeUrl = null;
       if (service.reschedule_token) {
-        const { existingShortUrlFor } = require('./short-url');
-        const { portalUrl } = require('../utils/portal-url');
+        const { existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
+        // No existing code ⇒ same-length placeholder from the SAME origin
+        // the send's mint will use (short-url's base chain, not portalUrl's
+        // — the two env chains differ).
         composeUrl = (await existingShortUrlFor({
           kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
-        })) || portalUrl('/l/xxxxxxxxxx');
-        // The template renderer strips https:// from owned portal hosts, so
-        // the counter must count the scheme-less form the customer receives.
-        composeUrl = String(composeUrl).replace(/^https?:\/\//i, '');
+        })) || `${shortLinkBaseUrl()}/l/xxxxxxxxxx`;
+        composeUrl = stripPortalUrlScheme(String(composeUrl));
       }
-      // Serve the body PRE-normalized through the renderer's own portal
-      // scheme-strip: an admin-embedded literal https://portal... URL in
-      // the template is stripped at render time, and the client counter
-      // must count the stripped form without keeping its own copy of the
-      // owned-host list (codex r5 P2).
-      const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
       customCompose = {
         template: stripPortalUrlScheme(row.body),
         firstName: service.first_name || 'there',

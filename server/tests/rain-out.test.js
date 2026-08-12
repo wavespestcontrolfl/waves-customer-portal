@@ -2026,6 +2026,36 @@ describe('rain-out service', () => {
       expect(options.customCompose.linkClause).not.toContain('https://');
     });
 
+    test('getOptions: an unowned short-link origin KEEPS its scheme in the counter clause (renderer parity)', async () => {
+      // codex r6 P2: the renderer strips https:// only from owned hosts —
+      // a blanket strip undercounted a non-owned SHORTLINK_BASE_URL by 8
+      // chars. The placeholder must also come from short-url's env chain.
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      process.env.SHORTLINK_BASE_URL = 'https://wvs-links.example';
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) }),
+            chain({ rows: [] }),
+          ],
+          sms_templates: [
+            chain({ first: jest.fn().mockResolvedValue({ ...CUSTOM_TEMPLATE_ROW }) }),
+          ],
+          short_codes: [
+            chain({ first: jest.fn().mockResolvedValue(undefined) }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.customCompose.linkClause)
+          .toBe(' New time & other options: https://wvs-links.example/l/xxxxxxxxxx');
+      } finally {
+        delete process.env.SHORTLINK_BASE_URL;
+      }
+    });
+
     test('getOptions: no token → reply fallback clause; disabled row → no compose; gate off → no compose', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
