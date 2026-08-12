@@ -1892,7 +1892,7 @@ describe('rain-out service', () => {
       }]);
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
-        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Pat', last_name: null }] })],
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9', last_name: null }] })],
       });
 
       const result = await RainOut.checkTarget({
@@ -1903,7 +1903,7 @@ describe('rain-out service', () => {
       expect(result.conflicts).toEqual([expect.objectContaining({
         windowStart: '14:00',
         windowEnd: '15:30',
-        customerName: 'Pat',
+        customerName: 'cust-9',
       })]);
     });
 
