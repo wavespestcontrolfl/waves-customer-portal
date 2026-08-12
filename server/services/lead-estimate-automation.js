@@ -494,10 +494,13 @@ function evaluateLeadEstimateAutomationReadiness({
     // A residential-intake lead whose own words describe a commercial
     // premises ("brand-new industrial building… office and warehouse") is a
     // category conflict: reclassifying + scoping the suite is operator
-    // work, never an auto-priced residential draft.
+    // work, never an auto-priced residential draft. An EXPLICIT commercial
+    // service selection ("Commercial Pest Control") is the same conflict
+    // stated outright — checked independently of the premises-phrase regex,
+    // which deliberately doesn't match bare service labels (codex r2 P1).
     const prose = [intake.message, intake.notes, resolvedServiceInterest]
       .filter(Boolean).join(' ');
-    if (commercialTextSignal(prose)) {
+    if (commercialTextSignal(prose) || /\bcommercial\b/i.test(resolvedServiceInterest || '')) {
       missing.push('commercial_category_conflict');
       review.push('commercial_signal_on_residential_intake');
     }

@@ -111,6 +111,12 @@ const HOA_COMMON_AREA_TYPE_RE = /hoa|common.?area|association/;
 
 function commercialCategoryConflict({ extraction, intent }) {
   if (intent?.is_commercial === true) return null;
+  // Structured commercial signals outrank the type text entirely (codex r2
+  // P1): hoa_common_area_service=true means the SERVICE targets HOA-owned
+  // common areas even when property_type reads 'condo' — the extraction
+  // schema routes that commercial by definition (call-triage-flags applies
+  // the same rule).
+  if (extraction?.property?.hoa_common_area_service === true) return 'hoa_common_area_service';
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
   if (!type) return null;
   if (HOA_COMMON_AREA_TYPE_RE.test(type)) return type;

@@ -126,6 +126,18 @@ describe('commercialCategoryConflict', () => {
       intent: { is_commercial: false },
     })).toBeNull();
   });
+  test('the structured hoa_common_area_service boolean outranks a residential type text', () => {
+    // A condo ASSOCIATION's common-area job reads property_type 'condo' —
+    // the boolean is the schema's commercial routing signal (codex r2 P1).
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'condo', hoa_common_area_service: true } },
+      intent: { is_commercial: false },
+    })).toBe('hoa_common_area_service');
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'condo', hoa_common_area_service: false } },
+      intent: { is_commercial: false },
+    })).toBeNull();
+  });
 });
 
 describe('resolveUnitScopeModel — unknown stays unknown in the audit', () => {
@@ -366,6 +378,21 @@ describe('lead webhook readiness guardrails', () => {
       expect(readiness.ready).toBe(false);
       expect(readiness.missing).toContain('commercial_category_conflict');
       expect(readiness.review).toContain('commercial_signal_on_residential_intake');
+    });
+  });
+
+  test('gate ON: an explicit commercial service interest parks regardless of prose', () => {
+    withGate('true', () => {
+      const readiness = evaluateLeadEstimateAutomationReadiness({
+        ...base,
+        intake: {
+          ...base.intake,
+          normalizedAddress: { line1: '4801 Industrial Way', fullAddress: '4801 Industrial Way, Parrish FL', city: 'Parrish', zip: '34221' },
+        },
+        serviceInterest: 'Commercial Pest Control',
+      });
+      expect(readiness.ready).toBe(false);
+      expect(readiness.missing).toContain('commercial_category_conflict');
     });
   });
 
