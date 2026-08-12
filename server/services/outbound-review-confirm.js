@@ -113,144 +113,17 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       logger.error(`[${routeTag}] outbound-review reminder arm returned null (swallowed failure) for ${svc.id}`);
     } else {
       logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
-      // Post-registration slot verify (Codex #3361 r11 P2): a reschedule
-      // committing between the fresh read above and the insert can have
-      // run its own handleReschedule resync BEFORE the reminder row
-      // existed. One more read AFTER registration closes the ordering
-      // both ways — a move committed before this read is resynced here;
-      // a move committed after it finds the now-existing row and
-      // resyncs itself. A detected move whose resync fails marks the
-      // leg failed so the sweep retries (registration dedupes; the
+      // Post-registration slot verify — shared helper (see
+      // verifyReminderSlotAfterRegistration below). A failed repair marks
+      // the leg failed so the sweep retries (registration dedupes; the
       // retry re-runs this verify).
-      try {
-        const postSlot = await db('scheduled_services')
-          .where({ id: svc.id })
-          .first('scheduled_date', 'window_start');
-        if (postSlot && !postSlot.window_start && slotStart) {
-          // The verified slot went WINDOWLESS (a concurrent edit cleared
-          // the arrival time after our registration armed a start): never
-          // resync to the fabricated 09:00 fallback — convert the armed
-          // row to the CANONICAL windowless pre-closed placeholder
-          // (windows_preclosed + suppressed_by_sibling + all windows
-          // closed), the exact state registerAppointment's
-          // closeReminderWindows insert produces (Codex #3361 r18 P2,
-          // hardened r22 P2). A flag-only close is transient: the DB sync
-          // trigger preserves closed windows across a later date-only move
-          // only for windows_preclosed rows — an unmarked row would
-          // recompute against the fabricated 08:00 time and re-arm a
-          // reminder for a time nobody chose. The marker makes the DB
-          // machinery hold placeholder semantics durably, and the trigger's
-          // real-window branch re-arms the row normally when an arrival
-          // time is later set.
-          const converted = await db.transaction(async (trx) => {
-            // Pre-conversion state: the row's suppression (an ARMED row may
-            // own its 08:00 fallback slot with a real sibling suppressed
-            // beneath it) and its sent flags (a window the armed owner
-            // already delivered was rendered with the merged slot label, so
-            // a promoted sibling inherits it — the same contract the sync
-            // trigger's slot-departure path applies).
-            const armed = await trx('appointment_reminders')
-              .where({ scheduled_service_id: svc.id, cancelled: false })
-              .first('id', 'customer_id', 'appointment_time', 'suppressed_by_sibling',
-                'reminder_72h_sent', 'reminder_72h_sent_at', 'reminder_24h_sent', 'reminder_24h_sent_at');
-            if (!armed) return 0;
-            // Same lock order as registration and the sync trigger: slot
-            // advisory lock FIRST, then reminder-row writes — inverting it
-            // deadlocks against a concurrent registration on this slot.
-            await trx.raw('SELECT pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))', [armed.customer_id, armed.appointment_time]);
-            // Atomic windowless guard (Codex #3361 r19 P2, same shape as
-            // handleReschedule's expectSchedule): a THIRD move assigning a
-            // real window between the postSlot read and this write makes
-            // the conversion miss instead of silencing the re-armed
-            // reminders — that move's own resync owns the row's state.
-            const rows = await trx('appointment_reminders')
-              .where({ id: armed.id, cancelled: false })
-              .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
-              .update({
-                suppressed_by_sibling: true,
-                windows_preclosed: true,
-                confirmation_sent: true,
-                confirmation_sent_at: trx.raw('COALESCE(confirmation_sent_at, NOW())'),
-                reminder_72h_sent: true,
-                reminder_72h_sent_at: trx.raw('COALESCE(reminder_72h_sent_at, NOW())'),
-                reminder_24h_sent: true,
-                reminder_24h_sent_at: trx.raw('COALESCE(reminder_24h_sent_at, NOW())'),
-                updated_at: new Date(),
-              });
-            if (rows && !armed.suppressed_by_sibling) {
-              // The conversion demoted a slot OWNER: a real visit
-              // registered at the same slot may sit suppressed beneath it,
-              // and no trigger event fires for this app-side demotion —
-              // promote exactly as the trigger does on slot departure,
-              // carrying the owner's delivered-window state. The vacated
-              // slot is the one the ARMED ROW actually occupies, so its
-              // date/window params are the ET decomposition of the row's
-              // own appointment_time (Codex #3361 r23 P2) — NOT the
-              // post-move service slot: when the windowless edit landed
-              // BEFORE our registration inserted (the stale-read ordering
-              // the r11 verify exists for), the row still sits at the
-              // pre-move real slot (e.g. 09:00, possibly a different
-              // date), and passing the post-move date + NULL(→08:00)
-              // window could never match the 09:00 sibling's service row
-              // in the promotion's candidate filter. Decomposing
-              // appointment_time inverts exactly the (date + COALESCE
-              // window) AT TIME ZONE composition the trigger builds slot
-              // times with, so it is right in both orderings.
-              await trx.raw(
-                `SELECT promote_suppressed_reminder_sibling(
-                   ?::uuid, ?::uuid, ?::timestamptz,
-                   ((?::timestamptz) AT TIME ZONE 'America/New_York')::date,
-                   ((?::timestamptz) AT TIME ZONE 'America/New_York')::time,
-                   ?, ?, ?, ?)`,
-                [armed.customer_id, svc.id, armed.appointment_time,
-                  armed.appointment_time, armed.appointment_time,
-                  armed.reminder_72h_sent === true, armed.reminder_72h_sent_at || null,
-                  armed.reminder_24h_sent === true, armed.reminder_24h_sent_at || null],
-              );
-            }
-            return rows;
-          });
-          if (!converted) {
-            // Guard miss = a real window arrived and its own sync owns the
-            // reminder state now — success, not a retryable failure.
-            logger.info(`[${routeTag}] windowless placeholder conversion skipped for ${svc.id} — the service regained a window; its own resync owns the state`);
-          } else {
-            logger.info(`[${routeTag}] reminder converted to windowless placeholder after concurrent windowless move for ${svc.id}`);
-          }
-        } else if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
-          || String(postSlot.window_start || '') !== String(slotStart || ''))) {
-          // expectSchedule = the observed slot, enforced atomically inside
-          // handleReschedule: a SECOND move (B) landing after the postSlot
-          // read makes this stale resync miss instead of stomping B's own
-          // sync back to A (Codex #3361 r12 P2). The explicit null start is
-          // enforced too (window_start IS NULL) — a date-only move observed
-          // windowless must not overwrite a concurrently-assigned real
-          // window with the fabricated 09:00 fallback (Codex #3361 r21 P2).
-          // handleReschedule is fail-soft (null on no-row/invalid-time/
-          // error) — a null here is an unsynced slot, so the leg fails and
-          // the sweep retries (Codex #3361 r12 P2).
-          const resynced = await AppointmentReminders.handleReschedule(
-            svc.id,
-            `${dateOnly(postSlot.scheduled_date)}T${postSlot.window_start || '09:00'}`,
-            {
-              sendNotification: false,
-              expectSchedule: {
-                date: dateOnly(postSlot.scheduled_date),
-                windowStart: postSlot.window_start || null,
-              },
-            },
-          );
-          if (resynced === null) {
-            coreLegsOk = false;
-            logger.warn(`[${routeTag}] reminder slot resync returned null for ${svc.id} — leaving retryable`);
-          } else {
-            logger.info(`[${routeTag}] reminder slot resynced after concurrent move for ${svc.id}`);
-          }
-        }
-      } catch (postSyncErr) {
-        coreLegsOk = false;
-        logger.warn(`[${routeTag}] post-registration slot verify failed for ${svc.id} — leaving retryable: ${postSyncErr.message}`);
-      }
+      const slotVerified = await verifyReminderSlotAfterRegistration(db, {
+        serviceId: svc.id,
+        slotDate,
+        slotStart,
+        routeTag,
+      });
+      if (!slotVerified) coreLegsOk = false;
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
@@ -447,6 +320,151 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   return coreLegsOk;
 }
 
+// Post-registration slot verify (Codex #3361 r11 P2), shared by the confirm
+// hook's registration leg and the call pipeline's same-key replay repair
+// (Codex #3361 r26 P2 — the replay has the same fresh-read → insert gap): a
+// reschedule committing between a registration's fresh slot read and its
+// reminder insert ran its own sync BEFORE the reminder row existed. One
+// more read AFTER registration closes the ordering both ways — a move
+// committed before this read is repaired here; a move committed after it
+// finds the now-existing row and syncs itself (app resync or the DB
+// trigger). `slotDate`/`slotStart` are the values the registration was
+// built from. Returns true when the slot is verified consistent (or another
+// actor's sync owns the row's state), false when a needed repair failed or
+// the verify itself errored — retryable by the caller's rail.
+async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, slotStart, routeTag = 'outbound-review' }) {
+  try {
+    const AppointmentReminders = require('./appointment-reminders');
+    const postSlot = await dbh('scheduled_services')
+      .where({ id: serviceId })
+      .first('scheduled_date', 'window_start');
+    if (postSlot && !postSlot.window_start && slotStart) {
+      // The verified slot went WINDOWLESS (a concurrent edit cleared
+      // the arrival time after our registration armed a start): never
+      // resync to the fabricated 09:00 fallback — convert the armed
+      // row to the CANONICAL windowless pre-closed placeholder
+      // (windows_preclosed + suppressed_by_sibling + all windows
+      // closed), the exact state registerAppointment's
+      // closeReminderWindows insert produces (Codex #3361 r18 P2,
+      // hardened r22 P2). A flag-only close is transient: the DB sync
+      // trigger preserves closed windows across a later date-only move
+      // only for windows_preclosed rows — an unmarked row would
+      // recompute against the fabricated 08:00 time and re-arm a
+      // reminder for a time nobody chose. The marker makes the DB
+      // machinery hold placeholder semantics durably, and the trigger's
+      // real-window branch re-arms the row normally when an arrival
+      // time is later set.
+      const converted = await dbh.transaction(async (trx) => {
+        // Pre-conversion state: the row's suppression (an ARMED row may
+        // own its 08:00 fallback slot with a real sibling suppressed
+        // beneath it) and its sent flags (a window the armed owner
+        // already delivered was rendered with the merged slot label, so
+        // a promoted sibling inherits it — the same contract the sync
+        // trigger's slot-departure path applies).
+        const armed = await trx('appointment_reminders')
+          .where({ scheduled_service_id: serviceId, cancelled: false })
+          .first('id', 'customer_id', 'appointment_time', 'suppressed_by_sibling',
+            'reminder_72h_sent', 'reminder_72h_sent_at', 'reminder_24h_sent', 'reminder_24h_sent_at');
+        if (!armed) return 0;
+        // Same lock order as registration and the sync trigger: slot
+        // advisory lock FIRST, then reminder-row writes — inverting it
+        // deadlocks against a concurrent registration on this slot.
+        await trx.raw('SELECT pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))', [armed.customer_id, armed.appointment_time]);
+        // Atomic windowless guard (Codex #3361 r19 P2, same shape as
+        // handleReschedule's expectSchedule): a THIRD move assigning a
+        // real window between the postSlot read and this write makes
+        // the conversion miss instead of silencing the re-armed
+        // reminders — that move's own resync owns the row's state.
+        const rows = await trx('appointment_reminders')
+          .where({ id: armed.id, cancelled: false })
+          .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
+          .update({
+            suppressed_by_sibling: true,
+            windows_preclosed: true,
+            confirmation_sent: true,
+            confirmation_sent_at: trx.raw('COALESCE(confirmation_sent_at, NOW())'),
+            reminder_72h_sent: true,
+            reminder_72h_sent_at: trx.raw('COALESCE(reminder_72h_sent_at, NOW())'),
+            reminder_24h_sent: true,
+            reminder_24h_sent_at: trx.raw('COALESCE(reminder_24h_sent_at, NOW())'),
+            updated_at: new Date(),
+          });
+        if (rows && !armed.suppressed_by_sibling) {
+          // The conversion demoted a slot OWNER: a real visit
+          // registered at the same slot may sit suppressed beneath it,
+          // and no trigger event fires for this app-side demotion —
+          // promote exactly as the trigger does on slot departure,
+          // carrying the owner's delivered-window state. The vacated
+          // slot is the one the ARMED ROW actually occupies, so its
+          // date/window params are the ET decomposition of the row's
+          // own appointment_time (Codex #3361 r23 P2) — NOT the
+          // post-move service slot: when the windowless edit landed
+          // BEFORE our registration inserted (the stale-read ordering
+          // the r11 verify exists for), the row still sits at the
+          // pre-move real slot (e.g. 09:00, possibly a different
+          // date), and passing the post-move date + NULL(→08:00)
+          // window could never match the 09:00 sibling's service row
+          // in the promotion's candidate filter. Decomposing
+          // appointment_time inverts exactly the (date + COALESCE
+          // window) AT TIME ZONE composition the trigger builds slot
+          // times with, so it is right in both orderings.
+          await trx.raw(
+            `SELECT promote_suppressed_reminder_sibling(
+               ?::uuid, ?::uuid, ?::timestamptz,
+               ((?::timestamptz) AT TIME ZONE 'America/New_York')::date,
+               ((?::timestamptz) AT TIME ZONE 'America/New_York')::time,
+               ?, ?, ?, ?)`,
+            [armed.customer_id, serviceId, armed.appointment_time,
+              armed.appointment_time, armed.appointment_time,
+              armed.reminder_72h_sent === true, armed.reminder_72h_sent_at || null,
+              armed.reminder_24h_sent === true, armed.reminder_24h_sent_at || null],
+          );
+        }
+        return rows;
+      });
+      if (!converted) {
+        // Guard miss = a real window arrived and its own sync owns the
+        // reminder state now — success, not a retryable failure.
+        logger.info(`[${routeTag}] windowless placeholder conversion skipped for ${serviceId} — the service regained a window; its own resync owns the state`);
+      } else {
+        logger.info(`[${routeTag}] reminder converted to windowless placeholder after concurrent windowless move for ${serviceId}`);
+      }
+    } else if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
+      || String(postSlot.window_start || '') !== String(slotStart || ''))) {
+      // expectSchedule = the observed slot, enforced atomically inside
+      // handleReschedule: a SECOND move (B) landing after the postSlot
+      // read makes this stale resync miss instead of stomping B's own
+      // sync back to A (Codex #3361 r12 P2). The explicit null start is
+      // enforced too (window_start IS NULL) — a date-only move observed
+      // windowless must not overwrite a concurrently-assigned real
+      // window with the fabricated 09:00 fallback (Codex #3361 r21 P2).
+      // handleReschedule is fail-soft (null on no-row/invalid-time/
+      // error) — a null here is an unsynced slot, so the caller's rail
+      // retries (Codex #3361 r12 P2).
+      const resynced = await AppointmentReminders.handleReschedule(
+        serviceId,
+        `${dateOnly(postSlot.scheduled_date)}T${postSlot.window_start || '09:00'}`,
+        {
+          sendNotification: false,
+          expectSchedule: {
+            date: dateOnly(postSlot.scheduled_date),
+            windowStart: postSlot.window_start || null,
+          },
+        },
+      );
+      if (resynced === null) {
+        logger.warn(`[${routeTag}] reminder slot resync returned null for ${serviceId} — leaving retryable`);
+        return false;
+      }
+      logger.info(`[${routeTag}] reminder slot resynced after concurrent move for ${serviceId}`);
+    }
+    return true;
+  } catch (postSyncErr) {
+    logger.warn(`[${routeTag}] post-registration slot verify failed for ${serviceId} — leaving retryable: ${postSyncErr.message}`);
+    return false;
+  }
+}
+
 /**
  * Lazy activation for a LEGACY outbound-review row (created pending before
  * the 2026-08-11 review-hold removal, PR #3361) touched by a writer that
@@ -575,4 +593,5 @@ module.exports = {
   runOutboundReviewConfirmHook,
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
+  verifyReminderSlotAfterRegistration,
 };

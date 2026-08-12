@@ -43,16 +43,23 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   DELAYED completion paths (ACH micro-deposits verify days later): an
  *   explicit Auto Pay disable recorded AFTER that moment wins — the stale
  *   authorization must not silently re-enroll the customer.
+ * @param {object} [opts.dbh] Knex handle to open the enrollment transaction
+ *   on — pass an OUTER transaction to run the enrollment as a savepoint
+ *   inside it (the appointment auto-secure serializes enrollment with its
+ *   visit-row lock this way, Codex #3361 r26 P1). Note the post-commit side
+ *   effects (autopay_log, the gated confirmation email) still fire when the
+ *   savepoint releases, before the outer transaction commits. Default: the
+ *   global pool, the existing standalone behavior for every other caller.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
 
   let target;
   let inChargeMethodId;
-  const outcome = await db.transaction(async (trx) => {
+  const outcome = await dbh.transaction(async (trx) => {
     // Serialize per customer: FOR UPDATE on the customer row makes the
     // read → unset-defaults → set-target → customer-pointer sequence below
     // atomic against a concurrent enrollment. Without it, two completions

@@ -11768,6 +11768,28 @@ const CallRecordingProcessor = {
                   serviceType: svc.service_type,
                   closeReminderWindows: !replaySlotStart,
                 });
+                // Post-registration slot verify (Codex #3361 r26 P2): the
+                // fresh read above still leaves a gap before the reminder
+                // insert — an edit landing inside it synced before the row
+                // existed, exactly the ordering the confirm hook's shared
+                // verify repairs (windowless → canonical placeholder
+                // conversion; moved slot → guarded resync). Best-effort on
+                // this rail: a failed repair logs, and a re-delivered
+                // replay (or the visit's own next edit) re-runs it.
+                try {
+                  const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');
+                  const slotVerified = await verifyReminderSlotAfterRegistration(db, {
+                    serviceId: svc.id,
+                    slotDate: replaySlotDate,
+                    slotStart: replaySlotStart,
+                    routeTag: 'call-proc-replay',
+                  });
+                  if (!slotVerified) {
+                    logger.warn(`[call-proc] replay slot verify left ${svc.id} unrepaired — a later replay or the visit's own edits resync it`);
+                  }
+                } catch (slotVerifyErr) {
+                  logger.warn(`[call-proc] replay slot verify failed for ${svc.id}: ${slotVerifyErr.message}`);
+                }
                 // Confirmation repair, evidence-gated: the reused-row branch
                 // below never re-sends inline, and selfHealMissingReminderRows
                 // marks recreated rows confirmation_sent=true — so a

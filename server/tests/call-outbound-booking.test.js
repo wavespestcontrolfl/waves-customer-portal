@@ -240,6 +240,42 @@ describe('replay repair — windowless reused rows register the placeholder (Cod
     expect(callProc).toContain('if (replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
     expect(callProc).toContain('.where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })');
   });
+
+  test('the replay runs the shared post-registration slot verify (Codex r26 P2)', () => {
+    // The fresh read still leaves a gap before the reminder insert — the
+    // replay repairs it with the SAME verify the confirm hook uses
+    // (windowless → canonical placeholder conversion; moved slot →
+    // guarded resync), so the two rails cannot drift.
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(callProc).toContain("const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');");
+    expect(callProc).toContain("routeTag: 'call-proc-replay',");
+    const hook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    expect(hook).toContain('async function verifyReminderSlotAfterRegistration(');
+    expect(hook).toContain('verifyReminderSlotAfterRegistration,');
+  });
+});
+
+describe('auto-secure — enrollment serialized with cancellation (Codex r26 P1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('live check, enrollment, and the satisfied row commit in ONE transaction under a visit-row lock', () => {
+    // The r9 read-only re-check was a TOCTOU: a cancel committing between
+    // the read and enrollment enrolled Auto Pay + wrote a satisfied row
+    // AFTER the cancellation follow-through had already looked for rows to
+    // release. FOR UPDATE on the visit row serializes with the cancel's
+    // status CAS; the enrollment rides the same transaction as a savepoint.
+    const card = fs.readFileSync(path.join(__dirname, '../services/appointment-card-request.js'), 'utf8');
+    const fnAt = card.indexOf('async function autoSecureFromSavedMethod');
+    const fnSlice = card.slice(fnAt, fnAt + 5000);
+    expect(fnSlice).toContain('return await db.transaction(async (trx) => {');
+    expect(fnSlice).toContain('.forUpdate()');
+    expect(fnSlice).toContain('dbh: trx,');
+    expect(fnSlice).toContain("await trx('appointment_card_requests')");
+    const enroll = fs.readFileSync(path.join(__dirname, '../services/autopay-enrollment.js'), 'utf8');
+    expect(enroll).toContain('dbh = db }');
+    expect(enroll).toContain('await dbh.transaction(async (trx) => {');
+  });
 });
 
 describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () => {
