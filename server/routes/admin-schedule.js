@@ -4544,20 +4544,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // rows matched = the row changed under us; refuse this id (the
               // batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
-              const updatedRows = await trx('scheduled_services')
-                .where({ id })
-                .where('status', String(svc.status))
-                .where({
-                  scheduled_date: prevDate,
-                  window_start: svc.window_start ?? null,
-                  window_end: svc.window_end ?? null,
-                  // Full observed tracker/lifecycle snapshot joins the CAS:
-                  // the rewind decision above came from this trx's read,
-                  // and tracker writers advance state, stamps, and SMS
-                  // guards without touching status. Any of it makes this
-                  // miss; the batch reports the conflict.
-                  ...require('../services/rebooker').trackLifecycleCasPredicate(svc),
-                })
+              // Full observed tracker/lifecycle snapshot joins the CAS: the
+              // rewind decision above came from this trx's read, and tracker
+              // writers advance state, stamps, and SMS guards without
+              // touching status. Any of it makes this miss; the batch
+              // reports the conflict.
+              const updatedRows = await require('../services/rebooker').applyTrackLifecycleCas(
+                trx('scheduled_services')
+                  .where({ id })
+                  .where('status', String(svc.status))
+                  .where({
+                    scheduled_date: prevDate,
+                    window_start: svc.window_start ?? null,
+                    window_end: svc.window_end ?? null,
+                  }),
+                svc,
+              )
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
@@ -5940,13 +5942,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // it — an id-only write would move it without the rewind. A
               // miss skips the row (it changed under us; the next edit
               // re-reads).
-              const childUpdated = await trx('scheduled_services')
-                .where({
-                  id: child.id,
-                  status: child.status,
-                  scheduled_date: child.scheduled_date,
-                  ...require('../services/rebooker').trackLifecycleCasPredicate(child),
-                })
+              const childUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
+                trx('scheduled_services')
+                  .where({
+                    id: child.id,
+                    status: child.status,
+                    scheduled_date: child.scheduled_date,
+                  }),
+                child,
+              )
                 .update(childUpdates);
               if (childUpdated === 0) {
                 // All-or-none, matching the rebooker's series CAS: leaving
@@ -6011,13 +6015,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   }
                 }
                 // Same CAS as the child rewrite above.
-                const boosterUpdated = await trx('scheduled_services')
-                  .where({
-                    id: booster.id,
-                    status: booster.status,
-                    scheduled_date: booster.scheduled_date,
-                    ...require('../services/rebooker').trackLifecycleCasPredicate(booster),
-                  })
+                const boosterUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
+                  trx('scheduled_services')
+                    .where({
+                      id: booster.id,
+                      status: booster.status,
+                      scheduled_date: booster.scheduled_date,
+                    }),
+                  booster,
+                )
                   .update(boosterUpdates);
                 if (boosterUpdated === 0) {
                   // All-or-none — same contract as the child rewrite above.

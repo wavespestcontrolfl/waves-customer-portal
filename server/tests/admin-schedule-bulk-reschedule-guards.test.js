@@ -84,6 +84,8 @@ function chain(overrides = {}) {
   Object.assign(builder, {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue(),
@@ -561,14 +563,11 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
   expect(updateChain.where).toHaveBeenCalledWith({
     scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
-    track_state: null,
-    en_route_at: null,
-    arrived_at: null,
-    actual_start_time: null,
-    check_in_time: null,
-    track_sms_sent_at: null,
-    arrival_sms_sent_at: null,
   });
+  // applyTrackLifecycleCas: track_state via where, null stamps via whereNull.
+  expect(updateChain.where).toHaveBeenCalledWith({ track_state: null });
+  expect(updateChain.whereNull).toHaveBeenCalledWith('en_route_at');
+  expect(updateChain.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
   // No audit row for a move that did not happen.
   expect(trx).not.toHaveBeenCalledWith('reschedule_log');
 });

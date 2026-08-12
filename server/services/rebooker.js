@@ -76,17 +76,30 @@ const LIVE_TRACK_STATES = new Set(['en_route', 'on_property']);
 // track_state could reset the row from a stale snapshot and still let an
 // old-attempt guard write land afterward, suppressing the new attempt's
 // text. Matching the full observed snapshot makes ANY concurrent lifecycle
-// write miss the move instead (knex object-form null renders IS NULL).
-function trackLifecycleCasPredicate(row = {}) {
-  return {
-    track_state: row.track_state ?? null,
-    en_route_at: row.en_route_at ?? null,
-    arrived_at: row.arrived_at ?? null,
-    actual_start_time: row.actual_start_time ?? null,
-    check_in_time: row.check_in_time ?? null,
-    track_sms_sent_at: row.track_sms_sent_at ?? null,
-    arrival_sms_sent_at: row.arrival_sms_sent_at ?? null,
-  };
+// write miss the move instead. Applied to the query builder (not a plain
+// where-object) because timestamptz equality needs ms truncation on BOTH
+// sides: node-postgres round-trips Dates at millisecond precision while
+// rows written by SQL now() carry microseconds — a naive equality would
+// NEVER match those and every move would false-conflict (same pattern as
+// call-research-miner / estimate-public's date_trunc CAS).
+const TRACK_CAS_TIMESTAMP_COLUMNS = [
+  'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'track_sms_sent_at', 'arrival_sms_sent_at',
+];
+function applyTrackLifecycleCas(query, row = {}) {
+  query.where({ track_state: row.track_state ?? null });
+  for (const col of TRACK_CAS_TIMESTAMP_COLUMNS) {
+    const value = row[col];
+    if (value == null) {
+      query.whereNull(col);
+    } else {
+      query.whereRaw(
+        `date_trunc('milliseconds', ??) = date_trunc('milliseconds', ?::timestamptz)`,
+        [col, new Date(value)],
+      );
+    }
+  }
+  return query;
 }
 
 // Should a date move rewind this row's tracker lifecycle? True on live
@@ -518,16 +531,19 @@ class SmartRebooker {
         }
       }
 
-      const updated = await trx('scheduled_services')
-        // The full observed tracker/lifecycle snapshot is in the CAS (see
-        // trackLifecycleCasPredicate): the lifecycleRewound decision above
-        // came from the outer read, and tracker writers advance state and
-        // stamps WITHOUT touching status — a status-only match would let
-        // this move commit while carrying freshly written lifecycle state
-        // onto the new date. Any tracker change makes the write miss and
-        // surface the concurrent-change 409 below instead.
-        .where({ id: serviceId, status: service.status, ...trackLifecycleCasPredicate(service) })
-        .whereIn('status', Array.from(allowedStatuses))
+      const updated = await applyTrackLifecycleCas(
+        trx('scheduled_services')
+          // The full observed tracker/lifecycle snapshot is in the CAS (see
+          // applyTrackLifecycleCas): the lifecycleRewound decision above
+          // came from the outer read, and tracker writers advance state and
+          // stamps WITHOUT touching status — a status-only match would let
+          // this move commit while carrying freshly written lifecycle state
+          // onto the new date. Any tracker change makes the write miss and
+          // surface the concurrent-change 409 below instead.
+          .where({ id: serviceId, status: service.status })
+          .whereIn('status', Array.from(allowedStatuses)),
+        service,
+      )
         // Optional caller-supplied expected-state predicate (e.g. auto-dispatch
         // passing the locked/excluded flags + original date) so a concurrent
         // operator lock/move is caught atomically here, not just by a prior read.
@@ -1116,22 +1132,24 @@ class SmartRebooker {
         // the whole trx — the series shift is all-or-none, so the customer
         // is never told "your visits moved" while one stayed on the old
         // cadence.
-        const updated = await trx('scheduled_services')
-          .where({
-            id: sib.id,
-            status: sib.status,
-            scheduled_date: sib.scheduled_date,
-            window_start: sib.window_start,
-            // window_end and technician_id are overwritten by this sweep
-            // (duration + the conflict-unassign decision were computed from
-            // the values read above) — a concurrent resize/reassignment
-            // must invalidate the match, not be steamrolled.
-            window_end: sib.window_end ?? null,
-            technician_id: sib.technician_id ?? null,
-            // Full tracker/lifecycle snapshot too: the sibRewound decision
-            // came from this read — see the single-job CAS above.
-            ...trackLifecycleCasPredicate(sib),
-          })
+        const updated = await applyTrackLifecycleCas(
+          trx('scheduled_services')
+            .where({
+              id: sib.id,
+              status: sib.status,
+              scheduled_date: sib.scheduled_date,
+              window_start: sib.window_start,
+              // window_end and technician_id are overwritten by this sweep
+              // (duration + the conflict-unassign decision were computed from
+              // the values read above) — a concurrent resize/reassignment
+              // must invalidate the match, not be steamrolled.
+              window_end: sib.window_end ?? null,
+              technician_id: sib.technician_id ?? null,
+            }),
+          // Full tracker/lifecycle snapshot too: the sibRewound decision
+          // came from this read — see the single-job CAS above.
+          sib,
+        )
           .update(updateData);
         if (updated === 0) {
           throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
@@ -1330,7 +1348,7 @@ module.exports = new SmartRebooker();
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
 module.exports.needsLifecycleRewind = needsLifecycleRewind;
-module.exports.trackLifecycleCasPredicate = trackLifecycleCasPredicate;
+module.exports.applyTrackLifecycleCas = applyTrackLifecycleCas;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;

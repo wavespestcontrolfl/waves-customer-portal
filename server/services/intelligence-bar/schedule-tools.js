@@ -484,7 +484,7 @@ async function moveStopsToDay(input) {
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const {
     LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
-    needsLifecycleRewind, trackLifecycleCasPredicate,
+    needsLifecycleRewind, applyTrackLifecycleCas,
   } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
@@ -531,18 +531,20 @@ async function moveStopsToDay(input) {
     const observedDate = s.scheduled_date instanceof Date
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const updatedRows = await db('scheduled_services')
-      .where('id', s.id)
-      .where('status', String(s.status))
-      .where({
-        scheduled_date: observedDate,
-        window_start: s.window_start ?? null,
-        window_end: s.window_end ?? null,
-        // Full observed tracker/lifecycle snapshot in the CAS — any
-        // concurrent lifecycle or SMS-guard write must make this miss.
-        // See reschedule_appointment in tools.js.
-        ...trackLifecycleCasPredicate(s),
-      })
+    const updatedRows = await applyTrackLifecycleCas(
+      db('scheduled_services')
+        .where('id', s.id)
+        .where('status', String(s.status))
+        .where({
+          scheduled_date: observedDate,
+          window_start: s.window_start ?? null,
+          window_end: s.window_end ?? null,
+        }),
+      // Full observed tracker/lifecycle snapshot in the CAS — any
+      // concurrent lifecycle or SMS-guard write must make this miss.
+      // See reschedule_appointment in tools.js.
+      s,
+    )
       .update({
         scheduled_date: dateStr,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,

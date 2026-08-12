@@ -324,19 +324,22 @@ async function markEnRoute(serviceId, opts = {}) {
     // and fabricate an en_route→confirmed history row.
     const liveOpStatus = String(svc.status) === 'on_site';
     // The CAS carries the FULL observed snapshot (status, schedule day, and
-    // every lifecycle/SMS field via trackLifecycleCasPredicate — which
-    // includes track_state): staleFieldClears was derived from this read,
-    // and a concurrent same-state lifecycle write can replace an old stamp
-    // with a current-attempt value that a narrower match would then null.
-    // Any change makes the heal miss; the re-entry below reloads.
-    const { trackLifecycleCasPredicate } = require('./rebooker');
-    const healWrite = (conn) => conn('scheduled_services')
-      .where({
-        id: serviceId,
-        status: svc.status,
-        scheduled_date: svc.scheduled_date ?? null,
-        ...trackLifecycleCasPredicate(svc),
-      })
+    // every lifecycle/SMS field via applyTrackLifecycleCas — which includes
+    // track_state, ms-truncated on both sides for the pg microsecond
+    // round-trip): staleFieldClears was derived from this read, and a
+    // concurrent same-state lifecycle write can replace an old stamp with a
+    // current-attempt value that a narrower match would then null. Any
+    // change makes the heal miss; the bounded retry below reloads.
+    const { applyTrackLifecycleCas } = require('./rebooker');
+    const healWrite = (conn) => applyTrackLifecycleCas(
+      conn('scheduled_services')
+        .where({
+          id: serviceId,
+          status: svc.status,
+          scheduled_date: svc.scheduled_date ?? null,
+        }),
+      svc,
+    )
       .update({
         track_state: 'scheduled',
         ...staleFieldClears,
@@ -370,14 +373,22 @@ async function markEnRoute(serviceId, opts = {}) {
     }
     if (healed > 0) {
       logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
-    } else {
-      logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; re-entering on fresh state`);
+      // Heal confirmed: re-enter on a fresh read with healing bypassed.
+      return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
     }
-    // Either way the in-memory snapshot is no longer the row: re-enter on a
-    // fresh read with the heal disabled. Falling through on the stale
-    // snapshot could report a concurrently-completed row as on_property,
-    // re-pin tech_status, or emit an obsolete customer refresh.
-    return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
+    // CAS loss: the row changed under us, but it may STILL be stale (a
+    // concurrent write can touch one stamp and leave the stale attempt
+    // standing) — so healing must stay armed on the retry, bounded so two
+    // writers can't ping-pong forever. Exhausted retries surface a
+    // conflict rather than falling through to a phantom idempotent
+    // success on the stale snapshot.
+    const attempts = (opts._staleHealAttempts || 0) + 1;
+    if (attempts >= 3) {
+      logger.warn(`[track-transitions] stale-heal on ${serviceId} lost ${attempts} concurrent races; surfacing conflict`);
+      return { ok: false, reason: 'concurrent_update' };
+    }
+    logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; retrying on fresh state (attempt ${attempts})`);
+    return markEnRoute(serviceId, { ...opts, _staleHealAttempts: attempts });
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
@@ -644,15 +655,25 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   // retry release below can release exactly this claim and never a later
   // attempt's.
   const claimStamp = new Date();
-  const claimed = await db('scheduled_services')
+  const claimQuery = db('scheduled_services')
     .where({
       id: serviceId,
       track_state: 'on_property',
-      arrived_at: claimArrivedAt ?? null,
       scheduled_date: svc.scheduled_date ?? null,
     })
-    .whereNull('arrival_sms_sent_at')
-    .update({ arrival_sms_sent_at: claimStamp });
+    .whereNull('arrival_sms_sent_at');
+  // ms-truncated on both sides: claimArrivedAt can be a row-read value
+  // (pg returns Dates at ms precision) compared against a column that
+  // may carry microseconds from a SQL now() write.
+  if (claimArrivedAt == null) {
+    claimQuery.whereNull('arrived_at');
+  } else {
+    claimQuery.whereRaw(
+      `date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`,
+      [new Date(claimArrivedAt)],
+    );
+  }
+  const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
   if (!claimed) return;
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.

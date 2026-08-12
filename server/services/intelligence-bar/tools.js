@@ -1757,7 +1757,7 @@ async function rescheduleAppointment(input) {
   // duration capture on the new date. Lazy require: rebooker is heavy.
   const {
     LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
-    needsLifecycleRewind, trackLifecycleCasPredicate,
+    needsLifecycleRewind, applyTrackLifecycleCas,
   } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   // Rewind on stale evidence too, not just live status — see
@@ -1798,20 +1798,22 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  const updatedRows = await db('scheduled_services')
-    .where('id', appointment_id)
-    .where('status', String(appt.status))
-    .where({
-      scheduled_date: observedDate,
-      window_start: appt.window_start ?? null,
-      window_end: appt.window_end ?? null,
-      // The full observed tracker/lifecycle snapshot is in the CAS: a
-      // geofence/manual transition between the read and this write can
-      // advance track_state, add stamps to a same-state row, or stamp an
-      // SMS guard — any of it must make this miss instead of moving the
-      // visit on a stale snapshot. See trackLifecycleCasPredicate.
-      ...trackLifecycleCasPredicate(appt),
-    })
+  const updatedRows = await applyTrackLifecycleCas(
+    db('scheduled_services')
+      .where('id', appointment_id)
+      .where('status', String(appt.status))
+      .where({
+        scheduled_date: observedDate,
+        window_start: appt.window_start ?? null,
+        window_end: appt.window_end ?? null,
+      }),
+    // The full observed tracker/lifecycle snapshot is in the CAS: a
+    // geofence/manual transition between the read and this write can
+    // advance track_state, add stamps to a same-state row, or stamp an
+    // SMS guard — any of it must make this miss instead of moving the
+    // visit on a stale snapshot. See applyTrackLifecycleCas.
+    appt,
+  )
     .update({
       scheduled_date: dateStr,
       window_start: newStart,

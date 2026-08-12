@@ -168,11 +168,17 @@ describe('markEnRoute stale-attempt self-heal', () => {
     // "stale", so they are simply absent from the write.)
     expect(healUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
       id: 'job-stale',
-      track_state: 'on_property',
       status: 'pending',
       scheduled_date: todayStr,
-      actual_start_time: expect.anything(),
     }));
+    // applyTrackLifecycleCas: track_state via where, null stamps via
+    // whereNull, non-null stamps via ms-truncated whereRaw.
+    expect(healUpdate.where).toHaveBeenCalledWith({ track_state: 'on_property' });
+    expect(healUpdate.whereNull).toHaveBeenCalledWith('en_route_at');
+    expect(healUpdate.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining("date_trunc('milliseconds'"),
+      ['actual_start_time', expect.any(Date)],
+    );
     const healPayload = healUpdate.update.mock.calls[0][0];
     expect(healPayload).toMatchObject({
       track_state: 'scheduled',

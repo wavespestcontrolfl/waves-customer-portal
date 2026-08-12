@@ -36,6 +36,7 @@ function query(result) {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
