@@ -1761,8 +1761,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // record/vision evidence actually supplied the field. Built on every
     // profile build, so cache-hit rebuilds carry it without a backfill.
     _observed: {
+      // Provider placeholders ('UNKNOWN') are not observations (PR r10) —
+      // same knownFact rule the structural-facts consumers apply.
       propertyType: commercialProfile
-        || !!((rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial') || visionPropertyType),
+        || !!(((rc?.propertyType
+          && String(rc.propertyType).trim().toUpperCase() !== 'UNKNOWN'
+          && normalizePricingPropertyType(rc.propertyType) !== 'commercial'))
+          || visionPropertyType),
       shrubDensity: !!ai?.shrubDensity,
       treeDensity: !!ai?.treeDensity,
       landscapeComplexity: !!ai?.landscapeComplexity,

@@ -161,6 +161,16 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (!pick) return null;
   const inputs = pick.inputs;
   const cleanString = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null);
+  const cleanedFeatures = inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
+    ? { ...inputs.features }
+    : null;
+  let zeroTreeCountAmbiguous = false;
+  if (cleanedFeatures
+    && Object.prototype.hasOwnProperty.call(cleanedFeatures, 'treeCount')
+    && !(Number(cleanedFeatures.treeCount) > 0)) {
+    delete cleanedFeatures.treeCount;
+    zeroTreeCountAmbiguous = true;
+  }
   const seed = {
     homeSqFt: positiveOrNull(inputs.homeSqFt),
     lotSqFt: positiveOrNull(inputs.lotSqFt),
@@ -172,18 +182,14 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // Non-dimensional pricing evidence rides with the dimensions (codex
     // #3367 PR r1): a pool-cage home whose accepted estimate carried the
     // modifiers must not price as a bare property on a lookup cache miss.
-    features: (() => {
-      if (!inputs.features || typeof inputs.features !== 'object' || Array.isArray(inputs.features)) return null;
-      const cleaned = { ...inputs.features };
-      // The v1 lookup adapter stores treeCount: 0 when NO count was
-      // observed (codex #3367 PR r9) — replayed as-is it reads as an
-      // explicit zero, and priceTreeShrub would skip its density fallback
-      // and price zero trees. A non-positive count is never observational
-      // evidence here: drop it and let the pricer's own fallback (which
-      // carries its warning) run.
-      if (!(Number(cleaned.treeCount) > 0)) delete cleaned.treeCount;
-      return cleaned;
-    })(),
+    features: cleanedFeatures,
+    // A stored zero tree count has NO provenance (codex #3367 PR r9+r10):
+    // the v1 adapter serializes both an operator-confirmed zero and its
+    // own synthetic unobserved zero into the same field. Neither replaying
+    // it (prices zero trees when synthetic) nor dropping it (prices
+    // phantom trees when authoritative) is safe, so the seed carries the
+    // ambiguity and a tree & shrub offer demotes to the quote CTA.
+    zeroTreeCountAmbiguous,
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
@@ -367,27 +373,41 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       .filter((key) => key && key !== 'unattributed');
 
     let reportFamilies = reportRowIsOneTime ? [] : ownershipKeysForRow(reportIdentity);
-    // Historical reports are not ownership (codex #3367 PR r9): the
-    // report-identity guard exists for the unseeded-NEXT-visit gap, which
-    // only occurs in the window right after a service. A permanent-token
-    // report opened after the plan was cancelled must not advance the
-    // ladder. The identity counts only when the service date sits within
-    // one recurrence window (90 days — the longest recurring cadence, so
-    // the gap case always qualifies) or the family carries live billing
-    // evidence in the plan-rate ledger. An uncorroborated family drops to
-    // NOT-owned; a customer who actually still holds it is protected by
-    // the ledger suppressor below and the pricer's alreadyIncluded
-    // re-check.
+    // A report identity is not ownership by itself (codex #3367 PR r9+r10).
+    // Corroboration ladder:
+    //   - family in the street-scoped upcoming rows → redundant, fine;
+    //   - family in the plan-rate ledger while GATE_PLAN_RATE_LEDGER is ON
+    //     → authoritative billing evidence, counts (advisory rows may
+    //     never advance the ladder — their suppress/demote roles below
+    //     are unchanged);
+    //   - otherwise, a RECENT report (within 90 days, one recurrence
+    //     window) is ambiguous — the unseeded-next-visit gap and a
+    //     just-cancelled plan are indistinguishable, and offering the
+    //     family vs advancing past it are each wrong in one of those
+    //     worlds → NO CARD (same both-answers-wrong doctrine as the
+    //     locality proofs);
+    //   - an OLD report is a historical record, not ownership → the
+    //     family drops and the ladder may offer it again (relationship
+    //     'start' unless other evidence exists).
     if (reportFamilies.length) {
-      const reportDate = service.service_date || service.created_at || null;
-      const reportMs = reportDate ? new Date(reportDate).getTime() : NaN;
-      const reportRecent = Number.isFinite(reportMs)
-        && (Date.now() - reportMs) <= 90 * 24 * 3600 * 1000;
-      if (!reportRecent) {
-        const billedVocab = offerVocabulary(planRateFamilies);
-        reportFamilies = reportFamilies.filter(
-          (fam) => [...offerVocabulary([fam])].some((key) => billedVocab.has(key))
-        );
+      const { planRateLedgerEnabled } = require('../plan-rate-ledger');
+      const ownedVocab = offerVocabulary(ownedKeys);
+      const billedVocab = planRateLedgerEnabled() ? offerVocabulary(planRateFamilies) : new Set();
+      const uncorroborated = reportFamilies.filter((fam) => {
+        // Only families that can MOVE the ladder carry the ambiguity harm —
+        // a rodent/termite-monitoring identity occupies no rung, so it
+        // neither advances nor needs corroboration.
+        const ladderVocab = [...offerVocabulary([fam])].filter((key) => OFFER_LADDER.includes(key));
+        if (!ladderVocab.length) return false;
+        return !ladderVocab.some((key) => ownedVocab.has(key) || billedVocab.has(key));
+      });
+      if (uncorroborated.length) {
+        const reportDate = service.service_date || service.created_at || null;
+        const reportMs = reportDate ? new Date(reportDate).getTime() : NaN;
+        const reportRecent = Number.isFinite(reportMs)
+          && (Date.now() - reportMs) <= 90 * 24 * 3600 * 1000;
+        if (reportRecent) return null;
+        reportFamilies = reportFamilies.filter((fam) => !uncorroborated.includes(fam));
       }
     }
     // The catalog-enriched identity feeds the commercial gate too (codex
@@ -472,7 +492,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       .some((key) => !modeledBaseline.has(key));
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
-    const priced = optionIsPriceable(option) && !baselineIncomplete;
+    // A tree & shrub offer built on a seed whose zero tree count was
+    // provenance-ambiguous never prices (codex #3367 PR r10) — the count
+    // may have been an operator-confirmed zero the fallback would
+    // contradict, or a synthetic zero the replay would price at nothing.
+    const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+    const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence;
 
     return {
       serviceKey: targetKey,

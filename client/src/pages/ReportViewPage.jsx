@@ -7465,7 +7465,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .cross-sell-chip {
           display: inline-block;
-          font-size: 12px;
+          font-size: 14px;
           font-weight: 700;
           letter-spacing: 0.02em;
           border: 1px solid rgba(4, 57, 94, 0.35);
@@ -7518,7 +7518,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .cross-sell-fine {
           margin: 12px 0 0;
           color: var(--muted);
-          font-size: 12.5px;
+          font-size: 14px;
           line-height: 1.5;
         }
         .cross-sell-error {

@@ -484,16 +484,46 @@ describe('buildReportCrossSell', () => {
     expect(result.relationship).toBe('start');
   });
 
-  test('a historical report identity STILL counts when the family carries live billing', async () => {
+  test('a report identity counts when the AUTHORITATIVE ledger carries the family (gate on)', async () => {
+    // Only gate-ON ledger rows are billing authority (advisory rows may
+    // never advance the ladder) — with it, the unseeded-gap report keeps
+    // its family and the ladder offers the next rung.
+    // The feature-gate map is baked at module load, so the gate-on world
+    // needs a fresh module registry.
+    const prev = process.env.GATE_PLAN_RATE_LEDGER;
+    process.env.GATE_PLAN_RATE_LEDGER = 'true';
+    jest.resetModules();
+    try {
+      const { buildReportCrossSell: freshBuild } = require('../services/service-report/cross-sell');
+      const db = dbFor({
+        serviceTypes: [],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+        planRates: [{ family_key: 'pest_control', monthly_rate: 60 }],
+      });
+      const service = SERVICE({ service_type: 'Quarterly Pest Control' });
+      const result = await freshBuild(service, db, { propertyLookup: missLookup });
+      expect(result).not.toBeNull();
+      expect(result.serviceKey).toBe('lawn_care');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_PLAN_RATE_LEDGER;
+      else process.env.GATE_PLAN_RATE_LEDGER = prev;
+      jest.resetModules();
+    }
+  });
+
+  test('an old report + a stale ADVISORY ledger component never becomes a lawn request (gate off)', async () => {
+    // The advisory component is not corroboration (it may be stale or
+    // another property's), so the old report's pest identity drops; pest
+    // becomes the ladder target, and the same advisory row then SUPPRESSES
+    // the card at the target rung — no card, rather than a lawn request
+    // for a customer with no current plan.
     const db = dbFor({
       serviceTypes: [],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
       planRates: [{ family_key: 'pest_control', monthly_rate: 60 }],
     });
     const service = SERVICE({ service_type: 'Quarterly Pest Control', service_date: '2026-01-05' });
-    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('lawn_care');
+    expect(await buildReportCrossSell(service, db, { propertyLookup: missLookup })).toBeNull();
   });
 
   test('a seeded synthetic zero tree count is dropped — it never reads as an explicit count', async () => {
@@ -518,30 +548,28 @@ describe('buildReportCrossSell', () => {
       estimates: estimateWith(features),
     }), { propertyLookup: missLookup });
     const withSyntheticZero = await run({ trees: 'moderate', treeCount: 0 });
-    const withoutCount = await run({ trees: 'moderate' });
     expect(withSyntheticZero).not.toBeNull();
     expect(withSyntheticZero.serviceKey).toBe('tree_shrub');
-    expect(withSyntheticZero.mode).toBe(withoutCount.mode);
-    expect(withSyntheticZero.option).toEqual(withoutCount.option);
+    // r10: a zero count has no provenance (operator-confirmed vs adapter
+    // synthetic), so a tree & shrub offer built on it NEVER prices —
+    // neither replaying zero trees nor a phantom density fallback is safe.
+    expect(withSyntheticZero.mode).toBe('quote_cta');
+    expect(withSyntheticZero.option).toBeNull();
   });
 
-  test('report-family guard: a pest report with zero upcoming rows never offers pest', async () => {
-    // Recurring customer whose next visit isn't seeded yet — ownership sees
-    // nothing upcoming, but the report itself proves they buy pest.
+  test('report-family guard: a RECENT uncorroborated report identity suppresses the card entirely', async () => {
+    // Recurring customer whose next visit isn't seeded — or a customer who
+    // just cancelled: with no upcoming rows and no authoritative billing
+    // evidence the two are indistinguishable (codex #3367 PR r10), and
+    // offering pest vs advancing to lawn are each wrong in one of those
+    // worlds. Both-answers-wrong → no card.
     const db = dbFor({
       serviceTypes: [],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
     });
     const service = SERVICE({ service_type: 'Quarterly Pest Control Service' });
     const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('lawn_care');
-    // Report-only ownership means the pricing baseline can't include the
-    // pest plan (the panel reloads ownership itself and sees no upcoming
-    // rows), so the offer must NOT show a standalone-priced number — the
-    // combined WaveGuard tier would be missing from it (codex r8 P0).
-    expect(result.mode).toBe('quote_cta');
-    expect(result.option).toBeNull();
+    expect(result).toBeNull();
   });
 
   test('plan-rate ledger evidence on the target rung suppresses the card — it never advances the ladder', async () => {
