@@ -390,7 +390,7 @@ router.isTemplateActive = async function(messageType) {
 };
 
 // Get template body by key (returns null if disabled)
-router.getTemplate = async function(templateKey, vars = {}, context = {}) {
+router.getTemplate = async function(templateKey, vars = {}, context = {}, opts = {}) {
   try {
     if (!(await db.schema.hasTable('sms_templates'))) {
       auditSmsTemplateIssue(templateKey, 'missing_table', 'sms_templates table missing', context);
@@ -408,8 +408,26 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       // still audit because those ARE defects.
       return null;
     }
-    const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
+    // opts.noVariants: callers whose flow contracts on ONE exact body (the
+    // rain-out custom rung pre-renders for a segment cap and mirrors a
+    // client counter) pin the base row — a weighted random variant can't be
+    // predicted by a pre-check or a preview.
+    const variant = opts.noVariants
+      ? null
+      : await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;
+    // opts.requiredVars: placeholders the SELECTED body must still carry —
+    // the unresolved-check below only rejects UNKNOWN placeholders, so an
+    // admin edit that deletes a load-bearing one (the dispatcher's
+    // {custom_message}) otherwise renders truthy with the promised content
+    // silently gone (codex #3363). Checked pre-substitution, on the body
+    // that will actually render.
+    for (const name of opts.requiredVars || []) {
+      if (!body.includes(`{${name}}`)) {
+        auditSmsTemplateIssue(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
+        return null;
+      }
+    }
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
       // Function-form replacement: a STRING replacement treats `$$`/`$&`
       // (and `$n` when the pattern captures) as substitution tokens, so a

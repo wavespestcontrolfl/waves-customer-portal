@@ -523,8 +523,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // 2 segments. Advisory mirror — the server renders the real body pre-move.
   const isCustomReason = reason === CUSTOM_REASON;
   const compose = options?.customCompose || null;
+  // Predict with the message the SERVER will embed: sanitizeCustomerNote
+  // collapses every whitespace run to one space before rendering, so
+  // counting the raw value (doubled spaces, line breaks) would overstate
+  // the body near the boundary (codex r3 P2).
   const customSeg = (isCustomReason && notify && compose && selected)
-    ? twoSegmentRemaining(predictedCustomBody(compose, note.trim(), selected))
+    ? twoSegmentRemaining(predictedCustomBody(compose, note.replace(/\s+/g, ' ').trim(), selected))
     : null;
   const customOverBudget = !!(customSeg && customSeg.remaining < 0);
   const customMissing = !!(isCustomReason && notify && !note.trim());

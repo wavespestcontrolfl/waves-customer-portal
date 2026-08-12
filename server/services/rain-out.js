@@ -94,6 +94,16 @@ function customLinkClause(rescheduleUrl) {
 // and sendMovedSms both call THIS, so the body the cap was checked against
 // is the body that sends (same vars, same template row, same GSM
 // normalization + portal scheme-strip inside renderSmsTemplate).
+//   noVariants: this flow contracts on ONE exact body (pre-move segment
+//     cap + the sheet's counter previews the base row getOptions serves) —
+//     a weighted random variant can't be predicted by either, so variants
+//     are deliberately inert on this key (codex r3 P1).
+//   requiredVars: an admin edit that deletes a load-bearing placeholder
+//     must fail the render (→ custom_message_unavailable pre-move), not
+//     send a body with the promised content silently gone — enforced on
+//     the template body pre-substitution, so a note that happens to match
+//     static template text can't mask the loss (codex r3 P2).
+const CUSTOM_REQUIRED_VARS = ['custom_message', 'new_option', 'link_clause'];
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
@@ -105,6 +115,9 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
     workflow: 'tech_rain_out',
     entity_type: 'scheduled_service',
     entity_id: serviceId,
+  }, {
+    noVariants: true,
+    requiredVars: CUSTOM_REQUIRED_VARS,
   });
 }
 
@@ -113,24 +126,6 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 // non-GSM char survives normalization.
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
-// A rendered custom body must carry every promise this flow makes: the
-// dispatcher's message, the new time, and the link (or reply fallback).
-// The shared template validator permits declared variables to be OMITTED,
-// so an admin edit to rain_out_moved_custom_v1 could drop any of the three
-// and still render truthy (codex PR P1/P2) — callers reject the move (or
-// the send) when this returns false. Needles are GSM-normalized because
-// that's the form the renderer embeds; the URL needle is scheme-less
-// (renderSmsTemplate strips https:// from portal hosts, and the stripped
-// form is a substring of the schemed form for every other host).
-function customBodyCarriesPromises(body, { customMessage, date, window, rescheduleUrl }) {
-  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
-  if (!body.includes(normalizeGsmPunctuation(customMessage))) return false;
-  if (!body.includes(normalizeGsmPunctuation(customerArrivalOption(date, window)))) return false;
-  const linkNeedle = rescheduleUrl
-    ? String(rescheduleUrl).replace(/^https?:\/\//i, '')
-    : 'Need a different time? Reply to this message.';
-  return body.includes(linkNeedle);
-}
 
 // Dispatcher-typed note appended to the end of the moved SMS ("Gate code
 // still works, see you Friday!"). Two hard limits, both re-checked here
@@ -614,9 +609,11 @@ async function getOptions(serviceId) {
     // The sheet's counter must measure the ACTIVE template body, never a
     // client-side copy of the migration literal — admins edit templates,
     // and a drifted mirror disables Move on bodies the server accepts (or
-    // vice versa) at the boundary (codex PR P1). Row missing/disabled ⇒
-    // no compose ⇒ the sheet hides the Custom option entirely, matching
-    // commit()'s custom_message_unavailable rejection.
+    // vice versa) at the boundary (codex PR P1). The base row is exactly
+    // what commit() renders: the custom rung pins it with noVariants
+    // (codex r3 P1 — weighted variants can't be previewed). Row
+    // missing/disabled ⇒ no compose ⇒ the sheet hides the Custom option
+    // entirely, matching commit()'s custom_message_unavailable rejection.
     const row = await db('sms_templates')
       .where({ template_key: CUSTOM_TEMPLATE_KEY })
       .first('body', 'is_active');
@@ -794,15 +791,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} missing/disabled — moved ${serviceId} without SMS`);
         return { sent: false, reason: 'missing_template' };
       }
-      // Same belts commit()'s pre-check wears (codex PR P1/P2): a body
-      // missing a required clause or exceeding the cap must not send from
-      // an unvalidated caller either.
-      if (!customBodyCarriesPromises(body, {
-        customMessage: customerNote, date: chosen.date, window: chosen.window, rescheduleUrl,
-      })) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render is missing a required clause for ${serviceId} — no SMS`);
-        return { sent: false, reason: 'custom_message_dropped' };
-      }
+      // Same cap belt commit()'s pre-check wears — an unvalidated caller's
+      // render must not exceed it either. (Placeholder integrity is already
+      // enforced inside the render via requiredVars: a gutted template
+      // returns null above.)
       const { countSegments } = require('./messaging/segment-counter');
       if (countSegments(body).segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {
         logger.warn(`[rain-out] custom body for ${serviceId} exceeds ${CUSTOM_SMS_MAX_SEGMENTS} segments — no SMS`);
@@ -1035,20 +1027,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         rescheduleUrl: url,
         serviceId,
       });
-      // Missing/disabled custom row: the message that IS the reason can't
-      // send, so fail the move here instead of silently moving the visit
-      // messageless (the disabled row is the ops kill switch). Same
-      // rejection when an admin template edit dropped {custom_message},
-      // {new_option}, or {link_clause} — a truthy render isn't proof the
-      // customer gets the message, the new time, AND a way to adjust
-      // (codex PR P1/P2; see customBodyCarriesPromises).
+      // Null render = the row is missing/disabled (the ops kill switch) OR
+      // an admin edit deleted a required placeholder (renderCustomMovedBody
+      // passes requiredVars — enforced inside getTemplate on the body that
+      // renders, pre-substitution). Either way the message that IS the
+      // reason can't send, so fail the move here instead of silently
+      // moving the visit messageless.
       if (!body) return { ok: false, reason: 'custom_message_unavailable' };
-      if (!customBodyCarriesPromises(body, {
-        customMessage: note, date: target.date, window: target.window, rescheduleUrl: url,
-      })) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} render is missing a required clause for ${serviceId} — rejecting pre-move`);
-        return { ok: false, reason: 'custom_message_unavailable' };
-      }
       const { countSegments } = require('./messaging/segment-counter');
       const seg = countSegments(body);
       if (seg.segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {

@@ -1912,28 +1912,29 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/l/abcde');
     });
 
-    test('a template edit that drops ANY required clause rejects the move pre-commit', async () => {
-      // codex PR P1/P2: the template validator doesn't require declared
-      // variables to be USED, so a render can be truthy while missing the
-      // dispatcher's message, the new time, or the link/reply clause —
-      // each one is a promise this flow makes.
+    test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {
+      // The enforcement itself lives in getTemplate (see
+      // admin-sms-templates-render.test.js): noVariants pins the base row
+      // (a weighted variant can't be previewed by the counter or the
+      // pre-move cap — codex r3 P1) and requiredVars nulls a render whose
+      // selected body lost {custom_message}/{new_option}/{link_clause}
+      // (codex r3 P2). This test asserts rain-out actually ASKS for both
+      // on every custom render.
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
-      const bodies = [
-        // {custom_message} dropped
-        async (key, vars) => `Hi Pat - your appointment moved to ${vars.new_option}.${vars.link_clause}`,
-        // {new_option} dropped
-        async (key, vars) => `Hi Pat - ${vars.custom_message}\n\nYour appointment moved.${vars.link_clause}`,
-        // {link_clause} dropped
-        async (key, vars) => `Hi Pat - ${vars.custom_message}\n\nWe've moved your visit to ${vars.new_option}.`,
-      ];
-      for (const impl of bodies) {
-        renderSmsTemplate.mockImplementationOnce(impl);
-        wireSingle();
-        const result = await RainOut.commit(COMMIT_ARGS);
-        expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });
+      mockCustomRender();
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls.length).toBeGreaterThan(0);
+      for (const call of customCalls) {
+        expect(call[3]).toEqual({
+          noVariants: true,
+          requiredVars: ['custom_message', 'new_option', 'link_clause'],
+        });
       }
-      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('series-anchor path: the prebuilt SMS quotes the NORMALIZED on-the-hour window that actually books', async () => {
