@@ -99,6 +99,46 @@ describe('commercialCategoryConflict', () => {
     })).toBeNull();
     expect(commercialCategoryConflict({ extraction: null, intent: { is_commercial: false } })).toBeNull();
   });
+  test('free-form variants and HOA/common-area families still conflict', () => {
+    // The extraction field is free-form — family matching, not an
+    // exact-string set (codex pre-push P1); HOA/common-area types trigger
+    // commercial handling by schema even when their text carries
+    // residential words like 'condo' (codex r1 P1).
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'industrial_flex' } },
+      intent: { is_commercial: false },
+    })).toBe('industrial_flex');
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'commercial property' } },
+      intent: { is_commercial: false },
+    })).toBe('commercial property');
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'hoa_common_area' } },
+      intent: { is_commercial: false },
+    })).toBe('hoa_common_area');
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'condo_association' } },
+      intent: { is_commercial: false },
+    })).toBe('condo_association');
+    // Residential families never conflict, including warehouse/downtown traps.
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'townhouse' } },
+      intent: { is_commercial: false },
+    })).toBeNull();
+  });
+});
+
+describe('resolveUnitScopeModel — unknown stays unknown in the audit', () => {
+  test('a schema-valid unknown (or unrecognized) type never records single_family', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: {}, property: { property_type: 'unknown' } },
+      intent: { is_commercial: false, address: '100 Palm Ave, Venice FL' },
+      propertyFacts: { home: { source: 'unresolved' } },
+      address: '100 Palm Ave, Venice FL',
+    });
+    expect(model.propertyUse).toBe('unknown');
+  });
 });
 
 describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
@@ -130,13 +170,21 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     expect(facts.lot.confidence).toBe('high');
   });
 
-  test('a resolved lot value is never cleared, and whole-structure scopes are untouched', () => {
+  test('a master-parcel lot that leaked into a unit scope is CLEARED into the rejected trail', () => {
     const model = resolveUnitScopeModel(tenantUnit);
-    const withLot = { lot: { value: 9000, source: 'county_assessed', confidence: 'high' } };
+    const withLot = { lot: { value: 98000, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(withLot, model);
-    expect(withLot.lot.value).toBe(9000);
-    expect(withLot.lot.source).toBe('county_assessed');
+    // The only lot a lookup can see for a unit is the development's master
+    // parcel — pricing a complex's parcel for one unit is the overquote
+    // class the V2 bridge already clears (codex r1 P1).
+    expect(withLot.lot.value).toBeNull();
+    expect(withLot.lot.source).toMatch(/^not_applicable:/);
+    expect(withLot.lot.rejected).toEqual([
+      expect.objectContaining({ value: 98000, source: 'county_assessed' }),
+    ]);
+  });
 
+  test('whole-structure scopes are untouched', () => {
     const owner = resolveUnitScopeModel({
       ...tenantUnit,
       extraction: { caller: { relationship_to_property: 'owner' }, property: { property_type: 'single_family' } },

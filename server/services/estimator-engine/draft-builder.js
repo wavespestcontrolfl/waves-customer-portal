@@ -616,12 +616,13 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
   if (propertyFacts?.newConstruction) reasons.push('new construction — county roll not yet assessed');
-  // Gate ON: the classification stayed 'unknown' instead of silently
-  // defaulting single_family (propertyTypeUnresolved is stamped off the
-  // ACTUAL engine input in index.js, so this can never drift from what
-  // priced) — observable and recoverable, but never a green one-click send.
+  // Gate ON: the type that reached the pricer was 'unknown', outside the
+  // pest pricer's vocabulary, or a multifamily family collapsed to
+  // single_family (propertyTypeUnresolved is stamped off the ACTUAL engine
+  // input in index.js, so this can never drift from what priced) —
+  // observable and recoverable, but never a green one-click send.
   if (propertyFacts?.propertyTypeUnresolved) {
-    reasons.push('property type unresolved — classify the property before send (priced at the neutral default)');
+    reasons.push('property type unresolved or not in the pricing vocabulary — classify the property before send (priced at the neutral single-family default)');
   }
   if (manualLines.length) {
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));

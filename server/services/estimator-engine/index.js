@@ -1600,12 +1600,36 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // water adjacency feed real pricing adjustments.
         lookupEnriched: effectiveSignals.enriched,
       });
-      // Stamp what ACTUALLY fed pricing: with the guardrails gate on, an
-      // unresolved residential classification prices as literal 'unknown'
-      // (neutral default dollars) and classifyLane parks the draft on this
-      // flag — stamped here so the reason can never drift from the input.
-      if (engineInput.propertyType === 'unknown') {
-        propertyFacts.propertyTypeUnresolved = true;
+      // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch
+      // must restore the previous lane behavior exactly, codex r1 P2): a
+      // residential draft parks for review when the type that reached the
+      // pest pricer is 'unknown' OR outside the pricer's own alias
+      // vocabulary (it silently defaults those to single_family — checked
+      // via its normalizer, never a literal-string list, codex r1 P1), OR
+      // the raw extraction/lookup type is a multifamily/apartment family
+      // that pricingSafePropertyType's substring match collapsed into
+      // 'single_family' (the '…family…' regex swallows 'multi_family' —
+      // the exact silent default the motivating apartment draft hit).
+      try {
+        const { unitScopeGuardrailsEnabled } = require('./unit-scope-model');
+        if (unitScopeGuardrailsEnabled() && !intent.is_commercial) {
+          const { normalizePestPropertyType } = require('../pricing-engine/service-pricing');
+          const rawType = String(
+            context.extraction?.property?.property_type
+            || (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
+            || '',
+          ).toLowerCase();
+          const meta = normalizePestPropertyType(engineInput.propertyType);
+          const multiCollapsed = /multi.?family|apartment/.test(rawType)
+            && meta.propertyType === 'single_family';
+          if (engineInput.propertyType === 'unknown'
+            || meta.propertyTypeWasDefaulted
+            || multiCollapsed) {
+            propertyFacts.propertyTypeUnresolved = true;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[estimator-engine] property-type stamp failed: ${err.message}`);
       }
       try {
         engineResult = generateEstimateSafely(engineInput);

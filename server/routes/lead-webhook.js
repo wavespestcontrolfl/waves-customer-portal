@@ -1579,23 +1579,12 @@ function buildLeadWebhookIntake(body = {}) {
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial
     // premises must park, not auto-price).
-    message: firstNonEmptyString(
+    message: firstNonEmpty(
       body.message,
       body['Message'],
       findField(body, /message|comment|note|detail|describ/i),
     ),
   };
-}
-
-// Local trim-first helper (buildLeadWebhookIntake ran on raw form fields
-// before any service-layer normalization exists).
-function firstNonEmptyString(...values) {
-  for (const value of values) {
-    if (value === undefined || value === null) continue;
-    const str = String(value).trim();
-    if (str) return str;
-  }
-  return '';
 }
 
 const SERVICE_INTEREST_LABELS = {

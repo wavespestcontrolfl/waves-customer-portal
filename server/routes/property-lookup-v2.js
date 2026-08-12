@@ -703,9 +703,15 @@ async function performPropertyLookup(address, options = {}) {
     } else if (!geo) {
       status = 'geocode_failed';
       reason = result.errors.find((e) => e.source === 'satellite')?.message || null;
-    } else if (result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))) {
+    } else if (result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
+      // lookupPropertyFromAITrio consumes its providers' timeouts
+      // internally (they never reach result.errors), so a record-less
+      // lookup that ran the whole time budget is classified by the
+      // observable proxy — budget exhaustion — instead of undercounting
+      // the provider_timeout segment as no_record (codex r1 P2).
+      || (Number(timing?.totalBudgetMs) > 0 && result.meta.lookupMs >= Number(timing.totalBudgetMs))) {
       status = 'provider_timeout';
-      reason = result.errors.map((e) => e.source).join(',');
+      reason = result.errors.map((e) => e.source).join(',') || 'lookup budget exhausted';
     } else {
       reason = result.errors.map((e) => e.source).join(',') || null;
     }

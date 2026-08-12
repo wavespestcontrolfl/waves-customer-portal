@@ -103,10 +103,18 @@ function commercialTextSignal(text) {
 // Engine-path conflict: the call extraction positively typed the premises
 // commercial while the composed intent stayed residential. Returns the
 // conflicting type (truthy) or null.
+// HOA/common-area/association types trigger commercial handling by schema
+// even though their text often carries residential words ('condo
+// association') — checked BEFORE the residential exclusion so the
+// exclusion can't swallow them (codex r1 P1).
+const HOA_COMMON_AREA_TYPE_RE = /hoa|common.?area|association/;
+
 function commercialCategoryConflict({ extraction, intent }) {
   if (intent?.is_commercial === true) return null;
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
-  if (!type || RESIDENTIAL_TYPE_FAMILY_RE.test(type)) return null;
+  if (!type) return null;
+  if (HOA_COMMON_AREA_TYPE_RE.test(type)) return type;
+  if (RESIDENTIAL_TYPE_FAMILY_RE.test(type)) return null;
   return COMMERCIAL_TYPE_FAMILY_RE.test(type) ? type : null;
 }
 
@@ -123,11 +131,11 @@ function resolvePropertyUse({ propertyType, landUseDescription, isCommercial, co
   if (/single|townho|duplex|triplex|quadplex|villa|mobile|manufactured|house|home\b/.test(text)) {
     return 'single_family';
   }
-  // A generic commercial label ('commercial property', 'business') is
-  // positively NOT single_family — unknown, never a residential default.
-  if (/commercial|business/.test(text)) return 'unknown';
-  if (isCommercial) return 'unknown';
-  return text ? 'single_family' : 'unknown';
+  // Nothing matched positively: 'unknown' — an unrecognized (or literal
+  // schema 'unknown') type must stay unknown in the audit record, or the
+  // persisted model recreates the exact silent single-family default this
+  // module exists to eliminate (codex r1 P2).
+  return 'unknown';
 }
 
 // ── Relationship ────────────────────────────────────────────────
@@ -191,11 +199,14 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
 }
 
 /**
- * Gate ON only: mark a unit/suite scope's absent lot as NOT APPLICABLE —
- * a resolved fact, not missing data (property-facts-v2 doctrine). Only a
- * genuinely absent lot is touched: a lot value that somehow resolved stays
- * (classifyLane's existing rails judge its source), and whole-structure
- * scopes keep today's behavior entirely.
+ * Gate ON only: resolve a unit/suite scope's lot as NOT APPLICABLE — a
+ * resolved fact, not missing data (property-facts-v2 doctrine). A lot
+ * value that DID resolve on such a scope is the development's master
+ * parcel leaking in (the only lot the lookup can see for a unit), so it is
+ * CLEARED into the rejected trail rather than preserved — a lot-driven
+ * service pricing a whole complex's parcel for one unit is exactly the
+ * overquote the V2 bridge already clears on its own path (codex r1 P1).
+ * Whole-structure scopes keep today's behavior entirely.
  */
 function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   if (!propertyFacts || !model) return propertyFacts;
@@ -208,12 +219,20 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   const noIndividualLot = model.lotApplicability === 'common_master_parcel'
     || model.lotApplicability === 'no_individual_lot'
     || model.lotApplicability === 'leased_land';
-  if (unitScoped && noIndividualLot && !Number(propertyFacts?.lot?.value)) {
+  if (unitScoped && noIndividualLot) {
+    const priorValue = Number(propertyFacts?.lot?.value) > 0 ? Number(propertyFacts.lot.value) : null;
     propertyFacts.lot = {
       value: null,
       source: `not_applicable:${model.lotApplicability}`,
       confidence: 'high',
-      rejected: propertyFacts.lot?.rejected || [],
+      rejected: [
+        ...(propertyFacts.lot?.rejected || []),
+        ...(priorValue ? [{
+          value: priorValue,
+          source: propertyFacts.lot?.source || 'unknown',
+          reason: 'master-parcel lot cleared — a unit/suite scope has no individual lot',
+        }] : []),
+      ],
     };
   }
   return propertyFacts;
