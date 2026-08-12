@@ -409,6 +409,40 @@ describe('miner persistAll action-aware gate', () => {
     expect(updates[0].updates).toMatchObject({ status: 'expired', skip_reason: 'seo_actions_owns_page' });
   });
 
+  test('a parent is NOT retired when its companion was claimed mid-sweep', async () => {
+    // claimNext can claim a companion between the unlocked probe and the
+    // lock. Expiring the parent anyway leaves a claimed orphan doing
+    // obsolete link work, so the pair is atomic: both or neither.
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: null, _in: null, _notIn: null,
+        where: jest.fn((f) => { if (typeof f === 'object') q._filters = f; return q; }),
+        whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+        select: jest.fn(() => q),
+        then: (res, rej) => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []
+        ).then(res, rej),
+        // The companion is gone (claimed); only the parent locks.
+        forUpdate: jest.fn(() => Promise.resolve(
+          (q._in?.[1] || [])
+            .filter((k) => !String(k).startsWith('link_boost::'))
+            .map((k) => ({ dedupe_key: k }))
+        )),
+        update: jest.fn((u) => { updates.push({ in: q._in, updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
+
+    // Nothing expired: the parent waits for the next mine.
+    expect(updates.filter((u) => u.updates?.skip_reason === 'ctr_rewrite_signal_recovered')).toHaveLength(0);
+  });
+
   test('rows on a domain WITHOUT fresh coverage are never swept', async () => {
     // ctr_rewrite mines every property, so one stale spoke sync makes that
     // property's queries vanish from the candidate set entirely — they

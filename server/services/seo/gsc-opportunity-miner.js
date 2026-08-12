@@ -3914,12 +3914,40 @@ class GscOpportunityMiner {
         .forUpdate();
       if (!locked.length) return;
 
+      // ATOMIC PAIRS: retire a parent and the companion it owns together,
+      // or neither. claimNext can claim a companion between the unlocked
+      // probe and this lock; the status predicate then omits it while its
+      // parent still locks and expires, and the worker executes obsolete
+      // link work against a retired parent (audit P1). A parent whose
+      // intended companion could not be locked is left alone — the next
+      // canonical mine retries the pair once that work finishes.
+      const lockedKeys = new Set(locked.map((r) => r.dedupe_key));
+      const targetedCompanions = new Set(companionKeys);
+      const blockedParents = new Set();
+      for (const r of probeStale) {
+        if (!r.page_url) continue;
+        const ck = dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        });
+        // Only companions we INTENDED to retire block their parent; a
+        // protected companion means another live parent still needs it,
+        // which is no reason to keep ours.
+        if (targetedCompanions.has(ck) && !lockedKeys.has(ck)) blockedParents.add(r.dedupe_key);
+      }
+      const expireKeys = locked
+        .map((r) => r.dedupe_key)
+        .filter((k) => !blockedParents.has(k));
+      if (blockedParents.size) {
+        logger.info(`[gsc-opp-miner] ${bucket} sweep: ${blockedParents.size} pair(s) deferred — companion claimed mid-sweep`);
+      }
+      if (!expireKeys.length) return;
+
       await runner('opportunity_queue')
-        .whereIn('dedupe_key', locked.map((r) => r.dedupe_key))
+        .whereIn('dedupe_key', expireKeys)
         .update({
           status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
         });
-      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${locked.length} row(s) expired (parents + companions)`);
+      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${expireKeys.length} row(s) expired (parents + companions)`);
     } catch (err) {
       // Inside the persist transaction the caller owns rollback semantics;
       // rethrow so a failed sweep cannot leave half-reconciled state.
