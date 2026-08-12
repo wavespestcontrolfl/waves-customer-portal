@@ -132,6 +132,12 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // (splitCoverageAmount slice) — the tier-extension credit derives from
   // what was PAID, never the undiscounted estimated_price.
   if (cols.prepaid_amount) selectCols.push('prepaid_amount');
+  // Which mechanism paid for the visit. A cash/Zelle prepayment keeps its own
+  // method even when attachScheduledServices links the row to an annual term,
+  // so the method is what distinguishes annual-prepay coverage from an
+  // unrelated out-of-band payment (annual-prepay-renewals' own
+  // annualPrepayCoversVisit keys on it first).
+  if (cols.prepaid_method) selectCols.push('prepaid_method');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
@@ -391,6 +397,15 @@ function ownershipFamiliesFromText(raw) {
     if (/\b(bait|station|monitor)/.test(s) || combinedPestRodent) add('rodent_bait');
   }
   if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
+  // Recurring spot-foam termite program (foam_recurring — catalog name
+  // "Recurring Foam Treatment" carries no termite token). Its OWN family,
+  // NOT termite_bait: foam coverage must never suppress a bait-station
+  // quote. No pricing consumer keys off this today (mapKey passes unknown
+  // keys through and they only ever equality-match) — it exists so the
+  // Property Score's termite component sees foam coverage through the same
+  // lifecycle-filtered ownership path as every other family. The adjacency
+  // requirement keeps rodent-exclusion foam-sealing work unmatched.
+  if (/recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s)) add('termite_foam');
   return keys;
 }
 
@@ -413,7 +428,12 @@ function ownershipKeysForRow(row = {}) {
     // no family tokens at all ("Premium Home Plan") defers to service_type.
     const s = catalogText.toLowerCase();
     const informative = /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?)\b/.test(s)
-      || RODENT_TOKEN_RE.test(s);
+      || RODENT_TOKEN_RE.test(s)
+      // foam_recurring is an informative termite identity despite carrying
+      // no termite token — without this, a foam row under a stale generic
+      // 'Pest Control' service_type would fall through to the joined text
+      // and claim pest coverage on top of termite_foam.
+      || /recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s);
     if (informative) return ownershipFamiliesFromText(catalogText);
   }
   return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());

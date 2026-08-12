@@ -280,7 +280,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
         return q;
       }
       if (table === 'scheduled_services') {
-        const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ source_estimate_id: sourceEstimateId })) };
+        const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => ({ source_estimate_id: sourceEstimateId })) };
         return q;
       }
       if (table === 'customers') {
@@ -290,6 +290,9 @@ describe('createFromService — estimate-deposit roll-forward', () => {
       if (table === 'invoices') {
         const q = {
           where: jest.fn(() => q),
+          // The replay mint's in-lock adoption re-check (codex r6 round).
+          whereNot: jest.fn(() => q),
+          whereNotIn: jest.fn(() => q),
           orderBy: jest.fn(() => q),
           first: jest.fn(async () => null),
           insert: jest.fn((data) => {
@@ -433,7 +436,7 @@ describe('createFromService — frozen-money backfill mints bypass scheduled rep
         return q;
       }
       if (table === 'scheduled_services') {
-        const q = { where: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
+        const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
         return q;
       }
       if (table === 'scheduled_service_addons') {
@@ -450,6 +453,9 @@ describe('createFromService — frozen-money backfill mints bypass scheduled rep
       if (table === 'invoices') {
         const q = {
           where: jest.fn(() => q),
+          // The replay mint's in-lock adoption re-check (codex r6 round).
+          whereNot: jest.fn(() => q),
+          whereNotIn: jest.fn(() => q),
           orderBy: jest.fn(() => q),
           first: jest.fn(async () => null),
           insert: jest.fn((data) => {
@@ -649,6 +655,9 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
       if (table === 'invoices') {
         const q = {
           where: jest.fn(() => q),
+          // The replay mint's in-lock adoption re-check (codex r6 round).
+          whereNot: jest.fn(() => q),
+          whereNotIn: jest.fn(() => q),
           orderBy: jest.fn(() => q),
           first: jest.fn(async () => null),
           insert: jest.fn((data) => {

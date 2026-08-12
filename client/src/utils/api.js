@@ -558,6 +558,11 @@ export class ApiClient {
     return this.request(`/lawn-health/${customerId}/history`);
   }
 
+  // ---- Property Score (GATE_PROPERTY_SCORE; gate-off answers available:false) ----
+  getPropertyScore() {
+    return this.request('/property-score');
+  }
+
   getLawnHealthPhotos(customerId, assessmentId) {
     return this.request(`/lawn-health/${customerId}/photos/${assessmentId}`);
   }

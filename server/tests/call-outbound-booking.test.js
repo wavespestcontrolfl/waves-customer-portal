@@ -9,17 +9,20 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/dispatch-alerts', () => ({ autoResolveOverdueAlertsForJob: jest.fn(async () => {}) }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(async () => ({})) }));
 jest.mock('../services/call-recording-processor', () => ({ convertCallLeadOnPhoneBooking: jest.fn(async () => true) }));
+jest.mock('../services/appointment-card-request', () => ({ requestCardForAppointment: jest.fn(async () => ({ requested: false })) }));
 
 const { buildTriageItem } = require('../services/call-routing-gates');
 const {
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
+  isPendingOutboundReviewBooking,
 } = require('../services/call-booking-source-actions');
 const { transitionJobStatus } = require('../services/job-status');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
+const { requestCardForAppointment } = require('../services/appointment-card-request');
 
 describe('outbound review booking — shared source-action markers', () => {
   test('the outbound-review marker is a distinct, stable string that fits source_action', () => {
@@ -68,6 +71,32 @@ describe('outbound review booking — originating lead carried on the card', () 
     const payload = JSON.parse(item.payload);
     expect(payload.lead_id).toBe('lead-9');
     expect(payload.keep_open_for_quote).toBe(true);
+  });
+});
+
+describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection', () => {
+  // tech-track's en-route/on-site auto-confirm keys on this helper matching
+  // EXACTLY the shared-writer guard's condition (source_action + pending +
+  // !customer_confirmed) — a drift between the two either re-opens the 409
+  // popup or auto-confirms a row the guard would have allowed through anyway.
+  const base = {
+    source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+  };
+
+  test('matches a pending, unconfirmed outbound-review row', () => {
+    expect(isPendingOutboundReviewBooking(base)).toBe(true);
+  });
+
+  test('does NOT match other source_actions, non-pending status, confirmed rows, or missing rows', () => {
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: 'ai_call_pipeline' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: CALL_FOLLOWUP_SOURCE_ACTION })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'confirmed' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'cancelled' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, customer_confirmed: true })).toBe(false);
+    expect(isPendingOutboundReviewBooking(null)).toBe(false);
+    expect(isPendingOutboundReviewBooking(undefined)).toBe(false);
   });
 });
 
@@ -166,6 +195,19 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       leadId: 'lead-1',
       keepOpenForQuote: false,
     }));
+  });
+
+  test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
+    // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
+    // card in person, so the funnel leg is skipped on the tech-track path —
+    // and ONLY there; the office confirm paths keep the full funnel.
+    const db = confirmHookDb({ fallbackLeads: [] });
+    await runOutboundReviewConfirmHook(db, svc, 'test', { skipCardRequest: true });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(requestCardForAppointment).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledServiceId: 'svc1', trigger: 'outbound_review_confirm' }),
+    );
   });
 
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {

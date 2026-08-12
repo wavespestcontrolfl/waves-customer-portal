@@ -25,8 +25,25 @@ const DISPATCH_OWNED_PENDING_SOURCE_ACTIONS = [
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
 ];
 
+/**
+ * THE pending-outbound-review classifier — the single source of truth for
+ * "this row is an outbound-callback booking still awaiting office review".
+ * Used by BOTH the shared status writer's guard (job-status.js, which blocks
+ * day-of transitions on such rows) and the sanctioned confirmation points
+ * (tech-track dispatch-implies-confirm) that bypass it — one function so the
+ * two mechanisms can never drift (Codex P1 on PR #3356). `svc` needs
+ * source_action, status, customer_confirmed.
+ */
+function isPendingOutboundReviewBooking(svc) {
+  return !!svc
+    && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+    && svc.status === 'pending'
+    && !svc.customer_confirmed;
+}
+
 module.exports = {
   CALL_FOLLOWUP_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
+  isPendingOutboundReviewBooking,
 };
