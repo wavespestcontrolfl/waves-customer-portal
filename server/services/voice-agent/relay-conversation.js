@@ -119,6 +119,10 @@ function contextPromptAddendum() {
     '  the matched caller about their own account is fine.',
     '- Use get_account_overview and get_service_history for account questions; never answer',
     '  them from memory or guesswork.',
+    '- Past CALLS and TEXTS (get_call_history, get_message_history) belong to the matched',
+    '  caller\'s own number only. Never share, summarize, or hint at a past call or text on a',
+    '  looked-up account — not even that one exists. The tools enforce this; do not work',
+    '  around them.',
     '- Pricing is public website information: get_pricing works for ANY caller, including a',
     '  brand-new prospect asking what a plan costs.',
   ].join('\n');

@@ -11,8 +11,9 @@
  * booking or touch the schedule. The agent offers times and still captures a
  * lead; a human locks the appointment in. The mutating confirm_booking is later.
  *
- * Phase 2 "context" (CONTEXT_TOOLS): get_account_overview, get_service_history
- * and get_pricing — READ-ONLY account/pricing reads for an ANI-matched caller.
+ * Phase 2 "context" (CONTEXT_TOOLS): get_account_overview, get_service_history,
+ * get_pricing, lookup_customer, and the Phase C history pair
+ * (get_call_history, get_message_history) — READ-ONLY account reads.
  * Dark behind VOICE_RELAY_CONTEXT_ENABLED (fail-closed): with the gate off the
  * tools don't register (activeTools) AND executeTool refuses them; with the
  * gate on they still refuse unless the session carries a matched customer id
@@ -157,6 +158,28 @@ const CONTEXT_TOOLS = [
       },
       required: [],
     },
+  },
+  {
+    name: 'get_call_history',
+    description:
+      'Summaries of past phone calls between Waves and the number THIS call is ' +
+      'coming from — the most recent ten processed calls, newest first. ' +
+      'READ-ONLY. Works ONLY when the caller\'s own number matched a customer ' +
+      'account; it NEVER works for looked-up accounts (call and text history ' +
+      'can contain payment and health details and is never shared with a voice ' +
+      'the number did not verify). Use it when the caller references an ' +
+      'earlier conversation.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_message_history',
+    description:
+      'The recent SMS/text thread between Waves and the number THIS call is ' +
+      'coming from — about the last twenty messages, newest last, each labeled ' +
+      'Customer or Waves. READ-ONLY. Works ONLY when the caller\'s own number ' +
+      'matched a customer account; it NEVER works for looked-up accounts. Use ' +
+      'it when the caller mentions a text they sent or received.',
+    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'get_pricing',
@@ -356,6 +379,25 @@ async function executeTool(name, input = {}, ctx = {}) {
       // (ctx.rememberLookup) keep this from ever dumping a record.
       if (name === 'lookup_customer') {
         return await relayContext.lookupCustomersText(input, ctx.rememberLookup);
+      }
+      // Phase C — call/text history is ANI-VERIFIED ONLY (stricter than the
+      // two-tier account rule): transcripts and SMS bodies can carry payment
+      // and health details, so a looked-up ref gets NOTHING here, not even a
+      // redacted view. Enforced in output code, never prompt language.
+      if (name === 'get_call_history' || name === 'get_message_history') {
+        if (String(input.customer_ref || '').trim()) {
+          return 'Call and text history are only available for the account the caller\'s own phone number '
+            + 'matches — never for a looked-up account. Do not share, summarize, or hint at any past call '
+            + 'or text on this account.';
+        }
+        if (!ctx.customerId) {
+          return 'No customer account matches the number this call is coming from, so there is no call or '
+            + 'text history to read. Do NOT guess at past calls or texts. Offer to have the office follow up, '
+            + 'and capture the lead.';
+        }
+        const relayHistory = require('./relay-history');
+        if (name === 'get_call_history') return await relayHistory.callHistoryText(ctx.from);
+        return await relayHistory.messageHistoryText(ctx.customerId, ctx.from);
       }
       // Account tools — two disclosure tiers, enforced HERE, not in prompt
       // language:

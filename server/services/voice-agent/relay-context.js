@@ -273,19 +273,27 @@ async function resolveCallerContext(from) {
   const work = (async () => {
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
-    const [services, nextAppointment, visits, balance, priorCall] = await Promise.all([
+    const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
       loadRecurringServiceNames(customer.id).catch(() => []),
       loadNextAppointment(customer.id).catch(() => null),
       loadCompletedVisits(customer.id, 1).catch(() => []),
       loadOpenBalance(customer.id).catch(() => null),
       loadPriorCallSummary(from).catch(() => null),
+      // Phase C: the last few SMS with this number, next to the KNOWN CALLER
+      // block (same gate, same ANI-matched-only condition). Optional context —
+      // buildRecentTextsBlock fails toward null and never blocks the session.
+      (async () => {
+        const { buildRecentTextsBlock } = require('./relay-history');
+        return buildRecentTextsBlock(customer.id, from);
+      })().catch(() => null),
     ]);
     logger.info(`[voice-relay-context] caller ${maskPhone(from)} matched customer ${customer.id}`);
+    const knownCallerBlock = buildKnownCallerBlock({
+      customer, services, nextAppointment, lastVisit: visits[0] || null, balance, priorCall,
+    });
     return {
       customer: { id: customer.id, first_name: customer.first_name || null },
-      block: buildKnownCallerBlock({
-        customer, services, nextAppointment, lastVisit: visits[0] || null, balance, priorCall,
-      }),
+      block: recentTexts ? `${knownCallerBlock}\n\n${recentTexts}` : knownCallerBlock,
     };
   })();
   let timer;
