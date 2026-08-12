@@ -39,6 +39,23 @@ function isContextEnabled() {
   return String(process.env.VOICE_RELAY_CONTEXT_ENABLED || '').toLowerCase() === 'true';
 }
 
+// The owner's anti-spoofing lever: when on, only a call the carrier vouches
+// for (STIR/SHAKEN attestation A) may be recognised as a customer at all.
+// Same exact-'true' shape as every other gate in this lane; default off is
+// today's behaviour (see the ruling quoted at the call site).
+function requiresAttestation() {
+  return String(process.env.VOICE_RELAY_REQUIRE_ATTESTATION || '').toLowerCase() === 'true';
+}
+
+// Twilio hands the carrier's verdict through as a `verstat` string —
+// 'TN-Validation-Passed-A' / '-B' / '-C', or 'No-TN-Validation' when nobody
+// signed it. Only a PASSED A means "this carrier vouches that the caller owns
+// this number"; anything else (including a passed B or C) does not.
+function isFullAttestation(value) {
+  const v = String(value == null ? '' : value).trim();
+  return /(^|-)passed-a$/i.test(v) || v.toUpperCase() === 'A';
+}
+
 // Bound the whole context resolution so a slow pool can never add dead air to
 // a live call: on timeout the caller is simply treated as unknown.
 const CONTEXT_RESOLVE_TIMEOUT_MS = 4000;
@@ -587,6 +604,30 @@ async function resolveCallerContext(from, { callSid = null } = {}) {
       return null;
     }
     logger.info(`[voice-relay-context] caller ${maskPhone(from)} verified against call_log callSid=${callSid} attestation=${verification.attestation || 'none'}`);
+    // ⭐ THE SPOOFING LEVER, DARK BY DEFAULT.
+    //
+    // The check above proves TWILIO supplied this ANI on the signature-verified
+    // /voice webhook — not that the caller owns the number. Caller-ID spoofing
+    // is commodity, and the only carrier-level defence is STIR/SHAKEN
+    // attestation A. Turning that into a hard requirement is an OWNER call, not
+    // a code call: most genuine calls arrive with no attestation at all (the
+    // /voice preconnect-screen notes measured this), so an A-only rule would
+    // silently demote a large share of real customers to strangers — which is
+    // why the ruling was "log it first, measure the distribution, then decide"
+    // and why the attestation is on the line above.
+    //
+    // `VOICE_RELAY_REQUIRE_ATTESTATION=true` is that decision, ready to flip:
+    // with it on, a call the carrier will not vouch for is treated exactly like
+    // an unverified one — no recognition, no account reads, no history, the
+    // agent behaves as it does for any stranger. Off (the default) keeps
+    // today's behaviour and changes nothing.
+    if (requiresAttestation() && !isFullAttestation(verification.attestation)) {
+      logger.info(
+        `[voice-relay-context] caller ${maskPhone(from)} has attestation=${verification.attestation || 'none'} `
+        + 'and VOICE_RELAY_REQUIRE_ATTESTATION is on — treating as unknown, no account access'
+      );
+      return null;
+    }
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
@@ -600,7 +641,7 @@ async function resolveCallerContext(from, { callSid = null } = {}) {
       // buildRecentTextsBlock fails toward null and never blocks the session.
       (async () => {
         const { buildRecentTextsBlock } = require('./relay-history');
-        return buildRecentTextsBlock(customer.id, from);
+        return buildRecentTextsBlock(from);
       })().catch(() => null),
     ]);
     logger.info(`[voice-relay-context] caller ${maskPhone(from)} matched customer ${customer.id} tier=${customer.tier}`);
@@ -1059,6 +1100,8 @@ async function servicesCatalogText() {
 
 module.exports = {
   isContextEnabled,
+  requiresAttestation,
+  isFullAttestation,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

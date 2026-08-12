@@ -739,6 +739,33 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(payload.lead_id).toBe('lead-42');
   });
 
+  // ⭐ THE TECH DRIVES TO THE ACCOUNT'S ADDRESS, SO THAT IS WHAT GETS SCORED.
+  // find_slots geocodes whatever address the model repeats back from the
+  // caller's speech; the booked row carries no address at all and is serviced
+  // at the customer's stored one. Re-validating on the offer's coordinates
+  // would drive-time-check a route nobody takes.
+  test('the commit re-check is scored from the CUSTOMER address, not the offered coordinates', async () => {
+    booking.resolveBookingCoords.mockResolvedValue({ lat: 27.9, lng: -82.1 });
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Booking REQUEST submitted/);
+    // Resolved from the account's own stored address/coords…
+    expect(booking.resolveBookingCoords).toHaveBeenCalledWith(expect.objectContaining({
+      address: expect.stringContaining('12 Shore Dr'),
+      city: 'Bradenton',
+    }));
+    // …and THOSE coordinates are what the engine re-checked, not the offer's.
+    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      lat: 27.9, lng: -82.1,
+    }));
+  });
+
+  test('an account whose service location cannot be resolved books NOTHING', async () => {
+    booking.resolveBookingCoords.mockResolvedValue({});
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Could not verify the service location/i);
+    assertNoCreateWrites();
+  });
+
   // ⭐ THE SAME INVARIANT, ENFORCED BY THE DATABASE. The latch above lives on
   // the RelayConversation instance: a WebSocket reconnect on the same CallSid
   // builds a fresh session with it cleared, and a booking on a DIFFERENT date

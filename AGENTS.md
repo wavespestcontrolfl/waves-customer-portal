@@ -1155,8 +1155,17 @@ violations at the severity noted.
   attached (`isRelayAttached`) AND the configured endpoint's scheme/host/path are
   trusted (`wss://` + this portal's own origin from `PUBLIC_PORTAL_URL` + the
   exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
-  never appended to a foreign host. Any change to this endpoint, its auth, or its
-  frame handling is security-critical).
+  never appended to a foreign host. Caller RECOGNITION on this endpoint is a
+  third, independent layer: the WS setup frame's `from` is unverified input and
+  is cross-checked against the signature-verified `/voice` webhook's `call_log`
+  row before any account read, and `VOICE_RELAY_REQUIRE_ATTESTATION=true`
+  additionally demands STIR/SHAKEN attestation A — the carrier vouching that the
+  caller owns the number — before the caller is recognised at all. That switch
+  ships OFF: most genuine calls carry no attestation, so turning it on trades
+  spoofing resistance for treating real customers as strangers, and the
+  attestation is logged on every call so the distribution can be measured first.
+  Any change to this endpoint, its auth, or its frame handling is
+  security-critical).
   `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
   "secure your appointment" card-on-file capture page for the
   appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`

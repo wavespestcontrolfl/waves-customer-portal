@@ -263,6 +263,48 @@ describe('GATE ON — caller recognition', () => {
       .toEqual({ verified: true, attestation: 'TN-Validation-Passed-A' });
   });
 
+  // ⭐ THE ANTI-SPOOFING LEVER. A signature-verified webhook proves Twilio sent
+  // this ANI, not that the caller owns it. VOICE_RELAY_REQUIRE_ATTESTATION is
+  // the owner's switch for demanding the carrier vouch for it; OFF by default
+  // because most genuine calls carry no attestation at all.
+  describe('VOICE_RELAY_REQUIRE_ATTESTATION', () => {
+    afterEach(() => { delete process.env.VOICE_RELAY_REQUIRE_ATTESTATION; });
+
+    test('off (default): an unattested call is still recognised — today\'s behaviour', async () => {
+      primeDb({
+        customers: [CUSTOMER],
+        callLog: [{ ...VERIFIED_CALL_ROW, metadata: JSON.stringify({ stir_verstat: 'No-TN-Validation' }) }],
+      });
+      const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
+      expect(ctx && ctx.customer.id).toBe(CUSTOMER.id);
+    });
+
+    test('on: an unattested call is a stranger — no recognition, no account reads', async () => {
+      process.env.VOICE_RELAY_REQUIRE_ATTESTATION = 'true';
+      primeDb({
+        customers: [CUSTOMER],
+        callLog: [{ ...VERIFIED_CALL_ROW, metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Failed-C' }) }],
+      });
+      expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+    });
+
+    test('on: a carrier-vouched attestation-A call is recognised normally', async () => {
+      process.env.VOICE_RELAY_REQUIRE_ATTESTATION = 'true';
+      primeDb({ customers: [CUSTOMER], callLog: [VERIFIED_CALL_ROW] });
+      const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
+      expect(ctx && ctx.customer.id).toBe(CUSTOMER.id);
+    });
+
+    test('only a PASSED-A counts — a passed B or C does not', () => {
+      expect(relayContext.isFullAttestation('TN-Validation-Passed-A')).toBe(true);
+      expect(relayContext.isFullAttestation('A')).toBe(true);
+      expect(relayContext.isFullAttestation('TN-Validation-Passed-B')).toBe(false);
+      expect(relayContext.isFullAttestation('TN-Validation-Failed-A')).toBe(false);
+      expect(relayContext.isFullAttestation('No-TN-Validation')).toBe(false);
+      expect(relayContext.isFullAttestation(null)).toBe(false);
+    });
+  });
+
   test('matched caller → KNOWN CALLER block with name, since-year, services, appt, visit, balance, prior call', async () => {
     primeDb({
       customers: [CUSTOMER],

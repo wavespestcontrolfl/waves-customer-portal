@@ -535,7 +535,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   const customer = await db('customers')
     .where({ id: customerId })
     .whereNull('deleted_at')
-    .first('id', 'first_name', 'address_line1', 'city', 'zip');
+    .first('id', 'first_name', 'address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
   if (!customer) {
     return 'Could not load that account. Do not retry; capture the lead and a team member will follow up.';
   }
@@ -552,9 +552,42 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
   const bookingDurationMinutes = resolveVoiceBookingDuration(catalogRow, offer);
 
+  // ⭐ RE-VALIDATE AT THE ADDRESS THE TECH WILL ACTUALLY DRIVE TO.
+  //
+  // The OFFER was route-scored from whatever address the model handed
+  // find_slots — the caller's spoken words (relay-tools.resolveAvailability
+  // geocodes `address_line1`/`city`/`zip` from the tool input and never
+  // consults the matched account). The ROW this writer inserts carries no
+  // address at all: the visit is serviced at the customer's stored address.
+  // So an offer scored from one town could be committed as a visit in
+  // another, and the drive-time/zone engine — the entire reason this lane
+  // books through it instead of a generic calendar — would have validated a
+  // route nobody is driving.
+  //
+  // The account's own coordinates are therefore the authority for the commit
+  // re-check, resolved through the same helper the /book route uses (stored
+  // lat/lng first, geocoded street address behind it). Everything else about
+  // the offer is preserved deliberately (timeOfDay, expandOpenDays, date,
+  // start) — see revalidateSlot's note on why dropping those loses slots. If
+  // the slot does not survive at the real address, that is a stale offer like
+  // any other: nothing is booked and the agent finds fresh times.
+  const bookingCoords = await require('../../routes/booking')._internals.resolveBookingCoords({
+    lat: customer.latitude || null,
+    lng: customer.longitude || null,
+    address: [customer.address_line1, customer.city, customer.state, customer.zip]
+      .filter(Boolean).join(', ') || null,
+    city: customer.city || null,
+  }).catch(() => ({}));
+  if (!bookingCoords || !bookingCoords.lat || !bookingCoords.lng) {
+    return 'Could not verify the service location for this account, so no booking request was placed. '
+      + 'Capture the lead with the preferred time; a team member will call to schedule.';
+  }
   // Never trust the model's memory of a slot: re-check the offered slot
-  // through the same availability engine, with the same inputs, right now.
-  const recheck = await revalidateSlot({ offer, durationMinutes: bookingDurationMinutes });
+  // through the same availability engine, right now, at the account's address.
+  const recheck = await revalidateSlot({
+    offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
+    durationMinutes: bookingDurationMinutes,
+  });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '
       + 'Capture the lead with the caller\'s preferred time; a team member will call to schedule.';

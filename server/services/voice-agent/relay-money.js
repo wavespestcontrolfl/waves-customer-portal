@@ -122,7 +122,17 @@ async function quotedLines(estimateRow) {
       // and the per-application price LEADS, exactly as the customer's estimate
       // card does. Leading with (or standing on) a monthly figure presents the
       // service as a flat monthly spread, which AGENTS.md forbids.
-      const perApp = fmtMoney(item.perTreatment);
+      //
+      // ⭐ AND IT IS `displayPrice`, NOT `perTreatment`. On a row that receives
+      // a tier discount (recurringServiceReceivesTierDiscount — WaveGuard and
+      // friends), `perTreatment` is the LIST per-application price and
+      // `displayPrice` is the net one the bundle computes from the discounted
+      // annual. PriceCard.jsx renders `row.displayPrice ?? row.perTreatment`
+      // and prints it as "/ application", and the monthly-total math on the
+      // same page reads displayPrice too — so quoting perTreatment made the
+      // phone say a HIGHER number than the customer's own estimate page for
+      // exactly the discounted customers who are most likely to check.
+      const perApp = fmtMoney(item.displayPrice ?? item.perTreatment);
       const bits = [];
       if (perApp) {
         bits.push(`${perApp} per application`);
@@ -166,25 +176,36 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     // truthful "billed $X per month" line), and `show_one_time_option` /
     // `waveguard_tier` shape the bundle itself. Selecting them is what keeps
     // the phone and the estimate page quoting the same estimate.
-    .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at',
+    // `archived_at` rides along for the viewability predicate below.
+    .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at', 'archived_at',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
       'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier');
-  if (!rows.length) {
+  // ⭐ STATUS IS NOT THE SAME QUESTION AS "CAN THE CUSTOMER SEE THIS?".
+  // `sent`/`viewed` is a status the expiry sweep has to come along and change;
+  // until it does — or if it fails — the row still reads as open while
+  // /estimate/:token already refuses it. Quoting from it would put a price on
+  // the call that the customer's own estimate page will not show, which is the
+  // exact failure the sent-price contract exists to prevent. Same predicate
+  // that page uses (estimate-public.isEstimateCustomerViewable): archived,
+  // linkage-invalidated and past-expiry rows all drop out here too.
+  const { isEstimateCustomerViewable } = require('../../routes/estimate-public');
+  const viewable = rows.filter((row) => isEstimateCustomerViewable(row));
+  if (!viewable.length) {
     return 'No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan '
       + 'pricing, and a team member can put a written estimate together.';
   }
 
   if (redacted) {
-    const lines = rows.map((row) => {
+    const lines = viewable.map((row) => {
       const when = speakDate(row.sent_at || row.created_at);
       return `an estimate sent ${when || 'recently'}`;
     });
-    return `There ${rows.length === 1 ? 'is' : 'are'} ${rows.length} open estimate${rows.length === 1 ? '' : 's'} `
+    return `There ${viewable.length === 1 ? 'is' : 'are'} ${viewable.length} open estimate${viewable.length === 1 ? '' : 's'} `
       + `on that account (${lines.join('; ')}). Do NOT state any amounts — the account holder can see the `
       + 'estimate in their portal, or the office can go over it with them directly.';
   }
 
-  const rendered = await Promise.all(rows.map(async (row) => {
+  const rendered = await Promise.all(viewable.map(async (row) => {
     const when = speakDate(row.sent_at || row.created_at);
     const expires = speakDate(row.expires_at);
     const bits = [];

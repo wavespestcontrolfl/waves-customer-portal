@@ -142,14 +142,19 @@ async function callHistoryText(fromPhone) {
  * correctly ANI-keyed; this now matches it. A customer arm is also exactly the
  * disclosure a contact-slot ANI match must never unlock.
  *
- * `customerId` stays in the signature (callers pass it, and the ANI-match
- * precondition is enforced in relay-tools) but is deliberately unused for
- * scoping.
+ * ⭐ AND THERE IS NO CUSTOMER ID IN THE SIGNATURE ANY MORE. It used to be
+ * passed and deliberately ignored, which is worse than useless: two separate
+ * reviewers read `loadRecentMessages(customerId, from)` as proof of an
+ * account-scoped read and filed it as a leak. A contact-slot ANI match
+ * (spouse, tenant, PRIOR OCCUPANT — the redacted tier, which authenticates
+ * nobody) reaches these tools with a customerId set, so the only thing keeping
+ * them honest is that the query never uses one. The parameter is gone so the
+ * signature says that out loud.
  *
  * Internal notes never leave the building (direction whitelist).
  * Returns scrubbed rows, NEWEST FIRST (callers reverse for speech order).
  */
-async function loadRecentMessages(customerId, fromPhone, limit = MESSAGE_HISTORY_LIMIT) {
+async function loadRecentMessages(fromPhone, limit = MESSAGE_HISTORY_LIMIT) {
   const { aniDigitKey } = require('./relay-context');
   const key = aniDigitKey(fromPhone);
   if (!key) return [];
@@ -176,8 +181,8 @@ async function loadRecentMessages(customerId, fromPhone, limit = MESSAGE_HISTORY
 }
 
 /** Most recent ~20 messages, direction-labeled, NEWEST LAST (reads like the thread). */
-async function messageHistoryText(customerId, fromPhone) {
-  const messages = await loadRecentMessages(customerId, fromPhone, MESSAGE_HISTORY_LIMIT);
+async function messageHistoryText(fromPhone) {
+  const messages = await loadRecentMessages(fromPhone, MESSAGE_HISTORY_LIMIT);
   if (!messages.length) {
     return 'No text messages on file with this number.';
   }
@@ -198,9 +203,9 @@ async function messageHistoryText(customerId, fromPhone) {
  * where a model is most likely to obey an instruction it finds. The per-line
  * directive filter (voiceSafeText → promptSafeUntrusted) is the other half.
  */
-async function buildRecentTextsBlock(customerId, fromPhone) {
+async function buildRecentTextsBlock(fromPhone) {
   try {
-    const messages = await loadRecentMessages(customerId, fromPhone, RECENT_TEXTS_BLOCK_LIMIT);
+    const messages = await loadRecentMessages(fromPhone, RECENT_TEXTS_BLOCK_LIMIT);
     if (!messages.length) return null;
     const lines = [
       'RECENT TEXTS — the last few SMS messages between Waves and this caller\'s',

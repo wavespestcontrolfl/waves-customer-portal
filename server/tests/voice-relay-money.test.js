@@ -34,7 +34,15 @@ jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }))
 // /estimate/:token page renders from, and it deliberately rejects the frozen
 // snapshot and re-derives in six cases). The voice agent must call IT, not read
 // sendSnapshot JSON by hand.
-jest.mock('../routes/estimate-public', () => ({ buildPricingBundle: jest.fn() }));
+// isEstimateCustomerViewable is the CUSTOMER-FACING viewability predicate the
+// /estimate/:token page gates on. Mocked with a faithful stand-in for the two
+// legs these tests exercise (archived, past-expiry); a test below asserts
+// relay-money actually consults it rather than re-deriving one.
+jest.mock('../routes/estimate-public', () => ({
+  buildPricingBundle: jest.fn(),
+  isEstimateCustomerViewable: jest.fn((row = {}, now = new Date()) => !row.archived_at
+    && !(row.expires_at && new Date(row.expires_at) < now)),
+}));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 // The LIVE payer authority. open-balance.js records the pre-push P0: payer-null
 // SQL is not proof of self-pay, because a payer assigned after the invoice row
@@ -45,7 +53,7 @@ jest.mock('../services/call-booking-catalog', () => ({ loadBookableCallServices:
 
 const db = require('../models/db');
 const { generateEstimate } = require('../services/pricing-engine');
-const { buildPricingBundle } = require('../routes/estimate-public');
+const { buildPricingBundle, isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { openBalanceSummary } = require('../services/open-balance');
 const { loadBookableCallServices } = require('../services/call-booking-catalog');
 
@@ -278,6 +286,48 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(out).not.toContain(SENT_ESTIMATE.token);
     expect(out).not.toMatch(TOKEN_LEAK_RE);
     expect(out).toMatch(/Do not read out a link/i);
+  });
+
+  // ⭐ STATUS IS NOT VIEWABILITY. `sent`/`viewed` only changes when the expiry
+  // sweep gets to the row; /estimate/:token refuses a past-expiry estimate the
+  // moment it passes. Quoting one would put a price on the call the customer's
+  // own page will not show.
+  test('an EXPIRED estimate is not quoted — the customer-facing predicate decides', async () => {
+    const expired = { ...SENT_ESTIMATE, id: 'est-expired', expires_at: '2026-08-01T12:00:00Z' };
+    primeDb({ estimates: [expired] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(isEstimateCustomerViewable).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-expired' }));
+    expect(out).toMatch(/No open estimates on this account/i);
+    expect(out).not.toMatch(/\$\d/);
+    expect(buildPricingBundle).not.toHaveBeenCalled();
+  });
+
+  test('an ARCHIVED estimate does not even count toward the redacted "how many" answer', async () => {
+    primeDb({ estimates: [{ ...SENT_ESTIMATE, id: 'est-archived', archived_at: '2026-08-05T12:00:00Z' }] });
+    const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: () => 'c-9001' };
+    const out = await executeTool('get_open_estimates', { customer_ref: 'C1' }, ctx);
+    expect(out).toMatch(/No open estimates on this account/i);
+    expect(out).not.toMatch(/1 open estimate/);
+  });
+
+  // ⭐ THE DISCOUNTED CUSTOMER IS THE ONE MOST LIKELY TO CHECK. On a row that
+  // takes a tier discount, `perTreatment` is the LIST price and `displayPrice`
+  // is the net one PriceCard.jsx renders as "/ application".
+  test('a tier-discounted line speaks displayPrice, not the pre-discount perTreatment', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [{
+        key: 'quarterly',
+        monthly: 41.5,
+        annual: 498,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Quarterly pest control', monthly: 41.5, perTreatment: 149, displayPrice: 124.5, visitsPerYear: 4 },
+        ],
+      }],
+    });
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toContain('$124.50 per application');
+    expect(out).not.toContain('$149');
   });
 
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
