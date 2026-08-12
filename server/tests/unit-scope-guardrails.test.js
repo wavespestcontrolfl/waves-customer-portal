@@ -82,6 +82,13 @@ describe('commercialTextSignal', () => {
     expect(commercialTextSignal('need pest control for our hotel')).toBe(true);
     expect(commercialTextSignal('service our daycare please')).toBe(true);
     expect(commercialTextSignal('roaches at our motel')).toBe(true);
+    // Schools/churches type commercial in the lookup too (codex r34 P1).
+    expect(commercialTextSignal('need pest control for our school')).toBe(true);
+    expect(commercialTextSignal('pest control for a school')).toBe(true);
+    // "the hotel" needs service context — working at one is residential
+    // prose (codex r34 P2).
+    expect(commercialTextSignal('I work at the hotel, but I need quarterly pest control at home')).toBe(false);
+    expect(commercialTextSignal('pest control at the hotel')).toBe(true);
     // Retail needs ownership/service context (codex r33 P2).
     expect(commercialTextSignal('ants in our retail store')).toBe(true);
     expect(commercialTextSignal('we lease retail space downtown')).toBe(true);
