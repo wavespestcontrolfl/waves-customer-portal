@@ -188,6 +188,10 @@ describe('peek action-aware floor', () => {
 describe('miner persistAll action-aware gate', () => {
   const miner = require('../services/seo/gsc-opportunity-miner');
 
+  // Only the canonical 28-day mine may RETIRE rows, so tests that exercise
+  // reconciliation must declare themselves canonical the way mineAll does.
+  const persistCanonical = (opps) => miner.persistAll(opps, null, { canonicalMine: true });
+
   function opp(over = {}) {
     return {
       bucket: 'seasonal_rising',
@@ -207,7 +211,7 @@ describe('miner persistAll action-aware gate', () => {
   test('persists blog rows at/above the blog floor, drops below it; non-blog still needs the global floor', async () => {
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    const persisted = await miner.persistAll([
+    const persisted = await persistCanonical([
       opp({ score: 49, dedupe_key: 'blog-49' }),                                  // blog ≥45 → kept
       opp({ score: 44, dedupe_key: 'blog-44' }),                                  // blog <45 → dropped
       opp({ score: 69, action_type: 'rewrite_title_meta', dedupe_key: 'rw-69' }), // non-blog <75 → dropped
@@ -226,7 +230,7 @@ describe('miner persistAll action-aware gate', () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    const persisted = await miner.persistAll([
+    const persisted = await persistCanonical([
       opp({ score: 69, action_type: 'rewrite_title_meta', page_url: 'https://x/p/', dedupe_key: 'rw-69-open' }), // ≥60 → kept
       opp({ score: 55, action_type: 'rewrite_title_meta', page_url: 'https://x/q/', dedupe_key: 'rw-55' }),      // <60 → dropped
       opp({ score: 69, action_type: 'refresh_existing_page', page_url: 'https://x/r/', dedupe_key: 'rf-69' }),   // refresh keeps global 75 → dropped
@@ -243,7 +247,7 @@ describe('miner persistAll action-aware gate', () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    const persisted = await miner.persistAll([
+    const persisted = await persistCanonical([
       // Companion carries the parent's score by design — it must clear
       // the parent's floor, not the global one, or the parent persists
       // while its promised link boost silently dies.
@@ -350,7 +354,7 @@ describe('miner persistAll action-aware gate', () => {
     });
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
         query: 'plaster bagworm', service: 'pest', city: null,
@@ -363,6 +367,22 @@ describe('miner persistAll action-aware gate', () => {
     expect(companionRetirements[0].in).toEqual(['dedupe_key', ['link_boost::pest::_::https://x/old-page/']]);
   });
 
+  test('a NONCANONICAL mine is additive — it never retires the canonical mine\'s target', async () => {
+    // A manual 7/14-day run sees a smaller qualifying set; letting it
+    // reconcile would expire targets the authoritative 28-day mine chose.
+    const { updates } = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm', service: 'pest', city: null,
+        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
+      }),
+    ]); // no canonicalMine flag → additive
+
+    expect(updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toHaveLength(0);
+  });
+
   test('a moved ctr_rewrite target retires the superseded row and its companion by EXACT key', async () => {
     // The ranking URL for a query moves A → B between mines. B queues
     // under a new dedupe key (page_url is in the key), so A's pending row
@@ -370,7 +390,7 @@ describe('miner persistAll action-aware gate', () => {
     // evidence no longer selects.
     const { updates, locks } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
@@ -408,7 +428,7 @@ describe('miner persistAll action-aware gate', () => {
     // new candidate is non-actionable.
     const { updates, locks } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
@@ -430,7 +450,7 @@ describe('miner persistAll action-aware gate', () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
     const { updates, locks } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 40, // under the 60 floor → persistAll drops it
         bucket: 'ctr_rewrite',
@@ -452,7 +472,7 @@ describe('miner persistAll action-aware gate', () => {
   test("a decay_refresh parent's companion is protected even when the per-run cap omitted it", async () => {
     const { updates } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
@@ -491,7 +511,7 @@ describe('miner persistAll action-aware gate', () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
     const { updates } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
@@ -536,7 +556,7 @@ describe('miner persistAll action-aware gate', () => {
     // rewrite candidates themselves.
     const { updates } = reconcileHarness([staleRow]);
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
@@ -571,7 +591,7 @@ describe('miner persistAll action-aware gate', () => {
     // reconciliation never sees it, so the lane sweep must.
     const { updates, locks } = reconcileHarness([staleRow]);
 
-    await miner._sweepRecoveredCtrRewrites([
+    await miner._sweepRecoveredQueries('ctr_rewrite', [
       opp({
         bucket: 'ctr_rewrite',
         action_type: 'rewrite_title_meta',
@@ -629,7 +649,7 @@ describe('miner persistAll action-aware gate', () => {
     });
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    await miner.persistAll([
+    await persistCanonical([
       opp({
         score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
         query: 'plaster bagworm', service: 'pest', city: null,
@@ -655,7 +675,7 @@ describe('miner persistAll action-aware gate', () => {
       return q;
     });
 
-    await expect(miner._sweepRecoveredCtrRewrites([])).rejects.toThrow('boom');
+    await expect(miner._sweepRecoveredQueries('ctr_rewrite', [])).rejects.toThrow('boom');
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {
@@ -672,7 +692,7 @@ describe('miner persistAll action-aware gate', () => {
     // near-me query demoted to do_not_publish by actionForOpportunity →
     // score 49 < 75 non-blog floor → dropped, but the stale pending
     // new_supporting_blog row sharing the dedupe_key must be expired
-    const persisted = await miner.persistAll([
+    const persisted = await persistCanonical([
       opp({ score: 49, action_type: 'do_not_publish', query: 'exterminator near me', dedupe_key: 'nearme-49' }),
     ]);
 

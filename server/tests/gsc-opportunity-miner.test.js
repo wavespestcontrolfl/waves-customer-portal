@@ -1835,7 +1835,7 @@ describe('listicle_family scoring + action mapping', () => {
     // Transactional (r22 audit): lock+revalidate predecessors, then upserts,
     // then sweep — all one transaction so concurrent claimNext can neither
     // race the transition nor observe it halfway.
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx, \{[\s\S]{0,200}\}\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.

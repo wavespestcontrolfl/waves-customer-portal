@@ -1570,7 +1570,9 @@ class GscOpportunityMiner {
         // The lock is taken even for an empty family batch when the sweep
         // will run.
         const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
-        persisted = await this.persistAll(revalidated, trx);
+        persisted = await this.persistAll(revalidated, trx, {
+          canonicalMine: periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS,
+        });
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
         // then means "didn't run", not "no signal").
@@ -1594,12 +1596,22 @@ class GscOpportunityMiner {
         // sees far fewer qualifying queries, and treating everything
         // absent from that shorter window as "recovered" would expire
         // valid rows produced by the authoritative 28-day run.
-        if (!errors.ctr_rewrite && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS) {
-          await this._sweepRecoveredCtrRewrites(
-            revalidated.filter((o) => o.bucket === 'ctr_rewrite'),
-            trx,
-            revalidated
-          );
+        // Both newly-revived buckets share one disappearing-signal
+        // lifecycle, so they share ONE sweep (AGENTS.md: extend the
+        // existing mechanism, never add a sibling). no_content_yet needs
+        // it most: its stale rows CREATE pages, so acting on a query an
+        // owned page has since started serving publishes duplicate
+        // content — a worse outcome than a stale rewrite.
+        if (periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS) {
+          for (const bucket of ['ctr_rewrite', 'no_content_yet']) {
+            if (errors[bucket]) continue;
+            await this._sweepRecoveredQueries(
+              bucket,
+              revalidated.filter((o) => o.bucket === bucket),
+              trx,
+              revalidated
+            );
+          }
         }
       });
     }
@@ -3307,7 +3319,13 @@ class GscOpportunityMiner {
 
   // ── persistence ────────────────────────────────────────────────────
 
-  async persistAll(opportunities, trx = null) {
+  // canonicalMine: only the authoritative 28-day run may RETIRE rows. A
+  // manual 7/14-day window sees a different (smaller) qualifying set, so
+  // its reconciliation would expire targets the canonical mine chose —
+  // the same trap the lane sweeps are gated against. Noncanonical mines
+  // stay purely additive. Defaults false so any caller that does not
+  // declare itself canonical cannot destroy queued work.
+  async persistAll(opportunities, trx = null, { canonicalMine = false } = {}) {
     const runner = trx || db;
     if (!opportunities.length) return 0;
     let count = 0;
@@ -3460,7 +3478,7 @@ class GscOpportunityMiner {
       // (the WHERE guard skipped the update) and must not count as persisted.
       count += result.rowCount ?? 0;
     }
-    await this._reconcileCtrRewriteTargets(runner, opportunities);
+    if (canonicalMine) await this._reconcileCtrRewriteTargets(runner, opportunities);
     return count;
   }
 
@@ -3608,10 +3626,10 @@ class GscOpportunityMiner {
    * 'expired' — revivable the moment the signal returns. Companions follow
    * their parent, minus anything the current batch still stands behind.
    */
-  async _sweepRecoveredCtrRewrites(ctrOpportunities = [], trx = null, fullBatch = null) {
+  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null) {
     const runner = trx || db;
     const liveQueries = new Set(
-      ctrOpportunities.filter((o) => o.query).map((o) => String(o.query))
+      bucketOpportunities.filter((o) => o.query).map((o) => String(o.query))
     );
     try {
       // FOR UPDATE: claimNext can otherwise claim a row between the select
@@ -3620,7 +3638,7 @@ class GscOpportunityMiner {
       // lets the update key on the LOCKED rows themselves rather than
       // re-running the predicate against a moved target (audit P1).
       let staleQ = runner('opportunity_queue')
-        .where({ bucket: 'ctr_rewrite', status: 'pending' });
+        .where({ bucket, status: 'pending' });
       if (liveQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(liveQueries));
       const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
       if (!stale.length) return;
@@ -3628,14 +3646,14 @@ class GscOpportunityMiner {
       await runner('opportunity_queue')
         .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
         .update({
-          status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
+          status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
         });
 
       // Protection must see the COMPLETE batch: a live decay_refresh
       // parent targeting the stale rewrite's page shares its companion
       // key, and the ctr-only list cannot see it (audit P1).
       const protectedKeys = await this._companionProtection(
-        runner, fullBatch || ctrOpportunities, new Set(stale.map((r) => r.dedupe_key))
+        runner, fullBatch || bucketOpportunities, new Set(stale.map((r) => r.dedupe_key))
       );
       const companionKeys = protectedKeys === null ? [] : stale
         .filter((r) => r.page_url)
@@ -3648,14 +3666,14 @@ class GscOpportunityMiner {
           .where({ bucket: 'link_boost', status: 'pending' })
           .whereIn('dedupe_key', companionKeys)
           .update({
-            status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
+            status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
           });
       }
-      logger.info(`[gsc-opp-miner] ctr_rewrite sweep: ${stale.length} recovered-query row(s) expired`);
+      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${stale.length} recovered-query row(s) expired`);
     } catch (err) {
       // Inside the persist transaction the caller owns rollback semantics;
       // rethrow so a failed sweep cannot leave half-reconciled state.
-      logger.warn(`[gsc-opp-miner] ctr_rewrite recovered-query sweep failed: ${err.message}`);
+      logger.warn(`[gsc-opp-miner] ${bucket} recovered-query sweep failed: ${err.message}`);
       throw err;
     }
   }
