@@ -1590,8 +1590,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // residential intent quoting a property the lookup typed COMMERCIAL
       // must still conflict (codex r8 P1: the unconditional null let a
       // residential intent survive for a secondary office/warehouse).
+      // detectCategory types EVERY apartment/multifamily record COMMERCIAL
+      // (it answers the whole-property question), so a residential-unit
+      // scope must be exempt or a valid second-property apartment quote
+      // would always red-lane (codex r13 P2) — the exact conflation this
+      // lane exists to end: a unit tenant is a residential customer.
+      const quotedIsResidentialUnit = unitScope.serviceScope === 'residential_unit';
       propertyFacts.categoryConflict = crossPropertyRegather
-        ? ((intent.is_commercial !== true && effectiveParcelOk
+        ? ((intent.is_commercial !== true && effectiveParcelOk && !quotedIsResidentialUnit
           && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
           ? 'lookup_category:commercial' : null)
         : commercialCategoryConflict({ extraction: context.extraction, intent });
