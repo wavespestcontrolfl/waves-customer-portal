@@ -31,14 +31,24 @@ describe('composeOverall', () => {
     expect(result).toEqual({ score: null, delta: null, componentCount: 0 });
   });
 
-  it('computes delta only over components with both current and previous values', () => {
+  it('suppresses delta when a scored component has no previous value (cohort mismatch)', () => {
     const result = composeOverall([
       { key: 'lawn', status: 'scored', score: 88, previousScore: 80 },
-      // no previous — must not drag delta toward zero
+      // newly appearing component — its movement is unknown, so a composite
+      // delta would attribute lawn's movement to the whole displayed score
       { key: 'tree_shrub', status: 'scored', score: 40, previousScore: null },
     ]);
     expect(result.score).toBe(64);
-    expect(result.delta).toBe(8);
+    expect(result.delta).toBeNull();
+  });
+
+  it('computes delta when every scored component has a previous value', () => {
+    const result = composeOverall([
+      { key: 'lawn', status: 'scored', score: 88, previousScore: 80 },
+      { key: 'tree_shrub', status: 'scored', score: 40, previousScore: 44 },
+    ]);
+    expect(result.score).toBe(64);
+    expect(result.delta).toBe(2);
   });
 
   it('ignores a scored status with a null score', () => {

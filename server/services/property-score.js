@@ -35,9 +35,8 @@ const {
   loadScoreForServiceRecord,
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
-const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
-const { loadActiveRecurringServiceRows } = require('./waveguard-existing-services');
+const { loadOwnedRecurringServiceKeys, TERMINAL_STATUSES } = require('./waveguard-existing-services');
 // Best-effort: the tree/shrub module also carries vision plumbing — a load
 // failure degrades that component to raw overall_score, never the endpoint.
 let formatAssessmentScores = null;
@@ -67,19 +66,44 @@ function movementReason(delta) {
   return 'Holding steady since your last assessment.';
 }
 
-// Active recurring coverage for a service line — the canonical
-// loadActiveRecurringServiceRows loader (inactive-customer guard, full
-// TERMINAL_STATUSES set including 'rescheduled' phantoms, is_recurring
-// rows only, unlimited), classified by the canonical detectServiceLine.
-// No parallel predicate: both halves are the exact mechanisms the
-// WaveGuard estimate flow and the report stack already use.
-// Loaded ONCE per request in buildPropertyScore and shared across every
-// component check — the loader repeats a customer lookup + columnInfo +
-// scheduled-service scan per call, so per-component calls would multiply
-// identical queries.
+// Active recurring coverage — the canonical OWNERSHIP mechanism end to
+// end: loadOwnedRecurringServiceKeys applies the WaveGuard lane's full
+// lifecycle evidence (past phantoms, callbacks, one-time booking sources
+// excluded; live in-progress rows honored) and catalog-authoritative
+// family classification. Loaded ONCE per request in buildPropertyScore
+// and shared across every component check. A throw (catalog join failure
+// fails closed there) degrades to "no programs claimed".
+const OWNERSHIP_KEY_TO_LINE = {
+  pest_control: 'pest',
+  lawn_care: 'lawn',
+  tree_shrub: 'tree_shrub',
+  mosquito: 'mosquito',
+  termite_bait: 'termite',
+};
 async function loadActiveLineSet(customerId, knex) {
-  const rows = await loadActiveRecurringServiceRows(knex, customerId).catch(() => []);
-  return new Set(rows.map((svc) => detectServiceLine(svc?.service_type)));
+  const keys = await loadOwnedRecurringServiceKeys(knex, customerId).catch(() => []);
+  const lines = new Set();
+  for (const key of keys) {
+    const line = OWNERSHIP_KEY_TO_LINE[key];
+    if (line) lines.add(line);
+  }
+  // Foam termite programs (foam_recurring: name "Recurring Foam Treatment")
+  // carry no 'termite' text token, so the ownership vocabulary cannot see
+  // them — but their catalog category is authoritative. Narrow,
+  // catalog-joined check using the exported canonical TERMINAL_STATUSES;
+  // rows without a service_id fail toward not claiming coverage.
+  if (!lines.has('termite')) {
+    const termiteRow = await knex('scheduled_services as ss')
+      .join('services as svc', 'ss.service_id', 'svc.id')
+      .where('ss.customer_id', customerId)
+      .whereNotIn('ss.status', TERMINAL_STATUSES)
+      .where('svc.category', 'termite')
+      .where('svc.billing_type', 'recurring')
+      .first('ss.id')
+      .catch(() => null);
+    if (termiteRow) lines.add('termite');
+  }
+  return lines;
 }
 
 async function lawnComponent(customerId, knex, activeLines) {
@@ -357,8 +381,12 @@ function composeOverall(components) {
   if (!scoredNow.length) return { score: null, delta: null, componentCount: 0 };
   const mean = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
   const score = Math.round(mean(scoredNow.map((c) => c.score)));
+  // Honest movement only: the delta must describe the SAME cohort as the
+  // displayed score. If any scored component lacks a previous value (a
+  // newly appearing component), showing a delta would attribute one
+  // component's movement to the whole composite — suppress it instead.
   const paired = scoredNow.filter((c) => c.previousScore != null);
-  const delta = paired.length
+  const delta = paired.length && paired.length === scoredNow.length
     ? Math.round(mean(paired.map((c) => c.score)) - mean(paired.map((c) => c.previousScore)))
     : null;
   return { score, delta, componentCount: scoredNow.length };
