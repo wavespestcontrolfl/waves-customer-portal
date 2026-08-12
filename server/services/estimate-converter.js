@@ -4060,12 +4060,11 @@ const EstimateConverter = {
                 throw palmCatalogMissingError();
               }
             }
-            // Palm never schedules by name (codex r15 pre-push P0 — see
-            // notifyPalmCatalogMissing): a lookup MISS skips the promoted
-            // unit to manual scheduling.
+            // A MISSING catalog row aborts here too (codex r22 pre-push
+            // P0) — same contract as the auto-schedule path above; the
+            // promotion catch rethrows the code.
             if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
-              notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion');
-              continue;
+              throw palmCatalogMissingError();
             }
             // Promoted lawn/palm parents get the converter FAMILY duration
             // (codex r7 P2): the identity-only skip above correctly refuses
@@ -4456,14 +4455,14 @@ const EstimateConverter = {
               throw palmCatalogMissingError();
             }
           }
-          // Palm never schedules by name (codex r15 pre-push P0 — see
-          // notifyPalmCatalogMissing): a lookup MISS skips the unit to
-          // manual scheduling with the bell. Lawn keeps the name fallback —
-          // lawn line names equal their catalog names exactly, so name
-          // resolution cannot misfile them.
+          // Palm never schedules by name, and a MISSING catalog row now
+          // ABORTS like the errored-lookup and reserved paths (codex r22
+          // pre-push P0): skip+bell completed billing without the sold
+          // program on a best-effort notification. Lawn keeps the name
+          // fallback — lawn line names equal their catalog names exactly,
+          // so name resolution cannot misfile them.
           if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {
-            notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit');
-            continue;
+            throw palmCatalogMissingError();
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';

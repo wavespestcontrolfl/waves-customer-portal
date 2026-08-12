@@ -652,10 +652,10 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(converterSrc).toContain('function notifyPalmCatalogMissing');
     // Auto-schedule unit loop: lookup miss/failure skips the unit.
     expect(converterSrc).toContain("if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {");
-    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit')");
-    // Reserved-bundle promotion: same skip before the standalone insert.
+    // The bell survives only on the invalid-DATA skip (a schedulable-env
+    // decision); identity-unavailable paths all abort.
+    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit (invalid recurring data)'");
     expect(converterSrc).toContain("if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {");
-    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'reserved-bundle palm promotion')");
     // Reserved path: a missing row (or failed lookup) ABORTS the
     // acceptance (codex r17 pre-push P0) — the reserved parent already
     // exists, possibly carrying the stale one-time id, so skip+bell would
@@ -663,10 +663,11 @@ describe('the series creators consume the guard (source guards)', () => {
     // The operational 422 must escape the follow-up catch, or the
     // acceptance completes around the rollback it forces.
     expect(converterSrc).toContain('function palmCatalogMissingError()');
-    // 2 reserved-relink sites + 2 lookup-ERROR aborts (codex r21 pre-push
-    // P1: an errored palm lookup is unknown state and fails the
-    // conversion; only a knowable MISSING row keeps skip+bell).
-    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(4);
+    // 2 reserved-relink sites + 2 lookup-ERROR aborts + 2 lookup-MISS
+    // aborts (codex r22 pre-push P0: skip+bell completed billing without
+    // the sold program — every identity-unavailable path now rolls the
+    // acceptance back).
+    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(6);
     expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
     // The reserved-bundle promotion catch rethrows too (codex r22 pre-push
     // P0) — a transient catalog failure must not complete billing without
