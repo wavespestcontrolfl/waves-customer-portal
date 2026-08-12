@@ -38,6 +38,14 @@
 const logger = require('../logger');
 
 const CALL_HISTORY_LIMIT = 10;
+// ⚠️ CALL HISTORY IS DATE-BOUNDED. The `right(regexp_replace(...), 10)` phone
+// predicate is FUNCTIONAL — no index serves it — so an unbounded version scans
+// the whole call_log table on a live phone call. summarizePriorCall, whose read
+// shape this mirrors, bounds itself to 7 days; that is far too short for "you
+// called us about this a while back", so the product bound here is 180 days,
+// stated explicitly rather than left open. It also lets the created_at index do
+// real work.
+const CALL_HISTORY_DAYS = 180;
 const MESSAGE_HISTORY_LIMIT = 20;
 const RECENT_TEXTS_BLOCK_LIMIT = 5;
 
@@ -88,7 +96,11 @@ async function callHistoryText(fromPhone) {
     return 'Call history is keyed to the caller\'s verified phone number, which is unavailable on this call. Do not guess at past calls.';
   }
   const db = require('../../models/db');
+  // A real Date object, never a hand-built naive ISO string (the timestamptz
+  // window leak): created_at is timestamptz and knex binds a Date correctly.
+  const since = new Date(Date.now() - CALL_HISTORY_DAYS * 24 * 60 * 60 * 1000);
   const rows = await db('call_log')
+    .where('created_at', '>=', since)
     .whereRaw(
       "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
       [key, key],
@@ -212,6 +224,7 @@ module.exports = {
   buildRecentTextsBlock,
   voiceSafeText,
   CALL_HISTORY_LIMIT,
+  CALL_HISTORY_DAYS,
   MESSAGE_HISTORY_LIMIT,
   RECENT_TEXTS_BLOCK_LIMIT,
 };

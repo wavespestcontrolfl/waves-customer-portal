@@ -142,7 +142,10 @@ describe('prompt wiring', () => {
 
   test('GATE ON → the prompt tells her to set callback expectations off the clock', () => {
     const p = buildBasePrompt(true);
-    expect(p).toContain('A CLOCK DATA block below tells you the real date, time');
+    // The clock now rides each caller TURN (a per-turn re-render inside the
+    // system prompt would invalidate the prompt cache on every turn).
+    expect(p).toContain('A CLOCK DATA block rides each caller turn');
+    expect(p).toContain('Use the one on the LATEST turn');
     expect(p).toContain('first thing tomorrow');
     expect(p).toMatch(/never "shortly"/);
     expect(p).toMatch(/do not state hours at all/);

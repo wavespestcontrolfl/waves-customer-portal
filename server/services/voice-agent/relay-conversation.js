@@ -22,7 +22,7 @@ const logger = require('../logger');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
-const { activeTools, executeTool } = require('./relay-tools');
+const { activeTools } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 
 /** 'HH:MM[:SS]' on an engine slot → minutes past midnight (the slot-ref key). */
@@ -32,10 +32,44 @@ function slotStartMinutes(slot) {
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// output_config.effort — GA, no beta header. See the call site for why `low`.
+const VOICE_EFFORT = 'low';
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
 const MAX_TOKENS = 1024; // voice replies are short
+// Bound the office-hours read the same way the context resolve is bounded: a
+// `.catch()` handles a rejection, not a hang, and this await sits in front of
+// the caller's very first turn.
+const OFFICE_HOURS_TIMEOUT_MS = 2000;
+// TOOL EXECUTION BOUNDS. The stream has a 20s bound and context resolution has
+// 4s; tool execution had none — and the slow ones are real (get_invoice_history
+// resolves a payer per invoice, request_reservice makes 5-6 sequential round
+// trips). An unbounded tool is unbounded DEAD AIR on an open line.
+//
+// Reads get 3s. WRITES get longer and a different degradation string: a write
+// that blew its budget is still IN FLIGHT, so telling the model "that didn't
+// work" would invite a retry and a duplicate booking/lead/ticket. They are told
+// the outcome is unknown and NOT to retry.
+const TOOL_TIMEOUT_MS = 3000;
+const WRITE_TOOL_TIMEOUT_MS = 8000;
+const WRITE_TOOLS = new Set(['capture_lead', 'request_booking', 'request_reservice']);
+const TOOL_TIMEOUT_TEXT =
+  'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
+const WRITE_TOOL_TIMEOUT_TEXT =
+  'That is taking longer than expected and I do not have confirmation either way. Do NOT call it again — a second '
+  + 'attempt could duplicate it. Tell the caller a Waves team member will follow up to confirm, and do not say '
+  + 'anything is booked, filed, or saved.';
+
+/** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
+function withTimeout(promise, ms, fallback = undefined) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 let anthropic = null;
 try {
@@ -149,8 +183,9 @@ function contextPromptAddendum() {
     '  Never ask for or accept a card number.',
     '',
     'TIME AND CALLBACK PROMISES:',
-    '- A CLOCK DATA block below tells you the real date, time, and whether the office is',
-    '  open. Use it. Never guess the time, the day, or whether anyone is there.',
+    '- A CLOCK DATA block rides each caller turn with the real date, time, and whether',
+    '  the office is open. Use the one on the LATEST turn — earlier turns carry the time',
+    '  they happened at. Never guess the time, the day, or whether anyone is there.',
     '- Set the expectation the clock actually supports: if the office is OPEN, "someone will',
     '  call you back shortly" is fine. If it is CLOSED, say when — "first thing tomorrow',
     '  morning" or "when the office opens at 8" — never "shortly" or "in a few minutes".',
@@ -369,6 +404,10 @@ class RelayConversation {
     // card's onConflict is per call_log_id) and would land on the dispatch
     // calendar invisible to the office confirm queue.
     this._bookingRequested = false;
+    // Built ONCE per session (see the prompt-caching note in _runLoop): the
+    // cached prefix is a byte match, so these must not change mid-call.
+    this._systemBlocks = null;
+    this._tools = null;
     // The lead id capture_lead created on this call, threaded into the booking
     // review card so office confirm converts THAT lead — not whichever single
     // active lead the customer happens to have.
@@ -462,11 +501,13 @@ class RelayConversation {
     // assistant/tool_result messages and corrupt the conversation order.
     this._chain = this._chain.then(() => {
       if (this.ended) return undefined;
-      this.messages.push({ role: 'user', content: t });
       // Recorded HERE (inside the serialized chain), not at enqueue time, so
       // the transcript's caller/agent ordering matches what actually happened.
+      // The MESSAGE itself is pushed inside _runLoop, after the office-hours
+      // read settles, so the live clock can ride this user turn instead of
+      // being re-rendered into the (cached) system prompt every turn.
       this._recordTurn('caller', t);
-      return this._runLoop();
+      return this._runLoop(t);
     }).catch((e) => {
       logger.error(`[voice-relay] loop error callSid=${this.callSid}: ${e.message}`);
     });
@@ -480,6 +521,33 @@ class RelayConversation {
     } catch {
       /* no-op */
     }
+  }
+
+  /**
+   * executeTool with a hard time bound (see TOOL_TIMEOUT_MS). A tool that blows
+   * its budget keeps running — we simply stop waiting for it and hand the model
+   * a degradation string, so the caller hears a sentence instead of silence.
+   */
+  async _executeToolBounded(name, input, ctx) {
+    const isWrite = WRITE_TOOLS.has(name);
+    const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
+    const onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
+    // Resolved at call time (not destructured at module load) so the timeout
+    // wrapper is the only thing between the loop and the tool.
+    const { executeTool: run } = require('./relay-tools');
+    const work = Promise.resolve()
+      .then(() => run(name, input, ctx))
+      .catch((err) => {
+        // executeTool has its own try/catch; this is the belt-and-braces path.
+        logger.error(`[voice-relay] tool "${name}" rejected: ${err.message}`);
+        return onTimeout;
+      });
+    work.catch(() => {}); // a late loser must never surface as unhandled
+    const out = await withTimeout(work, ms, onTimeout);
+    if (out === onTimeout) {
+      logger.warn(`[voice-relay] tool "${name}" exceeded ${ms}ms callSid=${this.callSid} — degrading${isWrite ? ' (write may still be in flight)' : ''}`);
+    }
+    return out;
   }
 
   /**
@@ -559,7 +627,7 @@ class RelayConversation {
     };
   }
 
-  async _runLoop() {
+  async _runLoop(callerText = null) {
     if (this.ended || !anthropic) {
       if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
       return;
@@ -578,26 +646,60 @@ class RelayConversation {
     // pair so message roles still strictly alternate.
     if (!this._dataTurnSeeded && this._callerContext && this._callerContext.dataTurn) {
       this._dataTurnSeeded = true;
-      this.messages.unshift(
+      this.messages.push(
         { role: 'user', content: this._callerContext.dataTurn },
         { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
       );
     }
 
     const toolCtx = this._buildToolCtx();
-
     const contextEnabled = isContextEnabled();
+
+    // Office hours are optional context. `.catch()` handles a REJECTION, not a
+    // HANG — an un-timed await here would hold the caller's first turn open for
+    // as long as the pool takes. Bounded exactly like _contextReady: on timeout
+    // the clock block simply degrades to "hours not available".
     if (this._officeHoursReady) {
-      try { await this._officeHoursReady; } catch { /* clock block degrades, never blocks */ }
+      try { await withTimeout(this._officeHoursReady, OFFICE_HOURS_TIMEOUT_MS); } catch { /* degrade */ }
     }
-    const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
-    const basePrompt = buildBasePrompt(contextEnabled)
-      + (clockBlock ? `\n\n${clockBlock}` : '')
-      + (contextEnabled && this._callerContext && this._callerContext.block
-        ? `\n\n${this._callerContext.block}`
-        : '');
-    const systemPrompt = composeSystemPrompt(basePrompt, getVoiceProfileTextNonBlocking());
-    const tools = activeTools();
+
+    // ── PROMPT CACHING ORDERING ────────────────────────────────────────────
+    // Caching is a strict PREFIX match over tools → system → messages, so the
+    // system prompt must be byte-identical on every turn of a call. Two
+    // consequences, both handled here:
+    //   1. The system blocks and the tool list are built ONCE per session and
+    //      reused. (Freezing the voice profile per call also matches its own
+    //      documented kill-switch granularity: a revoke reaches the NEXT call.)
+    //   2. The CLOCK moved OUT of `system`. It is re-rendered every turn by
+    //      definition, so leaving it in the system prompt would invalidate the
+    //      cache on every single turn — it now rides the user turn below.
+    if (!this._systemBlocks) {
+      const basePrompt = buildBasePrompt(contextEnabled)
+        + (contextEnabled && this._callerContext && this._callerContext.block
+          ? `\n\n${this._callerContext.block}`
+          : '');
+      this._systemBlocks = [{
+        type: 'text',
+        text: composeSystemPrompt(basePrompt, getVoiceProfileTextNonBlocking()),
+        cache_control: { type: 'ephemeral' },
+      }];
+      // Frozen with the system prompt: tools render BEFORE system, so a tool
+      // list that changed mid-call (a gate flipped) would invalidate everything.
+      this._tools = activeTools();
+    }
+
+    // The caller's turn, with the live clock attached as a per-turn note. Past
+    // turns keep the time they actually happened at, so the message prefix stays
+    // stable for caching AND the transcript reads honestly.
+    if (callerText) {
+      const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
+      this.messages.push({
+        role: 'user',
+        content: clockBlock
+          ? [{ type: 'text', text: clockBlock }, { type: 'text', text: callerText }]
+          : callerText,
+      });
+    }
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
@@ -616,9 +718,15 @@ class RelayConversation {
           {
             model: MODEL,
             max_tokens: MAX_TOKENS,
-            system: systemPrompt,
+            system: this._systemBlocks,
             thinking: { type: 'disabled' },
-            tools,
+            // LIVE PHONE CALL. The default effort is `high`, which buys depth
+            // this lane cannot spend: every extra second of deliberation is dead
+            // air on an open line, and the work here is short receptionist turns
+            // driven by tools, not reasoning. `low` is the right end of the
+            // ladder for that.
+            output_config: { effort: VOICE_EFFORT },
+            tools: this._tools,
             messages: this.messages,
           },
           { signal: this._controller.signal }
@@ -655,7 +763,7 @@ class RelayConversation {
           // something up rather than invented it. Name only — tool INPUT can
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
-          const out = await executeTool(block.name, block.input, toolCtx);
+          const out = await this._executeToolBounded(block.name, block.input, toolCtx);
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
         this.messages.push({ role: 'user', content: results });

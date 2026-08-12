@@ -92,21 +92,109 @@ describe('RelayConversation — explicit end after capture', () => {
       block: 'KNOWN CALLER ...',
       dataTurn: '<<<RECENT TEXTS DATA\nCustomer: the ants are back\nEND RECENT TEXTS DATA>>>',
     };
-    convo.messages.push({ role: 'user', content: 'hi there' });
     // Drive only the seeding half of _runLoop (no Anthropic client in tests).
-    await convo._runLoop().catch(() => {});
+    await convo._runLoop('hi there').catch(() => {});
 
     expect(convo.messages[0]).toEqual({ role: 'user', content: convo._callerContext.dataTurn });
     expect(convo.messages[1].role).toBe('assistant');
-    expect(convo.messages[2]).toEqual({ role: 'user', content: 'hi there' });
+    expect(convo.messages[2].role).toBe('user');
     // Roles alternate — the API rejects two consecutive same-role messages.
     for (let i = 1; i < convo.messages.length; i++) {
       expect(convo.messages[i].role).not.toBe(convo.messages[i - 1].role);
     }
 
     // Seeded ONCE, however many turns follow.
-    await convo._runLoop().catch(() => {});
+    await convo._runLoop('and another thing').catch(() => {});
     expect(convo.messages.filter((m) => m.content === convo._callerContext.dataTurn)).toHaveLength(1);
+  });
+
+  // ⭐ AN UNBOUNDED TOOL IS UNBOUNDED DEAD AIR. The stream has a 20s bound and
+  // context resolution 4s; tool execution had none, and the slow ones are real
+  // (get_invoice_history resolves a payer per invoice, up to 200).
+  describe('tool execution is time-bounded', () => {
+    let relayTools;
+    beforeEach(() => {
+      jest.useFakeTimers();
+      relayTools = require('../services/voice-agent/relay-tools');
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+      if (relayTools.executeTool.mockRestore) relayTools.executeTool.mockRestore();
+    });
+
+    async function raceWithTimers(promise) {
+      await Promise.resolve();
+      jest.advanceTimersByTime(30000);
+      return promise;
+    }
+
+    test('a hanging READ tool degrades instead of holding the turn open', async () => {
+      jest.spyOn(relayTools, 'executeTool').mockImplementation(() => new Promise(() => {}));
+      const convo = new RelayConversation({ callSid: 'CA8', from: '+19415551234', send: jest.fn() });
+      const out = await raceWithTimers(convo._executeToolBounded('get_invoice_history', {}, {}));
+      expect(out).toMatch(/Could not look that up right now/i);
+      expect(out).toMatch(/Do not guess/i);
+    });
+
+    // A timed-out WRITE is still IN FLIGHT. Telling the model "that failed"
+    // would invite a retry — and a duplicate booking, lead, or ticket.
+    test('a hanging WRITE tool degrades to "unknown outcome, do NOT retry"', async () => {
+      jest.spyOn(relayTools, 'executeTool').mockImplementation(() => new Promise(() => {}));
+      const convo = new RelayConversation({ callSid: 'CA8', from: '+19415551234', send: jest.fn() });
+      for (const name of ['request_booking', 'capture_lead', 'request_reservice']) {
+        const out = await raceWithTimers(convo._executeToolBounded(name, {}, {}));
+        expect(out).toMatch(/do not have confirmation either way/i);
+        expect(out).toMatch(/Do NOT call it again/i);
+        expect(out).not.toMatch(/could not|failed/i); // never implies it didn't happen
+      }
+    });
+
+    test('a fast tool is untouched by the bound', async () => {
+      jest.useRealTimers(); // no clock nudging — the work simply wins the race
+      jest.spyOn(relayTools, 'executeTool').mockResolvedValue('the real answer');
+      const convo = new RelayConversation({ callSid: 'CA8', from: '+19415551234', send: jest.fn() });
+      await expect(convo._executeToolBounded('get_account_overview', {}, {}))
+        .resolves.toBe('the real answer');
+    });
+  });
+
+  // ⭐ PROMPT-CACHING ORDERING. Caching is a strict prefix match, so the system
+  // prompt must be byte-identical every turn — which is exactly why the CLOCK,
+  // re-rendered per turn by definition, cannot live in it.
+  describe('prompt caching', () => {
+    test('system blocks + tools are built once and carry a cache breakpoint', async () => {
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+      try {
+        const convo = new RelayConversation({ callSid: 'CAc', from: '+19415551234', send: jest.fn() });
+        await convo._runLoop('first turn').catch(() => {});
+        const first = convo._systemBlocks;
+        expect(Array.isArray(first)).toBe(true);
+        expect(first[0].cache_control).toEqual({ type: 'ephemeral' });
+        // The RENDERED clock block (the per-turn invalidator) is out; the prompt
+        // RULE that tells her a clock exists stays.
+        expect(first[0].text).not.toContain('<<<CLOCK DATA');
+        await convo._runLoop('second turn').catch(() => {});
+        expect(convo._systemBlocks).toBe(first); // same object — byte-identical prefix
+      } finally {
+        delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      }
+    });
+
+    test('the clock rides the USER turn, so each turn carries its own time', async () => {
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+      try {
+        const convo = new RelayConversation({ callSid: 'CAd', from: '+19415551234', send: jest.fn() });
+        convo._officeHours = { startMin: 8 * 60, endMin: 17 * 60 };
+        await convo._runLoop('when can you come out?').catch(() => {});
+        const turn = convo.messages[convo.messages.length - 1];
+        expect(turn.role).toBe('user');
+        expect(Array.isArray(turn.content)).toBe(true);
+        expect(turn.content[0].text).toContain('CLOCK DATA');
+        expect(turn.content[1].text).toBe('when can you come out?');
+      } finally {
+        delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      }
+    });
   });
 
   // The tool ctx is rebuilt EVERY turn; the lookup budget must not be, or a
