@@ -416,6 +416,50 @@ router.get('/station-map', async (req, res, next) => {
   }
 });
 
+// GET /api/property/termite-bond — the authenticated customer's active
+// termite bond(s) for the My Plan coverage card: term, start, and renewal
+// dates only. Coverage TERMS stay out of the payload on purpose — the card
+// holds the same generic-coverage line as the renewal email
+// (termite.bond_renewal): specifics are a conversation, not portal copy.
+// Dark behind GATE_PORTAL_TERMITE_BOND (default OFF), read at request time
+// via the shared gateEnvValue parser (the renewal-email sweep reads the
+// same gate through the same parser); gate-off and no-bond both answer 200
+// {available:false} — the client renders nothing rather than an error.
+// termite_bonds.started_at / renews_at are ET business-calendar DATEs;
+// dateOnlyString handles the pg string/UTC-midnight-Date duality and
+// returns null on anything malformed (never throws — fail-soft).
+const { gateEnvValue } = require('../config/feature-gates');
+const { dateOnlyString } = require('../utils/date-only');
+
+router.get('/termite-bond', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_PORTAL_TERMITE_BOND')) {
+      return res.json({ available: false, reason: 'disabled', bonds: [] });
+    }
+    // Fail-soft: a bonds query error renders no card, never a broken tab.
+    const rows = await db('termite_bonds')
+      .where({ customer_id: req.customerId, status: 'active' })
+      .orderBy('renews_at', 'desc')
+      .select('service_type', 'term_years', 'started_at', 'renews_at', 'status')
+      .catch(() => []);
+    const bonds = rows
+      .map((r) => ({
+        serviceType: r.service_type,
+        termYears: Number(r.term_years) || 1,
+        startedAt: dateOnlyString(r.started_at),
+        renewsAt: dateOnlyString(r.renews_at),
+        status: r.status,
+      }))
+      .filter((b) => b.startedAt && b.renewsAt);
+    if (!bonds.length) {
+      return res.json({ available: false, reason: 'no_bond', bonds: [] });
+    }
+    return res.json({ available: true, bonds });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
 
 module.exports._private = {

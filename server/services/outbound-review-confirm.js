@@ -40,6 +40,13 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
  *                      source_call_log_id)
  * @param {string} [routeTag] label for log lines ('admin-schedule' / 'admin-dispatch')
  * @param {object} [opts]
+ * @param {boolean} [opts.skipCardRequest] Owner decision 2026-08-11 (PR
+ *   #3356): a FIELD-confirmed booking (tech-track dispatch-implies-confirm)
+ *   skips the card-on-file leg entirely — the tech is already driving to
+ *   meet the customer and collects a card in person, and the funnel's
+ *   pending/confirmed eligibility window doesn't survive the immediate
+ *   advance to en_route/on_site. Office-confirmed bookings keep the full
+ *   funnel.
  * @param {boolean} [opts.suppressCardAskWithoutClearance] lazy-activation
  *   callers set this: a silent move/replay is not a customer trust point,
  *   so without durable call-level SMS clearance (call_sms_cleared_at) the
@@ -351,24 +358,30 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // appointment with the customer (same trust point that arms reminders),
   // and the funnel's canonical send path still enforces stored SMS
   // consent + suppression. Idempotent; dark until APPOINTMENT_CARD_REQUEST
-  // + the template flip.
-  try {
-    const { requestCardForAppointment } = require('./appointment-card-request');
-    let cardCallOpts = {};
-    if (opts.suppressCardAskWithoutClearance) {
-      // Only a durable call-level clearance stamp lets the lazy path send;
-      // otherwise non-messaging mode (auto-secure still runs, the
-      // pre-visit sweep owns any later ask). Fail closed on a read error.
-      const clearance = await db('scheduled_services')
-        .where({ id: svc.id })
-        .first('call_sms_cleared_at', 'call_sms_cleared_recipient')
-        .catch(() => null);
-      cardCallOpts = clearance && clearance.call_sms_cleared_at
-        ? { recipientPhone: clearance.call_sms_cleared_recipient || null }
-        : { delivery: 'none' };
-    }
-    await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm', ...cardCallOpts });
-  } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  // + the template flip. Field-confirmed bookings opt out entirely — see
+  // the skipCardRequest JSDoc above (PR #3356); lazy-activation callers
+  // run it clearance-gated instead (suppressCardAskWithoutClearance).
+  if (opts.skipCardRequest) {
+    logger.info(`[${routeTag}] Skipping card-on-file request for field-confirmed booking ${svc.id} (tech collects in person)`);
+  } else {
+    try {
+      const { requestCardForAppointment } = require('./appointment-card-request');
+      let cardCallOpts = {};
+      if (opts.suppressCardAskWithoutClearance) {
+        // Only a durable call-level clearance stamp lets the lazy path send;
+        // otherwise non-messaging mode (auto-secure still runs, the
+        // pre-visit sweep owns any later ask). Fail closed on a read error.
+        const clearance = await db('scheduled_services')
+          .where({ id: svc.id })
+          .first('call_sms_cleared_at', 'call_sms_cleared_recipient')
+          .catch(() => null);
+        cardCallOpts = clearance && clearance.call_sms_cleared_at
+          ? { recipientPhone: clearance.call_sms_cleared_recipient || null }
+          : { delivery: 'none' };
+      }
+      await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm', ...cardCallOpts });
+    } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  }
 
   return coreLegsOk;
 }

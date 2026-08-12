@@ -617,6 +617,10 @@ export class ApiClient {
     return this.request('/property/station-map');
   }
 
+  getTermiteBond() {
+    return this.request('/property/termite-bond');
+  }
+
   updatePropertyPreferences(data) {
     return this.request('/property/preferences', {
       method: 'PUT',

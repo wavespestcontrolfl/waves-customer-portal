@@ -8825,6 +8825,9 @@ function MyPlanTab({ customer, focusService }) {
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
+  // Active termite bond(s) (GATE_PORTAL_TERMITE_BOND). Fail-soft: no bond
+  // or gate off simply renders no card.
+  const [termiteBonds, setTermiteBonds] = useState(null);
   const [planStatus, setPlanStatus] = useState('loading');
 
   const loadPlan = useCallback(() => {
@@ -8859,6 +8862,9 @@ function MyPlanTab({ customer, focusService }) {
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
+    api.getTermiteBond().then(d => {
+      setTermiteBonds(d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null);
+    }).catch(() => {});
   }, [loadPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
@@ -9634,6 +9640,61 @@ function MyPlanTab({ customer, focusService }) {
               })}
             </div>
           </section>
+
+          {/* Termite bond coverage (GATE_PORTAL_TERMITE_BOND). Informational
+              only — renewal is a conversation, not a portal action (owner
+              2026-08-11), and coverage terms stay generic here, the same
+              stance the renewal email holds. The renewal email's "Renew my
+              bond" CTA deep-links to this tab. */}
+          {Array.isArray(termiteBonds) && termiteBonds.length > 0 && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}>Termite Bond</div>
+              {termiteBonds.map((bond, index) => {
+                const renewalDiff = etDayDiff(bond.renewsAt);
+                const renewalPast = renewalDiff != null && renewalDiff < 0;
+                return (
+                  <div
+                    key={`${bond.startedAt}-${index}`}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(3, 1fr)',
+                      gap: 10,
+                      marginTop: 14,
+                      paddingTop: index === 0 ? 0 : 14,
+                      borderTop: index === 0 ? 'none' : '1px solid #E7E2D7',
+                    }}
+                  >
+                    {[
+                      { label: 'Term', value: `${bond.termYears}-year` },
+                      { label: 'Started', value: fmtDate(bond.startedAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
+                      { label: renewalPast ? 'Renewal due' : 'Renews', value: fmtDate(bond.renewsAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
+                    ].map((item) => (
+                      <div key={item.label} style={{
+                        border: '1px solid #E7E2D7',
+                        borderRadius: 8,
+                        background: subtle,
+                        padding: 14,
+                      }}>
+                        <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+                        <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: 9, marginTop: 14, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
+                <Icon name="shield" size={16} strokeWidth={1.8} style={{ color: B.glassNavy, marginTop: 2, flexShrink: 0 }} />
+                <span>
+                  Questions about what your bond covers, or ready to renew? Call or
+                  text us and we’ll walk through your specific terms.
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none' }}>Call us</a>
+                <a href="sms:+19412975749?body=Hi Waves, I have a question about my termite bond." data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none' }}>Text us</a>
+              </div>
+            </section>
+          )}
 
           {/* 0% is not a savings pitch — the card only renders when the tier
               actually discounts (eyeball 07-12 finding 5). */}

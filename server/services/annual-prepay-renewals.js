@@ -1493,6 +1493,240 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
   return reversedCount;
 }
 
+// WaveGuard tier-extension prepaid-difference credits (the extension apply
+// mints one grant PER TERM, marker "(term <id>, estimate <id>)", identity
+// shared via customer-credit.js). A refunded prepay term must claw its
+// grant back — the full-annual refund returns the money the discounted
+// allocation was carved from, so a kept credit would pay the tier savings
+// twice. Same discipline as the pending-completion reversal above:
+// customer row lock, marker-based dedupe (replay-safe against webhook
+// retries and admin re-records), balance-capped with a zero-delta dedupe
+// row when the credit was already spent. Term-level only by design: a
+// single covered VISIT refunding does not unwind the tier extension — the
+// term still stands, so there is no visitId narrowing here.
+// Per-marker event log: every ledger row of the three class identities that
+// carries the marker, oldest first. The LAST event decides what may run
+// next — grant/restore (positive) → clawable; reversal (negative or the
+// zero-delta exhausted row) → restorable — which keeps arbitrary
+// refund → claw → repay → restore → refund cycles correct where a simple
+// "reversal marker exists" dedupe would go one-shot.
+async function extensionMarkerEvents(t, customerId, marker) {
+  const {
+    WAVEGUARD_EXTENSION_CREDIT_BY,
+    WAVEGUARD_EXTENSION_REVERSAL_BY,
+    WAVEGUARD_EXTENSION_RESTORE_BY,
+  } = require('./customer-credit');
+  // Chronology comes from created_at — ledger ids are RANDOM UUIDs, so
+  // ordering by id would shuffle the event log. And because the column
+  // DEFAULT now() is transaction-START time (an early-started txn that
+  // commits late would stamp its event older than one it followed),
+  // every writer of these three classes insert-order-stamps created_at
+  // with clock_timestamp() taken while holding the customer row FOR
+  // UPDATE — lock-acquisition order IS event order. The id tie-break
+  // only makes a same-microsecond fluke deterministic.
+  const rows = await t('customer_credit_ledger')
+    .where({ customer_id: customerId })
+    .whereIn('created_by', [
+      WAVEGUARD_EXTENSION_CREDIT_BY,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+      WAVEGUARD_EXTENSION_RESTORE_BY,
+    ])
+    .where('note', 'like', `%${marker}%`)
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('*');
+  return rows;
+}
+
+async function reverseWaveguardExtensionCredits(term, conn = db) {
+  let reversedCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return reversedCount;
+    const {
+      postCreditMovement,
+      WAVEGUARD_EXTENSION_CREDIT_BY,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+    } = require('./customer-credit');
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id', 'account_credits');
+      if (!customer) return;
+      let balance = Number(customer.account_credits) || 0;
+      const credits = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .where('delta', '>', 0)
+        .select('*');
+      // Legacy-shape park (guards P0): the pre-guards writer minted ONE
+      // aggregate grant naming every term ("(estimate #…; terms: a, b)") —
+      // per-term clawback cannot honestly slice it, so it PARKS for the
+      // operator instead of being silently skipped. Prod carries zero rows
+      // of this class (gate never enabled — verified 2026-08-11), so this
+      // is belt-and-braces, deduped by its own marker row.
+      const legacyGrants = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+        .whereNot('note', 'like', '%(term %')
+        .where('note', 'like', `%${term.id}%`)
+        .where('delta', '>', 0)
+        .select('*');
+      for (const legacy of legacyGrants) {
+        const parkMarker = `(term ${term.id}, legacy ledger ${legacy.id})`;
+        const priorPark = await t('customer_credit_ledger')
+          .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+          .where('note', 'like', `%${parkMarker}%`)
+          .first('id');
+        if (priorPark) continue;
+        logger.warn(`[annual-prepay] legacy aggregate WaveGuard extension credit ${legacy.id} names refunded term ${term.id} — cannot auto-reverse per-term; operator review needed`);
+        await t('customer_credit_ledger').insert({
+          customer_id: term.customer_id,
+          delta: 0,
+          balance_after: balance,
+          source: 'adjustment',
+          invoice_id: legacy.invoice_id || null,
+          note: `Annual prepay refunded — a legacy aggregate WaveGuard extension credit names this term and cannot be auto-reversed per-term; operator review needed ${parkMarker}`,
+          created_by: WAVEGUARD_EXTENSION_REVERSAL_BY,
+          created_at: t.raw('clock_timestamp()'), // insert-order stamp — see extensionMarkerEvents
+        });
+      }
+      if (!credits.length) return;
+      for (const credit of credits) {
+        const markerMatch = String(credit.note || '').match(/\(term [^)]*\)/);
+        const marker = markerMatch ? markerMatch[0] : `(term ${term.id}, ledger ${credit.id})`;
+        const events = await extensionMarkerEvents(t, term.customer_id, marker);
+        const last = events[events.length - 1];
+        // Clawable only when the marker's last event is a GRANT or a
+        // RESTORE. A reversal-last marker (including the zero-delta
+        // exhausted row) is settled until a repayment restore re-opens it.
+        if (last && last.created_by === WAVEGUARD_EXTENSION_REVERSAL_BY) continue;
+        const outstanding = last ? Number(last.delta) || 0 : Number(credit.delta) || 0;
+        if (!(outstanding > 0)) continue;
+        const reverseAmount = Math.min(balance, outstanding);
+        if (!(reverseAmount > 0)) {
+          logger.warn(`[annual-prepay] WaveGuard extension credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
+          // Settlement row even when nothing reverses — the credit was
+          // already SPENT toward bills, so a replayed refund sync must not
+          // claw the slice out of unrelated later credit, and a repayment
+          // restore must not re-grant value the customer consumed.
+          // postCreditMovement rejects zero deltas, so write the audit row
+          // directly — same trx, customer row locked.
+          await t('customer_credit_ledger').insert({
+            customer_id: term.customer_id,
+            delta: 0,
+            balance_after: balance,
+            source: 'adjustment',
+            invoice_id: credit.invoice_id || null,
+            note: `Annual prepay refunded — the WaveGuard extension credit was already spent; nothing reversed, operator follow-up needed ${marker}`,
+            created_by: WAVEGUARD_EXTENSION_REVERSAL_BY,
+            created_at: t.raw('clock_timestamp()'), // insert-order stamp — see extensionMarkerEvents
+          });
+          continue;
+        }
+        if (reverseAmount < outstanding) {
+          logger.warn(`[annual-prepay] WaveGuard extension credit ${marker} only partially reversible ($${reverseAmount.toFixed(2)} of $${outstanding.toFixed(2)}) — balance exhausted; operator follow-up needed`);
+        }
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: -reverseAmount,
+          source: 'adjustment',
+          invoiceId: credit.invoice_id || null,
+          note: `Annual prepay refunded — reversing the WaveGuard extension credit ${marker}`,
+          createdBy: WAVEGUARD_EXTENSION_REVERSAL_BY,
+          stampInsertOrder: true,
+        }, t);
+        balance -= reverseAmount;
+        reversedCount += 1;
+      }
+    };
+    // Best-effort demands a SAVEPOINT on a caller's transaction (pre-push
+    // P1, codex r5 round): the catch below swallows, but a failed statement
+    // leaves a raw caller trx ABORTED — every later statement in that
+    // transaction then fails while this helper reports a quiet no-op.
+    // conn.transaction() on a knex trx is a savepoint: the failure rolls
+    // back to it and the caller's transaction stays healthy.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] WaveGuard extension credit reversal skipped for term ${term?.id}: ${err.message}`);
+  }
+  return reversedCount;
+}
+
+// Repayment restore (guards P0 counterpart to the clawback): a refunded
+// prepay invoice that is PAID AGAIN (lost-dispute revival — active and
+// decided paths alike) restores coverage, stamps, and billing mode, so the
+// clawed extension credit comes back with them. Restores exactly what the
+// reversal actually took (a partial claw restores the partial; the
+// zero-delta exhausted row restores nothing — that value was already spent
+// toward bills before the refund). Idempotent by the same last-event rule
+// the clawback uses: only a reversal-last marker is restorable.
+async function restoreWaveguardExtensionCredits(term, conn = db) {
+  let restoredCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return restoredCount;
+    const {
+      postCreditMovement,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+      WAVEGUARD_EXTENSION_RESTORE_BY,
+    } = require('./customer-credit');
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id');
+      if (!customer) return;
+      const reversals = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .select('*');
+      if (!reversals.length) return;
+      const seenMarkers = new Set();
+      for (const reversal of reversals) {
+        const markerMatch = String(reversal.note || '').match(/\(term [^)]*\)/);
+        if (!markerMatch) continue;
+        const marker = markerMatch[0];
+        if (marker.includes('legacy ledger')) continue; // parked, operator-owned
+        if (seenMarkers.has(marker)) continue;
+        seenMarkers.add(marker);
+        const events = await extensionMarkerEvents(t, term.customer_id, marker);
+        const last = events[events.length - 1];
+        if (!last || last.created_by !== WAVEGUARD_EXTENSION_REVERSAL_BY) continue;
+        // Sum what the claw actually took since the last grant/restore —
+        // walking back stops at the first positive-class event.
+        let clawed = 0;
+        for (let i = events.length - 1; i >= 0; i -= 1) {
+          const row = events[i];
+          if (row.created_by === WAVEGUARD_EXTENSION_REVERSAL_BY) {
+            clawed = Math.round((clawed + Math.max(0, -(Number(row.delta) || 0))) * 100) / 100;
+          } else break;
+        }
+        if (!(clawed > 0)) continue;
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: clawed,
+          source: 'adjustment',
+          invoiceId: reversal.invoice_id || null,
+          note: `Annual prepay re-paid — restoring the WaveGuard extension credit ${marker}`,
+          createdBy: WAVEGUARD_EXTENSION_RESTORE_BY,
+          stampInsertOrder: true,
+        }, t);
+        restoredCount += 1;
+      }
+    };
+    // Savepoint on a caller's transaction — same reasoning as the reversal
+    // helper above (pre-push P1, codex r5 round): a swallowed failure must
+    // not leave the owning transaction aborted.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] WaveGuard extension credit restore skipped for term ${term?.id}: ${err.message}`);
+  }
+  return restoredCount;
+}
+
 // A dispute on the annual-prepay invoice restores a prior-monthly customer to
 // monthly billing (mid-dispute visits must not go out free — GUARD 5 excludes
 // dispute-suspended terms), so the monthly cron legitimately collects dues
@@ -1965,6 +2199,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       current = updated || term;
       if (updated) {
         logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
+        // The refund clawed the extension credit; the repayment restores
+        // it with the coverage (guards P0). Idempotent (last-event rule).
+        await restoreWaveguardExtensionCredits(updated, conn);
       }
     } else if (nextStatus === 'cancelled') {
       const [updated] = await conn('annual_prepay_terms')
@@ -1978,6 +2215,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // renewal-lapse (renewal_decision set) keeps its paid window, so the
       // whereNull guard leaves `updated` undefined and we don't clear.
       if (updated && updated.status === 'cancelled') {
+        // Lock order (deadlock guard, guards round 1): the accept
+        // transaction locks the CUSTOMER at entry, before the extension's
+        // scheduled_services family lock — while this leg would otherwise
+        // take scheduled_services locks (the stamp clears below) first and
+        // the customer (credit reversals) last. Same order both sides or a
+        // concurrent accept + refund for one customer can deadlock. On
+        // autocommit (conn === db) every statement is its own transaction
+        // and no multi-statement order exists to invert.
+        if (conn.isTransaction && updated.customer_id) {
+          await conn('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+        }
         await clearPrepaidStampsForTerm(term.id, conn);
         // Also reopen any per-visit invoices this term settled as NON-CASH coverage
         // (status='prepaid' by this term, or a partial with a coverage line) — the
@@ -1993,6 +2241,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
         await reversePendingWindowCompletionCredits(updated, conn);
+        // Same double-pay shape for the WaveGuard tier-extension credit:
+        // the refund returns the prepaid dollars the discounted allocation
+        // was carved from, so the extension's prepaid-difference grant
+        // reverses with it.
+        await reverseWaveguardExtensionCredits(updated, conn);
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
         await resetBillingModeAfterTermCancel(updated, conn);
@@ -2064,6 +2317,10 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .where('t.id', decidedTerm.id)
           .first('t.id');
         if (!validPaid) continue;
+        // Repaid backing restores the clawed extension credit with the
+        // coverage (guards P0) — not window-gated: the credit was never
+        // date-bound, only payment-bound. Idempotent (last-event rule).
+        await restoreWaveguardExtensionCredits(decidedTerm, conn);
         const termStart = dateOnly(decidedTerm.term_start);
         const termEnd = dateOnly(decidedTerm.term_end);
         const coveredToday = !!(termStart && termEnd && termStart <= today && today <= termEnd);
@@ -2104,6 +2361,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       })
       .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
+      // Same customer-first lock order as the true-refund cancel branch
+      // above (deadlock guard vs the accept transaction).
+      if (conn.isTransaction && decided.customer_id) {
+        await conn('customers').where({ id: decided.customer_id }).forUpdate().first('id');
+      }
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
       // non-cash coverage — the refund voids their coverage too.
@@ -2113,6 +2375,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
       await reversePendingWindowCompletionCredits(decided, conn);
+      // Decided-lapse refund reverses the extension grant too — the paid
+      // window the credit rode on is the thing being refunded.
+      await reverseWaveguardExtensionCredits(decided, conn);
       // A decided-lapse term (status 'cancelled' + renewal_decision) whose
       // invoice refunds never passes through the active loop's reset — the
       // customer would stay 'annual_prepay' with the cron skipping them and
@@ -2405,6 +2670,14 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     const res = await reconcilePendingWindowCompletions(term, conn);
     summary.settled += res.settled || 0;
     summary.credited += res.credited || 0;
+    // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
+    // invoice), so any clawed extension credit is owed back — self-heals a
+    // repayment whose inline restore was lost (guards P0). Idempotent.
+    try {
+      summary.credited += await restoreWaveguardExtensionCredits(term, conn);
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
+    }
     try {
       const grants = await conn('customer_credit_ledger')
         .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
@@ -2458,6 +2731,223 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep expired-window marker pass failed: ${err.message}`);
+  }
+  // WaveGuard extension-credit recovery pass: a refund-cancelled term is no
+  // longer covered, so it never enters the dated loop above — an extension
+  // grant whose in-line clawback was lost (webhook died mid-sync) would
+  // strand forever. Re-scan the grant class directly: each grant's
+  // invoice_id anchors the term's PREPAY invoice; a cancelled/refunded
+  // anchor plus a cancelled term means the clawback is owed. A renewal
+  // lapse without a refund keeps its paid invoice, so it never trips this.
+  // The reversal is marker-deduped — re-running for an already-reversed
+  // grant is a no-op. The class is tiny (grants exist only for tier-raising
+  // accepts over prepaid visits), so the class-wide scan stays cheap.
+  try {
+    const { WAVEGUARD_EXTENSION_CREDIT_BY } = require('./customer-credit');
+    // Final lost-dispute backing (codex #3344 r9 P1): closed(lost)
+    // deliberately leaves the prepay invoice 'overdue' so recollection can
+    // chase it — never a terminal status — and the webhook's inline
+    // refund-shaped sync can lose a transient
+    // reverseWaveguardExtensionCredits failure AFTER the event was acked.
+    // The durable evidence is the payment row the webhook stamped:
+    // metadata.dispute_final='lost', bound to this invoice by the recorded
+    // dispute_invoice_id or by still owning its PI — the same two arms the
+    // webhook's own lostDisputeOwnedInvoice check uses. An OPEN dispute
+    // never writes dispute_final, so mid-dispute anchors stay excluded; a
+    // recollected invoice leaves 'overdue' and stops matching.
+    const lostDisputeBacked = async (c, anchor) => {
+      if (String(anchor.status || '').toLowerCase() !== 'overdue') return false;
+      const row = await c('payments')
+        .whereRaw("metadata->>'dispute_final' = 'lost'")
+        .where(function lostBinding() {
+          this.whereRaw("metadata->>'dispute_invoice_id' = ?", [String(anchor.id)]);
+          if (anchor.stripe_payment_intent_id) {
+            this.orWhere('stripe_payment_intent_id', String(anchor.stripe_payment_intent_id));
+          }
+        })
+        .first('id');
+      return !!row;
+    };
+    const extGrants = await conn('customer_credit_ledger')
+      .where({ created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+      .where('delta', '>', 0)
+      .select('customer_id', 'note', 'invoice_id');
+    const seenTerms = new Set();
+    for (const grant of extGrants) {
+      // Anything up to the marker's comma is the id — prod ids are UUIDs,
+      // but the parse must not silently skip a grant over id shape.
+      const termMatch = String(grant.note || '').match(/\(term ([^,)]+),/i);
+      const termId = termMatch ? termMatch[1] : null;
+      if (!termId || seenTerms.has(termId)) continue;
+      seenTerms.add(termId);
+      // UNANCHORED grants recover too (pre-push P0, codex r5 round): the
+      // accept path posts the grant with invoice_id null when its
+      // best-effort prepay-invoice lookup failed — filtering on the ledger
+      // anchor would leave exactly those grants without any sweep
+      // recovery. Resolve the anchor from the term's CURRENT prepay
+      // invoice instead; a term with no linked prepay invoice (legacy
+      // born-active) has no refundable anchor to detect and keeps its
+      // historical covered semantics.
+      let anchorInvoiceId = grant.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // collectible) out of the locked path entirely.
+      const anchorInvoice = await conn('invoices')
+        .where({ id: anchorInvoiceId })
+        .first('id', 'status', 'stripe_payment_intent_id');
+      if (!anchorInvoice) continue;
+      const anchorStatus = String(anchorInvoice.status || '').toLowerCase();
+      if (!INVOICE_CANCELLED_STATUSES.has(anchorStatus)
+        && !(await lostDisputeBacked(conn, anchorInvoice))) continue;
+      // The refunded ANCHOR is the whole evidence (codex #3344 r1 P1): a
+      // refunded term that had already decided renewal keeps its
+      // 'renewed'/'switch_plan' status through the inline refund path, so
+      // requiring status='cancelled' here would permanently skip exactly
+      // the grants a lost refund sync strands. The anchor is self-correct
+      // the other way too: a re-paid invoice (lost-dispute revival) leaves
+      // the cancelled set, and a DISPUTE parks the invoice at 'overdue' —
+      // never a mid-dispute clawback. The term row is only needed for its
+      // identity; the reversal itself is marker-deduped and balance-capped.
+      //
+      // Anchor recheck UNDER LOCK (codex #3344 r2): the pre-check above can
+      // observe 'refunded' while a lost-dispute repayment is mid-flight —
+      // clawing after it commits 'paid' would remove a credit whose backing
+      // payment was just restored. Lock the anchor row and re-read inside
+      // the same transaction the reversal runs in; the repayment's own
+      // invoice UPDATE serializes on the row lock, so whichever commits
+      // first, the other sees its final state.
+      //
+      // Customer BEFORE anchor (codex #3344 r5 P2): the extension accept
+      // path holds the customer FOR UPDATE and its ledger insert then takes
+      // KEY SHARE on this same prepay invoice via the invoice_id FK —
+      // anchor-first here would form the invoice→customer vs
+      // customer→invoice cycle Postgres resolves by aborting one side.
+      // Hoist the customer FOR UPDATE (the exact lock
+      // reverseWaveguardExtensionCredits takes anyway — re-locking in-txn
+      // is free) so every extension-credit writer agrees on customer →
+      // invoice, matching the mint paths' customer-first order.
+      const clawIfStillRefunded = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: grant.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
+        const lockedAnchor = await t('invoices')
+          .where({ id: anchorInvoiceId })
+          .forUpdate()
+          .first('id', 'status', 'stripe_payment_intent_id');
+        if (!lockedAnchor) return 0;
+        const lockedStatus = String(lockedAnchor.status || '').toLowerCase();
+        // The lost-dispute arm re-proves under the same lock: a
+        // recollection commits 'paid' on the anchor row this transaction
+        // now holds, so whichever side wins, the loser sees the final
+        // state — a repaid anchor stands down here exactly like a repaid
+        // refund would.
+        if (!INVOICE_CANCELLED_STATUSES.has(lockedStatus)
+          && !(await lostDisputeBacked(t, lockedAnchor))) return 0;
+        const term = await t('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'customer_id', 'status');
+        if (!term) return 0;
+        return reverseWaveguardExtensionCredits(term, t);
+      };
+      summary.reversed += conn === db
+        ? await db.transaction(clawIfStillRefunded)
+        : await clawIfStillRefunded(conn);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);
+  }
+  // WaveGuard extension-credit RESTORE recovery pass (codex #3344 r5 P1):
+  // the dated loop above restores only covered-TODAY terms, so a refunded
+  // anchor REPAID after term_end (late lost-dispute repayment) whose inline
+  // restore was lost never re-enters — the expired-window marker pass only
+  // runs the dispute recovery, and the inline restore swallows its own
+  // errors, so that follow-up can clear the marker with the credit still
+  // reversal-last. Mirror of the clawback pass, keyed on the REVERSAL
+  // class: each reversal's invoice_id anchors the term's prepay invoice; a
+  // paid-again anchor whose term shows valid paid backing
+  // (coveredTermsAsOf(null) — decided-repaid restores are deliberately NOT
+  // window-gated) means the restore is owed. The restore itself is
+  // last-event-idempotent, so overlap with an inline restore racing this
+  // sweep is a no-op, and the class is as tiny as the grant class.
+  try {
+    const { WAVEGUARD_EXTENSION_REVERSAL_BY } = require('./customer-credit');
+    const datedLoopTermIds = new Set(terms.map((term) => String(term.id)));
+    const reversalRows = await conn('customer_credit_ledger')
+      .where({ created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+      .select('customer_id', 'note', 'invoice_id');
+    const seenRestoreTerms = new Set();
+    for (const reversal of reversalRows) {
+      const termMatch = String(reversal.note || '').match(/\(term ([^,)]+),/i);
+      const termId = termMatch ? termMatch[1] : null;
+      if (!termId || seenRestoreTerms.has(termId)) continue;
+      seenRestoreTerms.add(termId);
+      // The dated loop already ran the restore for covered-today terms —
+      // this pass owns only the terms outside today's window.
+      if (datedLoopTermIds.has(String(termId))) continue;
+      // Unanchored reversals resolve their anchor from the term's current
+      // prepay invoice — same recovery contract as the clawback pass above
+      // (pre-push P0, codex r5 round): a reversal inherits its grant's
+      // null invoice_id when the accept-time anchor lookup failed.
+      let anchorInvoiceId = reversal.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // refunded — nothing to restore) out of the locked path entirely.
+      const anchorInvoice = await conn('invoices')
+        .where({ id: anchorInvoiceId })
+        .first('id', 'status', 'paid_at');
+      if (!anchorInvoice) continue;
+      const anchorPaid = String(anchorInvoice.status || '').toLowerCase() === 'paid'
+        || anchorInvoice.paid_at != null;
+      if (!anchorPaid) continue;
+      // Same lock discipline as the clawback pass: customer FOR UPDATE
+      // first (the grant path's order — see the r5 P2 note above), then the
+      // anchor row so a racing refund's invoice UPDATE serializes, then the
+      // paid-backing recheck through coveredTermsAsOf on this transaction —
+      // whichever side commits first, the other sees its final state.
+      const restoreIfStillPaidBacked = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: reversal.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
+        const lockedAnchor = await t('invoices')
+          .where({ id: anchorInvoiceId })
+          .forUpdate()
+          .first('id');
+        if (!lockedAnchor) return 0;
+        // Paid backing is the term-level authority, not the bare anchor
+        // status: coveredTermsAsOf(null) revalidates the prepay invoice AND
+        // the refunded-payment exclusion, and its windowless form is exactly
+        // the decided-repaid shape the restore rules cover. A term still
+        // stuck cancelled-unrevived (lost repayment sync) is out of scope
+        // here by design — the revival recoveries own it, and once revived
+        // it becomes paid-backed and this pass catches it next sweep.
+        const term = await coveredTermsAsOf(t, null)
+          .where('t.id', termId)
+          .first('t.id', 't.customer_id');
+        if (!term) return 0;
+        return restoreWaveguardExtensionCredits(term, t);
+      };
+      summary.credited += conn === db
+        ? await db.transaction(restoreIfStillPaidBacked)
+        : await restoreIfStillPaidBacked(conn);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
   }
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
@@ -3640,6 +4130,8 @@ module.exports = {
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,
   reversePendingWindowCompletionCredits,
+  reverseWaveguardExtensionCredits,
+  restoreWaveguardExtensionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,

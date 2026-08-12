@@ -42,12 +42,13 @@ const {
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Reuse the SAME advisory-lock key the scheduled-service invoice-mint path uses
-// (admin-schedule.js: 'schedule.invoice.mint') so a recovery Bill serializes not
-// just against another recovery Bill/dismiss but against Charge-now / completion
-// mints too. invoices.scheduled_service_id is NOT unique, so a private namespace
-// would let a recovery Bill and a concurrent mint both create duplicate drafts.
-const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule.invoice.mint';
+// Reuse the SAME advisory lock the scheduled-service invoice-mint path uses
+// (services/scheduled-invoice-mint) so a recovery Bill serializes not just
+// against another recovery Bill/dismiss but against Charge-now / completion
+// mints too. invoices.scheduled_service_id is NOT unique, so a private
+// namespace would let a recovery Bill and a concurrent mint both create
+// duplicate drafts. Imported, never re-declared (codex #3344 r8).
+const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -453,7 +454,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     // Serialize concurrent bills on the same visit, recheck inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
     const invoice = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
+      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
 
       const existingInvoice = await trx('invoices')
         .where(function () {
@@ -477,21 +478,24 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       }
 
       // Canonical completion path (replays scheduled-service line items + discounts).
-      // NOTE: createFromService writes via the global db connection and takes no
-      // trx, so the draft invoice commits independently of this transaction —
-      // true invoice⇄disposition atomicity would require threading a trx through
-      // the shared InvoiceService (used by the completion path), which is out of
-      // scope here. The advisory lock + the existing-invoice/disposition rechecks
-      // above prevent the dangerous outcomes (double invoice, double disposition).
-      // Residual failure mode is benign: if the disposition insert below throws,
-      // the draft invoice is orphaned (recoverable/voidable) and the existing-
-      // invoice recheck excludes the visit from future leaks on retry — never a
-      // double-charge.
+      // THIS transaction is threaded through (codex #3344 r6 P1): we hold
+      // the schedule.invoice.mint advisory lock above, and an un-threaded
+      // createFromService would open a SEPARATE connection and request the
+      // same lock — a self-deadlock that blocked /bill until timeout.
+      // Same-session re-acquisition is a no-op, the replay mint runs under
+      // a savepoint on this trx, and invoice⇄disposition now commit
+      // atomically as a bonus.
       const created = await InvoiceService.createFromService(visit.service_record_id, {
+        database: trx,
         amount: price,
         description: visit.service_type,
         taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
         useScheduledReplay: true,
+        // The row price this amount derived from — lets the locked replay
+        // rebuild 409 instead of silently minting a since-repriced visit at
+        // the stale figure (codex #3344 r2). Unpriced rows (per-app fee
+        // lane) have no basis to drift.
+        scheduledPriceBasis: rowPrice > 0 ? visit.estimated_price : undefined,
         dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
       });
 
@@ -541,7 +545,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
     // eligibility is re-validated INSIDE the lock so a stale UI / direct request
     // can't permanently exclude a future, uncompleted, or already-invoiced visit.
     await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
+      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
 
       const visit = await trx({ ss: 'scheduled_services' })
         .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')

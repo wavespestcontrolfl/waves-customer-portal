@@ -14,12 +14,14 @@ jest.mock('../services/inspection-credit', () => ({
   markBookingForInspectionCredit: jest.fn(async () => 1),
   redeemInspectionCreditForBooking: jest.fn(async () => ({})),
 }));
+jest.mock('../services/appointment-card-request', () => ({ requestCardForAppointment: jest.fn(async () => ({ requested: false })) }));
 
 const { buildTriageItem } = require('../services/call-routing-gates');
 const {
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   CALL_FOLLOWUP_SOURCE_ACTION,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
+  isPendingOutboundReviewBooking,
 } = require('../services/call-booking-source-actions');
 const {
   runOutboundReviewConfirmHook,
@@ -29,6 +31,7 @@ const {
 const { transitionJobStatus } = require('../services/job-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
+const { requestCardForAppointment } = require('../services/appointment-card-request');
 
 describe('outbound review booking — shared source-action markers', () => {
   test('the outbound-review marker is a distinct, stable string that fits source_action', () => {
@@ -320,6 +323,19 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     }));
   });
 
+  test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
+    // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
+    // card in person, so the funnel leg is skipped on the tech-track path —
+    // and ONLY there; the office confirm paths keep the full funnel.
+    const db = confirmHookDb({ fallbackLeads: [] });
+    await runOutboundReviewConfirmHook(db, svc, 'test', { skipCardRequest: true });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(requestCardForAppointment).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledServiceId: 'svc1', trigger: 'outbound_review_confirm' }),
+    );
+  });
+
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {
     const db = confirmHookDb({ fallbackLeads: [{ id: 'lead-1', status: 'new' }, { id: 'lead-2', status: 'contacted' }] });
     await runOutboundReviewConfirmHook(db, svc, 'test');
@@ -327,5 +343,30 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     // The other side effects still run.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
     expect(db._state.triageResolved).toBe(true);
+  });
+});
+
+describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection', () => {
+  // tech-track's en-route/on-site auto-confirm (PR #3356) keys on this
+  // helper; the legacy-activation seams (PR #3361) share its condition
+  // (source_action + pending + !customer_confirmed).
+  const base = {
+    source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+  };
+
+  test('matches a pending, unconfirmed outbound-review row', () => {
+    expect(isPendingOutboundReviewBooking(base)).toBe(true);
+  });
+
+  test('does NOT match other source_actions, non-pending status, confirmed rows, or missing rows', () => {
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: 'ai_call_pipeline' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, source_action: CALL_FOLLOWUP_SOURCE_ACTION })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'confirmed' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, status: 'cancelled' })).toBe(false);
+    expect(isPendingOutboundReviewBooking({ ...base, customer_confirmed: true })).toBe(false);
+    expect(isPendingOutboundReviewBooking(null)).toBe(false);
+    expect(isPendingOutboundReviewBooking(undefined)).toBe(false);
   });
 });
