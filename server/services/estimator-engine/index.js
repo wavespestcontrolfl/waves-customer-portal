@@ -1684,8 +1684,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // (neutral default) and the stamp below parks the draft instead of
         // green-laning on a type that describes another address (codex r26
         // P1). Same object as propertyFacts on every other path.
+        // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
+        // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
+        // master-parcel lot, for one), and pricing from a stale clone would
+        // charge for a lot the lane review shows as cleared (codex r27 P1).
         propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
-          && crossPropertyRegather) ? scopeFacts : propertyFacts,
+          && crossPropertyRegather)
+          ? { ...propertyFacts, tenant: false, propertyType: null }
+          : propertyFacts,
         context,
         priorQualifyingServices,
         profileDescribesQuotedProperty,

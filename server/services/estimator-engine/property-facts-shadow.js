@@ -40,11 +40,20 @@ const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+
 // The ADDRESS half of the unit signal alone: an explicit unit/apt/suite
 // subpremise on the service address (never tenancy — a tenant of a plain
 // single-family rental treats the whole house).
+// Strip the trailing locality so SUBPREMISE_RE sees the unit suffix at the
+// end of the string. Handles BOTH comma styles — ", Venice, FL 34285" and
+// the equally common ", Parrish FL 34219": requiring a comma before the
+// state left the ZIP at the end, so an explicit "Suite 101" lost its unit
+// scope entirely (codex r27 P1).
+function stripTrailingLocality(address) {
+  return String(address || '').replace(/,?\s*[A-Za-z .'-]+,?\s*\b(?:FL|Florida)\b.*$/i, '');
+}
+
 function hasSubpremiseSignal({ address, extraction }) {
-  if (address && SUBPREMISE_RE.test(String(address).replace(/,?\s*[A-Za-z .]+,\s*FL.*$/i, ''))) return true;
+  if (address && SUBPREMISE_RE.test(stripTrailingLocality(address))) return true;
   const extractionAddress = extraction?.property?.service_address;
   if (typeof extractionAddress === 'string') {
-    return !!(extractionAddress && SUBPREMISE_RE.test(extractionAddress));
+    return !!(extractionAddress && SUBPREMISE_RE.test(stripTrailingLocality(extractionAddress)));
   }
   // The extraction schema's field names (raw_text/street_line_1/
   // street_line_2 — codex r6 P1: the legacy raw/line1 reads matched
@@ -54,7 +63,8 @@ function hasSubpremiseSignal({ address, extraction }) {
   const lines = [extractionAddress?.raw_text, extractionAddress?.street_line_1,
     extractionAddress?.raw, extractionAddress?.line1];
   if (String(extractionAddress?.street_line_2 || '').trim()) return true;
-  return lines.some((line) => line && SUBPREMISE_RE.test(String(line)));
+  // Free-text lines carry localities too (raw_text especially).
+  return lines.some((line) => line && SUBPREMISE_RE.test(stripTrailingLocality(line)));
 }
 
 function hasUnitSignal({ tenant, address, extraction }) {

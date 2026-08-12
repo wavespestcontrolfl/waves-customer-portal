@@ -327,6 +327,20 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.lot.value).toBeNull();
   });
+  test('a no-comma city/state address keeps its unit scope (r27)', () => {
+    // "…, Parrish FL 34219" is as common as "…, Venice, FL 34285"; the
+    // comma-required locality strip left the ZIP at the end and the suite
+    // suffix went unseen.
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: true, address: '4801 Industrial Way, Suite 101, Parrish FL 34219' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '4801 Industrial Way, Suite 101, Parrish FL 34219',
+    });
+    expect(model.subpremiseSignal).toBe(true);
+    expect(model.serviceScope).toBe('commercial_suite');
+  });
   test('the schema street_line_2 unit field signals even when the composed address dropped it (r6)', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
