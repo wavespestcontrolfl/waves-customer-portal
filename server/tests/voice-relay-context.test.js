@@ -151,6 +151,14 @@ describe('GATE ON — caller recognition', () => {
     expect(p).toContain('lookup_customer');
     expect(p).toContain("confirm-don't-recite");
     expect(p).toContain('Pricing is public website information');
+    // Phase E: clock-based callback expectations, the re-service lane for
+    // existing customers, the hot-lead escalation, and capture-don't-act
+    // contact preferences all ride the SAME gate.
+    expect(p).toContain('TIME AND CALLBACK PROMISES');
+    expect(p).toContain('THE PROBLEM CAME BACK');
+    expect(p).toContain('URGENT CALLS');
+    expect(p).toContain('IF THEY TELL YOU HOW TO CONTACT THEM');
+    expect(p).toContain('never starts an appointment before 8:00 AM Eastern');
     // Everything BEFORE the price line is untouched.
     expect(p).toContain('ONLY state appointment times that a tool actually returned');
   });
