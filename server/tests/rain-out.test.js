@@ -1763,7 +1763,7 @@ describe('rain-out service', () => {
             chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
             chain({ rows: [] }),
           ],
-          customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Trang', last_name: 'Nguyen' }] })],
+          customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })],
         });
 
         const options = await RainOut.getOptions('svc-1');
@@ -1780,9 +1780,10 @@ describe('rain-out service', () => {
         expect(options.sameDay[0].conflicts).toEqual([{
           windowStart: '11:00',
           windowEnd: '12:00',
-          customerName: 'Trang Nguyen',
+          customerName: 'cust-9a cust-9b',
           serviceType: 'Mosquito Treatment',
           isHold: false,
+          isRouteSibling: false,
         }]);
         expect(options.sameDay[1].conflicts).toEqual([]);
         // Day options arrive conflict-free from the rebooker's own candidate
@@ -1856,7 +1857,7 @@ describe('rain-out service', () => {
       }]);
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
-        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Trang', last_name: 'Nguyen' }] })],
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })],
       });
 
       const result = await RainOut.checkTarget({
@@ -1869,9 +1870,10 @@ describe('rain-out service', () => {
         conflicts: [{
           windowStart: '14:00',
           windowEnd: '15:00',
-          customerName: 'Trang Nguyen',
+          customerName: 'cust-9a cust-9b',
           serviceType: 'Mosquito Treatment',
           isHold: false,
+          isRouteSibling: false,
         }],
       });
       expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
@@ -1927,6 +1929,46 @@ describe('rain-out service', () => {
         windowStart: '14:00',
         windowEnd: '15:00',
       })]);
+    });
+
+    test('flags overlapping stops a route-scope push would shift (isRouteSibling)', async () => {
+      findConflictingVisits.mockResolvedValue([
+        {
+          id: 'svc-2', customer_id: 'cust-2', status: 'pending', service_type: 'Quarterly Pest Control',
+          window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+        },
+        {
+          id: 'svc-77', customer_id: 'cust-77', status: 'confirmed', service_type: 'Lawn Treatment',
+          window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+        },
+      ]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2' }] }), // remaining route: svc-2 shifts with a route push
+        ],
+        customers: [chain({
+          rows: [
+            { id: 'cust-2', first_name: 'cust-2', last_name: null },
+            { id: 'cust-77', first_name: 'cust-77', last_name: null },
+          ],
+        })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.conflicts).toEqual([
+        expect.objectContaining({ customerName: 'cust-2', isRouteSibling: true }),
+        expect.objectContaining({ customerName: 'cust-77', isRouteSibling: false }),
+      ]);
     });
 
     test('clear window → ok with no conflicts; bad target and missing service reject', async () => {

@@ -1253,7 +1253,12 @@ function RainOutSheet({ service, onClose, onDone }) {
     const h12 = h % 12 || 12;
     return `${h12}:${String(m % 60).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
   };
-  const selectedConflicts = selected?.conflicts || [];
+  // A route-scope same-day push shifts the remaining route stops by the
+  // same delta (commit moves tail-first), so an overlap with a stop
+  // that's moving too is not a definite failure — drop flagged siblings
+  // from the warning while scope=route (codex #3375 P2).
+  const scopedConflicts = (list) => (list || []).filter((c) => !(scope === 'route' && c.isRouteSibling));
+  const selectedConflicts = scopedConflicts(selected?.conflicts);
   const conflictLabel = (c) => {
     const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
     const when = c.windowStart
@@ -1402,9 +1407,9 @@ function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>
-                    {(opt.conflicts?.length > 0 || opt.rainChance != null) && (
+                    {(scopedConflicts(opt.conflicts).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                        {opt.conflicts?.length > 0 && (
+                        {scopedConflicts(opt.conflicts).length > 0 && (
                           <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (

@@ -623,7 +623,7 @@ function sameDayOptions(now = new Date()) {
 // BEFORE the Move tap. Warn-only by design: the sheets never disable Move
 // on this data (it can be seconds stale in either direction).
 const TARGET_CONFLICT_LIMIT = 3;
-async function conflictsForTarget(serviceId, date, window) {
+async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = null } = {}) {
   const { findConflictingVisits } = require('./scheduling/occupancy');
   const rows = await findConflictingVisits({
     date,
@@ -662,6 +662,14 @@ async function conflictsForTarget(serviceId, date, window) {
       // customer-NULL rows with a live reservation stamp are estimate-slot
       // holds — real occupancy, but there's no customer name to show.
       isHold: !row.customer_id && !!row.reservation_expires_at,
+      // A "rest of route" same-day push shifts every remaining route stop
+      // by the anchor's delta (commit() moves tail-first, so a sibling
+      // vacates its window before the anchor lands on it) — an overlap
+      // with a stop that's moving too is NOT a definite failure. Flagged
+      // so the sheets can drop these from the warning when scope=route
+      // (codex #3375 P2). Only today's rows can carry the flag: the probe
+      // is date-scoped and route siblings sit on today until commit.
+      isRouteSibling: !!routeSiblingIds?.has(String(row.id)),
     };
   });
 }
@@ -675,9 +683,16 @@ async function checkTarget({ serviceId, target }) {
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
-  const service = await db('scheduled_services').where({ id: serviceId }).first('id');
+  const service = await db('scheduled_services')
+    .where({ id: serviceId })
+    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'route_order');
   if (!service) return { ok: false, reason: 'not_found' };
-  const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window);
+  // Route siblings flagged (not excluded) so one response serves both
+  // scopes — the sheet filters by its live scope toggle without refetching.
+  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
+  const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window, {
+    routeSiblingIds: new Set(route.map((j) => String(j.id))),
+  });
   return { ok: true, conflicts };
 }
 
@@ -696,22 +711,6 @@ async function getOptions(serviceId) {
   // candidates are built here). Fail-open helper.
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
   const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
-
-  // Overlap advisory on the same-day presets: +2h/+4h are pure clock
-  // offsets with no occupancy input, so they can land on a booked stop.
-  // Day options below skip the probe — findRescheduleOptions already
-  // filters its candidates against the same predicate (rebooker.js
-  // candidate clash check), so they arrive conflict-free. Best-effort:
-  // a probe failure renders the pill without a badge, never blocks the
-  // sheet (same fail-open posture as the rain badges).
-  for (const opt of sameDay) {
-    try {
-      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window);
-    } catch (err) {
-      logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
-      opt.conflicts = [];
-    }
-  }
 
   // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h
@@ -744,6 +743,25 @@ async function getOptions(serviceId) {
   });
 
   const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
+
+  // Overlap advisory on the same-day presets: +2h/+4h are pure clock
+  // offsets with no occupancy input, so they can land on a booked stop.
+  // Day options above skip the probe — findRescheduleOptions already
+  // filters its candidates against the same predicate (rebooker.js
+  // candidate clash check), so they arrive conflict-free. Route siblings
+  // are flagged, not dropped — the sheet filters by its scope toggle
+  // (a route-scope same-day push shifts them too). Best-effort: a probe
+  // failure renders the pill without a badge, never blocks the sheet
+  // (same fail-open posture as the rain badges).
+  const routeSiblingIds = new Set(route.map((j) => String(j.id)));
+  for (const opt of sameDay) {
+    try {
+      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window, { routeSiblingIds });
+    } catch (err) {
+      logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
+      opt.conflicts = [];
+    }
+  }
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row

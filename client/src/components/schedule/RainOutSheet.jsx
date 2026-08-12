@@ -471,8 +471,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // Overlap advisory (owner ask 2026-08-12): every selection change —
   // preset OR custom time — re-checks the target against the schedule
   // (POST rain-out/target-check → checkTarget: the same tech-blind
-  // occupancy predicate commit enforces) so the dispatcher sees "this
-  // overlaps Trang Nguyen, 2-3 PM" BEFORE tapping Move instead of
+  // occupancy predicate commit enforces) so the dispatcher sees the
+  // overlapped stop's customer + window BEFORE tapping Move instead of
   // discovering it as commit's SLOT_TAKEN rejection. Warn-only: Move
   // stays enabled (this data can be seconds stale in either direction —
   // the rebooker's locked probe at commit is the enforcer), and a fetch
@@ -502,7 +502,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [selectedDate, selectedStart, selectedEnd, service.id]);
-  const activeConflicts = liveConflicts ?? selected?.conflicts ?? [];
+  // A route-scope same-day push shifts the remaining route stops by the
+  // same delta (commit moves tail-first), so an overlap with a stop
+  // that's moving too is not a definite failure — drop flagged siblings
+  // from the warning while scope=route (codex #3375 P2).
+  const scopedConflicts = (list) => (list || []).filter((c) => !(scope === 'route' && c.isRouteSibling));
+  const activeConflicts = scopedConflicts(liveConflicts ?? selected?.conflicts);
   const conflictLabel = (c) => {
     const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
     const when = c.windowStart
@@ -687,9 +692,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
-                    {(opt.conflicts?.length > 0 || opt.rainChance != null) && (
+                    {(scopedConflicts(opt.conflicts).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                        {opt.conflicts?.length > 0 && (
+                        {scopedConflicts(opt.conflicts).length > 0 && (
                           <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (

@@ -12177,12 +12177,17 @@ router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
 //
 // Advisory overlap probe for the Quick Move sheet: the custom-time picker
 // (and any selected preset) re-checks here on every change so the
-// dispatcher sees "this overlaps Trang Nguyen, 2-3 PM" BEFORE tapping
+// dispatcher sees the overlapped stop's customer + window BEFORE tapping
 // Move instead of discovering it as commit's SLOT_TAKEN rejection.
 // Warn-only + read-only: the sheet never disables Move on this data and
 // nothing is locked or reserved — the rebooker's rung-1-locked probe at
 // commit stays the enforcer.
-router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
+// requireAdmin (codex #3375 P1): the response names OTHER customers on
+// arbitrary date/window probes — with the router's inherited
+// requireTechOrAdmin, any tech could enumerate the global schedule. Only
+// the admin dispatch sheet calls this; the tech sheet gets its (own-route)
+// annotations from rain-out-options.
+router.post('/:serviceId/rain-out/target-check', requireAdmin, async (req, res, next) => {
   try {
     const { target } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
