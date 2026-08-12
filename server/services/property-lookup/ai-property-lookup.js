@@ -1985,7 +1985,13 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   return sawDisagreement;
 }
 
-async function lookupPropertyFromAITrio(address, geoContext = null) {
+// Optional `diag` out-param: when supplied, the trio records which AI legs
+// LOOK timed out — each leg consumes its own timeout internally and
+// resolves null, so a null that took (about) the leg's full configured
+// timeout is the only externally observable signal. Purely observational
+// (feeds the property_lookups attempt-status segmentation); never alters
+// the returned record.
+async function lookupPropertyFromAITrio(address, geoContext = null, diag = null) {
   // County street-string matching and AI search prompts both get the
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
@@ -2105,10 +2111,27 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
+  // Per-leg timing wrapper for the diag out-param: a leg that resolved
+  // null after ~its full configured timeout is classified as a suspected
+  // provider timeout (the legs consume their timeout errors internally).
+  const legTimeoutMs = {
+    claude: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    openai: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, 60000),
+    gemini: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+  };
+  const timedLeg = (name, promise) => {
+    const legT0 = Date.now();
+    return promise.then((value) => {
+      if (diag && value === null && Date.now() - legT0 >= legTimeoutMs[name] - 250) {
+        (diag.providerTimeouts = diag.providerTimeouts || []).push(name);
+      }
+      return value;
+    });
+  };
   const results = await Promise.allSettled([
-    lookupPropertyFromAI(searchAddress),
-    lookupPropertyFromOpenAI(searchAddress),
-    lookupPropertyFromGemini(searchAddress),
+    timedLeg('claude', lookupPropertyFromAI(searchAddress)),
+    timedLeg('openai', lookupPropertyFromOpenAI(searchAddress)),
+    timedLeg('gemini', lookupPropertyFromGemini(searchAddress)),
   ]);
   const aiRecords = results
     .filter((r) => r.status === 'fulfilled' && r.value)

@@ -347,7 +347,7 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
 // advertising empty segments ahead of that would misread as coverage.
 const LOOKUP_ATTEMPT_STATUSES = new Set([
   'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
-  'incomplete_address', 'new_construction_suspected', 'provider_timeout',
+  'incomplete_address', 'vacant_or_unassessed', 'provider_timeout',
 ]);
 
 async function markLookupAttempt(address, status, reason = null) {

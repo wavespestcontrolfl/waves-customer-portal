@@ -36,7 +36,6 @@ const { sameStreetAddress } = require('./address-compare');
 const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
-  commercialCategoryConflict,
 } = require('./unit-scope-model');
 
 const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
@@ -549,7 +548,10 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     // stayed residential: reclassifying is the composer's job, so a
     // conflict here means one of them is wrong — no automated price until
     // an operator resolves which (owner ruling: category conflicts red).
-    const conflictType = commercialCategoryConflict({ extraction: context?.extraction, intent });
+    // Read from the stamp index.js resolved with the re-gather in view —
+    // the raw primary-property extraction must not judge a re-gathered
+    // secondary property (codex r3 P1).
+    const conflictType = propertyFacts?.categoryConflict || null;
     if (conflictType) {
       return {
         lane: LANES.RED,

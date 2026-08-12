@@ -294,17 +294,31 @@ describe('classifyLane guardrails', () => {
     });
   });
 
-  test('gate ON: a commercial extraction type on a residential draft is RED (category_conflict)', () => {
+  test('gate ON: a stamped category conflict is RED (category_conflict)', () => {
+    withGate('true', () => {
+      // The stamp is resolved in index.js with the re-gather in view (a
+      // primary-property extraction must not judge a re-gathered secondary
+      // property) — classifyLane consumes it off propertyFacts.
+      const out = classifyLane({
+        ...baseArgs,
+        propertyFacts: { ...baseArgs.propertyFacts, categoryConflict: 'industrial' },
+      });
+      expect(out.lane).toBe('red');
+      expect(out.causes).toContain('category_conflict');
+    });
+  });
+
+  test('gate ON: a null stamp (re-gathered address) never red-lanes on the primary extraction', () => {
     withGate('true', () => {
       const out = classifyLane({
         ...baseArgs,
+        propertyFacts: { ...baseArgs.propertyFacts, categoryConflict: null },
         context: {
           ...baseArgs.context,
           extraction: { property: { property_type: 'industrial' } },
         },
       });
-      expect(out.lane).toBe('red');
-      expect(out.causes).toContain('category_conflict');
+      expect(out.lane).not.toBe('red');
     });
   });
 

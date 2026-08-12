@@ -297,7 +297,11 @@ async function performPropertyLookup(address, options = {}) {
   // floorplans, and permit data through Claude/OpenAI/Gemini search. The shaped object
   // intentionally matches the old normalized property-record shape so the
   // pricing engine and field-verify logic do not need a provider branch.
-  const aiProperty = await lookupPropertyFromAITrio(address, geo).catch((err) => {
+  // Attempt-status diagnostics: the trio consumes its providers' timeouts
+  // internally, so it reports suspected per-leg timeouts through this
+  // out-param (observational only — feeds the finalize stamp below).
+  const lookupDiag = {};
+  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });
@@ -680,10 +684,12 @@ async function performPropertyLookup(address, options = {}) {
     const record = result.propertyRecord;
     let status = 'no_record';
     let reason = null;
-    // Vacant/new-construction detection runs BEFORE the parcel-ID branch:
-    // an unassessed vacant record usually still carries a parcel ID, so the
-    // resolved branch would swallow exactly the rows the
-    // new_construction_suspected segment exists for (codex pre-push P1).
+    // Vacant/unassessed detection runs BEFORE the parcel-ID branch: such a
+    // record usually still carries a parcel ID, so the resolved branch
+    // would swallow it (codex pre-push P1). The label is deliberately
+    // NEUTRAL — the detector's own contract cannot distinguish an ordinary
+    // empty lot from assessment lag on new construction, so a
+    // construction-specific label would corrupt the segment (codex r3 P2).
     let vacantSuspected = false;
     if (record) {
       try {
@@ -691,27 +697,31 @@ async function performPropertyLookup(address, options = {}) {
         vacantSuspected = !!detectUnassessedVacantParcel(record);
       } catch { /* detector unavailable — fall through to parcel branches */ }
     }
-    if (record && vacantSuspected) {
-      status = 'new_construction_suspected';
-    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
-      status = 'resolved';
-    } else if (record) {
-      status = 'no_parcel';
-    } else if (!hasPrimaryStreetNumber(address)) {
+    // PREREQUISITE failures classify before record success (codex r3 P2):
+    // a numberless address that a provider snapped to SOME record, or a
+    // geocode-less lookup whose record can't be cached (no satellite),
+    // must not read as 'resolved' — the failure is what the segment needs.
+    if (!hasPrimaryStreetNumber(address)) {
       status = 'incomplete_address';
       reason = 'no primary street number';
     } else if (!geo) {
       status = 'geocode_failed';
       reason = result.errors.find((e) => e.source === 'satellite')?.message || null;
-    } else if (result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
-      // lookupPropertyFromAITrio consumes its providers' timeouts
-      // internally (they never reach result.errors), so a record-less
-      // lookup that ran the whole time budget is classified by the
-      // observable proxy — budget exhaustion — instead of undercounting
-      // the provider_timeout segment as no_record (codex r1 P2).
+    } else if (record && vacantSuspected) {
+      status = 'vacant_or_unassessed';
+    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
+      status = 'resolved';
+    } else if (record) {
+      status = 'no_parcel';
+    } else if ((lookupDiag.providerTimeouts || []).length
+      || result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
+      // Whole-budget exhaustion stays as the coarse fallback signal; the
+      // trio's per-leg diag above is the precise one (codex r3 P2).
       || (Number(timing?.totalBudgetMs) > 0 && result.meta.lookupMs >= Number(timing.totalBudgetMs))) {
       status = 'provider_timeout';
-      reason = result.errors.map((e) => e.source).join(',') || 'lookup budget exhausted';
+      reason = (lookupDiag.providerTimeouts || []).join(',')
+        || result.errors.map((e) => e.source).join(',')
+        || 'lookup budget exhausted';
     } else {
       reason = result.errors.map((e) => e.source).join(',') || null;
     }

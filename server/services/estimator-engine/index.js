@@ -1555,6 +1555,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     try {
       const {
         unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
+        commercialCategoryConflict,
       } = require('./unit-scope-model');
       const unitScope = resolveUnitScopeModel({
         propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
@@ -1565,6 +1566,16 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       });
       propertyFacts.unitScope = unitScope;
       result.unitScope = unitScope;
+      // Category-conflict signal, resolved HERE where the re-gather is
+      // known (codex r3 P1): the top-level extraction describes the call's
+      // PRIMARY property — when the composer quoted a different property
+      // (addressRegathered), that extraction must neither red-lane the
+      // quoted one (commercial primary, residential secondary) nor is it
+      // evidence about it; the re-gathered lookup's own signals carry the
+      // quoted property's category. classifyLane consumes the stamp.
+      propertyFacts.categoryConflict = addressRegathered
+        ? null
+        : commercialCategoryConflict({ extraction: context.extraction, intent });
       if (unitScopeGuardrailsEnabled()) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
       }
@@ -1614,9 +1625,16 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         const { unitScopeGuardrailsEnabled } = require('./unit-scope-model');
         if (unitScopeGuardrailsEnabled() && !intent.is_commercial) {
           const { normalizePestPropertyType } = require('../pricing-engine/service-pricing');
+          // Every raw source buildEngineInput's fallback chain can draw
+          // from, in the same precedence — INCLUDING the matched profile
+          // (codex r3 P1: customers.property_type='multifamily' collapses
+          // through pricingSafePropertyType's /family/ branch exactly like
+          // an extraction value, and omitting it left that draft green at
+          // single-family pricing).
           const rawType = String(
             context.extraction?.property?.property_type
             || (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
+            || (profileDescribesQuotedProperty ? trustedCustomer?.property_type : '')
             || '',
           ).toLowerCase();
           const meta = normalizePestPropertyType(engineInput.propertyType);
