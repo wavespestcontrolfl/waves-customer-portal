@@ -1200,7 +1200,13 @@ function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new
     };
     byKey.set(opp.dedupe_key, winner);
   }
+  // Drop companions that cannot clear their own persistence floor BEFORE
+  // the cap: persistAll checks floors afterwards, so ten 60–74-point decay
+  // companions would consume every slot, be discarded at the global floor,
+  // and starve lower-scoring but valid rewrite companions riding the lower
+  // rewrite floor (audit P2). Same floor the persist gate uses.
   return Array.from(byKey.values())
+    .filter(isPersistable)
     .sort((a, b) => b.score - a.score)
     .slice(0, cap);
 }

@@ -729,10 +729,13 @@ describe('deriveLinkBoost', () => {
   });
 
   test('excludeKeys rotates the cap past occupied rows instead of starving lower-scoring pages', () => {
+    // All three clear the default persistence floor — this test is about
+    // cap ROTATION, not floors (a below-floor companion is dropped before
+    // the cap now; see the starvation test below).
     const parents = [
       ctrParent({ page_url: '/a/', score: 95 }),
       ctrParent({ page_url: '/b/', score: 85 }),
-      ctrParent({ page_url: '/c/', score: 70 }),
+      ctrParent({ page_url: '/c/', score: 80 }),
     ];
     // First run: cap 2 → the top two pages.
     const firstRun = deriveLinkBoost(parents, { cap: 2 });
@@ -742,6 +745,33 @@ describe('deriveLinkBoost', () => {
     const occupied = new Set(firstRun.map((o) => o.dedupe_key));
     const secondRun = deriveLinkBoost(parents, { cap: 2, excludeKeys: occupied });
     expect(secondRun.map((o) => o.page_url)).toEqual(['/c/']);
+  });
+
+  test('non-persistable companions never consume cap slots (no starvation of valid lower-scoring ones)', () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      // Two decay companions at 69 outscore the rewrite companion at 65,
+      // but decay rides the global 75 floor and would be discarded at
+      // persist time — burning the whole cap and starving the rewrite
+      // companion, which is persistable at its own 60 floor.
+      const out = deriveLinkBoost([
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: '/decay-1/', service: 'pest', city: null, query: null,
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: '/decay-2/', service: 'pest', city: null, query: null,
+        },
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 65,
+          page_url: '/rewrite/', service: 'pest', city: null, query: 'q',
+        },
+      ], { cap: 2 });
+      expect(out.map((o) => o.page_url)).toEqual(['/rewrite/']);
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
   });
 
   test('companions derived after the facts boost inherit the boosted parent score', () => {
