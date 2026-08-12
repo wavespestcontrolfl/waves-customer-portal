@@ -68,9 +68,18 @@ function serviceTemplateLabel(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+// Keep in lockstep with loadCurrentServiceSpendContext's spendSource values
+// and with EstimateToolViewV2's SPEND_SOURCE_LABEL — an unrecognized source
+// falls through to "price unavailable" beside a concrete dollar amount, which
+// reads as broken and loses the provenance that tells staff whether a figure
+// is a real payment or an inference.
 function spendSourceLabel(value) {
   if (value === "last_paid_invoice") return "last paid invoice";
   if (value === "scheduled_estimate") return "scheduled price fallback";
+  if (value === "prepaid_allocation") return "prepaid allocation";
+  if (value === "per_application_fee") return "billing stamp";
+  if (value === "monthly_rate_derived") return "derived from monthly rate";
+  if (value === "mixed_basis") return "mixed basis — see properties";
   return "price unavailable";
 }
 
@@ -275,24 +284,68 @@ export function CustomerAccountPanel({ account, profile }) {
       </div>
       <div className="mt-3 overflow-hidden rounded-sm border border-emerald-200 bg-white">
         <div className="border-b border-emerald-100 px-3 py-2 text-[14px] font-medium text-zinc-900">Current service + spend</div>
-        {services.length ? services.map((service) => (
-          <div key={service.key} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-3 last:border-b-0">
-            <div>
-              <div className="text-[14px] font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
-              <div className="text-[14px] text-zinc-500">
-                {spendSourceLabel(service.spendSource)}
-                {service.lastPaidAt ? ` · ${String(service.lastPaidAt).slice(0, 10)}` : ""}
-                {service.qualifiesForWaveGuard === false ? " · not a tier service" : ""}
+        {services.length ? services.map((service) => {
+          // A service active at several properties is several contracts, each
+          // with its own per-application price; currentPerVisit sums them, so
+          // rendering that sum under "per application" quotes two $100
+          // contracts as $200. Itemize instead — same treatment the estimate
+          // builder's panel applies to the same payload.
+          const perProperty = Array.isArray(service.contracts) && service.contracts.length > 1
+            ? service.contracts
+            : [];
+          return (
+            <div key={service.key} className="border-b border-zinc-100 px-3 py-3 last:border-b-0">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-[14px] font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
+                  <div className="text-[14px] text-zinc-500">
+                    {/* Cadence belongs on the family row too, not only inside
+                        the multi-property loop: a monthly-derived amount is
+                        meaningless without the divisor that produced it
+                        ("$133.33" vs "Every 6 weeks · 9/yr · $133.33"). */}
+                    {[
+                      service.cadenceLabel,
+                      service.visitsPerYear ? `${service.visitsPerYear}/yr` : null,
+                      spendSourceLabel(service.spendSource),
+                      service.lastPaidAt ? String(service.lastPaidAt).slice(0, 10) : null,
+                      service.qualifiesForWaveGuard === false ? "not a tier service" : null,
+                      perProperty.length ? `${perProperty.length} properties` : null,
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                </div>
+                {perProperty.length ? null : (
+                  <div className="text-right">
+                    <div className="text-[16px] font-medium text-zinc-950">
+                      {service.currentPerVisit == null ? "Not available" : money(service.currentPerVisit)}
+                    </div>
+                    <div className="text-[14px] text-zinc-500">per application</div>
+                  </div>
+                )}
               </div>
+              {perProperty.map((contract, i) => (
+                <div
+                  key={contract.serviceAddress || i}
+                  className="mt-1.5 flex flex-wrap items-baseline justify-between gap-2 border-l border-zinc-200 pl-3"
+                >
+                  <div className="text-[14px] text-zinc-500">
+                    {[
+                      contract.serviceAddress || "Property not recorded",
+                      contract.cadenceLabel,
+                      contract.visitsPerYear ? `${contract.visitsPerYear}/yr` : null,
+                      // Per-contract provenance: one property can be prepaid
+                      // while another bills its scheduled price.
+                      spendSourceLabel(contract.spendSource),
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                  <div className="ml-auto text-[14px] text-zinc-950">
+                    {contract.perVisit == null ? "Not available" : money(contract.perVisit)}
+                    <span className="text-zinc-500"> / application</span>
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="text-right">
-              <div className="text-[16px] font-medium text-zinc-950">
-                {service.currentPerVisit == null ? "Not available" : money(service.currentPerVisit)}
-              </div>
-              <div className="text-[14px] text-zinc-500">per application</div>
-            </div>
-          </div>
-        )) : (
+          );
+        }) : (
           <div className="px-3 py-3 text-[14px] text-zinc-600">Account matched, but no active recurring service rows were found.</div>
         )}
       </div>
