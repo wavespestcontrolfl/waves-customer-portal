@@ -507,7 +507,8 @@ const TwilioService = {
       // 20:00 ET cutoff, so checking any earlier lets a 19:59 send reach
       // Twilio at 20:01. Fail closed: a throwing check blocks the send.
       // Legacy direct sendSMS callers don't pass it and are unaffected.
-      if (typeof options.preSendCheck === "function") {
+      const runPreSendCheck = async () => {
+        if (typeof options.preSendCheck !== "function") return null;
         let verdict;
         try {
           verdict = await options.preSendCheck();
@@ -533,11 +534,72 @@ const TwilioService = {
             nextAllowedAt: verdict?.nextAllowedAt,
           };
         }
+        return null;
+      };
+      const preSendBlockedResult = await runPreSendCheck();
+      if (preSendBlockedResult) return preSendBlockedResult;
+      // Push channel routing (GATE_PUSH_CHANNEL_ROUTING, default OFF).
+      // Placed HERE — after owner silence, feature gates, the per-template
+      // kill switch, validateOutbound, and the caller's send-window
+      // boundary re-check above — so a push obeys every guard an SMS does
+      // (same precedent as the internal-alert redirect at the top of this
+      // method). push_first with proven device delivery skips Twilio; the
+      // routing layer writes sms_log + conversations history itself.
+      // push_and_sms fires AFTER messages.create succeeds (below), so a
+      // retried SMS failure can never duplicate the push leg.
+      const PushRouting = require("./messaging/push-channel-routing");
+      const pushRoute = PushRouting.decidePushRoute({
+        gateOn: PushRouting.gatePushRoutingOn(),
+        customerId: options.customerId || null,
+        messageType: options.messageType,
+        hasMedia: urls.length > 0 || Boolean(options.media),
+        humanAuthored: options.humanAuthored === true,
+        operatorInitiated: options.operatorInitiated === true,
+        // IB send_sms / comms composer stamp adminUserId without the
+        // operatorInitiated flag — admin attribution is operator provenance.
+        adminAttributed: Boolean(options.adminUserId),
+      });
+      if (pushRoute === "push_first") {
+        const pushed = await PushRouting.attemptPushFirst({
+          customerId: options.customerId,
+          to,
+          body,
+          messageType: options.messageType,
+          fromNumber,
+          // Proof-of-send linkage for the scheduled-SMS recovery sweep —
+          // without it a crash window makes the sweep resend the message.
+          scheduledSmsLogId: options.scheduledSmsLogId,
+          // Per-leg send-window gate inside the fan-out (round-4 P1).
+          preSendCheck: options.preSendCheck,
+        });
+        if (pushed.delivered) {
+          logger.info(
+            `[push-routing] ${options.messageType} delivered as push to customer ${options.customerId} — SMS skipped`,
+          );
+          return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
+        }
+        // The push attempt consumed real time (each leg is bounded at 8s but
+        // a multi-device fan-out adds up) — the 20:00 ET boundary can pass
+        // mid-attempt, so the fallback SMS re-checks the window before the
+        // Twilio handoff exactly like a fresh send.
+        const postPushBlocked = await runPreSendCheck();
+        if (postPushBlocked) return postPushBlocked;
       }
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
+      if (pushRoute === "push_and_sms") {
+        // Companion push, best-effort and only now that Twilio accepted the
+        // SMS — never awaited into the send path.
+        void PushRouting.sendCompanionPush({
+          customerId: options.customerId,
+          to,
+          body,
+          messageType: options.messageType,
+          preSendCheck: options.preSendCheck,
+        }).catch(() => {});
+      }
 
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as

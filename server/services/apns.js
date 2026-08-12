@@ -18,6 +18,14 @@ const http2 = require('http2');
 const jwt = require('jsonwebtoken');
 const logger = require('./logger');
 
+// AMBIGUITY, deliberate: destroying after handoff cannot retract bytes
+// the provider already accepted — the push may still deliver. Routing
+// classifies timeouts as undelivered ON PURPOSE (at-least-once: a rare
+// duplicate beats silent loss; see push-channel-routing.js rule 1).
+// Bounded requests: a hung APNs connection must fail the send promptly —
+// and destroying the stream also prevents a LATE delivery after a caller
+// (push-channel-routing) has already taken its SMS fallback.
+const APNS_REQUEST_TIMEOUT_MS = 8000;
 const HOST_PROD = 'https://api.push.apple.com';
 const HOST_SANDBOX = 'https://api.sandbox.push.apple.com';
 
@@ -128,9 +136,17 @@ function send(deviceToken, notification) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
+      clearTimeout(wallClockKiller);
       try { client.close(); } catch { /* noop */ }
       resolve(result);
     };
+    // Same connection-phase gap as fcm.js: stream timers only run once the
+    // session is connected — a DNS/TCP/TLS stall on http2.connect never
+    // reaches them. destroy() fails the leg and prevents late delivery.
+    const wallClockKiller = setTimeout(() => {
+      try { client.destroy(); } catch { /* noop */ }
+      finish({ ok: false, failed: true, reason: 'apns_timeout' });
+    }, APNS_REQUEST_TIMEOUT_MS);
 
     client.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
 
@@ -153,6 +169,10 @@ function send(deviceToken, notification) {
       req.setEncoding('utf8');
       req.on('data', (chunk) => { data += chunk; });
       req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+      req.setTimeout(APNS_REQUEST_TIMEOUT_MS, () => {
+        try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* noop */ }
+        finish({ ok: false, failed: true, reason: 'apns_timeout' });
+      });
       req.on('end', () => {
         let reason = null;
         if (data) { try { reason = JSON.parse(data).reason; } catch { /* non-JSON body */ } }
