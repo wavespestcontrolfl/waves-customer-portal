@@ -454,6 +454,11 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // keep the joined-row comparison (a divergent line1 there is still a
     // genuinely stamped divergence).
     let linkedVisit = null;
+    // Was the premises this report describes actually PROVEN, rather than
+    // assumed? Only a resolved stamp or a resolved property/estimate link
+    // proves it; everything else falls back to the single-premises proof
+    // below (pre-push P0).
+    let premisesProven = false;
     if (service.scheduled_service_id) {
       linkedVisit = await database('scheduled_services')
         .where({ id: service.scheduled_service_id })
@@ -470,6 +475,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         // (city-only vs zip-only) — sameScopeKey's per-field wildcard
         // accepts that across cities; require one shared proof (PR r6).
         if (!scopeKeysShareLocality(rawKey, primaryStreet)) return null;
+        premisesProven = true;
       } else if (linkedVisit && (linkedVisit.property_id || linkedVisit.source_estimate_id)) {
         // Unstamped but LINKED (codex #3367 PR r7): dispatch's own rule
         // resolves an unstamped row through its property row / creating
@@ -493,8 +499,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         if (!resolvedKey || linkage.scopeKeyLacksLocality(resolvedKey)) return null;
         if (!linkage.sameScopeKey(resolvedKey, primaryStreet)) return null;
         if (!scopeKeysShareLocality(resolvedKey, primaryStreet)) return null;
+        premisesProven = true;
       }
-      // No raw stamp and no linkage → the visit ran at the primary property.
+      // A linked row that is MISSING, or carries no stamp and no
+      // property/estimate linkage, proves nothing (pre-push P0). Historical
+      // rows predate those linkage columns, and a permanent report token
+      // can belong to a secondary property — assuming primary here
+      // published the primary property's exact offer on the wrong report.
+      // It falls through to the same single-premises proof the unlinked
+      // branch uses.
     } else {
       const reportStreet = linkage.normalizedStampedStreet(
         service.address_line1, service.address_line2, service.city, service.zip
@@ -515,6 +528,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       // price on the click, so the card must prove single-premises or
       // suppress. Unprovable = no card, the same posture the linked branches
       // above take (a throw here rides the outer catch to the same place).
+    }
+    // ONE gate for every path that did not prove the premises: an unlinked
+    // report (address_* is the customer mirror, so it can only ever prove
+    // EQUAL) and a linked row that could not be resolved are the same
+    // situation — the account must have a single premises, or no card.
+    if (!premisesProven) {
       if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
         return null;
       }

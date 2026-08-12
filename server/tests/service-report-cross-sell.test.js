@@ -702,6 +702,29 @@ describe('buildReportCrossSell', () => {
       expect(result.serviceKey).toBe('lawn_care');
     });
 
+    test('a LINKED row that resolves to nothing gets the same proof (pre-push P0)', async () => {
+      // Historical rows predate the linkage columns: a linked visit with no
+      // stamp, no property_id and no source_estimate_id proves nothing, and
+      // assuming primary published the primary property's exact offer on a
+      // report that may belong to a secondary one. Same gate as unlinked.
+      const bare = { id: 'v-bare', status: 'completed' };
+      const secondary = {
+        properties: [{ id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' }],
+      };
+      const withSecond = singlePremisesDb({ stampRows: [bare], ...secondary });
+      expect(await buildReportCrossSell(
+        SERVICE({ scheduled_service_id: 'v-bare' }), withSecond, { propertyLookup: missLookup },
+      )).toBeNull();
+
+      // Single-premises account: the same unresolvable row still gets a card.
+      const singleOnly = singlePremisesDb({ stampRows: [bare] });
+      const result = await buildReportCrossSell(
+        SERVICE({ scheduled_service_id: 'v-bare' }), singleOnly, { propertyLookup: missLookup },
+      );
+      expect(result).not.toBeNull();
+      expect(result.serviceKey).toBe('lawn_care');
+    });
+
     test('a locality-less witness is UNPROVEN, not benign (PR r12 P1)', async () => {
       // A secondary property with the same street and unit in another city
       // produces exactly this key, so accepting it would declare the wrong
