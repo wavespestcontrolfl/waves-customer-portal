@@ -702,6 +702,74 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
     expect(brief.gsc_signal.family_queries).toContain('deep sixth variant phrasing');
   });
 
+  test('a collapsed city-service target binds the writer to EVERY contributing query', () => {
+    // mineNoContentYet emits one row per (service, city) because every query
+    // for that segment create-or-refreshes the SAME page. The losing queries
+    // cannot queue separately — they resolve to that same page — so without
+    // this the collapse silently discards their demand.
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-ncy-city-service',
+        bucket: 'no_content_yet',
+        query: 'termite inspection sarasota fl',
+        page_url: null,
+        service: 'termite',
+        city: 'Sarasota',
+        signal_metadata: {
+          impressions: 80,
+          contributing_queries: [
+            'termite inspection sarasota fl',
+            'termite treatment cost sarasota',
+          ],
+          contributing_impressions: 145,
+        },
+      },
+      signals: {},
+      decision: {
+        page_type: 'city_service',
+        action_type: 'create_or_refresh_city_service_page',
+        final_score: 60,
+        score_breakdown: {},
+      },
+      existingBriefVersions: 0,
+    });
+    const segmentSection = brief.required_sections.find((sec) => /segment coverage/i.test(sec));
+    expect(segmentSection).toBeTruthy();
+    expect(segmentSection).toContain('termite inspection sarasota fl');
+    expect(segmentSection).toContain('termite treatment cost sarasota');
+    // …and the provenance round-trips through the brief schema too.
+    expect(brief.gsc_signal.contributing_queries).toContain('termite treatment cost sarasota');
+    expect(brief.gsc_signal.contributing_impressions).toBe(145);
+  });
+
+  test('a single-query city-service row gets NO segment section', () => {
+    // Nothing was collapsed, so there is no extra demand to bind — the
+    // section would just be noise in the writer contract.
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-ncy-single',
+        bucket: 'no_content_yet',
+        query: 'termite inspection sarasota fl',
+        page_url: null,
+        service: 'termite',
+        city: 'Sarasota',
+        signal_metadata: { impressions: 80 },
+      },
+      signals: {},
+      decision: {
+        page_type: 'city_service',
+        action_type: 'create_or_refresh_city_service_page',
+        final_score: 60,
+        score_breakdown: {},
+      },
+      existingBriefVersions: 0,
+    });
+    expect(brief.required_sections.find((sec) => /segment coverage/i.test(sec))).toBeFalsy();
+    expect(brief.gsc_signal.contributing_queries).toBeNull();
+  });
+
   test('FAQ-blocked service steers the coverage section AWAY from FAQ formats (Codex r22)', () => {
     const builder = new ContentBriefBuilder();
     const brief = builder._composeBrief({
