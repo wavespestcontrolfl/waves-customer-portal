@@ -238,10 +238,14 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   });
 
   // Caller-stated sizes — the ONLY unit-scoped source for a commercial
-  // tenant, and for an apartment unit (whose county record is complex-wide).
+  // suite, and for an apartment unit (whose county record is complex-wide).
+  // Keyed on the resolved SERVICE SCOPE, not tenancy: an OWNER-occupied
+  // commercial unit is a suite too, and scoping their stated unit size as
+  // 'building' made the suite area unresolved and cleared the one usable
+  // measurement they gave us (codex r11 P1).
   const stated = positive(extraction?.property?.approximate_living_sqft);
   if (stated) {
-    const statedScope = (isCommercial && tenant) ? 'suite'
+    const statedScope = (isCommercial && (tenant || serviceScope === 'commercial_suite')) ? 'suite'
       : (serviceScope === 'residential_unit' ? 'unit' : 'building');
     out.push({
       id: nextId('caller'),
