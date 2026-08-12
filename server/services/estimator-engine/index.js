@@ -1595,10 +1595,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
           ? 'lookup_category:commercial' : null)
         : commercialCategoryConflict({ extraction: context.extraction, intent });
-      // The lot-clearing mutation also stays off on a cross-property
-      // re-gather — a scope inferred without the quoted property's own
-      // extraction must not change lot-driven pricing (codex r4 P1).
-      if (unitScopeGuardrailsEnabled() && !crossPropertyRegather) {
+      // The lot-clearing mutation runs on BOTH paths: the cross-property
+      // fence already lives at the model's INPUT (extraction nulled,
+      // tenancy suppressed above), so any unit scope the model still
+      // infers comes from the QUOTED property's own evidence — its
+      // re-gathered record and composed address. Skipping the apply there
+      // let a second-property Unit/Suite quote keep the master-parcel lot
+      // (codex r10 P1, refining the r4 fence).
+      if (unitScopeGuardrailsEnabled()) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
       }
     } catch (err) {

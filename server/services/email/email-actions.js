@@ -84,7 +84,10 @@ function emailProseForScan(body) {
   const out = [];
   for (const line of lines) {
     if (/^\s*>/.test(line)) continue; // quoted history
-    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:|From:\s|Sent from |Best regards|Kind regards|Sincerely|Thanks,|Thank you,)/i.test(line)) break;
+    // Signoffs count only as WHOLE lines — "Thank you, we need pest
+    // control for a warehouse" is the request itself, and breaking on it
+    // emptied the scan body (codex r10 P1).
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s|Sent from |(?:best regards|kind regards|sincerely|thanks|thank you)[,.!]?\s*$)/i.test(line)) break;
     out.push(line);
   }
   return out.join('\n').slice(0, 2000);
