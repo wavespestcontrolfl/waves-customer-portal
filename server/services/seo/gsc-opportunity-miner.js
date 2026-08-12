@@ -3599,23 +3599,7 @@ class GscOpportunityMiner {
       opp.score = total;
       opp.score_breakdown = breakdown;
       opp.action_type = actionForOpportunity(opp);
-      // TARGET-keyed on the city-service route. dedupeKey falls back to the
-      // QUERY when a row has no page_url, so N distinct weak queries for one
-      // (service, city) mint N keys that all create-or-refresh the SAME
-      // page — the runner then drafts that page N times. This is the
-      // per-query collapse above, one level up: that one dedupes the
-      // classifier splits OF a query, this one dedupes the queries OF a
-      // target. Keying on the target lets persistAll's existing
-      // highest-score collapse elect one row per page instead of adding a
-      // parallel arbitration (uncapped pre-push audit P1).
-      //
-      // The blog route stays QUERY-keyed: cityless candidates each become
-      // their own post, so collapsing them would silently drop demand. It
-      // cannot collide with a city-service key either — the blog route only
-      // fires when the city is absent, and a query is never empty.
-      opp.dedupe_key = opp.action_type === 'create_or_refresh_city_service_page'
-        ? dedupeKey({ ...opp, query: null })
-        : dedupeKey(opp);
+      opp.dedupe_key = dedupeKey(opp);
       out.push(opp);
     }
     if (uncovered) {
@@ -3626,7 +3610,50 @@ class GscOpportunityMiner {
       // the upsert revives the row.
       logger.warn(`[gsc-opp-miner] no_content_yet: ${uncovered} candidate(s) skipped — a contributing domain has no in-window query→page map rows`);
     }
-    return out;
+
+    // ONE row per city-service TARGET. Several distinct weak queries can
+    // resolve to the same (service, city), and every one of them
+    // create-or-refreshes the SAME page — persisted separately, the runner
+    // drafts that one page once per query. This is the per-query collapse
+    // above one level up: that one dedupes the classifier splits OF a
+    // query, this one dedupes the queries OF a target (uncapped pre-push
+    // audit P1).
+    //
+    // The winner keeps its OWN query-derived dedupe key. A target-keyed row
+    // (query dropped from the key) would dedupe just as well but be stable
+    // forever, and the upsert's frozen-row guard skips 'done'/'skipped'
+    // rows ENTIRELY — so once a segment's page completed once, no later
+    // query could ever enqueue that target again and the bucket would go
+    // permanently silent for it, which is the exact failure this PR exists
+    // to fix (cloud P2). Every contributing query rides along in
+    // signal_metadata instead, so the brief still sees the full demand
+    // rather than only the winner's intent.
+    const targets = new Map();
+    const collapsed = [];
+    for (const opp of out) {
+      if (opp.action_type !== 'create_or_refresh_city_service_page') {
+        collapsed.push(opp);
+        continue;
+      }
+      const key = ownPageKey(opp.service, opp.city);
+      if (!targets.has(key)) targets.set(key, []);
+      targets.get(key).push(opp);
+    }
+    for (const group of targets.values()) {
+      // Same bucket and action across the group, so persistFloorFor is
+      // identical for every member and the top score IS the persistable-
+      // first pick the per-query collapse above makes explicitly.
+      const winner = group.reduce((best, o) => (o.score > best.score ? o : best), group[0]);
+      if (group.length > 1) {
+        winner.signal_metadata.contributing_queries = group
+          .map((o) => o.query)
+          .sort();
+        winner.signal_metadata.contributing_impressions = group
+          .reduce((sum, o) => sum + (o.signal_metadata.impressions || 0), 0);
+      }
+      collapsed.push(winner);
+    }
+    return collapsed;
   }
 
   // ── persistence ────────────────────────────────────────────────────
