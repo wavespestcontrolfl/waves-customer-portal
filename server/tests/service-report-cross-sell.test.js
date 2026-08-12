@@ -306,6 +306,23 @@ describe('buildReportCrossSell', () => {
     );
     expect(nested.features.attachedGarage).toBe(true);
     expect(nested.features.pool).toBe(true);
+
+    // Water adjacency has the same split with a twist (PR r18 P1): the V2
+    // adapter persists the real enum at inputs.nearWater while writing
+    // features.nearWater FALSE, because it only compares the enum to 'YES'.
+    for (const value of ['CANAL_ADJACENT', 'POND_ON_PROPERTY', 'LAKE_ADJACENT']) {
+      const water = await loadEstimateSeed(
+        seedDb({ nearWater: value, features: { nearWater: false } }), 'cust-1', street,
+      );
+      expect(water.features.nearWater).toBe(true);
+    }
+    // 'NONE' and 'UNKNOWN' are not adjacency, and must not invent it.
+    for (const value of ['NONE', 'UNKNOWN', '']) {
+      const dry = await loadEstimateSeed(
+        seedDb({ nearWater: value, features: { nearWater: false } }), 'cust-1', street,
+      );
+      expect(dry.features.nearWater).toBe(false);
+    }
   });
 
   test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {

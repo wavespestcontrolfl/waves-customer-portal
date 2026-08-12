@@ -333,6 +333,17 @@ function lookupEnabled() {
   return process.env.CUSTOMER_PRICING_AI_LOOKUP !== 'false';
 }
 
+// Every field the accepted-estimate seed can fill, in one list so a blanket
+// rejection cannot silently miss one. A wrong-premises lookup rejects all of
+// them (codex #3367 PR r18); the per-field rejections elsewhere name their
+// own members. Keep in sync with the seed replay in resolvePropertyContext.
+const SEED_FILLABLE_FIELDS = [
+  'homeSqFt', 'lotSqFt', 'lawnSqFt', 'bedArea', 'stories',
+  'propertyType', 'yearBuilt', 'constructionMaterial', 'foundationType', 'roofType',
+  'pool', 'poolCage', 'poolCageSize', 'nearWater',
+  'shrubs', 'trees', 'complexity', 'irrigation', 'treeCount', 'attachedGarage',
+];
+
 // Columns the `customers` table ACTUALLY has for pricing (verified against
 // the live schema 2026-08-09): bed_sqft, canopy_type, lot_sqft, palm_count,
 // property_sqft, property_type. Everything else this resolver used to read
@@ -462,11 +473,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // missing home size fails closed to PROPERTY_DETAILS_NEEDED.
       const lookupDescribesThisProperty = !hasGlobalVerifyFlag(p);
       if (!lookupDescribesThisProperty) {
-        // The premises itself is unverified — every dimension is rejected,
-        // so none of them may be back-filled from an older estimate either.
-        for (const field of ['homeSqFt', 'lotSqFt', 'lawnSqFt', 'bedArea', 'stories']) {
-          lookupRejectedFields.add(field);
-        }
+        // The premises itself is unverified — the lookup may describe a
+        // different parcel entirely — so NOTHING may be back-filled from an
+        // older estimate: not the dimensions, not the features, not the
+        // classification, not the structural facts (codex #3367 PR r18).
+        // Rejecting only the dimensions still let a customer whose stored
+        // sqft was sufficient receive an exact price built on the older
+        // estimate's modifiers, for a property we cannot prove is theirs.
+        for (const field of SEED_FILLABLE_FIELDS) lookupRejectedFields.add(field);
       } else {
         // FLAG-based rejections only. The bed-area and turf-ESTIMATE
         // predicates also return false when the lookup simply carried no
@@ -564,6 +578,18 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // profile's provenance bit says the record/vision supplied it.
       // Legacy cached profiles without _observed keep the old behavior.
       const typeObserved = !p._observed || p._observed.propertyType !== false;
+      // A REFUSED classification is not a gap either (codex #3367 PR r18):
+      // condo/townhome moves the price, so restoring the older estimate's
+      // type publishes an exact amount on the very value the lookup says to
+      // confirm first.
+      // Only a type the lookup actually CARRIED can be refused. A silent
+      // lookup is a gap the seed is entitled to fill (the r3 ruling), and
+      // typeObserved alone does not distinguish them — it is true for a
+      // legacy profile with no _observed bits at all, including one that
+      // carried no classification.
+      if (typeObserved && p.propertyType && !lookupPropertyTypeIsTrustworthy(p)) {
+        lookupRejectedFields.add('propertyType');
+      }
       const adoptedLookupType = (typeObserved && lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
         || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null);
       if (adoptedLookupType) {
@@ -819,7 +845,8 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     // lookup/record classification (codex #3367 PR r3) — a trusted
     // single_family read is indistinguishable from the default by value,
     // so provenance is tracked explicitly above.
-    if (!customer.property_type && !propertyTypeFromLookup && propertyType === 'single_family'
+    if (seedMayFill('propertyType')
+      && !customer.property_type && !propertyTypeFromLookup && propertyType === 'single_family'
       && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
       propertyType = propertySeed.propertyType;
     }

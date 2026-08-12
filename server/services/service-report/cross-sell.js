@@ -327,6 +327,19 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (inputs.attachedGarage !== undefined && inputs.attachedGarage !== null) {
     cleanedFeatures = { ...(cleanedFeatures || {}), attachedGarage: !!inputs.attachedGarage };
   }
+  // Water adjacency has the same top-level/feature split, with a twist
+  // (codex #3367 PR r18): the V2 adapter persists the real enum
+  // ('CANAL_ADJACENT', 'POND_ON_PROPERTY', …) at inputs.nearWater while
+  // writing features.nearWater FALSE, because it only compares the enum to
+  // 'YES'. Copying features alone therefore loses water adjacency entirely,
+  // and the pest, mosquito, and rodent modifiers that key on it price low.
+  // Normalized the same way the pricer's own adoption does — any value that
+  // is not 'NONE' is adjacency — and only ever upgraded to true, so a
+  // features member that already says true is never contradicted.
+  const seededWater = String(inputs.nearWater || '').trim().toUpperCase();
+  if (seededWater && seededWater !== 'NONE' && seededWater !== 'UNKNOWN') {
+    cleanedFeatures = { ...(cleanedFeatures || {}), nearWater: true };
+  }
   let zeroTreeCountAmbiguous = false;
   if (cleanedFeatures
     && Object.prototype.hasOwnProperty.call(cleanedFeatures, 'treeCount')

@@ -268,6 +268,40 @@ describe('performPropertyLookup cacheOnly', () => {
     expect(writes.length).toBe(0);
   });
 
+  it('an unaudited row whose record is a SNAPPED neighbor is a miss, not a hit (PR r18 P1)', async () => {
+    // Pre-audit rows carry no _addressAudit. The cache-only path is
+    // latency-bound and cannot run the backfill, so returning the row
+    // rebuilds the result with no 'address' verification flag — the exact
+    // signal every downstream price guard keys on. Here the cached record's
+    // house number disagrees with the typed one, so serving it unflagged
+    // would let the report cross-sell publish an exact price from the
+    // NEIGHBOR's parcel for the rest of the TTL.
+    const snapped = cachedRow();
+    snapped.property_record.formattedAddress = '2967 Rock Creek Dr, Port Charlotte, FL 33948';
+    snapped.property_record.addressLine1 = '2967 Rock Creek Dr';
+    mockDbHandler = () => fakeTable({ row: snapped });
+
+    const result = await performPropertyLookup(ADDRESS, { cacheOnly: true, persist: false });
+    expect(result).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('an already-audited row still serves on the cache-only path', async () => {
+    // The guard is about MISSING audit evidence, not about the audit's
+    // verdict — a row that carries one keeps its normal hit.
+    const audited = cachedRow();
+    audited.property_record._addressAudit = {
+      county: 'Charlotte', houseNumber: '2965', streetLabel: 'Rock Creek Dr',
+      streetExists: true, hasExactMatch: true, parcelCount: 1, nearestNumbers: [],
+    };
+    mockDbHandler = () => fakeTable({ row: audited });
+
+    const hit = await performPropertyLookup(ADDRESS, { cacheOnly: true, persist: false });
+    expect(hit).not.toBeNull();
+    expect(hit.meta.cache).toBe('hit');
+  });
+
   it('cacheOnly combined with refresh still refuses the live pipeline', async () => {
     mockDbHandler = () => fakeTable({ row: cachedRow() });
 

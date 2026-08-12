@@ -231,6 +231,26 @@ async function performPropertyLookup(address, options = {}) {
       const cachedSnapped = cached.property_record
         ? typedNumberDisagreesWithRecord(address, cached.property_record)
         : null;
+      // The cache-only path cannot run the backfill (it is latency-bound and
+      // must not make a GIS call), so a row that still NEEDS the audit is
+      // unaudited evidence — and returning it rebuilds the result with no
+      // 'address' verification flag, which is exactly the signal every
+      // downstream price guard keys on. A detected snap is the acute case:
+      // the cached record belongs to a different house number, and serving
+      // it unflagged lets the report cross-sell publish an exact price from
+      // the NEIGHBOR's parcel for the rest of the 180-day TTL. Treated as a
+      // miss instead (codex #3367 PR r18) — the caller prices from the
+      // stored profile alone, and any non-cache-only caller still backfills
+      // the audit and resumes normal hits.
+      if (
+        cacheOnly
+        && cached.property_record
+        && cached.property_record._addressAudit === undefined
+        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
+      ) {
+        logger.info('[property-lookup-v2] cache-only: unaudited row needs a house-number audit — treating as miss');
+        return null;
+      }
       if (
         !cacheOnly
         && cached.property_record

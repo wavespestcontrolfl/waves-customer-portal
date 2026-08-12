@@ -445,6 +445,75 @@ describe('customer pricing AI helpers', () => {
     expect(price(await run({ garageType: '', seedGarage: true }))).toBeGreaterThan(price(baseline));
   });
 
+  test('a wrong-premises lookup blocks EVERY seed field, not just dimensions (PR r18 P1)', async () => {
+    // The global 'address' flag means the lookup may describe a different
+    // parcel. Rejecting only the dimensions still let a customer whose
+    // STORED sqft was sufficient get an exact price built on the older
+    // estimate's modifiers, classification, and structural facts — for a
+    // property we cannot prove is theirs.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (flags) => resolvePropertyContext({
+      // Stored dimensions are enough to price without the lookup.
+      customer: propertyCustomer({ id: 'cust-premises', property_sqft: 2200, lot_sqft: 7000, property_type: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, aiConfidence: 0.9, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      propertySeed: {
+        homeSqFt: 2400, bedArea: 1200, stories: 2,
+        propertyType: 'condo', yearBuilt: 1975, constructionMaterial: 'WOOD_FRAME',
+        foundationType: 'CRAWLSPACE', roofType: 'TILE',
+        features: { pool: true, poolCage: true, trees: 'heavy', attachedGarage: true },
+      },
+    });
+
+    const clean = await resolve([]);
+    expect(clean.propertyInput.features.pool).toBe(true);
+    expect(clean.propertyInput.propertyType).toBe('condo');
+    expect(clean.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+
+    const wrongPremises = await resolve([{ field: 'address', priority: 'high' }]);
+    expect(wrongPremises.propertyInput.features.pool).not.toBe(true);
+    expect(wrongPremises.propertyInput.features.poolCage).not.toBe(true);
+    expect(wrongPremises.propertyInput.features.attachedGarage).not.toBe(true);
+    expect(wrongPremises.propertyInput.propertyType).not.toBe('condo');
+    expect(wrongPremises.propertyInput.constructionMaterial).toBeNull();
+    expect(wrongPremises.propertyInput.foundationType).toBeNull();
+    expect(wrongPremises.propertyInput.roofType).toBeNull();
+  });
+
+  test('a FLAGGED property type is not restored by the seed (PR r18 P1)', async () => {
+    // condo/townhome classification moves the price, so restoring the older
+    // estimate's type publishes an exact amount on the value the lookup
+    // says to confirm. A SILENT lookup stays a gap the seed may fill —
+    // that is the r3 ruling and it must survive this guard.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = ({ lookupType, flags = [] }) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-type-flag', property_type: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1, aiConfidence: 0.9,
+          fieldVerifyFlags: flags,
+          ...(lookupType ? { propertyType: lookupType } : {}),
+        },
+        propertyRecord: {},
+      }),
+      propertySeed: { propertyType: 'condo' },
+    });
+
+    // Silent lookup → the seed fills (unchanged r3 behavior).
+    expect((await resolve({ lookupType: null })).propertyInput.propertyType).toBe('condo');
+    // Carried but FLAGGED → refused, and the seed may not stand it back up.
+    const flagged = await resolve({
+      lookupType: 'townhome',
+      flags: [{ field: 'propertyType', priority: 'high' }],
+    });
+    expect(flagged.propertyInput.propertyType).not.toBe('condo');
+    expect(flagged.propertyInput.propertyType).not.toBe('townhome');
+  });
+
   test('a REJECTED vision feature is not refilled from the seed (PR r17 P1)', async () => {
     // lookupFeaturesAreTrustworthy is exactly the flag/confidence gate for
     // vision features. When it refuses them the values are not adopted —
