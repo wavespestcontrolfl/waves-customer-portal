@@ -611,23 +611,35 @@ async function getOptions(serviceId) {
   // enforcer); the counter stays advisory, commit() is the enforcer.
   let customCompose = null;
   if (customReasonEnabled()) {
-    let composeUrl = null;
-    if (service.reschedule_token) {
-      const { existingShortUrlFor } = require('./short-url');
-      const { portalUrl } = require('../utils/portal-url');
-      composeUrl = (await existingShortUrlFor({
-        kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
-      })) || portalUrl('/l/xxxxxxxxxx');
-      // The template renderer strips https:// from owned portal hosts, so
-      // the counter must count the scheme-less form the customer receives.
-      composeUrl = String(composeUrl).replace(/^https?:\/\//i, '');
+    // The sheet's counter must measure the ACTIVE template body, never a
+    // client-side copy of the migration literal — admins edit templates,
+    // and a drifted mirror disables Move on bodies the server accepts (or
+    // vice versa) at the boundary (codex PR P1). Row missing/disabled ⇒
+    // no compose ⇒ the sheet hides the Custom option entirely, matching
+    // commit()'s custom_message_unavailable rejection.
+    const row = await db('sms_templates')
+      .where({ template_key: CUSTOM_TEMPLATE_KEY })
+      .first('body', 'is_active');
+    if (row?.body && row.is_active !== false) {
+      let composeUrl = null;
+      if (service.reschedule_token) {
+        const { existingShortUrlFor } = require('./short-url');
+        const { portalUrl } = require('../utils/portal-url');
+        composeUrl = (await existingShortUrlFor({
+          kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
+        })) || portalUrl('/l/xxxxxxxxxx');
+        // The template renderer strips https:// from owned portal hosts, so
+        // the counter must count the scheme-less form the customer receives.
+        composeUrl = String(composeUrl).replace(/^https?:\/\//i, '');
+      }
+      customCompose = {
+        template: row.body,
+        firstName: service.first_name || 'there',
+        serviceType: (service.service_type || 'service').toLowerCase(),
+        linkClause: customLinkClause(composeUrl),
+        maxSegments: CUSTOM_SMS_MAX_SEGMENTS,
+      };
     }
-    customCompose = {
-      firstName: service.first_name || 'there',
-      serviceType: (service.service_type || 'service').toLowerCase(),
-      linkClause: customLinkClause(composeUrl),
-      maxSegments: CUSTOM_SMS_MAX_SEGMENTS,
-    };
   }
 
   return {

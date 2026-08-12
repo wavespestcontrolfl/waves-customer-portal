@@ -1981,13 +1981,21 @@ describe('rain-out service', () => {
       expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
     });
 
-    test('getOptions: gate flag + compose info for the sheet counter (existing short link, read-only)', async () => {
+    const CUSTOM_TEMPLATE_ROW = {
+      body: "Hi {first_name} - {custom_message}\n\nWe've moved your {service_type} to {new_option}.{link_clause}",
+      is_active: true,
+    };
+
+    test('getOptions: gate flag + compose info for the sheet counter (ACTIVE template + existing short link, read-only)', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
       wireDb({
         scheduled_services: [
           chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) }),
           chain({ rows: [] }),
+        ],
+        sms_templates: [
+          chain({ first: jest.fn().mockResolvedValue({ ...CUSTOM_TEMPLATE_ROW }) }),
         ],
         short_codes: [
           chain({ first: jest.fn().mockResolvedValue({ code: 'ty34tarkdu' }) }),
@@ -1999,6 +2007,10 @@ describe('rain-out service', () => {
       expect(options.ok).toBe(true);
       expect(options.customReasonEnabled).toBe(true);
       expect(options.customCompose).toMatchObject({
+        // The counter assembles the ACTIVE template body served here — a
+        // client-side copy of the migration literal would silently desync
+        // from what commit() renders after an admin edit (codex PR P1).
+        template: CUSTOM_TEMPLATE_ROW.body,
         firstName: 'Pat',
         serviceType: 'quarterly pest control',
         maxSegments: 2,
@@ -2009,7 +2021,7 @@ describe('rain-out service', () => {
       expect(options.customCompose.linkClause).not.toContain('https://');
     });
 
-    test('getOptions: no reschedule token → compose uses the reply fallback clause; gate off → no compose at all', async () => {
+    test('getOptions: no token → reply fallback clause; disabled row → no compose; gate off → no compose', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
       wireDb({
@@ -2017,11 +2029,28 @@ describe('rain-out service', () => {
           chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
           chain({ rows: [] }),
         ],
+        sms_templates: [
+          chain({ first: jest.fn().mockResolvedValue({ ...CUSTOM_TEMPLATE_ROW }) }),
+        ],
       });
       let options = await RainOut.getOptions('svc-1');
       expect(options.customCompose).toMatchObject({
         linkClause: ' Need a different time? Reply to this message.',
       });
+
+      // Disabled row = ops kill switch: the sheet must not offer Custom.
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [] }),
+        ],
+        sms_templates: [
+          chain({ first: jest.fn().mockResolvedValue({ ...CUSTOM_TEMPLATE_ROW, is_active: false }) }),
+        ],
+      });
+      options = await RainOut.getOptions('svc-1');
+      expect(options.customReasonEnabled).toBe(true);
+      expect(options.customCompose).toBeNull();
 
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
       wireDb({

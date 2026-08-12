@@ -329,10 +329,24 @@ function smsNewOption(dateStr, startHHMM) {
   const endMin = (startMin + 120) % (24 * 60);
   return `${smsDateLabel(dateStr)}, ${fmtTime(minToHHMM(startMin))} - ${fmtTime(minToHHMM(endMin))}`;
 }
-// Mirror of the rain_out_moved_custom_v1 template body — keep in sync with
-// the migration.
+// Predicted body assembled from the ACTIVE template the server sent in the
+// options payload (customCompose.template) — never a hardcoded copy of the
+// migration body, which an admin template edit would silently desync from
+// what commit() actually renders (codex PR P1). Same global `{key}`
+// substitution as the server's renderer.
 function predictedCustomBody(compose, message, option) {
-  return `Hi ${compose.firstName} - ${message}\n\nWe've moved your ${compose.serviceType} to ${smsNewOption(option.date, option.window?.start)}.${compose.linkClause}`;
+  const vars = {
+    first_name: compose.firstName,
+    custom_message: message,
+    service_type: compose.serviceType,
+    new_option: smsNewOption(option.date, option.window?.start),
+    link_clause: compose.linkClause,
+  };
+  let body = compose.template;
+  for (const [key, value] of Object.entries(vars)) {
+    body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), () => value);
+  }
+  return body;
 }
 
 // Sentinel selection key for the custom-time option (distinct from the preset
@@ -653,7 +667,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               {[
                 ...RAIN_REASONS,
                 ...(options.extraReasonsEnabled ? EXTRA_REASONS : []),
-                ...(options.customReasonEnabled ? [{ code: CUSTOM_REASON, label: 'Custom message' }] : []),
+                // Custom needs BOTH the gate and a live template row — the
+                // payload omits customCompose when the row is missing or
+                // disabled, and offering the option then would only reach
+                // commit()'s custom_message_unavailable rejection.
+                ...(options.customReasonEnabled && options.customCompose
+                  ? [{ code: CUSTOM_REASON, label: 'Custom message' }] : []),
               ].map((r) => (
                 <option key={r.code} value={r.code}>{r.label}</option>
               ))}
