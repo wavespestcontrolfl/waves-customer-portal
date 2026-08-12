@@ -348,6 +348,16 @@ async function commitVoiceBooking({
           }))
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore();
+      } else if (created) {
+        // LOUD: a pending row with no review card is invisible to the office
+        // confirm queue. Only reachable on the sandbox path (no call_log row
+        // for this CallSid) — a transient lookup failure refuses to book at
+        // all (requestBookingText) — but if it ever happens in production the
+        // row needs finding by hand.
+        logger.error(
+          `[voice-relay-booking] pending booking ${created.id} for customer ${customerId} created with NO `
+          + 'outbound_booking_review card (no call_log row for this call) — it is invisible to the office confirm queue'
+        );
       }
       return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
     });
@@ -533,11 +543,25 @@ async function requestBookingText(input = {}, ctx = {}) {
   // row (sandbox path) just means the fallback lead lookup applies.
   let callLogId = null;
   if (ctx.callSid) {
-    const callRow = await db('call_log')
-      .where({ twilio_call_sid: ctx.callSid })
-      .first('id')
-      .catch(() => null);
-    callLogId = (callRow && callRow.id) || null;
+    try {
+      const callRow = await db('call_log')
+        .where({ twilio_call_sid: ctx.callSid })
+        .first('id');
+      callLogId = (callRow && callRow.id) || null;
+    } catch (lookupErr) {
+      // ⭐ FAIL CLOSED ON AN UNANSWERABLE LOOKUP. A row with no card lands on
+      // the dispatch calendar invisible to the office confirm queue — the one
+      // thing that makes a pending voice booking real (see the one-per-call
+      // guard above) — so a TRANSIENT failure here must not be read as "this
+      // call has no call_log row". Same doctrine as the re-service dedupe:
+      // an unanswerable question is not a licence to write. A genuine ABSENCE
+      // (the TwiML-Bin sandbox path, which has no call_log row at all) is a
+      // different answer and still books, cardless, as documented.
+      logger.error(`[voice-relay-booking] call_log lookup FAILED for callSid ${ctx.callSid} — refusing to book (no review-card linkage): ${lookupErr.message}`);
+      return 'I could not reach the system that puts this in front of the office, so NOTHING was booked. '
+        + 'Tell the caller a Waves team member will call to schedule, and capture the lead with their '
+        + 'preferred time. Do NOT say anything is booked.';
+    }
   }
 
   const { maskPhone } = require('./relay-protocol');

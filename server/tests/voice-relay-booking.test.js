@@ -524,6 +524,22 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoCreateWrites();
   });
 
+  // ⭐ AN UNANSWERABLE LOOKUP IS NOT A LICENCE TO WRITE. The review card is the
+  // one thing that makes a pending voice booking real (it is what the office
+  // confirm queue works), so a TRANSIENT call_log failure must not be read as
+  // "this call has no call_log row" and commit a row nobody can see. A genuine
+  // ABSENCE (the sandbox path below) is a different answer.
+  test('a FAILING call_log lookup refuses to book — never a cardless, office-invisible row', async () => {
+    const throwing = makeBuilder([]);
+    throwing.first = jest.fn(() => Promise.reject(new Error('connection terminated')));
+    db.mockImplementation((table) => (table === 'call_log' ? throwing : builders[table] || makeBuilder([])));
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/NOTHING was booked/);
+    expect(out).toMatch(/Do NOT say anything is booked/i);
+    assertNoCreateWrites();
+    assertNoComms();
+  });
+
   test('missing call_log row (sandbox path) → booking still lands, just without a triage card', async () => {
     primeDb({ callLog: [] });
     await executeTool('request_booking', GOOD_INPUT, slotCtx());

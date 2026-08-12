@@ -26,6 +26,14 @@ jest.mock('../services/call-recording-processor', () => ({
 jest.mock('../services/waveguard-existing-services', () => ({ loadOwnedRecurringServiceKeys: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 jest.mock('../services/project-types', () => ({ customerSafeServiceNotes: jest.fn((notes) => (notes ? `SAFE:${notes}` : null)) }));
+// ⭐ THE PARSER-APPROVED COPY GATE. Speaking a visit's notes is a report path,
+// and AGENTS.md allows only technicianReportCustomerCopy's reviewed parse
+// through it (customerSafeServiceNotes is a fee scrub, not that parse). Mocked
+// as an approving parse so the scrub assertions below still read naturally; the
+// REJECTING case (an unreviewed note) has its own test.
+jest.mock('../services/service-report/technician-report-copy', () => ({
+  technicianReportCustomerCopy: jest.fn((notes) => (notes ? { body: String(notes) } : null)),
+}));
 jest.mock('../services/call-booking-source-actions', () => ({ DISPATCH_OWNED_PENDING_SOURCE_ACTIONS: ['call_followup'] }));
 jest.mock('../utils/service-normalizer', () => ({ normalizeServiceType: jest.fn((v) => v) }));
 jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }));
@@ -366,6 +374,29 @@ describe('GATE ON — account tools', () => {
     expect(out).not.toContain('internal-only-secret');
     expect(out).not.toContain('SAFE:internal-only-secret');
     assertNoWrites();
+  });
+
+  // ⭐ RAW TECHNICIAN NOTES NEVER EGRESS ON A REPORT PATH (AGENTS.md; owner
+  // ruling 2026-07-16). The fee scrub alone returns an ordinary visit's note
+  // VERBATIM, so a history read that stood on it spoke the technician's
+  // internal note — access codes, billing notes — down the phone. Only
+  // technicianReportCustomerCopy's reviewed parse may be spoken; anything else
+  // parses to null and is simply not said, exactly as get_service_report does.
+  test('an UNREVIEWED technician note is not spoken at all (parser-approved copy only)', async () => {
+    const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+    technicianReportCustomerCopy.mockReturnValue(null); // not the reviewed two-section draft
+    primeDb({
+      records: [{
+        service_date: '2026-07-31', service_type: 'Lawn Care',
+        technician_notes: 'gate code 4482, customer disputes the invoice', structured_notes: null, status: 'completed',
+      }],
+    });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
+    expect(out).toContain('Friday July 31');   // the visit itself is still stated
+    expect(out).not.toContain('4482');         // the note is not
+    expect(out).not.toContain('disputes');
+    expect(out).not.toContain('SAFE:');
+    technicianReportCustomerCopy.mockImplementation((notes) => (notes ? { body: String(notes) } : null));
   });
 
   test('balance of zero reads as none', async () => {

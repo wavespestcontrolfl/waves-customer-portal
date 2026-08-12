@@ -154,8 +154,21 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     .limit(ESTIMATE_LIMIT)
     // NOTE the absence of `token`: the estimate view link is a bearer
     // credential and never rides a voice reply.
+    //
+    // ⭐ THE PROJECTION IS PART OF THE SENT-PRICE CONTRACT. quotedLines hands
+    // this row to buildPricingBundle — the same function the customer's own
+    // /estimate/:token page asks — and that function reads more than the
+    // totals: `customer_id` / `customer_phone` are how
+    // estimateRendersMonthlyBilling identifies a legacy monthly member
+    // (estimate-public.js estimateCustomerPreservesMonthlyBilling returns
+    // false outright when BOTH are absent, so a thin projection silently
+    // classified every estimate as per-application and suppressed the
+    // truthful "billed $X per month" line), and `show_one_time_option` /
+    // `waveguard_tier` shape the bundle itself. Selecting them is what keeps
+    // the phone and the estimate page quoting the same estimate.
     .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at',
-      'monthly_total', 'annual_total', 'onetime_total', 'estimate_data');
+      'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
+      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier');
   if (!rows.length) {
     return 'No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan '
       + 'pricing, and a team member can put a written estimate together.';

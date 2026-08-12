@@ -246,6 +246,25 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(b.orderBy).toHaveBeenCalledWith('created_at', 'desc');
   });
 
+  // ⭐ THE PROJECTION IS PART OF THE SENT-PRICE CONTRACT. buildPricingBundle
+  // reads more than the totals: customer_id / customer_phone are how
+  // estimateRendersMonthlyBilling recognises a legacy monthly member (its
+  // resolver returns false outright when BOTH are absent, so a thin projection
+  // classified every estimate as per-application and suppressed the truthful
+  // "billed $X per month" line), and show_one_time_option / waveguard_tier
+  // shape the bundle itself.
+  test('the estimate projection carries every field buildPricingBundle reads', async () => {
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    const selected = builders.estimates.select.mock.calls.flat();
+    for (const col of ['customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
+      'monthly_total', 'annual_total', 'onetime_total', 'estimate_data']) {
+      expect(selected).toContain(col);
+    }
+    // …and the row the bundle builder is handed is the row that was read.
+    expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
+  });
+
   test('the estimate view token is never SELECTed, and never reaches the output', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });

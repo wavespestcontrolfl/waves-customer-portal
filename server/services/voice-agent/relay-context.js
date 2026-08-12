@@ -445,10 +445,22 @@ async function loadCompletedVisits(customerId, limit = 5) {
     // the notes off customer surfaces — and the phone is one.
     const { suppressesCustomerArtifacts } = require('../../routes/services');
     const suppressed = suppressesCustomerArtifacts(structured);
-    // customerSafeServiceNotes is the SAME scrub every customer-facing render
-    // of technician_notes goes through (portal history, service-report PDF) —
-    // never raw internal notes.
-    const notes = suppressed ? null : customerSafeServiceNotes(svc.technician_notes, structured);
+    // ⭐ PARSER-APPROVED COPY ONLY — speaking a visit's notes down the phone is
+    // a REPORT path. AGENTS.md: "Raw `technician_notes` never egress on any
+    // report path (parser-approved copy only)", and the owner ruling behind it
+    // (2026-07-16, report-data.js's `legacy` block) names
+    // technicianReportCustomerCopy's reviewed parse as the ONLY sanctioned
+    // route to customer copy. customerSafeServiceNotes is not that parse — it
+    // only scrubs the WDO inspection fee and otherwise returns the note
+    // verbatim, so on its own it read the technician's internal note (access
+    // codes, billing notes) to the caller. Same two-step get_service_report
+    // already uses (relay-visit.js): parse first, fee scrub on top, and
+    // anything that is not the reviewed two-section draft simply isn't spoken.
+    const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
+    const reportCopy = suppressed ? null : technicianReportCustomerCopy(svc.technician_notes);
+    const notes = reportCopy && reportCopy.body
+      ? customerSafeServiceNotes(reportCopy.body, structured)
+      : null;
     return {
       date: speakDate(svc.service_date),
       service: promptSafeUntrusted(svc.service_type, 60) || null,
