@@ -67,7 +67,7 @@ const CONTACT_SLOT_CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '
 // Chainable knex-builder stub: every chain method returns the builder, the
 // builder is thenable (resolves `rows`), `.first()` resolves rows[0]. Write
 // verbs exist only as spies so "no writes" is provable.
-function makeBuilder(rows) {
+function makeBuilder(rows, { claimRows = null } = {}) {
   const b = {};
   const chain = ['whereNull', 'whereIn', 'orderBy', 'select', 'limit', 'offset', 'whereRaw', 'orWhereRaw', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'whereNot'];
   for (const m of chain) b[m] = jest.fn(() => b);
@@ -75,30 +75,53 @@ function makeBuilder(rows) {
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   b.insert = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
-  b.update = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
+  // ⭐ THE ONE WRITE THIS LANE MAKES ON THE READ PATH: the single-use CallSid
+  // claim, burned atomically on the call's own signature-verified call_log row
+  // (`metadata.relay_session_claimed_at`). It is the recognition boundary, not
+  // an account write — so only the call_log builder may update, it must be
+  // exactly that jsonb_set, and every other table still explodes.
+  b.update = claimRows
+    ? jest.fn((payload) => {
+        const sql = String((payload && payload.metadata && payload.metadata.__raw) || (payload && payload.metadata) || '');
+        if (!sql.includes('relay_session_claimed_at')) throw new Error('WRITE ATTEMPTED');
+        b._claimed = true;
+        return { returning: jest.fn(() => Promise.resolve(claimRows())) };
+      })
+    : jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
   b.del = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
   return b;
 }
 
 let builders;
-function primeDb({ customers = [], scheduled = [], records = [], callLog = [VERIFIED_CALL_ROW] } = {}) {
+function primeDb({
+  customers = [], scheduled = [], records = [], callLog = [VERIFIED_CALL_ROW],
+  // What the atomic claim returns: one row = this session won it, [] = the
+  // CallSid was already claimed (a replay, possibly on another instance).
+  claimRows = () => [{ id: 'cl-1' }],
+} = {}) {
   builders = {
     customers: makeBuilder(customers),
     scheduled_services: makeBuilder(scheduled),
     service_records: makeBuilder(records),
-    call_log: makeBuilder(callLog),
+    call_log: makeBuilder(callLog, { claimRows }),
   };
   db.mockImplementation((table) => {
     if (!builders[table]) builders[table] = makeBuilder([]);
     return builders[table];
   });
+  // The claim's jsonb_set expression rides through db.raw.
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
 }
 
+// No ACCOUNT write anywhere. The single-use CallSid claim on call_log is the
+// one exception and is asserted on its own terms (it is the recognition
+// boundary, not data): every other builder must be untouched, and call_log may
+// only ever have taken the claim.
 function assertNoWrites() {
-  for (const b of Object.values(builders || {})) {
+  for (const [table, b] of Object.entries(builders || {})) {
     expect(b.insert).not.toHaveBeenCalled();
-    expect(b.update).not.toHaveBeenCalled();
     expect(b.del).not.toHaveBeenCalled();
+    if (table !== 'call_log') expect(b.update).not.toHaveBeenCalled();
   }
 }
 
@@ -284,12 +307,33 @@ describe('GATE ON — caller recognition', () => {
         .toEqual({ verified: false, reason: 'call_not_current' });
     });
 
-    test('a CallSid can open exactly ONE relay session', () => {
-      const sid = `CA-claim-${Math.floor(Date.now() % 1e6)}`;
-      expect(relayContext.beginRelaySessionClaim(sid)).toBe(true);
-      expect(relayContext.beginRelaySessionClaim(sid)).toBe(false);
-      // A blank CallSid never claims anything.
-      expect(relayContext.beginRelaySessionClaim('')).toBe(false);
+    // The claim is a single atomic UPDATE on the call's own row — one caller
+    // gets a row back, every replay gets zero — so it holds across instances
+    // and restarts, which an in-process Map never did.
+    test('the claim is won once and lost thereafter, in shared storage', async () => {
+      primeDb({ customers: [CUSTOMER] }); // claim returns a row
+      expect(await relayContext.beginRelaySessionClaim(CALL_SID)).toBe(true);
+      const update = builders.call_log.update;
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(String(update.mock.calls[0][0].metadata.__raw)).toContain('jsonb_set');
+
+      primeDb({ customers: [CUSTOMER], claimRows: () => [] }); // already claimed
+      expect(await relayContext.beginRelaySessionClaim(CALL_SID)).toBe(false);
+      // A blank CallSid never claims anything, and never touches the DB.
+      expect(await relayContext.beginRelaySessionClaim('')).toBe(false);
+    });
+
+    test('a replayed CallSid resolves to NO caller context', async () => {
+      primeDb({ customers: [CUSTOMER], claimRows: () => [] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+        .toEqual({ verified: false, reason: 'call_sid_already_claimed' });
+      expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+    });
+
+    test('a claim that cannot be proven fails CLOSED', async () => {
+      primeDb({ customers: [CUSTOMER] });
+      builders.call_log.update = jest.fn(() => { throw new Error('pool exhausted'); });
+      expect(await relayContext.beginRelaySessionClaim(CALL_SID)).toBe(false);
     });
   });
 

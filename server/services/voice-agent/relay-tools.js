@@ -735,13 +735,25 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (input.do_not_contact_request === true) {
         try {
           const { recordSuppression } = require('../messaging/validators/suppression');
-          await recordSuppression({
+          // ⭐ IT RESOLVES ON FAILURE. recordSuppression catches its own DB
+          // errors and returns { ok: false } — it does not reject — so an
+          // un-inspected await here would log "honoured" over a caller whose
+          // texts are still enabled. The flag is the only truth about whether
+          // the opt-out actually landed.
+          const suppression = await recordSuppression({
             phone: callerPhone,
             reason: 'opt_out_natural_language',
             source: 'voice_agent',
             capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),
           });
-          logger.info(`[voice-relay] verbal do-not-contact honoured — suppression recorded callSid=${ctx.callSid || 'n/a'}`);
+          if (suppression && suppression.ok) {
+            logger.info(`[voice-relay] verbal do-not-contact honoured — suppression recorded callSid=${ctx.callSid || 'n/a'}`);
+          } else {
+            logger.error(
+              `[voice-relay] verbal do-not-contact NOT recorded callSid=${ctx.callSid || 'n/a'} `
+              + `(${(suppression && suppression.error) || 'no ok flag'}) — automated texts are still enabled for this number`
+            );
+          }
         } catch (err) {
           // The lead still records the request; a failed suppression must not
           // lose the lead, and the owner alert below still pages a human.

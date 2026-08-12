@@ -65,38 +65,47 @@ const CONTEXT_RESOLVE_TIMEOUT_MS = 4000;
 // verifyInboundCaller). The relay socket opens seconds after the webhook
 // writes the row; 10 minutes is slack, not a window.
 const VERIFY_CALL_MAX_AGE_MS = 10 * 60 * 1000;
-// CallSids that have already opened a relay session. In-process by design:
-// the sessions it guards are in-process too, and the freshness bound above
-// covers a restart. Bounded so a long-lived instance cannot grow it without
-// limit.
-const CLAIMED_CALL_SIDS = new Map(); // callSid -> claimed-at ms
-const CLAIMED_CALL_SID_MAX = 5000;
+// The jsonb key the claim burns on the call's own signature-verified row.
+const RELAY_CLAIM_KEY = 'relay_session_claimed_at';
 
 /**
- * Claim a CallSid for ONE relay session. Returns false when this CallSid has
- * already been claimed — a replayed setup frame, which must not be verified
- * again. Called once per session (relay-conversation), never per turn.
+ * Claim a CallSid for ONE relay session — ATOMICALLY, AND IN SHARED STORAGE.
+ *
+ * This was an in-process Map first, which is not a claim at all in the shape
+ * this deployment actually runs: a second Railway instance, or the same one
+ * after a restart or a redeploy, has an empty Map and would happily accept the
+ * replayed (CallSid, from) pair inside its freshness window. The guarantee has
+ * to live where every instance can see it.
+ *
+ * So the burn is a single UPDATE against the same `call_log` row the
+ * verification already trusts — one statement, so the "is it unclaimed" test
+ * and the write cannot be interleaved by a racing session. Exactly one caller
+ * gets a row back; every replay gets zero. `jsonb_set` merges, so no other
+ * metadata key (stir_verstat, lead_id, …) is disturbed.
+ *
+ * Fails CLOSED: any error means the claim is unproven, which is treated as
+ * already-claimed rather than "probably fine".
  */
-function beginRelaySessionClaim(callSid) {
+async function beginRelaySessionClaim(callSid) {
   const key = String(callSid || '').trim();
   if (!key) return false;
-  const now = Date.now();
-  // Opportunistic prune: anything older than the freshness bound can never
-  // verify again anyway, so it has nothing left to protect.
-  if (CLAIMED_CALL_SIDS.size >= CLAIMED_CALL_SID_MAX) {
-    for (const [sid, at] of CLAIMED_CALL_SIDS) {
-      if (now - at > VERIFY_CALL_MAX_AGE_MS) CLAIMED_CALL_SIDS.delete(sid);
-    }
-    // Still full (a burst of live calls): drop the oldest to stay bounded.
-    while (CLAIMED_CALL_SIDS.size >= CLAIMED_CALL_SID_MAX) {
-      const oldest = CLAIMED_CALL_SIDS.keys().next().value;
-      if (oldest === undefined) break;
-      CLAIMED_CALL_SIDS.delete(oldest);
-    }
+  try {
+    const db = require('../../models/db');
+    const claimed = await db('call_log')
+      .where({ twilio_call_sid: key })
+      .whereRaw(`(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`)
+      .update({
+        metadata: db.raw(
+          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,
+        ),
+      })
+      .returning('id');
+    const rows = Array.isArray(claimed) ? claimed.length : Number(claimed) || 0;
+    return rows > 0;
+  } catch (err) {
+    logger.warn(`[voice-relay-context] relay session claim failed for callSid=${key} — treating as claimed: ${err.message}`);
+    return false;
   }
-  if (CLAIMED_CALL_SIDS.has(key)) return false;
-  CLAIMED_CALL_SIDS.set(key, now);
-  return true;
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -452,6 +461,13 @@ async function verifyInboundCaller({ callSid, from } = {}) {
     const startedAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
     if (!Number.isFinite(startedAt) || Date.now() - startedAt > VERIFY_CALL_MAX_AGE_MS) {
       return { verified: false, reason: 'call_not_current' };
+    }
+    // …and one live call is ONE session. The burn happens here, after every
+    // cheap check and before the caller is recognised, so a replay is refused
+    // before it reads anything — and it is refused on every instance, not just
+    // the one that saw the first session.
+    if (!(await beginRelaySessionClaim(callSid))) {
+      return { verified: false, reason: 'call_sid_already_claimed' };
     }
     let attestation = null;
     try {

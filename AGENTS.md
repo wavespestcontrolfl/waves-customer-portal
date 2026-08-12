@@ -1164,9 +1164,11 @@ violations at the severity noted.
   ships OFF: most genuine calls carry no attestation, so turning it on trades
   spoofing resistance for treating real customers as strangers, and the
   attestation is logged on every call so the distribution can be measured first.
-  Recognition is additionally bound to ONE session per CallSid and to a
-  freshness window on that call_log row, so a historical (CallSid, from) pair
-  cannot be replayed by anyone holding the key. WRITES for a caller the ANI did
+  Recognition is additionally bound to a freshness window on that call_log row
+  and to ONE session per CallSid — burned atomically as a metadata key on the
+  row itself (`relay_session_claimed_at`), so the claim holds across instances
+  and restarts and a historical (CallSid, from) pair cannot be replayed by
+  anyone holding the key. WRITES for a caller the ANI did
   not fully authenticate — a looked-up account, or a number that matched only a
   service-contact slot — are gated separately again by
   `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES` (default OFF: full ANI match or no

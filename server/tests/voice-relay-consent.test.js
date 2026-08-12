@@ -404,4 +404,20 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }, CTX);
     expect(out).toMatch(/Lead saved successfully/i);
   });
+
+  // ⭐ recordSuppression RESOLVES ON FAILURE — it catches its own DB errors and
+  // returns { ok: false }. An un-inspected await would log "honoured" over a
+  // caller whose texts are still enabled, which is the whole failure this write
+  // exists to prevent.
+  test('a resolved { ok: false } is treated as a FAILURE, not a success', async () => {
+    const logger = require('../services/logger');
+    recordSuppression.mockResolvedValueOnce({ ok: false, error: 'relation does not exist' });
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Stop texting me.',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(out).toMatch(/Lead saved successfully/i); // the lead still lands…
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/do-not-contact NOT recorded/i));
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringMatching(/do-not-contact honoured/i));
+  });
 });

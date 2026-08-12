@@ -65,7 +65,14 @@ function makeBuilder(rows) {
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   b.insert = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
-  b.update = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
+  // The single-use CallSid claim (relay-context) burns a metadata key on the
+  // call's own call_log row before recognition — the recognition boundary, not
+  // an account write. Anything else is still a failure.
+  b.update = jest.fn((payload) => {
+    const raw = String((payload && payload.metadata && payload.metadata.__raw) || '');
+    if (!raw.includes('relay_session_claimed_at')) throw new Error('WRITE ATTEMPTED');
+    return { returning: jest.fn(() => Promise.resolve([{ id: 'cl-1' }])) };
+  });
   b.del = jest.fn(() => { throw new Error('WRITE ATTEMPTED'); });
   return b;
 }
@@ -81,13 +88,16 @@ function primeDb(tables = {}) {
     if (!builders[table]) builders[table] = makeBuilder([]);
     return builders[table];
   });
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
 }
 
 function assertNoWrites() {
-  for (const b of Object.values(builders || {})) {
+  for (const [table, b] of Object.entries(builders || {})) {
     expect(b.insert).not.toHaveBeenCalled();
-    expect(b.update).not.toHaveBeenCalled();
     expect(b.del).not.toHaveBeenCalled();
+    // call_log may only ever have taken the CallSid claim (asserted in the
+    // context suite); no other table may be written at all.
+    if (table !== 'call_log') expect(b.update).not.toHaveBeenCalled();
   }
 }
 
