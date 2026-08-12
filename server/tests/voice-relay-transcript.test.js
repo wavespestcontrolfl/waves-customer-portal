@@ -140,7 +140,10 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(row.transcription).toContain('Agent: I can help with that.');
     expect(row.transcription).toContain('[tool] get_availability');
     const meta = JSON.parse(row.transcription_metadata);
-    expect(meta).toMatchObject({ source: 'voice_relay_session', caller_turns: 2, agent_turns: 1, tool_calls: 1, lead_captured: true });
+    expect(meta).toMatchObject({
+      source: 'voice_relay_session', caller_turns: 2, agent_turns: 1, tool_calls: 1,
+      lead_captured: true, reservice_filed: false,
+    });
     // ai_extraction is deliberately NOT synthesized.
     expect(row.ai_extraction).toBeUndefined();
     // The unified message row is resynced as before.
@@ -162,6 +165,16 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(JSON.parse(row.transcription_metadata)).toMatchObject({ end_reason: 'ws_close', lead_captured: false });
     // The pre-existing capture floor is unchanged.
     expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
+  });
+
+  test('a re-service call is recorded as such, not as a lead-less call', async () => {
+    const { update } = primeCallLog();
+    const convo = conversationWithTurns('CA-reservice');
+    convo._reserviceFiled = true;
+    convo.leadCaptured = true; // request_reservice suppresses the capture floor
+    await convo.end('agent_complete');
+    expect(JSON.parse(update.mock.calls[0][0].transcription_metadata)).toMatchObject({ reservice_filed: true });
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
 
   test('ERROR/teardown close (idle timeout) still writes the record', async () => {

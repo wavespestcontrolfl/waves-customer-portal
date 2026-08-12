@@ -118,7 +118,7 @@ function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {
  * Never throws: a composition failure returns null and the reconcile proceeds
  * with the original outcome/duration columns.
  */
-function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null, leadCaptured = false, callSid = null, model = null, startedAt = null } = {}) {
+function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null, leadCaptured = false, reserviceFiled = false, callSid = null, model = null, startedAt = null } = {}) {
   try {
     const transcription = buildTranscriptText(turns);
     if (!transcription && !clean(modelSummary, MAX_SUMMARY_CHARS)) return null;
@@ -137,6 +137,10 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
         call_sid: callSid || null,
         end_reason: reason || null,
         lead_captured: Boolean(leadCaptured),
+        // What the call actually PRODUCED — a re-service request on an
+        // existing account is a different outcome from a new lead, and the
+        // reviewer should not have to infer it from the turn text.
+        reservice_filed: Boolean(reserviceFiled),
         caller_turns: callerTurns,
         agent_turns: agentTurns,
         tool_calls: toolCalls,

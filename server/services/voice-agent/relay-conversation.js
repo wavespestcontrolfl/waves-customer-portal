@@ -623,6 +623,7 @@ class RelayConversation {
           modelSummary: this._modelSummary,
           reason: reason || null,
           leadCaptured: this.leadCaptured,
+          reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
           model: MODEL,
           startedAt: this._startedAt,
