@@ -101,6 +101,61 @@ async function hasActivePushDevice(customerId, knex = db) {
   return Boolean(row);
 }
 
+// messageType → the notification_prefs channel column governing its family.
+// Every type in PUSH_ROUTING_POLICY must map here (test-enforced) so a
+// saved customer channel choice always wins.
+const PREF_CHANNEL_COLUMN = {
+  tech_en_route: 'en_route_channel',
+  receipt: 'payment_receipt_channel',
+  appointment_reminder: 'service_reminder_channel',
+  reminder_72h: 'service_reminder_channel',
+  appointment_confirmation: 'service_reminder_channel',
+  appointment_cancelled: 'service_reminder_channel',
+  billing_reminder: 'billing_channel',
+  payment_failure: 'billing_channel',
+  autopay: 'billing_channel',
+};
+
+function normalizeDigits(phone) {
+  return String(phone || '').replace(/\D+/g, '').slice(-10);
+}
+
+/**
+ * Runtime eligibility beyond the pure decision — both checks fail toward
+ * SMS:
+ *   1. `to` must be the ACCOUNT HOLDER's own phone. Reminder/en-route
+ *      flows can address secondary authorized contacts under the same
+ *      customer id; replacing THEIR text with a push to the account
+ *      holder's devices would notify the wrong person (and push_and_sms
+ *      would duplicate contact-personalized pushes onto one account).
+ *   2. A SAVED notification_prefs row is an explicit customer channel
+ *      choice — the prefs vocabulary has no 'push' value yet, so any
+ *      saved row governing this message family keeps the customer's
+ *      chosen channel untouched. Customers who never saved prefs (no
+ *      row) route normally.
+ */
+async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
+  const toDigits = normalizeDigits(to);
+  if (toDigits.length < 10) return false;
+  const customer = await knex('customers')
+    .where({ id: customerId })
+    .first('phone')
+    .catch(() => null);
+  if (!customer || normalizeDigits(customer.phone) !== toDigits) return false;
+
+  const col = PREF_CHANNEL_COLUMN[messageType];
+  if (col) {
+    const ERR = Symbol('prefs-lookup-failed');
+    const prefsRow = await knex('notification_prefs')
+      .where({ customer_id: customerId })
+      .first(col)
+      .catch(() => ERR);
+    if (prefsRow === ERR) return false; // unknown preference → SMS
+    if (prefsRow) return false; // saved explicit channel choice → SMS
+  }
+  return true;
+}
+
 async function sendPush(customerId, messageType, body) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
@@ -148,6 +203,7 @@ async function recordBell(customerId, messageType, body) {
  */
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber }) {
   try {
+    if (!(await pushEligibleRuntime(customerId, to, messageType))) return { delivered: false };
     if (!(await hasActivePushDevice(customerId))) return { delivered: false };
     const { delivered } = await sendPush(customerId, messageType, body);
     if (!delivered) {
@@ -205,8 +261,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber 
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, body, messageType }) {
+async function sendCompanionPush({ customerId, to, body, messageType }) {
   try {
+    if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     if (!(await hasActivePushDevice(customerId))) return;
     const { delivered } = await sendPush(customerId, messageType, body);
     if (delivered) await recordBell(customerId, messageType, body);
@@ -222,5 +279,5 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, PRESENTATION },
+  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime },
 };

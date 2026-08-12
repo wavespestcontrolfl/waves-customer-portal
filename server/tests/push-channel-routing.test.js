@@ -66,6 +66,20 @@ describe('policy table hygiene', () => {
     }
   });
 
+  it('maps every policy type to a notification_prefs channel column', () => {
+    // A saved customer channel choice must always be able to veto routing —
+    // a policy type without a prefs mapping would silently skip that veto.
+    for (const type of Object.keys(PUSH_ROUTING_POLICY)) {
+      expect(typeof _test.PREF_CHANNEL_COLUMN[type]).toBe('string');
+    }
+  });
+
+  it('normalizes phones to their last ten digits for the recipient-identity check', () => {
+    expect(_test.normalizeDigits('+1 (941) 555-0123')).toBe('9415550123');
+    expect(_test.normalizeDigits('19415550123')).toBe('9415550123');
+    expect(_test.normalizeDigits('')).toBe('');
+  });
+
   it('presentation titles carry no emoji and every policy type has a portal link', () => {
     const emoji = /\p{Extended_Pictographic}/u;
     for (const type of Object.keys(PUSH_ROUTING_POLICY)) {

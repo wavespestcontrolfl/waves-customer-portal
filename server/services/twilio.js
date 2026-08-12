@@ -576,6 +576,7 @@ const TwilioService = {
         // SMS — never awaited into the send path.
         void PushRouting.sendCompanionPush({
           customerId: options.customerId,
+          to,
           body,
           messageType: options.messageType,
         }).catch(() => {});
