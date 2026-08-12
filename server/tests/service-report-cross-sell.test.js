@@ -313,27 +313,7 @@ describe('buildReportCrossSell', () => {
     expect(result.mode).toBe('quote_cta');
   });
 
-  test('blank customer mirror: seed scope falls back to the report street (wrong-street estimate refused)', async () => {
-    // Customer row has no primary street; the report's stamped street is the
-    // scope. An accepted estimate at a different property must not seed.
-    const customer = CUSTOMER({ address_line1: null, city: null, zip: null });
-    const db = dbFor({
-      customer,
-      serviceTypes: ['Lawn Care'],
-      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
-      estimates: [{
-        id: 'est-1',
-        address: '9 Rental Way, Venice, FL 34285',
-        status: 'accepted',
-        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
-      }],
-    });
-    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.mode).toBe('quote_cta');
-  });
-
-  test('blank customer mirror: an estimate matching the report street DOES seed', async () => {
+  test('FAIL CLOSED: a customer with no primary street gets no card (property frames cannot be proven aligned)', async () => {
     const customer = CUSTOMER({ address_line1: null, city: null, zip: null });
     const db = dbFor({
       customer,
@@ -347,9 +327,7 @@ describe('buildReportCrossSell', () => {
       }],
     });
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('pest_control');
-    expect(result.mode).toBe('priced');
+    expect(result).toBeNull();
   });
 
   test('an estimate stamped at a different street never seeds this property', async () => {

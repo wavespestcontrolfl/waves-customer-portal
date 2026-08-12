@@ -188,10 +188,17 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     const primaryStreet = linkage.normalizedStampedStreet(
       customer.address_line1, customer.address_line2, customer.city, customer.zip
     );
+    // FAIL CLOSED without a primary street (codex #3367 r6 P0): every
+    // downstream frame — ownership scoping, the pricing panel's profile
+    // fields, the estimate seed — is anchored to the customer's primary
+    // property. With no primary street those frames can't be proven to
+    // describe ONE property (a multi-property customer could earn an
+    // unearned combined tier or another property's price), so no card.
+    if (!primaryStreet) return null;
     const reportStreet = linkage.normalizedStampedStreet(
       service.address_line1, service.address_line2, service.city, service.zip
     );
-    if (primaryStreet && reportStreet && !linkage.sameScopeKey(reportStreet, primaryStreet)) {
+    if (reportStreet && !linkage.sameScopeKey(reportStreet, primaryStreet)) {
       return null;
     }
 
@@ -219,12 +226,13 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     if (!targetKey) return null;
 
     // Best-effort seed — a failed estimate read must not kill the card, it
-    // just prices without the seed (and likely degrades to the CTA). Scope
-    // falls back to the report's stamped street when the customer mirror
-    // has no primary street; with neither, no seed at all.
+    // just prices without the seed (and likely degrades to the CTA). The
+    // scope street is ALWAYS the primary street: the no-primary case failed
+    // closed above, so every frame (ownership, profile, seed) shares one
+    // property anchor.
     let propertySeed = null;
     try {
-      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet || reportStreet || null);
+      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
     } catch (err) {
       logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
     }

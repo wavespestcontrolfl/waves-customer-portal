@@ -1026,7 +1026,25 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
           .first();
         const { buildReportCrossSell } = require('../services/service-report/cross-sell');
         const crossSell = joined?.customer_id ? await buildReportCrossSell(joined, db) : null;
-        if (crossSell) {
+        // The recomputed offer must MATCH what the customer clicked (codex
+        // #3367 r6 P1): a vanished offer, a different target family, or a
+        // shown per-application price that no longer holds (>1% drift) all
+        // reject — the card fails visibly instead of confirming a request
+        // for something the customer never saw. Client metadata is only
+        // COMPARED against server truth here, never persisted as the offer.
+        const clickedKey = String(metadata.serviceKey || '').trim();
+        const clickedPer = Number(metadata.perApplication);
+        const serverPer = Number(crossSell?.option?.perVisit);
+        const offerMismatch = !crossSell
+          || (clickedKey && clickedKey !== crossSell.serviceKey)
+          || (Number.isFinite(clickedPer) && clickedPer > 0 && (
+            !(Number.isFinite(serverPer) && serverPer > 0)
+            || Math.abs(clickedPer - serverPer) > serverPer * 0.01
+          ));
+        if (offerMismatch) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
+        {
           const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
           const requestedService = normalizeRequestedServiceKey(crossSell.serviceKey) || crossSell.serviceKey;
           const perApplication = Number(crossSell.option?.perVisit);
