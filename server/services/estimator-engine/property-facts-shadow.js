@@ -84,9 +84,30 @@ function hasSubpremiseSignal({ address, extraction }) {
   return lines.some((line) => line && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(line)));
 }
 
-function hasUnitSignal({ tenant, address, extraction }) {
+// The PRE-CHANGE address parse, kept verbatim: the enhanced parse
+// (anchored locality strip + schema street_line_2 + dwelling-only
+// designators) must not reach the independently-gated V2 pricing path with
+// GATE_UNIT_SCOPE_GUARDRAILS off, or an owner at a multifamily "Unit A"
+// could newly flip to residential_unit and have V2 clear measurements
+// after the advertised kill switch was flipped (codex r31 P1 — same class
+// as the r12 owner-suite leak).
+const LEGACY_LOCALITY_RE = /,?\s*[A-Za-z .]+,\s*FL.*$/i;
+
+function hasLegacySubpremiseSignal({ address, extraction }) {
+  if (address && SUBPREMISE_RE.test(String(address).replace(LEGACY_LOCALITY_RE, ''))) return true;
+  const extractionAddress = extraction?.property?.service_address;
+  const rawLine = typeof extractionAddress === 'string'
+    ? extractionAddress
+    : (extractionAddress?.raw || extractionAddress?.line1 || '');
+  return !!(rawLine && SUBPREMISE_RE.test(String(rawLine)));
+}
+
+function hasUnitSignal({ tenant, address, extraction, enhanced = false }) {
   if (tenant) return true;
-  if (hasSubpremiseSignal({ address, extraction })) return true;
+  const subpremise = enhanced
+    ? hasSubpremiseSignal({ address, extraction })
+    : hasLegacySubpremiseSignal({ address, extraction });
+  if (subpremise) return true;
   return String(extraction?.property?.property_type || '') === 'apartment';
 }
 
@@ -377,15 +398,21 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
     const aggregated = parcel.aggregated === true;
     const propertyType = propertyRecord?.propertyType || extraction?.property?.property_type || null;
 
-    const unitSignal = hasUnitSignal({ tenant, address: address || propertyRecord?.formattedAddress, extraction });
-    // Owner-unit suites reach the V2 PRICING path only when the unit-scope
-    // kill switch is also on, so disabling it restores prior V2 behavior
-    // exactly (codex r12 P1). Lazily required: unit-scope-model requires
-    // this module at load time, so an eager import would cycle.
+    // The unit-scope lane's behavior reaches the V2 PRICING path only when
+    // that kill switch is also on, so disabling it restores prior V2
+    // behavior exactly — owner-unit suites (codex r12 P1) AND the enhanced
+    // address parse (codex r31 P1). Lazily required: unit-scope-model
+    // requires this module at load time, so an eager import would cycle.
     let unitScopeSuites = false;
     try {
       unitScopeSuites = require('./unit-scope-model').unitScopeGuardrailsEnabled();
     } catch { /* predicate unavailable — stay on prior behavior */ }
+    const unitSignal = hasUnitSignal({
+      tenant,
+      address: address || propertyRecord?.formattedAddress,
+      extraction,
+      enhanced: unitScopeSuites,
+    });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
     });

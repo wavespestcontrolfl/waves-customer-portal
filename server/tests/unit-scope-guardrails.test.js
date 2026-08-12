@@ -297,6 +297,17 @@ describe('lookupCategoryConflict — the lookup verdict vs a residential intent'
 describe('kill-switch isolation from the V2 gate (r12)', () => {
   const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
 
+  test('the enhanced address parse is opt-in too (r31)', () => {
+    // Legacy parse: comma-required locality strip, legacy extraction field
+    // names, lot counted — the V2 path keeps exactly this with the
+    // unit-scope kill switch off.
+    const args = { tenant: false, address: '4801 Industrial Way, Suite 101, Parrish FL 34219', extraction: null };
+    expect(shadowPrivate.hasUnitSignal(args)).toBe(false);
+    expect(shadowPrivate.hasUnitSignal({ ...args, enhanced: true })).toBe(true);
+    // Tenancy is pre-existing and gate-independent.
+    expect(shadowPrivate.hasUnitSignal({ ...args, tenant: true })).toBe(true);
+  });
+
   test('owner-unit suites are opt-in per call, so the V2 path cannot inherit them', () => {
     const args = {
       propertyType: 'industrial', isCommercial: true, tenant: false,

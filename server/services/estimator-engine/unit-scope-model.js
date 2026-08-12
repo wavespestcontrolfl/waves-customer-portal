@@ -249,6 +249,9 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     tenant,
     address: modelAddress,
     extraction,
+    // This module IS the lane — it always uses the enhanced parse (its
+    // pricing-affecting apply is separately gated).
+    enhanced: true,
   });
   const subpremiseSignal = shadowPrivate.hasSubpremiseSignal({ address: modelAddress, extraction });
   // This module IS the unit-scope lane, so owner-unit suites are always on
