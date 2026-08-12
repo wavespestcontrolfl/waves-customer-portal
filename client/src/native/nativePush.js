@@ -32,6 +32,10 @@ let pendingToken = null;
 // scope the unsubscribe to this device's token.
 let lastToken = null;
 const LAST_TOKEN_KEY = 'waves_native_push_token';
+// A denied-permission revocation that could not be confirmed yet (signed
+// out, offline, or zero-row) — persisted so the next login or launch
+// retries it instead of leaving a heartbeated token silently active.
+const PENDING_REVOKE_KEY = 'waves_native_push_revoke_pending';
 let listenersBound = false;
 let pushPluginPromise = null;
 // Logout's unsubscribe request while it's on the wire. postToken() awaits it
@@ -197,6 +201,10 @@ export async function initNativePush() {
 async function revokeRegistrationForDeniedPermission() {
   const token = rememberedToken();
   if (!token) return; // this device never registered — nothing to release
+  // Mark the revocation as owed BEFORE any early return — a signed-out
+  // cold launch can't release the row, and login only calls
+  // flushNativePushToken(); the marker is what makes that flush retry us.
+  try { localStorage.setItem(PENDING_REVOKE_KEY, '1'); } catch { /* storage unavailable */ }
   let refreshJwt = null;
   try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
   if (!authToken() && !refreshJwt) return;
@@ -214,6 +222,7 @@ async function revokeRegistrationForDeniedPermission() {
       pendingToken = null;
       lastToken = null;
       try { localStorage.removeItem(LAST_TOKEN_KEY); } catch { /* storage unavailable */ }
+      try { localStorage.removeItem(PENDING_REVOKE_KEY); } catch { /* storage unavailable */ }
     } else {
       console.warn('[nativePush] denied-permission revoke matched no row under this profile — keeping token for a later re-point/retry');
     }
@@ -228,10 +237,33 @@ async function revokeRegistrationForDeniedPermission() {
  */
 export function flushNativePushToken() {
   if (!isNativeApp()) return;
+  // A revocation owed from a signed-out/offline denied-permission launch
+  // retries now that credentials exist — before any re-registration, so a
+  // dead token can't outlive the login that could have released it.
+  void retryPendingRevocation();
   if (!pendingToken) return;
   const token = pendingToken;
   pendingToken = null;
   postToken(token);
+}
+
+async function retryPendingRevocation() {
+  let owed = null;
+  try { owed = localStorage.getItem(PENDING_REVOKE_KEY); } catch { return; }
+  if (!owed) return;
+  try {
+    const PushNotifications = await pushPlugin();
+    const state = permissionValue(await PushNotifications.checkPermissions());
+    if (state === 'granted') {
+      // Permission came back — the registration/flush path re-points the
+      // row legitimately; the owed revocation is moot.
+      try { localStorage.removeItem(PENDING_REVOKE_KEY); } catch { /* storage unavailable */ }
+      return;
+    }
+    await revokeRegistrationForDeniedPermission();
+  } catch (err) {
+    console.warn('[nativePush] pending revocation retry failed:', err?.message || err);
+  }
 }
 
 /**

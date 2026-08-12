@@ -65,6 +65,7 @@ const PUSH_ROUTING_POLICY = {
   // shared helpers thread the marker.
   billing_reminder: 'push_and_sms',
   payment_failure: 'push_and_sms',
+  payment_failed: 'push_and_sms',
   late_payment: 'push_and_sms',
   payment_expiry: 'push_and_sms',
   autopay: 'push_and_sms',
@@ -88,13 +89,17 @@ const PUSH_ROUTING_POLICY = {
 const BILLING_UPDATE = { title: 'Billing update', link: '/?tab=billing', category: 'billing' };
 const PAYMENT_ISSUE = { title: 'Payment issue', link: '/?tab=billing', category: 'billing' };
 const PRESENTATION = {
-  tech_en_route: { title: 'Your technician is on the way', link: '/?tab=visits', category: 'service' },
+  // en-route deep-links HOME: the authenticated live tracker (map + ETA)
+  // renders on the dashboard, not the Visits tab — the tap must land on
+  // the same live view the SMS /track link promises.
+  tech_en_route: { title: 'Your technician is on the way', link: '/', category: 'service' },
   receipt: { title: 'Payment receipt', link: '/?tab=billing', category: 'billing' },
   deposit_receipt: { title: 'Payment receipt', link: '/?tab=billing', category: 'billing' },
   appointment_reminder: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
   reminder_72h: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
   billing_reminder: BILLING_UPDATE,
   payment_failure: PAYMENT_ISSUE,
+  payment_failed: PAYMENT_ISSUE,
   late_payment: PAYMENT_ISSUE,
   payment_expiry: BILLING_UPDATE,
   autopay: BILLING_UPDATE,
@@ -171,6 +176,7 @@ const PREF_CHANNEL_COLUMN = {
   reminder_72h: 'service_reminder_72h_channel',
   billing_reminder: 'billing_channel',
   payment_failure: 'billing_channel',
+  payment_failed: 'billing_channel',
   late_payment: 'billing_channel',
   payment_expiry: 'billing_channel',
   autopay: 'billing_channel',

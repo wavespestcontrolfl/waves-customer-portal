@@ -20,6 +20,9 @@ jest.mock('../config', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
+  // Push channel routing reads this at send time; false keeps routing inert
+  // so these tests keep asserting the legacy SMS path.
+  gateEnvValue: jest.fn(() => false),
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-sms-templates', () => ({
