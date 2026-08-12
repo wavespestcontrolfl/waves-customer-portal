@@ -98,10 +98,28 @@ async function quotedLines(estimateRow) {
   // persisted monthly/annual — the same correspondence
   // pricingBundleMatchesEstimateTotals uses to decide a snapshot is still
   // honest. No match (a one-time-only estimate, say) ⇒ the first entry.
+  // ⭐ EVERY POPULATED TOTAL, NOT EITHER ONE. The canonical predicate
+  // (estimate-pricing-bundle-utils.pricingBundleMatchesEstimateTotals) requires
+  // both populated totals to agree and DERIVES the annual from the monthly when
+  // a frequency carries no explicit one. An OR joined here meant a cadence that
+  // happened to share only ONE total with the estimate could win `find()` —
+  // quoting another cadence's per-application price at the customer.
   const monthlyTotal = Number(estimateRow.monthly_total);
   const annualTotal = Number(estimateRow.annual_total);
-  const matches = (f) => (Number.isFinite(monthlyTotal) && monthlyTotal > 0 && Math.abs(Number(f.monthly) - monthlyTotal) < 0.01)
-    || (Number.isFinite(annualTotal) && annualTotal > 0 && Math.abs(Number(f.annual) - annualTotal) < 0.01);
+  const moneyMatches = (a, b) => Number.isFinite(Number(a)) && Math.abs(Number(a) - Number(b)) < 0.01;
+  const matches = (f) => {
+    const freqMonthly = Number(f && f.monthly);
+    const explicitAnnual = Number(f && f.annual);
+    const freqAnnual = explicitAnnual > 0
+      ? explicitAnnual
+      : (freqMonthly > 0 ? freqMonthly * 12 : null);
+    const monthlyOk = (Number.isFinite(monthlyTotal) && monthlyTotal > 0) ? moneyMatches(freqMonthly, monthlyTotal) : true;
+    const annualOk = (Number.isFinite(annualTotal) && annualTotal > 0) ? moneyMatches(freqAnnual, annualTotal) : true;
+    // Neither total populated ⇒ nothing to match on: fail closed (no lines)
+    // rather than let every frequency qualify and pick the first.
+    if (!(monthlyTotal > 0) && !(annualTotal > 0)) return false;
+    return monthlyOk && annualOk;
+  };
   // ⭐ NO MATCH ⇒ NO LINES. The fallback used to be `|| frequencies[0]`, which
   // quotes A cadence rather than THE cadence: buildPricingBundle returns the
   // whole ladder, and when it rejects a mismatched snapshot and re-derives, the

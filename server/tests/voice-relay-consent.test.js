@@ -400,18 +400,30 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).not.toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415557777' }));
   });
 
-  // The write is phone-keyed: it stops TEXTS. An email opt-out is a different
-  // ledger and a human's call — so the record must not read as finished.
-  test('an email opt-out is recorded as SMS-only, with the email half flagged pending', async () => {
+  // ⭐ ROUTED BY CHANNEL. The write is phone-keyed — it stops TEXTS. Applying it
+  // to "stop emailing me" would silence appointment reminders the caller never
+  // asked to stop, while the email they DID ask about kept sending.
+  test('an EMAIL-ONLY opt-out writes no SMS suppression and is left for a human', async () => {
     const logger = require('../services/logger');
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop emailing.',
       contact_preference: 'stop emailing me, I get too many',
       do_not_contact_request: true,
     }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/EMAIL-ONLY/));
+  });
+
+  test('a GENERAL "stop contacting me" still takes the SMS suppression, email half flagged', async () => {
+    const logger = require('../services/logger');
+    await executeTool('capture_lead', {
+      call_summary: 'Asked to be left alone entirely.',
+      contact_preference: 'stop contacting me — no calls, no texts, no email',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
     expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/SMS suppression recorded/));
     expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/EMAIL: that opt-out is NOT applied here/));
-    expect(logger.info).not.toHaveBeenCalledWith(expect.stringMatching(/do-not-contact honoured/));
   });
 
   test('a preference that is NOT an opt-out records nothing', async () => {

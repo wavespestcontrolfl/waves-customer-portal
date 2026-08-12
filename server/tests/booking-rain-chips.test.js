@@ -52,6 +52,10 @@ function slot(startTime, rank) {
 function wireDayCapCounts(rows = []) {
   const builder = {
     whereNot: jest.fn().mockReturnThis(),
+    // The day cap also counts VOICE bookings off scheduled_services (they
+    // write no self_booked_appointments row) — same thenable, no rows here.
+    where: jest.fn().mockReturnThis(),
+    whereNotIn: jest.fn().mockReturnThis(),
     whereBetween: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),

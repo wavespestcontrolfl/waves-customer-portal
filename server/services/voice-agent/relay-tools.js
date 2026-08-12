@@ -732,7 +732,26 @@ async function executeTool(name, input = {}, ctx = {}) {
       // other record. This is the ONLY consent write the agent makes and it is
       // one-directional: it can stop messages, never start them (nothing here
       // ever calls clearSuppression).
-      if (input.do_not_contact_request === true) {
+      // ⭐ ROUTED BY CHANNEL. `messaging_suppression` is phone-keyed: writing it
+      // stops TEXTS. "Stop emailing me" sets the same boolean, so applying it
+      // here would silence a customer's appointment reminders — an opt-out they
+      // never asked for — while the email they DID ask about kept sending. So
+      // an EMAIL-ONLY request writes nothing and stays a human's to action, the
+      // same as every other stated preference in this lane; a general "stop
+      // contacting me" still takes the SMS suppression (the one channel this
+      // platform sends automatically) with its email half explicitly pending.
+      const preferenceText = String(input.contact_preference || '');
+      const mentionsEmail = /\bemail(s|ing)?\b/i.test(preferenceText)
+        || String(input.preferred_contact_method || '') === 'email';
+      const mentionsSms = /\b(text|texts|texting|sms|message|messages|messaging|call|calls|contact|contacting)\b/i.test(preferenceText);
+      const emailOnlyRequest = mentionsEmail && !mentionsSms;
+      if (input.do_not_contact_request === true && emailOnlyRequest) {
+        logger.warn(
+          `[voice-relay] verbal do-not-contact is EMAIL-ONLY callSid=${ctx.callSid || 'n/a'} — no SMS suppression written `
+          + '(that would stop texts they did not ask to stop); recorded on the lead for a human to action'
+        );
+      }
+      if (input.do_not_contact_request === true && !emailOnlyRequest) {
         try {
           const { recordSuppression } = require('../messaging/validators/suppression');
           // ⭐ IT RESOLVES ON FAILURE. recordSuppression catches its own DB
@@ -762,8 +781,6 @@ async function executeTool(name, input = {}, ctx = {}) {
             // mechanism and a human's call, exactly like every other stated
             // preference in this lane. Logging it as "honoured" without that
             // distinction is how a half-done opt-out reads as a finished one.
-            const mentionsEmail = /\bemail(s|ing)?\b/i.test(String(input.contact_preference || ''))
-              || String(input.preferred_contact_method || '') === 'email';
             logger.info(
               `[voice-relay] verbal do-not-contact — SMS suppression recorded callSid=${ctx.callSid || 'n/a'}`
               + (mentionsEmail ? ' ⚠️ the caller also referenced EMAIL: that opt-out is NOT applied here and is pending a human' : '')
