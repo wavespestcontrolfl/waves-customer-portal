@@ -1413,7 +1413,7 @@ class GscOpportunityMiner {
       // header's RETIRED note for the canonical mechanisms.
       ['local_gap', () => this.mineLocalGap(since, ownPagesByServiceCity)],
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
-      ['no_content_yet', () => this.mineNoContentYet(since)],
+      ['no_content_yet', () => this.mineNoContentYet(since, { periodDays })],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
@@ -1543,10 +1543,22 @@ class GscOpportunityMiner {
         logger.warn(`[gsc-opp-miner] occupied link_boost keys load failed: ${err.message}`);
         return new Set();
       });
-      buckets.link_boost = deriveLinkBoost(
-        [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
-        { excludeKeys: occupied }
-      );
+      // seo-action-generator also emits add_internal_links (issue_type
+      // internal_linking) into seo_actions, so companions need the same
+      // cross-queue fence the rewrite targets got — otherwise a page can
+      // collect duplicate internal-link work under two unrelated dedupe
+      // schemes (audit P1). Fails CLOSED: an unavailable lookup derives
+      // no companions this run rather than risking duplicates.
+      const linkOwned = await this._pagesOwnedByOpenSeoActions(['add_internal_links']);
+      if (linkOwned === null) {
+        logger.warn('[gsc-opp-miner] link_boost: seo_actions fence unavailable — no companions derived this run');
+        buckets.link_boost = [];
+      } else {
+        buckets.link_boost = deriveLinkBoost(
+          [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
+          { excludeKeys: occupied }
+        ).filter((o) => !linkOwned.has(routeIdentity(o.page_url)));
+      }
     } catch (err) {
       logger.warn(`[gsc-opp-miner] link_boost failed: ${err.message}`);
       errors.link_boost = err.message;
@@ -1802,7 +1814,7 @@ class GscOpportunityMiner {
   // seo_actions — the older mechanism's claim on a page. null on failure
   // so the caller can fail CLOSED: without this evidence we cannot rule
   // out duplicate rewrite work.
-  async _pagesOwnedByOpenSeoActions() {
+  async _pagesOwnedByOpenSeoActions(actionTypes = ['rewrite_title_meta']) {
     try {
       // status stays 'open' after execution — completion is recorded in
       // execution_status ('done' / 'failed' / 'manual_required'), so
@@ -1812,7 +1824,8 @@ class GscOpportunityMiner {
       // finished for this purpose too: nothing is in flight, and the page
       // needs someone to act, which is exactly what this bucket does.
       const rows = await db('seo_actions')
-        .where({ action_type: 'rewrite_title_meta', status: 'open' })
+        .whereIn('action_type', actionTypes)
+        .where({ status: 'open' })
         .whereNotIn('execution_status', ['done', 'failed', 'manual_required'])
         .select('url');
       const out = new Set();
@@ -2057,6 +2070,22 @@ class GscOpportunityMiner {
       throw new Error('seo_actions ownership fence unavailable — cannot rule out duplicate rewrite work');
     }
 
+    // One page, one rewrite. A query classified under two service/city
+    // values during the window yields two qualifying candidates that can
+    // resolve to the SAME page, and dedupeKey keeps service+city — so both
+    // persist and two rewrite rows target one URL (audit P2). Keep the
+    // highest-impression candidate per resolved page.
+    const claimedPages = new Map();
+    for (const r of [...filtered].sort((a, b) => parseInt(b.impressions, 10) - parseInt(a.impressions, 10))) {
+      const mapped = rankingPages.get(r.query);
+      if (!(queryDomainsCovered(r.domains, covered) && mapped
+        && queryDomainsCovered(r.domains, mapped.domains))) continue;
+      const target = ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains));
+      if (!target) continue;
+      const id = routeIdentity(target);
+      if (!claimedPages.has(id)) claimedPages.set(id, r);
+    }
+
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
@@ -2066,10 +2095,13 @@ class GscOpportunityMiner {
         && queryDomainsCovered(r.domains, mapped.domains))
         ? ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains))
         : null;
-      // The older seo_actions queue owns this page — yield to it.
-      const pageUrl = (resolved && ownedBySeoActions.has(routeIdentity(resolved)))
-        ? null
-        : resolved;
+      const targetId = resolved ? routeIdentity(resolved) : null;
+      const pageUrl = (
+        // The older seo_actions queue owns this page — yield to it.
+        (resolved && ownedBySeoActions.has(targetId))
+        // A higher-impression sibling candidate already claimed the page.
+        || (resolved && claimedPages.get(targetId) !== r)
+      ) ? null : resolved;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
@@ -3288,7 +3320,7 @@ class GscOpportunityMiner {
     }
   }
 
-  async mineNoContentYet(since) {
+  async mineNoContentYet(since, { periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS } = {}) {
     // Queries with impressions but no owned page USEFULLY ranking for them
     // — served-ness on TRUE query→page rows, not classification overlap.
     // Two earlier iterations both broke in opposite directions: raw
@@ -3302,6 +3334,15 @@ class GscOpportunityMiner {
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
+      // HUB-ONLY, exactly as mineListicleFamily is and for the same
+      // reason: this bucket's output is a blog or city-service page, blog
+      // publishes are hub-only (hubOnlyBlogDomains in the publisher), and
+      // the emitted brief carries no target_sites — so spoke-observed
+      // demand would mint a hub post the hub does not have the demand
+      // for (audit P1). Cross-domain aggregation is right for judging
+      // whether a page RANKS (see _bestMappedPositionByQueryDomain); it
+      // is wrong for deciding where to PUBLISH.
+      .where('domain', 'wavespestcontrol.com')
       .select('query', 'service_category', 'city_target', 'intent_type')
       // Contributing domains ride along so the served-check can require
       // map coverage from each of them (queryDomainsCovered).
@@ -3337,6 +3378,17 @@ class GscOpportunityMiner {
     const bestMapped = await this._bestMappedPositionByQueryDomain(
       candidates.map((c) => c.q.query), since
     );
+    // ARBITRATION vs seasonal_rising. A service query can be both rising
+    // ≥50% and weakly mapped, and for a cityless query both buckets emit
+    // new_supporting_blog — under different dedupe keys (bucket is the
+    // first key segment), so persistAll keeps both and the runner drafts
+    // TWO posts for one intent (audit P1). _seasonalEmittableQueries is
+    // the same admission mirror the listicle lane already uses for this
+    // exact purpose; seasonal_rising runs earlier in mineAll's list, so
+    // yielding to it here is the stable direction.
+    const seasonalEmittable = await this._seasonalEmittableQueries(
+      candidates.map((c) => c.q.query), periodDays
+    );
 
     let uncovered = 0;
     const out = [];
@@ -3347,6 +3399,7 @@ class GscOpportunityMiner {
       const domainPositions = (Array.isArray(q.domains) ? q.domains : [])
         .map((d) => bestMapped.get(mappedPositionKey(q.query, d)) ?? null);
       if (!noContentYetEmittable(domainPositions)) continue;
+      if (seasonalEmittable.has(q.query)) continue; // seasonal_rising owns it
 
       const opp = {
         bucket: 'no_content_yet',
