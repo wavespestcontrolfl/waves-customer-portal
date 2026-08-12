@@ -37,6 +37,7 @@ const {
   classifierQuerySupported,
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
+  noContentYetMapServed,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -244,11 +245,12 @@ describe('actionForOpportunity', () => {
     expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'do i have to use hometeam pest defense' }))
       .toBe('new_supporting_blog');
   });
-  test('cannibalization always do_not_publish', () => {
+  test('unknown/retired buckets fall through to do_not_publish', () => {
+    // cannibalization + page_type_mismatch retired 2026-08-12 (canonical
+    // mechanisms: CannibalizationDetector / url-intelligence intent
+    // routes) — any historical row still maps to the safe fallback.
     expect(actionForOpportunity({ bucket: 'cannibalization', query: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('do_not_publish');
-  });
-  test('page_type_mismatch always do_not_publish (human review)', () => {
     expect(actionForOpportunity({ bucket: 'page_type_mismatch', page_url: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('do_not_publish');
   });
@@ -319,14 +321,38 @@ describe('dedupeKey', () => {
   });
 });
 
+// ── noContentYetMapServed ───────────────────────────────────────────
+//
+// The served-ness test shared by mineNoContentYet admission and the
+// reachability mirror. Boundary = THRESHOLDS.answerGapPositionMax: at or
+// inside it an owned page already carries the query (refresh/answer-gap
+// territory); beyond it — or unmapped — the demand is a content gap.
+
+describe('noContentYetMapServed', () => {
+  const { THRESHOLDS: T } = require('../services/content/scoring-config');
+  test('mapped at/inside answerGapPositionMax → served', () => {
+    expect(noContentYetMapServed(9)).toBe(true);
+    expect(noContentYetMapServed(T.answerGapPositionMax)).toBe(true);
+  });
+  test('mapped beyond the window → not served (content gap)', () => {
+    expect(noContentYetMapServed(T.answerGapPositionMax + 0.1)).toBe(false);
+    expect(noContentYetMapServed(85)).toBe(false);
+  });
+  test('unmapped / non-numeric → not served', () => {
+    expect(noContentYetMapServed(null)).toBe(false);
+    expect(noContentYetMapServed(undefined)).toBe(false);
+    expect(noContentYetMapServed(NaN)).toBe(false);
+  });
+});
+
 // ── scoreOpportunity integration of breakdown ───────────────────────
 
 describe('scoreOpportunity', () => {
-  test('cannibalization gets cannibalizationRisk penalty applied', () => {
-    const o = { bucket: 'cannibalization', service: 'pest', query: 'pest control', city: 'Bradenton' };
+  test('breakdown keeps _penalty (0 — no bucket pre-applies one since the review buckets retired)', () => {
+    const o = { bucket: 'striking_distance', service: 'pest', query: 'pest control', city: 'Bradenton' };
     const { total, breakdown } = scoreOpportunity(o, { position: 5, impressions: 200 });
-    expect(breakdown._penalty).toBe(WEIGHTS.cannibalizationRisk);
-    expect(total).toBeLessThan(
+    expect(breakdown._penalty).toBe(0);
+    expect(total).toBe(
       Object.entries(breakdown).filter(([k]) => k !== '_penalty').reduce((a, [, v]) => a + v, 0)
     );
   });
@@ -968,7 +994,7 @@ describe('listicle_family scoring + action mapping', () => {
     });
     // Beyond 15 with no resolvable service (raw AND inferred blank) →
     // unreachable: mineNoContentYet skips !service.
-    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map(), undefined, { queryPageMapAvailable: true })).toBe(false);
     // Striking-distance window (4-15): SQL admission alone is NOT
     // reachability (Codex r16) — the mirrored candidate must also clear
     // persistAll's action-aware floor, and at these signal levels a
@@ -976,18 +1002,22 @@ describe('listicle_family scoring + action mapping', () => {
     // blog floor 45 without): the family keeps the demand.
     expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
     expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(false);
-    // Beyond 15 with NO own page for the service+city → no_content_yet reaches it.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(true);
-    // Beyond 15 but an own page EXISTS for the service+city →
-    // no_content_yet skips it and striking_distance is out of window: NO
-    // bucket emits the rep, so the family must stay eligible. The lookup
-    // mirrors that miner's RAW-classifier-first keying (Codex r13): a raw
-    // 'tree_shrub' classification must find the raw-keyed map entry.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
-    expect(listicleFamilyRepReachable(
-      rep({ position: 20, service_category: 'tree_shrub' }),
-      new Map([['tree_shrub::', 'https://x/']])
-    )).toBe(false);
+    // Beyond 15, map available, query unmapped (no owned page ranks for
+    // it) → no_content_yet reaches it.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true })).toBe(true);
+    // Beyond 15 but mapped weakly (best owned page past
+    // answerGapPositionMax) → still a content gap: reachable.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 45 })).toBe(true);
+    // Beyond 15 with a mapped page at ≤ answerGapPositionMax →
+    // no_content_yet skips it (refresh/answer-gap territory) and
+    // striking_distance is out of window: NO bucket emits the rep, so the
+    // family must stay eligible (noContentYetMapServed mirror).
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 25 })).toBe(false);
+    // Map UNAVAILABLE (sync outage): mineNoContentYet fails closed and
+    // emits nothing, so the mirror must read unreachable — demand stays
+    // with the family, no double emission from either side.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: false, mappedBestPos: null })).toBe(false);
     // Seasonal-emittable rep → reachable regardless of position/own-page
     // (mineSeasonalRising emits it independently; Codex r13).
     expect(listicleFamilyRepReachable(
@@ -1003,17 +1033,18 @@ describe('listicle_family scoring + action mapping', () => {
   test('reachability judges tuples by the QUERY MINERS aggregation, not the family weighting (Codex r14)', () => {
     // 100 imps at plain-avg 54 (volatile daily rankings): the family's
     // weighted position may sit near 8, but mineStrikingDistance uses
-    // avg(position)=54 (out of window) and mineNoContentYet skips on the
-    // own page — NO bucket emits it, so the family must stay eligible.
+    // avg(position)=54 (out of window) and mineNoContentYet skips when a
+    // mapped page serves the query — NO bucket emits it, so the family
+    // must stay eligible.
     const volatile = {
       query: 'drought tolerant plants florida',
       impressions: 101,
       position: 8.9, // family weighting — must NOT decide reachability
       tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null }],
     };
-    expect(listicleFamilyRepReachable(volatile, new Map([['tree_shrub::', 'https://x/']]))).toBe(false);
-    // Same rep with no own page → no_content_yet emits (plain avg > 15).
-    expect(listicleFamilyRepReachable(volatile, new Map())).toBe(true);
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 22 })).toBe(false);
+    // Same rep unmapped → no_content_yet emits (plain avg > 15).
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { queryPageMapAvailable: true })).toBe(true);
     // Split classification: 30+21 imps across two tuples — each tuple is
     // under the per-tuple ≥50 floor the query miners apply per group, so
     // neither miner emits despite the 51-imp total.
@@ -1026,7 +1057,7 @@ describe('listicle_family scoring + action mapping', () => {
         { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null },
       ],
     };
-    expect(listicleFamilyRepReachable(split, new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(split, new Map(), undefined, { queryPageMapAvailable: true })).toBe(false);
     // In-window tuple over the SQL floor — but the mirrored candidate
     // scores ~32, under its persistence floor, so the query bucket would
     // mine-and-drop it: the family keeps the demand (Codex r16).

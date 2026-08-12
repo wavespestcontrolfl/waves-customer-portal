@@ -21,6 +21,7 @@ const queue = require('../services/content/opportunity-queue');
 afterEach(() => {
   jest.clearAllMocks();
   delete process.env.AUTONOMOUS_BLOG_MIN_SCORE;
+  delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
 });
 
 describe('minScoreToActFor', () => {
@@ -48,6 +49,24 @@ describe('minScoreToActFor', () => {
     process.env.AUTONOMOUS_BLOG_MIN_SCORE = 'junk';
     expect(minScoreToActFor('new_supporting_blog')).toBe(THRESHOLDS.blogMinScoreToAct);
   });
+
+  test('AUTONOMOUS_REWRITE_MIN_SCORE lowers the rewrite floor; unset keeps the global (lane dark)', () => {
+    // Default already asserted above: rewrite_title_meta == global floor.
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    expect(minScoreToActFor('rewrite_title_meta')).toBe(60);
+    // Other actions unaffected by the rewrite env.
+    expect(minScoreToActFor('refresh_existing_page')).toBe(THRESHOLDS.minScoreToAct);
+    expect(minScoreToActFor('new_supporting_blog')).toBe(THRESHOLDS.blogMinScoreToAct);
+  });
+
+  test('rewrite override clamps to [20, minScoreToAct] and ignores junk', () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '5';
+    expect(minScoreToActFor('rewrite_title_meta')).toBe(20);
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '90';
+    expect(minScoreToActFor('rewrite_title_meta')).toBe(THRESHOLDS.minScoreToAct);
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = 'junk';
+    expect(minScoreToActFor('rewrite_title_meta')).toBe(THRESHOLDS.minScoreToAct);
+  });
 });
 
 // Minimal knex-chain fake for the queue methods under test.
@@ -72,13 +91,14 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric ELSE \?::numeric END/);
-    // bindings: [claimed_at, maxAttempts, blogFloor, minScore] — the
-    // lifetime-claim-budget filter binds between the claim timestamp and
-    // the score floors.
+    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' THEN \?::numeric ELSE \?::numeric END/);
+    // bindings: [claimed_at, maxAttempts, blogFloor, rewriteFloor,
+    // minScore] — the lifetime-claim-budget filter binds between the claim
+    // timestamp and the score floors.
     expect(bindings[1]).toBe(5);
     expect(bindings[2]).toBe(THRESHOLDS.blogMinScoreToAct);
-    expect(bindings[3]).toBe(THRESHOLDS.minScoreToAct);
+    expect(bindings[3]).toBe(THRESHOLDS.minScoreToAct); // rewrite floor default = global (dark)
+    expect(bindings[4]).toBe(THRESHOLDS.minScoreToAct);
   });
 
   test('an explicitly LOWER caller minScore applies to every action type', async () => {
@@ -90,6 +110,7 @@ describe('claimNext action-aware floor', () => {
     const [, bindings] = db.raw.mock.calls[0];
     expect(bindings[2]).toBe(0);
     expect(bindings[3]).toBe(0);
+    expect(bindings[4]).toBe(0);
   });
 
   test('an explicitly HIGHER caller minScore restricts blogs too (no blog-floor leak on --min-score=90)', async () => {
@@ -101,6 +122,7 @@ describe('claimNext action-aware floor', () => {
     const [, bindings] = db.raw.mock.calls[0];
     expect(bindings[2]).toBe(90);
     expect(bindings[3]).toBe(90);
+    expect(bindings[4]).toBe(90);
   });
 
   test('env-tuned blog floor flows into the claim bindings', async () => {
@@ -113,6 +135,18 @@ describe('claimNext action-aware floor', () => {
     const [, bindings] = db.raw.mock.calls[0];
     expect(bindings[2]).toBe(50);
   });
+
+  test('env-tuned rewrite floor flows into the claim bindings (persist and claim gates agree)', async () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    db.mockImplementation(() => chainResolving([]));
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({});
+
+    const [, bindings] = db.raw.mock.calls[0];
+    expect(bindings[3]).toBe(60);
+    expect(bindings[4]).toBe(THRESHOLDS.minScoreToAct);
+  });
 });
 
 describe('peek action-aware floor', () => {
@@ -123,8 +157,8 @@ describe('peek action-aware floor', () => {
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
     expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric ELSE \?::numeric END/),
-      [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct],
+      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' THEN \?::numeric ELSE \?::numeric END/),
+      [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct, THRESHOLDS.minScoreToAct],
     );
   });
 
@@ -134,7 +168,7 @@ describe('peek action-aware floor', () => {
 
     await queue.peek({ minScore: 90 });
 
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.any(String), [90, 90]);
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.any(String), [90, 90, 90]);
   });
 
   test('peek without minScore applies no floor (unchanged behavior)', async () => {
@@ -186,6 +220,23 @@ describe('miner persistAll action-aware gate', () => {
     expect(persistedKeys).toContain('rf-87');
     expect(persistedKeys).not.toContain('blog-44');
     expect(persistedKeys).not.toContain('rw-69');
+  });
+
+  test('AUTONOMOUS_REWRITE_MIN_SCORE admits rewrite rows at the tuned floor', async () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    const persisted = await miner.persistAll([
+      opp({ score: 69, action_type: 'rewrite_title_meta', page_url: 'https://x/p/', dedupe_key: 'rw-69-open' }), // ≥60 → kept
+      opp({ score: 55, action_type: 'rewrite_title_meta', page_url: 'https://x/q/', dedupe_key: 'rw-55' }),      // <60 → dropped
+      opp({ score: 69, action_type: 'refresh_existing_page', page_url: 'https://x/r/', dedupe_key: 'rf-69' }),   // refresh keeps global 75 → dropped
+    ]);
+
+    expect(persisted).toBe(1);
+    const persistedKeys = db.raw.mock.calls.map(([, b]) => b).map((b) => b[12]);
+    expect(persistedKeys).toContain('rw-69-open');
+    expect(persistedKeys).not.toContain('rw-55');
+    expect(persistedKeys).not.toContain('rf-69');
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {
