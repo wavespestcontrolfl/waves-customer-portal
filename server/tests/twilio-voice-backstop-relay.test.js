@@ -36,6 +36,9 @@ const { isRelayAttached } = require('../services/voice-agent/relay-server');
 const {
   buildRelayTwiML,
   DEFAULT_WELCOME_GREETING,
+  defaultWelcomeGreeting,
+  agentName,
+  DEFAULT_TTS_VOICE_ID,
   appendWsKey,
   maskPhone,
 } = require('../services/voice-agent/relay-protocol');
@@ -159,6 +162,44 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
     const noAction = buildRelayTwiML({ wsUrl: RELAY_URL });
     expect(noAction).toContain('<Connect>');
     expect(noAction).not.toContain('action=');
+  });
+});
+
+describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
+  const savedEnv = {};
+  const KEYS = ['VOICE_RELAY_TTS_VOICE', 'VOICE_RELAY_GREETING', 'VOICE_AGENT_NAME', 'VOICE_RELAY_WS_SECRET'];
+  beforeEach(() => { for (const k of KEYS) { savedEnv[k] = process.env[k]; delete process.env[k]; } });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  test('default voice id is the Sandy voice, env-overridable', () => {
+    expect(DEFAULT_TTS_VOICE_ID).toBe('21m00Tcm4TlvDq8ikWAM');
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="21m00Tcm4TlvDq8ikWAM"');
+    process.env.VOICE_RELAY_TTS_VOICE = 'custom-voice-id';
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="custom-voice-id"');
+  });
+
+  test('default greeting names the agent AND keeps the §934.03 recorded-line + AI disclosure', () => {
+    const greeting = defaultWelcomeGreeting();
+    expect(greeting).toContain('Sandy');
+    expect(greeting.toLowerCase()).toContain('recorded');
+    expect(greeting.toLowerCase()).toContain('automated assistant');
+    expect(greeting).toContain('How can I help you today?');
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Sandy');
+  });
+
+  test('VOICE_AGENT_NAME renames her; VOICE_RELAY_GREETING overrides the whole line', () => {
+    expect(agentName()).toBe('Sandy');
+    process.env.VOICE_AGENT_NAME = 'Marge';
+    expect(agentName()).toBe('Marge');
+    expect(defaultWelcomeGreeting()).toContain('Marge');
+    process.env.VOICE_RELAY_GREETING = 'Hi, this is Sandy! How can I help you today?';
+    expect(defaultWelcomeGreeting()).toBe('Hi, this is Sandy! How can I help you today?');
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Hi, this is Sandy! How can I help you today?');
   });
 });
 

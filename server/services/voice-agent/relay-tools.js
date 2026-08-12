@@ -9,7 +9,15 @@
  * route-aware slot engine as the web /book funnel (booking.js `_internals`) — no
  * duplicated scheduling logic — and are strictly READ-ONLY: they never write a
  * booking or touch the schedule. The agent offers times and still captures a
- * lead; a human locks the appointment in. The mutating confirm_booking is Phase 2.
+ * lead; a human locks the appointment in. The mutating confirm_booking is later.
+ *
+ * Phase 2 "context" (CONTEXT_TOOLS): get_account_overview, get_service_history
+ * and get_pricing — READ-ONLY account/pricing reads for an ANI-matched caller.
+ * Dark behind VOICE_RELAY_CONTEXT_ENABLED (fail-closed): with the gate off the
+ * tools don't register (activeTools) AND executeTool refuses them; with the
+ * gate on they still refuse unless the session carries a matched customer id
+ * (relay-context.resolveCallerContext — identity is ANI-only). Bodies live in
+ * relay-context.js.
  */
 
 const logger = require('../logger');
@@ -94,6 +102,67 @@ const TOOLS = [
     },
   },
 ];
+
+// Phase 2 context tools — registered only while VOICE_RELAY_CONTEXT_ENABLED
+// (activeTools below) and useful only for an ANI-matched caller.
+const CONTEXT_TOOLS = [
+  {
+    name: 'get_account_overview',
+    description:
+      'Look up the MATCHED caller\'s Waves account: active recurring services, ' +
+      'next scheduled appointment, last completed visit, and open balance. ' +
+      'READ-ONLY. Only works when the caller\'s phone number matched exactly one ' +
+      'customer account — it returns nothing for unknown callers, and you must ' +
+      'never guess account details.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_service_history',
+    description:
+      'Look up the MATCHED caller\'s recent service history: the last few ' +
+      'completed visits with date, service name, and the customer-facing visit ' +
+      'summary. READ-ONLY, matched callers only.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_pricing',
+    description:
+      'Look up standard recurring-plan pricing from the live Waves pricing ' +
+      'engine (the same engine the website quote calculator uses). READ-ONLY, ' +
+      'matched callers only. If it reports information is still needed, ask the ' +
+      'caller for it and call again. You may quote ONLY the numbers this tool ' +
+      'returns — never negotiate, discount, or estimate a price yourself.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        service: {
+          type: 'string',
+          enum: ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'],
+          description: 'Which recurring plan to price',
+        },
+        home_sqft: { type: 'number', description: 'Approximate home square footage (ask the caller)' },
+        lot_sqft: { type: 'number', description: 'Approximate lot size in square feet (needed for lawn/mosquito/tree & shrub)' },
+        lawn_sqft: { type: 'number', description: 'Approximate lawn/turf square footage, if the caller knows it' },
+        frequency: { type: 'string', enum: ['quarterly', 'bimonthly', 'monthly'], description: 'Pest control visit frequency (default quarterly)' },
+        lawn_track: { type: 'string', enum: ['st_augustine', 'bermuda', 'zoysia', 'bahia'], description: 'Grass type, if known' },
+        lawn_tier: { type: 'string', enum: ['basic', 'standard', 'enhanced', 'premium'], description: 'Lawn program tier (default standard)' },
+        mosquito_tier: { type: 'string', enum: ['seasonal9', 'monthly12'], description: 'Mosquito program (default monthly12)' },
+      },
+      required: ['service'],
+    },
+  },
+];
+const CONTEXT_TOOL_NAMES = CONTEXT_TOOLS.map((t) => t.name);
+
+/**
+ * The tool set to register for a relay session. Context tools appear ONLY
+ * while the context gate is on (checked at call time, not module load, so an
+ * env flip takes effect without a restart of the test/process).
+ */
+function activeTools() {
+  const { isContextEnabled } = require('./relay-context');
+  return isContextEnabled() ? [...TOOLS, ...CONTEXT_TOOLS] : TOOLS;
+}
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -192,10 +261,34 @@ function availabilityResultToText(res) {
  * Execute a tool call. Returns a short string (the tool_result content) telling
  * the model what happened so it can respond to the caller naturally.
  *
- * ctx: { from, to, callSid, language, markCaptured() }
+ * ctx: { from, to, callSid, language, markCaptured(), customerId }
+ * (customerId is the ANI-matched customer for this session, or null.)
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (CONTEXT_TOOL_NAMES.includes(name)) {
+      const relayContext = require('./relay-context');
+      // Double gate (defense in depth): even if a stale tool list registered
+      // these, the gate off means NO account/pricing reads — fail closed.
+      if (!relayContext.isContextEnabled()) {
+        return 'That lookup is not available. Tell the caller a Waves team member will follow up with the details.';
+      }
+      if (name === 'get_pricing') {
+        if (!ctx.customerId) {
+          return 'Pricing lookups are only available for recognized customer numbers on this line. '
+            + 'Do NOT quote or estimate any price — say a team member will go over pricing on the callback, and capture the lead.';
+        }
+        return await relayContext.pricingText(input);
+      }
+      // Account tools: identity is the ANI match made at session start — never
+      // a caller's claim. No match → no account data, offer an office callback.
+      if (!ctx.customerId) {
+        return 'No customer account matches the number this call is coming from. Do NOT share, confirm, or '
+          + 'guess any account details. Offer to have the office call them back, and capture the lead.';
+      }
+      if (name === 'get_account_overview') return await relayContext.accountOverviewText(ctx.customerId);
+      if (name === 'get_service_history') return await relayContext.serviceHistoryText(ctx.customerId);
+    }
     if (name === 'capture_lead') {
       // Robocall/spam: do NOT write it to the lead pipeline (createLeadFromExtraction
       // records any truthy quality as a normal lead). Suppress the hangup capture
@@ -257,8 +350,11 @@ async function executeTool(name, input = {}, ctx = {}) {
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }
+    if (CONTEXT_TOOL_NAMES.includes(name)) {
+      return 'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
+    }
     return 'Could not look up appointment times right now. Tell the caller a Waves team member will call to schedule, and capture the lead.';
   }
 }
 
-module.exports = { TOOLS, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText };
+module.exports = { TOOLS, CONTEXT_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText };

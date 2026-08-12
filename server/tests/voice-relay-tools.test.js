@@ -15,7 +15,7 @@ jest.mock('../routes/booking', () => ({
 }));
 jest.mock('../services/scheduling/parse-when', () => ({ parseWhen: jest.fn(), summarizeWindow: jest.fn() }));
 
-const { TOOLS, executeTool, speakSlot, formatSlots } = require('../services/voice-agent/relay-tools');
+const { TOOLS, CONTEXT_TOOLS, activeTools, executeTool, speakSlot, formatSlots } = require('../services/voice-agent/relay-tools');
 const { isEnabled } = require('../config/feature-gates');
 const booking = require('../routes/booking')._internals;
 const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
@@ -43,6 +43,37 @@ describe('TOOLS surface', () => {
   test('find_slots requires `when`; get_availability requires nothing', () => {
     expect(TOOLS.find((t) => t.name === 'find_slots').input_schema.required).toEqual(['when']);
     expect(TOOLS.find((t) => t.name === 'get_availability').input_schema.required).toEqual([]);
+  });
+});
+
+describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)', () => {
+  const saved = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    else process.env.VOICE_RELAY_CONTEXT_ENABLED = saved;
+  });
+
+  test('gate off/absent/anything-but-true → activeTools() is exactly the Phase 0/1 set', () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    expect(activeTools()).toEqual(TOOLS);
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'false';
+    expect(activeTools()).toEqual(TOOLS);
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = '1'; // not the literal 'true' → still dark
+    expect(activeTools()).toEqual(TOOLS);
+  });
+
+  test('gate on → the three read-only context tools register too', () => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    expect(activeTools().map((t) => t.name).sort()).toEqual(
+      ['capture_lead', 'find_slots', 'get_account_overview', 'get_availability', 'get_pricing', 'get_service_history']
+    );
+    expect(CONTEXT_TOOLS).toHaveLength(3);
+  });
+
+  test('gate off → executeTool refuses context tools outright', async () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1' });
+    expect(out).toMatch(/not available/i);
   });
 });
 

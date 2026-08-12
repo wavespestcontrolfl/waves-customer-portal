@@ -13695,6 +13695,14 @@ const CallRecordingProcessor = {
 // the office settles the email read-back question.
 CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustomerToNewsletter;
 
+// Named production exports for the voice-relay context lane (Phase 2,
+// read-only): the canonical inbound phone→identity column set and the
+// sanitized prior-call continuation summary (PR #2601), so the relay's
+// caller recognition mirrors the call pipeline exactly instead of forking a
+// parallel matcher — the two can never drift.
+CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
+CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
+
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
   reconcileFormerLeadLinkage,

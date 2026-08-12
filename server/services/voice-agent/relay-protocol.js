@@ -64,24 +64,41 @@ function appendWsKey(wsUrl, secret = process.env.VOICE_RELAY_WS_SECRET) {
   }
 }
 
+// The agent's spoken name (persona parity with the relay system prompt —
+// relay-conversation reads the same env). Read at call time, not module load.
+function agentName() {
+  return String(process.env.VOICE_AGENT_NAME || '').trim() || 'Sandy';
+}
+
 // FL §934.03 recorded-line disclosure + explicit AI disclosure, spoken by
 // Twilio TTS before the first caller turn. Kept here so the TwiML Bin and any
-// future in-app TwiML render the identical greeting.
+// future in-app TwiML render the identical greeting. The agent introduces
+// herself by name (VOICE_AGENT_NAME, default Sandy) but the recorded-line +
+// automated-assistant disclosure is NOT dropped — the /voice backstop relies
+// on this greeting BEING the §934.03 disclosure (see twilio-voice-webhook.js).
+// VOICE_RELAY_GREETING overrides the whole line verbatim if the owner wants
+// different copy.
 const DEFAULT_WELCOME_GREETING =
-  "Thanks for calling Waves Pest Control. Just so you know, this call may be " +
+  "Hi, this is Sandy at Waves Pest Control! Just so you know, this call may be " +
   "recorded, and you're speaking with our automated assistant. How can I help you today?";
+
+function defaultWelcomeGreeting() {
+  const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
+  if (override) return override;
+  return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
+}
 
 const DEFAULT_TTS_PROVIDER = 'ElevenLabs'; // matches the existing Waves voice-agent stack
 const DEFAULT_LANGUAGE = 'en-US';
 
-// Provider-specific voice id for the agent's TTS. Unset → the provider's
-// default voice. Set VOICE_RELAY_TTS_VOICE to the ElevenLabs voice id of the
-// Waves brand voice ("Veda Sky" — the same voice as the greeting/voicemail
-// assets) so the agent sounds identical to the rest of the call flow. Read at
-// call time (not module load) so an env change takes effect on restart even
-// if this module was required before the var existed in the environment.
+// Provider-specific voice id for the agent's TTS — the Sandy voice by default
+// (owner ruling 2026-08-11: voice id 21m00Tcm4TlvDq8ikWAM, name parity with
+// the sandbox), overridable via VOICE_RELAY_TTS_VOICE. Read at call time (not
+// module load) so an env change takes effect on restart even if this module
+// was required before the var existed in the environment.
+const DEFAULT_TTS_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 function defaultTtsVoice() {
-  return String(process.env.VOICE_RELAY_TTS_VOICE || '').trim() || undefined;
+  return String(process.env.VOICE_RELAY_TTS_VOICE || '').trim() || DEFAULT_TTS_VOICE_ID;
 }
 
 /** Pull the caller's transcribed text out of an inbound `prompt` frame, tolerant of field-name drift. */
@@ -125,7 +142,7 @@ function escapeXmlAttr(value) {
  */
 function buildRelayTwiML({
   wsUrl,
-  welcomeGreeting = DEFAULT_WELCOME_GREETING,
+  welcomeGreeting = defaultWelcomeGreeting(),
   ttsProvider = DEFAULT_TTS_PROVIDER,
   language = DEFAULT_LANGUAGE,
   voice = defaultTtsVoice(), // provider-specific voice id (env VOICE_RELAY_TTS_VOICE)
@@ -164,8 +181,11 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   DEFAULT_WELCOME_GREETING,
+  defaultWelcomeGreeting,
+  agentName,
   DEFAULT_TTS_PROVIDER,
   DEFAULT_LANGUAGE,
+  DEFAULT_TTS_VOICE_ID,
   defaultTtsVoice,
   isRelayEnabled,
   maskPhone,

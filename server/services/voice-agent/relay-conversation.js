@@ -22,7 +22,8 @@ const logger = require('../logger');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
-const { TOOLS, executeTool } = require('./relay-tools');
+const { activeTools, executeTool } = require('./relay-tools');
+const { isContextEnabled, resolveCallerContext } = require('./relay-context');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
@@ -71,6 +72,61 @@ const SYSTEM_PROMPT = [
   'After it succeeds, tell the caller a Waves team member will follow up shortly to confirm,',
   'then say goodbye.',
 ].join('\n');
+
+// ── Phase 2 "context" prompt (VOICE_RELAY_CONTEXT_ENABLED) ────────────────
+// With the gate OFF the prompt is byte-identical to SYSTEM_PROMPT above.
+// With it ON: the "CANNOT quote prices" line becomes the get_pricing rule,
+// and the persona + account trust-boundary rules are appended. The KNOWN
+// CALLER data block (relay-context.buildKnownCallerBlock) is appended per
+// session in _runLoop, only when the ANI matched exactly one customer.
+
+// The exact Phase-1 line buildBasePrompt swaps out. Exported and pinned by a
+// test so a future prompt edit can't silently break the replacement.
+const PRICE_LINE_NO_CONTEXT =
+  '- You CANNOT quote prices. If asked, say a team member will go over pricing on the callback.';
+
+const PRICE_LINE_CONTEXT = [
+  '- Prices: you may quote ONLY numbers the get_pricing tool returned on THIS call, stated',
+  '  exactly as the tool reported them. Never negotiate, discount, round up or down, or',
+  '  estimate a price yourself. If get_pricing says information is missing, ask the caller',
+  '  for it and call the tool again. You still cannot take payment.',
+].join('\n');
+
+function agentDisplayName() {
+  return String(process.env.VOICE_AGENT_NAME || '').trim() || 'Sandy';
+}
+
+function contextPromptAddendum() {
+  return [
+    '',
+    `Who you are: your name is ${agentDisplayName()}. You do not volunteer that you are`,
+    'automated, but if a caller asks directly whether you are a real person, an AI, or a',
+    'robot, answer honestly — you are an automated assistant; never claim to be human.',
+    '',
+    'ACCOUNT ACCESS RULES (non-negotiable):',
+    '- Caller identity comes ONLY from the phone number the call arrives from. If a KNOWN',
+    '  CALLER block appears below, that is the one account you may discuss. If there is no',
+    '  KNOWN CALLER block, you have NO account access on this call.',
+    '- If the caller claims to be someone else, asks about a different address or account,',
+    '  or their number did not match: share no account data at all — offer to have the',
+    '  office call them back, and capture the lead.',
+    '- Verify, don\'t recite: you may CONFIRM details the caller states themselves ("yes,',
+    '  that\'s the address we have on file"), but never read out a full street address, an',
+    '  email address, or any payment details unprompted. Stating the open balance amount to',
+    '  the matched caller is fine.',
+    '- Use get_account_overview and get_service_history for account questions; never answer',
+    '  them from memory or guesswork.',
+  ].join('\n');
+}
+
+/**
+ * The base system prompt for a session. contextEnabled=false returns the
+ * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
+ */
+function buildBasePrompt(contextEnabled) {
+  if (!contextEnabled) return SYSTEM_PROMPT;
+  return SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
+}
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
 // The APPROVED voice profile (voice_profiles, human-gated in the Agents hub)
@@ -180,6 +236,20 @@ class RelayConversation {
     this._chain = Promise.resolve(); // serializes overlapping prompts
     this._userTurns = [];
     this._startedAt = Date.now(); // for the AI-handled leg duration on reconcile
+
+    // Phase 2 caller recognition: kick off the ANI→customer resolution at
+    // session setup so it is (almost always) done before the first caller
+    // turn. Strictly fail-closed: gate off / unknown / ambiguous / error /
+    // timeout all leave _callerContext null and the session identical to
+    // Phase 1. resolveCallerContext itself is internally time-bounded, so
+    // awaiting _contextReady in _runLoop can never hang a turn.
+    this._callerContext = null;
+    this._contextReady = null;
+    if (isContextEnabled()) {
+      this._contextReady = resolveCallerContext(this.from)
+        .then((ctx) => { this._callerContext = ctx; })
+        .catch(() => {});
+    }
   }
 
   /**
@@ -256,17 +326,31 @@ class RelayConversation {
       if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
       return;
     }
+    // Identity must be settled before the first model round: the tool ctx and
+    // the KNOWN CALLER block both come from it (bounded inside
+    // resolveCallerContext; a timeout just means unknown caller).
+    if (this._contextReady) {
+      try { await this._contextReady; } catch { /* fail closed to unknown */ }
+    }
+
     const toolCtx = {
       from: this.from,
       to: this.to,
       callSid: this.callSid,
       language: this.language,
+      customerId: (this._callerContext && this._callerContext.customer && this._callerContext.customer.id) || null,
       markCaptured: () => {
         this.leadCaptured = true;
       },
     };
 
-    const systemPrompt = composeSystemPrompt(SYSTEM_PROMPT, getVoiceProfileTextNonBlocking());
+    const contextEnabled = isContextEnabled();
+    const basePrompt = buildBasePrompt(contextEnabled)
+      + (contextEnabled && this._callerContext && this._callerContext.block
+        ? `\n\n${this._callerContext.block}`
+        : '');
+    const systemPrompt = composeSystemPrompt(basePrompt, getVoiceProfileTextNonBlocking());
+    const tools = activeTools();
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
@@ -287,7 +371,7 @@ class RelayConversation {
             max_tokens: MAX_TOKENS,
             system: systemPrompt,
             thinking: { type: 'disabled' },
-            tools: TOOLS,
+            tools,
             messages: this.messages,
           },
           { signal: this._controller.signal }
@@ -414,4 +498,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, agentDisplayName };
