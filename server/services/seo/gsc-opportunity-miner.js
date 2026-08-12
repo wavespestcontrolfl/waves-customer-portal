@@ -937,6 +937,20 @@ function pickCtrRewriteTargetPage(rows = []) {
 // query is really landing on.
 const CTR_REWRITE_TARGET_MIN_SHARE = 0.25;
 
+// Restrict mapped pages to the ones a candidate's OWN domains produced.
+// rankingPages is keyed by query alone while candidates are grouped by
+// (query, service, city), so under mixed-domain or drifted classification
+// one tuple could otherwise be handed a URL that belongs to another
+// tuple's domain (audit P1). Pages without domain provenance are dropped:
+// unattributable evidence must not pick a rewrite target.
+function pagesForCandidateDomains(pageRows = [], domains = []) {
+  const own = new Set((Array.isArray(domains) ? domains : [])
+    .filter(Boolean).map((d) => String(d).toLowerCase()));
+  if (!own.size) return [];
+  return pageRows.filter((r) => (Array.isArray(r.domains) ? r.domains : [])
+    .some((d) => d && own.has(String(d).toLowerCase())));
+}
+
 function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
   // Only pages inside the bucket's own ranking window are eligible. The
   // gate is a query-level avg_position, which a deep secondary URL can
@@ -1985,7 +1999,7 @@ class GscOpportunityMiner {
       const pageUrl = (queryDomainsCovered(r.domains, covered)
         && mapped
         && queryDomainsCovered(r.domains, mapped.domains))
-        ? ctrRewriteTargetFor(mapped.pages)
+        ? ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains))
         : null;
       const opp = {
         bucket: 'ctr_rewrite',
@@ -3474,6 +3488,41 @@ class GscOpportunityMiner {
    * moves back. Pending rows only — claimed/in-review work is in flight.
    * Fail-soft: reconciliation must never abort the mining pass.
    */
+  /**
+   * Companion keys that must survive this reconciliation: the ones the
+   * current batch stands behind, UNION the ones live queue rows do.
+   *
+   * The batch alone is not enough. A link_boost key carries no query and
+   * no source bucket, so it is shared across parents — and a parent can be
+   * absent from this batch for reasons that have nothing to do with its
+   * validity: its bucket errored this run, or its signal dipped for a
+   * window. Reading live page-editing rows straight from the queue covers
+   * both cases without needing to know which bucket failed (audit P1).
+   *
+   * Fails CLOSED on a query error: an empty protection set would expire
+   * every companion in sight, so the error path returns a set that
+   * protects everything by reporting failure to the caller.
+   */
+  async _companionProtection(runner, opportunities = []) {
+    const keys = companionProtectionKeys(opportunities);
+    try {
+      const live = await runner('opportunity_queue')
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
+        .whereNotNull('page_url')
+        .select('page_url', 'service', 'city');
+      for (const r of live) {
+        keys.add(dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        }));
+      }
+      return keys;
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] companion protection lookup failed (${err.message}) — companion retirement suppressed this run`);
+      return null; // null = protect everything (callers skip companion retirement)
+    }
+  }
+
   async _reconcileCtrRewriteTargets(runner, opportunities = []) {
     const activeKeysByQuery = new Map();
     for (const o of opportunities) {
@@ -3491,7 +3540,7 @@ class GscOpportunityMiner {
     }
     if (!activeKeysByQuery.size) return;
 
-    const protectedCompanionKeys = companionProtectionKeys(opportunities);
+    const protectedCompanionKeys = await this._companionProtection(runner, opportunities);
 
     for (const [query, activeKeys] of activeKeysByQuery) {
       try {
@@ -3510,7 +3559,8 @@ class GscOpportunityMiner {
             status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
           });
 
-        const companionKeys = stale
+        // null protection = lookup failed = protect everything.
+        const companionKeys = protectedCompanionKeys === null ? [] : stale
           .filter((r) => r.page_url)
           .map((r) => dedupeKey({
             bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
@@ -3574,8 +3624,8 @@ class GscOpportunityMiner {
       // Protection must see the COMPLETE batch: a live decay_refresh
       // parent targeting the stale rewrite's page shares its companion
       // key, and the ctr-only list cannot see it (audit P1).
-      const protectedKeys = companionProtectionKeys(fullBatch || ctrOpportunities);
-      const companionKeys = stale
+      const protectedKeys = await this._companionProtection(runner, fullBatch || ctrOpportunities);
+      const companionKeys = protectedKeys === null ? [] : stale
         .filter((r) => r.page_url)
         .map((r) => dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
@@ -3650,6 +3700,7 @@ module.exports._internals = {
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
+  pagesForCandidateDomains,
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,

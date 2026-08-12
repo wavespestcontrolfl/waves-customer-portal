@@ -41,6 +41,7 @@ const {
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
+  pagesForCandidateDomains,
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
@@ -440,6 +441,25 @@ describe('pickCtrRewriteTargetPage', () => {
     expect(pickCtrRewriteTargetPage([])).toBe(null);
     expect(pickCtrRewriteTargetPage()).toBe(null);
     expect(pickCtrRewriteTargetPage([{ page_url: null, impressions: '500' }])).toBe(null);
+  });
+});
+
+describe('pagesForCandidateDomains (a tuple may only use its own domains evidence)', () => {
+  const rows = [
+    { page_url: 'https://hub/a/', impressions: '900', page_position: '3.0', domains: ['wavespestcontrol.com'] },
+    { page_url: 'https://spoke/b/', impressions: '900', page_position: '3.0', domains: ['venicelawncare.com'] },
+  ];
+  test('keeps only pages produced by the candidate own domains', () => {
+    expect(pagesForCandidateDomains(rows, ['wavespestcontrol.com']).map((r) => r.page_url))
+      .toEqual(['https://hub/a/']);
+    expect(pagesForCandidateDomains(rows, ['VeniceLawnCare.com']).map((r) => r.page_url))
+      .toEqual(['https://spoke/b/']);
+  });
+  test('no provenance on either side -> nothing eligible (fail closed)', () => {
+    expect(pagesForCandidateDomains(rows, [])).toEqual([]);
+    expect(pagesForCandidateDomains(rows, null)).toEqual([]);
+    expect(pagesForCandidateDomains([{ page_url: 'https://x/', impressions: '9' }], ['wavespestcontrol.com']))
+      .toEqual([]);
   });
 });
 

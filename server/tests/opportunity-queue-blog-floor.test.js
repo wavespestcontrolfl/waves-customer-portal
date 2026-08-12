@@ -285,10 +285,16 @@ describe('miner persistAll action-aware gate', () => {
         whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
         whereRaw: jest.fn(() => q),
-        // select(...).forUpdate() — the reconciliation LOCKS the rows it
-        // is about to retire and then updates them by locked key, so the
-        // selection predicate and the update target are asserted apart.
+        whereNotNull: jest.fn(() => q),
+        // Two shapes share this builder: `select(...)` awaited directly
+        // (the live-parent companion protection lookup) and
+        // `select(...).forUpdate()` (the reconciliation, which LOCKS the
+        // rows it is about to retire and then updates them by locked key,
+        // so predicate and update target are asserted apart).
         select: jest.fn(() => q),
+        then: (resolve, reject) => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite' ? staleRows : []
+        ).then(resolve, reject),
         forUpdate: jest.fn(() => {
           locks.push({ table, filters: q._filters, notIn: q._notIn });
           return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? staleRows : []);
@@ -540,6 +546,51 @@ describe('miner persistAll action-aware gate', () => {
     expect(sweeps.length).toBeGreaterThanOrEqual(1);
     expect(sweeps[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
     expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
+  });
+
+  test('a companion is protected by a LIVE QUEUE parent absent from this batch (errored/dipped bucket)', async () => {
+    // decay_refresh errors this run, or its signal dips: its pending
+    // refresh row is not in the batch, but it is still in the queue and
+    // still needs its shared companion.
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        _filters: null, _notIn: null, _in: null,
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        whereNot: jest.fn(() => q), whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+        select: jest.fn(() => q),
+        // The live-parent lookup (no bucket filter) returns a refresh row
+        // on the SAME page as the stale rewrite row.
+        then: (res, rej) => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite'
+            ? [staleRow]
+            : [{ page_url: 'https://x/old-page/', service: 'pest', city: null }]
+        ).then(res, rej),
+        forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
+        update: jest.fn((u) => {
+          updates.push({ table, filters: q._filters, in: q._in, updates: u });
+          return Promise.resolve(1);
+        }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    await miner.persistAll([
+      opp({
+        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm', service: 'pest', city: null,
+        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
+      }),
+    ]);
+
+    // Parent row retired (updated by its locked key), companion spared by
+    // the live queue parent.
+    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
+    expect(retirements.some((u) => u.in?.[1]?.includes(staleRow.dedupe_key))).toBe(true);
+    expect(retirements.filter((u) => u.filters?.bucket === 'link_boost')).toHaveLength(0);
   });
 
   test('recovered-query sweep rethrows so a failure rolls back the persist transaction', async () => {
