@@ -65,6 +65,55 @@ async function loadService(serviceId) {
     .first();
 }
 
+// ---- Stale-attempt detection (shared with routes) --------------------------
+// A visit started on an EARLIER day, aborted, and moved to a later date can
+// carry the old attempt's tracker state and stamps. The proof of a
+// reschedule is a stamp predating the row's OWN scheduled_date — an attempt
+// started on the current scheduled day is that day's genuine attempt, even
+// when read after midnight (overdue completions are deliberately allowed).
+// Staleness is judged PER FIELD: one fresh timestamp must not validate a
+// week-old sibling (a stale actual_start_time would feed
+// buildCompletionLifecycleUpdates a multi-day duration), and fresh columns
+// are kept — so a same-day SMS guard survives and the customer is not
+// double-texted. Terminal rows never qualify: completion persists status
+// BEFORE its best-effort tracker flip, and a finished visit's stamps ARE
+// the service record.
+const STALE_CLEARABLE_COLUMNS = [
+  'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'track_sms_sent_at', 'arrival_sms_sent_at',
+];
+const LIFECYCLE_EVIDENCE_COLUMNS = ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time'];
+
+function scheduledDayOf(svc = {}) {
+  const day = String(
+    svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || ''
+  ).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+function staleLifecycleFieldClears(svc = {}) {
+  const day = scheduledDayOf(svc);
+  if (!day) return {};
+  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) return {};
+  const clears = {};
+  for (const col of STALE_CLEARABLE_COLUMNS) {
+    const value = svc[col];
+    if (!value) continue;
+    const ms = new Date(value).getTime();
+    if (Number.isFinite(ms) && etDateString(new Date(ms)) < day) clears[col] = null;
+  }
+  return clears;
+}
+
+// Route-facing: does this row carry a stale live attempt markEnRoute's
+// self-heal will rewind? tech-track uses it to delegate the legacy
+// status='on_site' shape instead of 409ing before the heal can run.
+function isStaleLiveAttempt(svc = {}) {
+  if (!['en_route', 'on_property'].includes(String(svc.track_state))) return false;
+  const clears = staleLifecycleFieldClears(svc);
+  return LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in clears);
+}
+
 function customerRoom(customerId) {
   return `customer:${customerId}`;
 }
@@ -257,37 +306,11 @@ async function markEnRoute(serviceId, opts = {}) {
   // visits are deliberately allowed above), so it stays on the idempotent
   // path, as does same-day evidence. No-evidence advanced states are left
   // alone — nothing proves them stale. Never heals complete/cancelled.
-  const scheduledDayStr = String(
-    svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || ''
-  ).slice(0, 10);
-  // Operational-status gate: completion persists status BEFORE the
-  // best-effort markComplete tracker flip, so a completed row can
-  // legitimately sit at on_property — healing it would erase a finished
-  // visit's timestamps and re-text the customer. Only non-terminal rows
-  // qualify, and the observed status joins the UPDATE predicate below so a
-  // completion landing between this read and the write makes the heal miss.
-  const healableStatus = !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status));
-  // Staleness is judged PER FIELD (one fresh timestamp must not validate
-  // the rest — a partially reset row can hold a current-day en_route_at
-  // next to a week-old actual_start_time, and that stale start would feed
-  // buildCompletionLifecycleUpdates a multi-day duration). Every stale
-  // column, SMS guards included, is queued for clearing; fresh columns are
-  // kept — so a same-day SMS guard survives and the customer is not
-  // double-texted.
-  const validScheduledDay = /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr);
-  const isStaleField = (value) => {
-    if (!healableStatus || !validScheduledDay || !value) return false;
-    const ms = new Date(value).getTime();
-    return Number.isFinite(ms) && etDateString(new Date(ms)) < scheduledDayStr;
-  };
-  const staleFieldClears = {};
-  for (const col of ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time', 'track_sms_sent_at', 'arrival_sms_sent_at']) {
-    if (isStaleField(svc[col])) staleFieldClears[col] = null;
-  }
+  const scheduledDayStr = scheduledDayOf(svc) || '';
+  const staleFieldClears = staleLifecycleFieldClears(svc);
   // The heal keys off stale LIFECYCLE evidence (a stale SMS guard alone is
   // cleaned by the flip below but does not prove an aborted attempt).
-  const staleEvidence = ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time']
-    .some((col) => col in staleFieldClears);
+  const staleEvidence = LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in staleFieldClears);
   if (!opts._afterStaleHeal
     && staleEvidence
     && ['en_route', 'on_property'].includes(svc.track_state)) {
@@ -1088,6 +1111,7 @@ module.exports = {
   cancel,
   portalOrigin,
   isFutureScheduledDate,
+  isStaleLiveAttempt,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,

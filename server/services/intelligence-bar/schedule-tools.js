@@ -537,6 +537,11 @@ async function moveStopsToDay(input) {
         scheduled_date: observedDate,
         window_start: s.window_start ?? null,
         window_end: s.window_end ?? null,
+        // Tracker state in the CAS: a concurrent En Route flip advances
+        // track_state without touching status (the status sync is opt-in),
+        // so the stop would otherwise move with freshly written lifecycle
+        // state left un-rewound. See reschedule_appointment in tools.js.
+        track_state: s.track_state ?? null,
       })
       .update({
         scheduled_date: dateStr,

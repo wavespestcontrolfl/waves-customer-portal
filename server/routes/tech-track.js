@@ -79,7 +79,11 @@ router.post('/:id/en-route', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'status', 'scheduled_date');
+      .first(
+        'id', 'technician_id', 'status', 'scheduled_date',
+        // Stale-attempt evidence for the on_site heal delegation below.
+        'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+      );
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
@@ -115,10 +119,19 @@ router.post('/:id/en-route', async (req, res, next) => {
     //                                         it (avoids a noisy
     //                                         same-status row in
     //                                         job_status_history)
-    // Not allowed: on_site, completed, cancelled, skipped — all 409.
+    // Not allowed: on_site, completed, cancelled, skipped — all 409,
+    // with ONE exception: a STALE 'on_site' left behind by a legacy date
+    // move (lifecycle evidence predates the row's own scheduled day) is
+    // not today's real on-site — it is exactly the shape markEnRoute's
+    // self-heal rewinds, and rejecting it here would leave the visit
+    // permanently unable to go en route. Delegate it: skip this route's
+    // own status flip (the heal rewinds on_site→confirmed with its
+    // history row inside its own trx) and let markEnRoute run the fresh
+    // flip with the operational sync.
     const fromStatus = svc.status;
     const PRE_EN_ROUTE = new Set(['pending', 'confirmed', 'rescheduled']);
-    if (!PRE_EN_ROUTE.has(fromStatus) && fromStatus !== 'en_route') {
+    const staleOnSiteHeal = fromStatus === 'on_site' && trackTransitions.isStaleLiveAttempt(svc);
+    if (!PRE_EN_ROUTE.has(fromStatus) && fromStatus !== 'en_route' && !staleOnSiteHeal) {
       return res.status(409).json({
         error: `Cannot mark en-route from status '${fromStatus}'`,
       });
@@ -130,7 +143,7 @@ router.post('/:id/en-route', async (req, res, next) => {
     // Skipped on the en_route → en_route idempotent path so we don't
     // write a same-status job_status_history row + re-fire broadcasts
     // for a no-op tap.
-    if (fromStatus !== 'en_route') {
+    if (fromStatus !== 'en_route' && !staleOnSiteHeal) {
       try {
         await db.transaction(async (trx) => {
           await transitionJobStatus({
@@ -169,6 +182,10 @@ router.post('/:id/en-route', async (req, res, next) => {
     const result = await trackTransitions.markEnRoute(svc.id, {
       actorType: 'tech',
       actorId: req.technicianId,
+      // Stale-heal delegation: this route skipped its own status flip, so
+      // the healed re-entry syncs the operational side (confirmed →
+      // en_route, with history) itself.
+      ...(staleOnSiteHeal ? { syncOperationalStatus: true } : {}),
     });
 
     if (!result.ok) {

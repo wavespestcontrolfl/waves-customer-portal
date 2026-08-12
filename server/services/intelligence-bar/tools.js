@@ -1799,6 +1799,14 @@ async function rescheduleAppointment(input) {
       scheduled_date: observedDate,
       window_start: appt.window_start ?? null,
       window_end: appt.window_end ?? null,
+      // Tracker state is in the CAS too: a geofence/manual En Route flip
+      // between the read and this write advances track_state WITHOUT
+      // touching status (markEnRoute writes the tracker before the opt-in
+      // status sync), so status/date/window alone would still match and
+      // move the visit without rewinding the freshly written lifecycle
+      // state. A tracker change makes this miss instead; the caller
+      // reports the conflict and can retry on fresh state.
+      track_state: appt.track_state ?? null,
     })
     .update({
       scheduled_date: dateStr,

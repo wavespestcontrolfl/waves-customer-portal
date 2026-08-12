@@ -39,6 +39,7 @@ jest.mock('../services/recurring-app-intro-email', () => ({
 }));
 
 const db = require('../models/db');
+const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
 const { needsLifecycleRewind, LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
 const { buildVisitTimeline } = require('../services/service-report/visit-timeline');
@@ -89,6 +90,30 @@ describe('needsLifecycleRewind', () => {
   test('clean scheduled row does not rewind', () => {
     expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled' })).toBe(false);
     expect(needsLifecycleRewind({ status: 'pending' })).toBe(false);
+  });
+});
+
+describe('isStaleLiveAttempt (route-facing detector)', () => {
+  test('stale advanced state detected; same-day and terminal shapes are not', () => {
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'on_site', track_state: 'on_property', scheduled_date: todayStr, actual_start_time: isoDaysAgo(7),
+    })).toBe(true);
+    // Same-day evidence = today's genuine attempt.
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'on_site', track_state: 'on_property', scheduled_date: todayStr, actual_start_time: isoDaysAgo(0, 'T09:00'),
+    })).toBe(false);
+    // Terminal status never qualifies.
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'completed', track_state: 'on_property', scheduled_date: todayStr, actual_start_time: isoDaysAgo(7),
+    })).toBe(false);
+    // Non-advanced tracker never qualifies.
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'pending', track_state: 'scheduled', scheduled_date: todayStr, actual_start_time: isoDaysAgo(7),
+    })).toBe(false);
+    // A stale SMS guard alone is not lifecycle evidence.
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'pending', track_state: 'on_property', scheduled_date: todayStr, track_sms_sent_at: isoDaysAgo(7),
+    })).toBe(false);
   });
 });
 
@@ -469,6 +494,48 @@ describe('markEnRoute stale-attempt self-heal', () => {
       job_id: 'job-live-status',
       from_status: 'on_site',
       to_status: 'confirmed',
+    }));
+  });
+
+  test('delegated stale-on_site heal syncs the operational side back to en_route', async () => {
+    // tech-track's delegation path: it skips its own status flip and passes
+    // syncOperationalStatus, so after the heal rewinds on_site→confirmed
+    // the re-entry transitions confirmed→en_route with history.
+    const staleSvc = {
+      id: 'job-delegated',
+      customer_id: 'cust-15',
+      technician_id: null,
+      status: 'on_site',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      actual_start_time: isoDaysAgo(7),
+      track_sms_sent_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const healedSvc = {
+      ...staleSvc,
+      status: 'confirmed',
+      track_state: 'scheduled',
+      arrived_at: null,
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(staleSvc)) // loadService
+      .mockReturnValueOnce(query(1)) // heal UPDATE (in trx)
+      .mockReturnValueOnce(query(1)) // job_status_history insert (in trx)
+      .mockReturnValueOnce(query(healedSvc)) // recursed loadService
+      .mockReturnValueOnce(query(1)); // flip UPDATE
+
+    const result = await trackTransitions.markEnRoute('job-delegated', { syncOperationalStatus: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'job-delegated',
+      fromStatus: 'confirmed',
+      toStatus: 'en_route',
     }));
   });
 
