@@ -4165,6 +4165,12 @@ const EstimateConverter = {
             }
             logger.info(`[estimate-converter] standalone "${unit.service.name}" scheduled alongside reserved accept for estimate ${estimateId}`);
           } catch (standaloneErr) {
+            // The palm identity abort must surface (codex r22 pre-push P0)
+            // — swallowing it would complete acceptance/billing without
+            // scheduling the sold palm program, exactly what the throw
+            // exists to prevent (same contract as the follow-up catch).
+            if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'
+              || standaloneErr.code === 'PALM_RECURRING_LINE_INVALID') throw standaloneErr;
             logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
           }
         }

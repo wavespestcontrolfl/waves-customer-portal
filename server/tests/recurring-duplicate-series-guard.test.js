@@ -649,6 +649,10 @@ describe('the series creators consume the guard (source guards)', () => {
     // conversion; only a knowable MISSING row keeps skip+bell).
     expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(4);
     expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
+    // The reserved-bundle promotion catch rethrows too (codex r22 pre-push
+    // P0) — a transient catalog failure must not complete billing without
+    // the sold palm program.
+    expect(converterSrc).toContain("if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'");
     expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
     // Invalid-but-recurring palm lines never proceed as name-only rows
     // (codex r18 pre-push P0): the auto-schedule loop skips them to manual
