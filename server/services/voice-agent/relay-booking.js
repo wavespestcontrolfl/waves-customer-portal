@@ -537,10 +537,10 @@ async function requestBookingText(input = {}, ctx = {}) {
   const { resolveCallBookingPrice, callBookingInvoiceOnComplete } = require('../call-booking-catalog');
   const priceInfo = resolveCallBookingPrice({ quotedPrice: null, catalogRow });
 
-  // Link the live call's call_log row when it exists (the /voice webhook
-  // creates it at call start) so the office-confirm hook can close the
-  // originating lead and resolve the review card. Best-effort — a missing
-  // row (sandbox path) just means the fallback lead lookup applies.
+  // Link the live call's call_log row (the signature-verified /voice webhook
+  // creates it at call start) — it is what the review card FKs, and what lets
+  // the office-confirm hook close the originating lead and resolve that card.
+  // REQUIRED, not best-effort: no row ⇒ no card ⇒ no booking (below).
   let callLogId = null;
   if (ctx.callSid) {
     try {
@@ -552,11 +552,11 @@ async function requestBookingText(input = {}, ctx = {}) {
       // ⭐ FAIL CLOSED ON AN UNANSWERABLE LOOKUP. A row with no card lands on
       // the dispatch calendar invisible to the office confirm queue — the one
       // thing that makes a pending voice booking real (see the one-per-call
-      // guard above) — so a TRANSIENT failure here must not be read as "this
-      // call has no call_log row". Same doctrine as the re-service dedupe:
-      // an unanswerable question is not a licence to write. A genuine ABSENCE
-      // (the TwiML-Bin sandbox path, which has no call_log row at all) is a
-      // different answer and still books, cardless, as documented.
+      // guard above) — so a TRANSIENT failure here must not be swallowed into
+      // `null` and read as "this call has no call_log row". Same doctrine as
+      // the re-service dedupe: an unanswerable question is not a licence to
+      // write. (A genuine ABSENCE refuses too, just below — with its own
+      // message, because it is a different answer.)
       logger.error(`[voice-relay-booking] call_log lookup FAILED for callSid ${ctx.callSid} — refusing to book (no review-card linkage): ${lookupErr.message}`);
       return 'I could not reach the system that puts this in front of the office, so NOTHING was booked. '
         + 'Tell the caller a Waves team member will call to schedule, and capture the lead with their '
