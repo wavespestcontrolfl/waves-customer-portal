@@ -1503,6 +1503,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const profileDescribesQuotedProperty = !addressRegathered
       && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
 
+    // Did the composer switch to a DIFFERENT property (not merely refine
+    // the same street with locality)? Computed here because BOTH the V2
+    // shadow pass and the unit-scope model must fence the primary
+    // property's extraction on a true switch (codex r18 P1: the V2 pass
+    // ran before this flag existed, so an owner-unit's stated area could
+    // become suite evidence for a whole commercial building).
+    const crossPropertyRegather = addressRegathered
+      && !!address && !sameStreetAddress(intent.address, address);
+
     // Wrong-premise parcel signals (global flag / snapped record) are
     // stripped here exactly as in the pre-compose arbitration — the
     // re-gathered signals carry their OWN audit, so a corrected address is
@@ -1535,7 +1544,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // Same wrong-premise strip as V1 arbitration — with the V2 gate ON,
       // applyV2ToPropertyFacts would otherwise re-adopt the snapped parcel.
       propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
-      extraction: context.extraction,
+      // Cross-property fence (codex r18 P1): the primary property's unit
+      // signal and stated area must not describe a different quoted
+      // property — with both gates on, that stated area could replace the
+      // new building's county measurement as "suite evidence".
+      extraction: crossPropertyRegather ? null : context.extraction,
       intent,
       propertyFacts,
       address: intent.address || result.addressUsed || address,
@@ -1557,18 +1570,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
         commercialCategoryConflict, lookupCategoryConflict,
       } = require('./unit-scope-model');
-      // The cross-property fence applies only when the composer quoted a
-      // genuinely DIFFERENT property. addressRegathered also fires on
-      // same-property refinements — no prior gathered address at all, or
-      // the same street gaining city/ZIP (addressAddsLocality) — where the
-      // extraction still describes the quoted property and discarding its
-      // signals would bypass the category guard (codex r6 P1: a condo
-      // common-area extraction that merely added locality kept residential
-      // pricing). Only a street-level mismatch means another property
-      // (codex r4 P1: a primary-address tenant extraction must not
-      // classify a different quoted property, or clear its real lot).
-      const crossPropertyRegather = addressRegathered
-        && !!address && !sameStreetAddress(intent.address, address);
+      // crossPropertyRegather (computed above, shared with the V2 pass)
+      // fences the primary property's extraction only on a genuine street
+      // change: addressRegathered also fires on same-property refinements
+      // — no prior gathered address, or the same street gaining city/ZIP —
+      // where the extraction still describes the quoted property and
+      // discarding its signals would bypass the category guard (codex r6
+      // P1). A true switch must not let a primary-address tenant
+      // extraction classify another property or clear its lot (codex r4 P1).
       const unitScope = resolveUnitScopeModel({
         propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
         extraction: crossPropertyRegather ? null : context.extraction,

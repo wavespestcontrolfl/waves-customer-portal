@@ -519,6 +519,27 @@ describe('classifyLane guardrails', () => {
     });
   });
 
+  test('a unit quote with a MEASURED treated area is not parked for a missing lot (r18)', () => {
+    withGate('true', () => {
+      const out = classifyLane({
+        ...baseArgs,
+        intent: { ...baseArgs.intent, services: { lawn: { track: 'st_augustine' } } },
+        engineResult: {
+          lineItems: [{
+            service: 'lawn_care', monthlyAfterDiscount: 60, annualAfterDiscount: 720,
+            turfBasis: 'measuredTurfSf', turfConfidence: 'high', turfSf: 1800,
+          }],
+        },
+        totals: { monthly: 60, annual: 720, oneTime: 0 },
+        propertyFacts: {
+          ...baseArgs.propertyFacts,
+          lot: { value: null, source: 'not_applicable:common_master_parcel', confidence: 'high' },
+        },
+      });
+      expect(out.reasons.join(' ')).not.toMatch(/lot-driven service on a unit\/suite scope/);
+    });
+  });
+
   test('a lot-driven service on a unit scope parks — no lot means nothing to price turf from', () => {
     withGate('true', () => {
       // codex r5 P1: after the master-parcel lot clears, the lawn pricer's

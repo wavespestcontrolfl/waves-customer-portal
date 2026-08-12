@@ -82,12 +82,18 @@ function parseExtractedAddress(raw) {
 function emailProseForScan(body) {
   const lines = String(body || '').split('\n');
   const out = [];
+  const hasContent = () => out.some((l) => l.trim());
   for (const line of lines) {
     if (/^\s*>/.test(line)) continue; // quoted history
-    // Signoffs count only as WHOLE lines — "Thank you, we need pest
-    // control for a warehouse" is the request itself, and breaking on it
-    // emptied the scan body (codex r10 P1).
-    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s|Sent from |(?:best regards|kind regards|sincerely|thanks|thank you)[,.!]?\s*$)/i.test(line)) break;
+    // Structural markers (separator, reply header, forwarded header) end
+    // the sender's own text wherever they appear.
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s|Sent from )/i.test(line)) break;
+    // Courtesy signoffs count only as WHOLE lines AND only once request
+    // content precedes them — "Thanks!" can OPEN a reply ("Thanks!\nWe
+    // need pest control for our warehouse…"), and breaking there discarded
+    // the entire request (codex r18 P1; whole-line rule from r10 P1).
+    if (hasContent()
+      && /^\s*(?:best regards|kind regards|sincerely|regards|thanks|thank you|thx)[,.!]?\s*$/i.test(line)) break;
     out.push(line);
   }
   return out.join('\n').slice(0, 2000);

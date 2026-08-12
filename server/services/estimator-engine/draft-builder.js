@@ -105,6 +105,23 @@ function lineHasHeuristicTurf(line = {}) {
     || (line.turfBasis != null && HEURISTIC_TURF_BASES.has(line.turfBasis));
 }
 
+// Bases that describe a REAL treated area for the priced property (an
+// operator/profile measurement, a supplied lawn area, or a confident
+// lookup estimate) — the complement of HEURISTIC_TURF_BASES above.
+const MEASURED_TURF_BASES = new Set(['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf']);
+
+// True when every turf-bearing line priced from a measured/supplied area.
+// A unit quote with such a measurement needs no lot: its treated area is
+// already known, so the missing-lot review reason would be false (codex
+// r18 P2).
+function turfAreaFullyMeasured(lines = []) {
+  const turfLines = lines.filter((l) => l.turfBasis != null
+    || l.turfSf || l.turfSqFt || l.treatableArea);
+  return turfLines.length > 0
+    && turfLines.every((l) => MEASURED_TURF_BASES.has(String(l.turfBasis || ''))
+      && !lineHasHeuristicTurf(l));
+}
+
 // ── Engine input ──────────────────────────────────────────────
 
 // Lookup-resolved feature modifiers → the pest pricer's features vocabulary.
@@ -608,7 +625,8 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
-  } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')) {
+  } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')
+    && !turfAreaFullyMeasured(lines)) {
     // A unit/suite scope has NO individual lot by design — but a
     // lot-driven service (lawn/mosquito/T&S) on that scope has nothing to
     // price from: the engine's zero-area fallback returns a minimum-priced
