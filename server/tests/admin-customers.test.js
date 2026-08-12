@@ -602,6 +602,10 @@ describe('admin customers route helpers', () => {
     // P1): validation applies without an explicit key or name.
     expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
     expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // An UNRESOLVED explicit alias is inert and must not block the raw-key
+    // validation (codex r24 P1).
+    expect(serviceCatalogMatch({ serviceKey: 'legacy_palm', service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ serviceKey: 'legacy_palm', service: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
     // Snake-case explicit keys hit the same guards (codex r22 pre-push
     // P0): service_key is the persisted spelling.
     expect(serviceCatalogMatch({ service_key: 'palm_injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();

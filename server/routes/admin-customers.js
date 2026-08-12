@@ -397,12 +397,19 @@ function serviceCatalogMatch(line, serviceIndex) {
   // unmatched when cadence DATA is present but invalid; a bare explicit
   // selection (no line cadence data to contradict it) keeps the
   // operator's choice.
+  // An explicit key that resolves NO catalog row is inert — computed here
+  // (hoisted, codex r24 P1) so BOTH palm validation branches treat an
+  // unresolved explicit alias ({ serviceKey: 'legacy_palm', … }) as
+  // absent, exactly as the fallback matching does.
+  const explicitKeyResolves = explicitKey
+    && !!(serviceIndex.byKey.get(explicitKey) || serviceIndex.byName.get(explicitKey));
   // The raw `service` field carries the key too (codex r23 P1): a stored
   // { service: 'palm_injection_semiannual', frequency: 'monthly' } line
   // has no explicit key or name, but the candidate loop would match the
-  // semiannual row — same validation applies.
+  // semiannual row — same validation applies, including under an
+  // unresolved explicit alias (codex r24 P1).
   if (explicitKey === 'palm_injection_semiannual'
-    || (!explicitKey && rawKey === 'palm_injection_semiannual')) {
+    || ((!explicitKey || !explicitKeyResolves) && rawKey === 'palm_injection_semiannual')) {
     try {
       const {
         converterFollowUpSeedingPattern, visitsPerYearForRecurringService,
@@ -432,8 +439,6 @@ function serviceCatalogMatch(line, serviceIndex) {
   // keys that DO resolve are the operator's recognized choice: the two
   // palm identities are validated above, and any other resolved key wins
   // in the candidate loop as before.
-  const explicitKeyResolves = explicitKey
-    && !!(serviceIndex.byKey.get(explicitKey) || serviceIndex.byName.get(explicitKey));
   if ((!explicitKey || !explicitKeyResolves) && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
     try {
       const {
