@@ -56,9 +56,14 @@
  * caller's write is inside the reconcile try/catch. A persistence failure is
  * logged at error level and the call continues.
  *
- * PII: the transcript rows ARE the record — they are stored verbatim and are
- * never masked. Only LOGS are masked (phone numbers via maskPhone, and no
- * transcript text is ever logged).
+ * PII: the transcript rows ARE the record — names, addresses and problem
+ * descriptions are stored as spoken, and only LOGS are masked (phone numbers via
+ * maskPhone; no transcript text is ever logged). The ONE exception is access
+ * codes: `redactAccessCodes`, the scrub already applied on the model-facing
+ * path, also runs on the STORAGE path, so a gate or door code read aloud does
+ * not land verbatim on a row every admin call view renders. Parity with the
+ * existing pipeline, and the audit value is intact — turn, speaker, and
+ * surrounding words all survive.
  */
 
 const logger = require('../logger');
@@ -78,13 +83,37 @@ function clean(value, max) {
 }
 
 /**
+ * Access codes are redacted on the way INTO storage, not only on the way out.
+ *
+ * `redactAccessCodes` is the pipeline's existing scrub and is already applied on
+ * the MODEL-facing path (relay-history voiceSafeText). A caller reading out a
+ * gate code or a door code over the phone is exactly the kind of thing this
+ * transcript persists verbatim onto call_log.transcription, which every admin
+ * call view renders — so the same scrub runs on the storage path. This is
+ * PARITY with the existing pipeline, not a new policy, and it preserves the
+ * audit value: the turn, the speaker, and the surrounding words all survive;
+ * only the code itself becomes a placeholder.
+ *
+ * Never throws — a scrub failure must not cost the whole audit record.
+ */
+function scrubForStorage(text) {
+  if (!text) return text;
+  try {
+    const { redactAccessCodes } = require('../context-aggregator');
+    return typeof redactAccessCodes === 'function' ? redactAccessCodes(text) : text;
+  } catch {
+    return text;
+  }
+}
+
+/**
  * Render the session's ordered turn list as the pipeline's labeled dialogue.
  * turns: [{ role: 'caller'|'agent'|'tool', text }]
  */
 function buildTranscriptText(turns = []) {
   const lines = [];
   for (const turn of Array.isArray(turns) ? turns : []) {
-    const text = clean(turn && turn.text, MAX_TURN_CHARS);
+    const text = scrubForStorage(clean(turn && turn.text, MAX_TURN_CHARS));
     if (!text) continue;
     if (turn.role === 'caller') lines.push(`${CALLER_LABEL}: ${text}`);
     else if (turn.role === 'agent') lines.push(`${AGENT_LABEL}: ${text}`);
@@ -102,11 +131,11 @@ function buildTranscriptText(turns = []) {
  * composes a deterministic one from the caller's turns.
  */
 function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {}) {
-  const provided = clean(modelSummary, MAX_SUMMARY_CHARS);
+  const provided = scrubForStorage(clean(modelSummary, MAX_SUMMARY_CHARS));
   if (provided) return provided;
   const callerTurns = (Array.isArray(turns) ? turns : [])
     .filter((t) => t && t.role === 'caller')
-    .map((t) => clean(t.text, 300))
+    .map((t) => scrubForStorage(clean(t.text, 300)))
     .filter(Boolean);
   const head = leadCaptured
     ? 'AI phone assistant handled this call.'
@@ -193,6 +222,7 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
 
 module.exports = {
   buildTranscriptText,
+  scrubForStorage,
   buildCallSummary,
   buildTranscriptUpdate,
   TRANSCRIPTION_PROVIDER,

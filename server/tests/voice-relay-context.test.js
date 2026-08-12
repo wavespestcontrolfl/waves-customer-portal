@@ -687,7 +687,12 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(out).toContain('$112 per application');
     expect(out).toContain('$37.33');
     expect(out).toContain('$448');
-    expect(out).toContain('$99 setup fee');
+    // The fee is stated WITH its documented waiver (public-ranges.js: waived
+    // when bundled with another recurring service or with annual prepay) —
+    // stating it flat overquoted every caller about to bundle.
+    expect(out).toContain('$99 initial service fee on standalone pest service');
+    expect(out).toMatch(/waived if they bundle/i);
+    expect(out).toMatch(/pay for the year up front/i);
     expect(out).toMatch(/Quote ONLY these numbers/);
     // Owner rule: "per application", never "per visit".
     expect(out).not.toMatch(/per visit/i);

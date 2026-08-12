@@ -53,13 +53,83 @@ describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)'
     else process.env.VOICE_RELAY_CONTEXT_ENABLED = saved;
   });
 
-  test('gate off/absent/anything-but-true → activeTools() is exactly the Phase 0/1 set', () => {
+  // ⭐ THE GATE-OFF PIN WAS VACUOUS. `expect(activeTools()).toEqual(TOOLS)`
+  // compares the module's output to the module's own constant, so ANY schema
+  // edit satisfied it — capture_lead silently gained four properties under it.
+  // The pin is now a FROZEN SNAPSHOT: an independent description of what a
+  // caller reaches with the gate off, which a schema edit must consciously
+  // update.
+  const GATE_OFF_TOOL_SURFACE = {
+    capture_lead: {
+      required: ['call_summary'],
+      properties: [
+        'address_line1', 'callback_phone', 'city', 'contact_preference', 'call_summary',
+        'do_not_contact_request', 'email', 'first_name', 'last_name', 'lead_quality',
+        'pain_points', 'preferred_contact_method', 'preferred_date_time', 'requested_service',
+        'urgency_reason', 'zip',
+      ],
+    },
+    find_slots: {
+      required: ['when'],
+      properties: ['address_line1', 'city', 'when', 'zip'],
+    },
+    get_availability: {
+      required: [],
+      properties: ['address_line1', 'city', 'zip'],
+    },
+  };
+
+  function toolSurface(tools) {
+    return Object.fromEntries(tools.map((t) => [t.name, {
+      required: [...(t.input_schema.required || [])].sort(),
+      properties: Object.keys(t.input_schema.properties || {}).sort(),
+    }]));
+  }
+
+  function normalizedSnapshot(snapshot) {
+    return Object.fromEntries(Object.entries(snapshot).map(([name, shape]) => [name, {
+      required: [...shape.required].sort(),
+      properties: [...shape.properties].sort(),
+    }]));
+  }
+
+  test('gate off/absent/anything-but-true → the tool surface matches the frozen snapshot', () => {
+    for (const value of [undefined, 'false', '1', 'TRUE ', 'yes']) {
+      if (value === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      else process.env.VOICE_RELAY_CONTEXT_ENABLED = value;
+      const tools = activeTools();
+      expect(tools.map((t) => t.name).sort()).toEqual(['capture_lead', 'find_slots', 'get_availability']);
+      expect(toolSurface(tools)).toEqual(normalizedSnapshot(GATE_OFF_TOOL_SURFACE));
+      // No write tool and no account/pricing tool is reachable at all.
+      for (const forbidden of ['request_booking', 'request_reservice', 'lookup_customer', 'get_pricing']) {
+        expect(tools.map((t) => t.name)).not.toContain(forbidden);
+      }
+    }
+  });
+
+  // The prompt is what the caller actually experiences with the gate off, and
+  // buildBasePrompt(false) alone does not cover the ASSEMBLED result — the
+  // voice profile and every gate-on addendum compose on top of it.
+  test('gate off → the ASSEMBLED system prompt carries no gate-on behavior', () => {
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
-    expect(activeTools()).toEqual(TOOLS);
-    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'false';
-    expect(activeTools()).toEqual(TOOLS);
-    process.env.VOICE_RELAY_CONTEXT_ENABLED = '1'; // not the literal 'true' → still dark
-    expect(activeTools()).toEqual(TOOLS);
+    delete process.env.GATE_VOICE_AI_BOOKING;
+    const { buildBasePrompt, composeSystemPrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
+    // Assembled the way _runLoop assembles it, including a profile.
+    const assembled = composeSystemPrompt(buildBasePrompt(false), 'Keep it warm and plain-spoken.');
+    expect(assembled.startsWith(SYSTEM_PROMPT)).toBe(true);
+    for (const gateOnMarker of [
+      'ACCOUNT ACCESS RULES', 'KNOWN CALLER', 'CLOCK DATA', 'RECENT TEXTS',
+      'BOOKING REQUESTS', 'request_reservice', 'lookup_customer', 'get_pricing',
+      'get_account_overview', 'get_invoice_history', 'slot_ref', 'contact_preference',
+      'urgency_reason', 'Sandy',
+    ]) {
+      expect(assembled).not.toContain(gateOnMarker);
+    }
+    // The Phase-1 price refusal is still exactly the line the gate swaps out.
+    const { PRICE_LINE_NO_CONTEXT } = require('../services/voice-agent/relay-conversation');
+    expect(assembled).toContain(PRICE_LINE_NO_CONTEXT);
+    // A profile still composes on (it is style, not gate-on behavior).
+    expect(assembled).toContain('VOICE PROFILE');
   });
 
   test('gate on → the read-only context tools register too', () => {

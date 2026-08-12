@@ -114,13 +114,20 @@ async function requestReserviceText(input = {}, ctx = {}) {
   // don't file anything. Reuses the picker's own lane dedupe read
   // (reservice-scheduler.openReserviceCallbacks) — no parallel query, and it
   // returns no token.
+  // ⭐ THIS DEDUPE FAILS CLOSED. It used to be caught-and-continued, so a
+  // lookup FAILURE read exactly like "no free re-service is booked" — and filed
+  // a duplicate ticket for a customer who already had one on the calendar. An
+  // unanswerable dedupe question is not a licence to write.
   let booked = null;
   try {
     const { openReserviceCallbacks } = require('../reservice-scheduler');
     const byLane = await openReserviceCallbacks(customerId);
     booked = (byLane && byLane[lane]) || null;
   } catch (err) {
-    logger.warn(`[voice-relay-reservice] open-callback check failed for ${customerId}: ${err.message}`);
+    logger.error(`[voice-relay-reservice] open-callback dedupe FAILED for ${customerId} — refusing to file (fail closed): ${err.message}`);
+    return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '
+      + 'filed — filing a second one would double-book them. Tell the caller a Waves team member will follow up '
+      + 'about it shortly, and do NOT state a date, a time, a link, or a code.';
   }
   if (booked) {
     const when = speakDate(booked.date);
@@ -173,9 +180,10 @@ async function requestReserviceText(input = {}, ctx = {}) {
 
   // INTERNAL admin notification — the same feed + deep link the portal's own
   // POST /api/requests writes to. Internal only; fail-open.
+  let notif = null;
   try {
     const NotificationService = require('../notification-service');
-    await NotificationService.notifyAdmin(
+    notif = await NotificationService.notifyAdmin(
       'service',
       `${urgency === 'urgent' ? '🚨 URGENT ' : ''}Phone assistant re-service request`,
       `Category: ${category.replace(/_/g, ' ')}\nSubject: ${subject}\n\n"${issue}"`,
@@ -193,7 +201,37 @@ async function requestReserviceText(input = {}, ctx = {}) {
       }
     );
   } catch (err) {
-    logger.warn(`[voice-relay-reservice] admin notification failed for request ${created && created.id}: ${err.message}`);
+    logger.error(`[voice-relay-reservice] admin notification threw for request ${created && created.id}: ${err.message}`);
+  }
+  // notifyAdmin SWALLOWS DB errors and returns null instead of throwing, so the
+  // catch above never sees a failed insert — routes/requests.js checks `if
+  // (!notif)` for exactly this reason. The request row is durable either way;
+  // an unsurfaced notification is not, so say so loudly enough to page.
+  if (!notif) {
+    logger.error(
+      `[voice-relay-reservice] admin notification did NOT persist for request ${created && created.id} `
+      + `(customer ${customerId}); the service_requests row is durable but may be unsurfaced in the admin feed.`
+    );
+  }
+
+  // ⭐ OWNER-RULED ROUTING FIX. routes/requests.js 409s a covered pest/lawn
+  // ticket precisely because the ticket queue is "a proven black hole — 14
+  // requests, zero resolved"; the re-service streamline exists to bypass it.
+  // The agent cannot use the streamline's booking half (it fires customer
+  // comms, which the agent may NEVER do), so the ticket stays as the durable
+  // record AND the existing INTERNAL owner alert fires for every voice-filed
+  // re-service — reaching a human instead of the queue. No new notification
+  // mechanism: this is relay-alert's own sender, the same one the hot-lead path
+  // and createSelfBooking's confirm alert use, and it is internal-only by
+  // construction (owner phone + messageType 'internal_alert').
+  try {
+    const { alertOwnerReservice } = require('./relay-alert');
+    await alertOwnerReservice({
+      lane, category, urgency, issue, subject, covered, requestId: created && created.id, customerId,
+    }, ctx);
+  } catch (err) {
+    // Fail-open: the ticket is already written and the caller is on the line.
+    logger.error(`[voice-relay-reservice] owner alert FAILED for request ${created && created.id}: ${err.message}`);
   }
 
   return `Re-service request filed for this account (${LANE_LABEL[lane]}${urgency === 'urgent' ? ', flagged urgent' : ''}). `

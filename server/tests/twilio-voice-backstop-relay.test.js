@@ -197,9 +197,22 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     process.env.VOICE_AGENT_NAME = 'Marge';
     expect(agentName()).toBe('Marge');
     expect(defaultWelcomeGreeting()).toContain('Marge');
+    // ⚠️ THE GREETING *IS* THE FL §934.03 DISCLOSURE (the /voice backstop relies
+    // on it), so a verbatim override could delete a legal disclosure with an
+    // env-var edit. An override missing it gets the disclosure APPENDED rather
+    // than rejected — refusing would strand live calls on a bad env value.
     process.env.VOICE_RELAY_GREETING = 'Hi, this is Sandy! How can I help you today?';
-    expect(defaultWelcomeGreeting()).toBe('Hi, this is Sandy! How can I help you today?');
+    const patched = defaultWelcomeGreeting();
+    expect(patched).toContain('Hi, this is Sandy! How can I help you today?');
+    expect(patched).toMatch(/record(ed|ing)/i);
+    expect(patched).toMatch(/automated assistant/i);
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Hi, this is Sandy! How can I help you today?');
+
+    // An override that ALREADY discloses both is used verbatim — no double-up.
+    process.env.VOICE_RELAY_GREETING =
+      'Thanks for calling Waves. This call may be recorded and you are speaking with our automated assistant.';
+    expect(defaultWelcomeGreeting()).toBe(process.env.VOICE_RELAY_GREETING);
+    expect((defaultWelcomeGreeting().match(/automated assistant/gi) || []).length).toBe(1);
   });
 });
 

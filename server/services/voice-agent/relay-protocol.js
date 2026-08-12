@@ -82,10 +82,23 @@ const DEFAULT_WELCOME_GREETING =
   "Hi, this is Sandy at Waves Pest Control! Just so you know, this call may be " +
   "recorded, and you're speaking with our automated assistant. How can I help you today?";
 
+// ⚠️ THE GREETING *IS* THE FL §934.03 DISCLOSURE. twilio-voice-webhook.js relies
+// on this line carrying the recorded-line notice before the first caller turn —
+// the whole consent posture of the relay leg rests on it. A verbatim
+// VOICE_RELAY_GREETING override could therefore silently delete a legal
+// disclosure with an env-var edit, so the override is VALIDATED: it must itself
+// mention recording, and it must disclose the automated assistant. Anything
+// short of that gets the missing half appended rather than being rejected —
+// refusing would strand live calls on a bad env value.
+const RECORDING_DISCLOSURE_RE = /\brecord(ed|ing)\b/i;
+const AI_DISCLOSURE_RE = /\b(automated|virtual|AI|assistant|bot)\b/i;
+const DISCLOSURE_SUFFIX = 'Just so you know, this call may be recorded, and you\'re speaking with our automated assistant.';
+
 function defaultWelcomeGreeting() {
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
-  if (override) return override;
-  return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
+  if (!override) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
+  if (RECORDING_DISCLOSURE_RE.test(override) && AI_DISCLOSURE_RE.test(override)) return override;
+  return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX}`;
 }
 
 const DEFAULT_TTS_PROVIDER = 'ElevenLabs'; // matches the existing Waves voice-agent stack
@@ -181,6 +194,7 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   DEFAULT_WELCOME_GREETING,
+  DISCLOSURE_SUFFIX,
   defaultWelcomeGreeting,
   agentName,
   DEFAULT_TTS_PROVIDER,

@@ -157,6 +157,85 @@ describe('GATE ON — the alert', () => {
   });
 });
 
+// ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND. Marking it first meant a
+// transient failure PERMANENTLY consumed the one-per-call budget — the retry saw
+// `alreadyAlerted` and returned quietly, and the hot lead was never paged at all.
+describe('the one-per-call latch survives a failed send', () => {
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; process.env.ADAM_PHONE = OWNER; });
+
+  function latchCtx() {
+    let alerted = false;
+    return {
+      callSid: 'CA-latch',
+      isOwnerAlerted: () => alerted,
+      markOwnerAlerted: () => { alerted = true; },
+      _alerted: () => alerted,
+    };
+  }
+
+  const HOT = { lead_quality: 'hot', first_name: 'Pat', phone: CALLER, urgency_reason: 'swarming termites' };
+
+  test('a failed send leaves the latch OPEN so the retry can still page', async () => {
+    const ctx = latchCtx();
+    TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
+    expect(ctx._alerted()).toBe(false); // NOT consumed
+
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: true });
+    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
+    expect(ctx._alerted()).toBe(true);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(2);
+  });
+
+  test('a SUCCESSFUL send still closes the latch — never two pages per call', async () => {
+    const ctx = latchCtx();
+    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(true);
+    expect(await relayAlert.alertOwnerHotLead(HOT, ctx)).toBe(false);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ⭐ OWNER-RULED: the ticket queue is "a proven black hole — 14 requests, zero
+// resolved", and the agent cannot use the streamline's booking half (it fires
+// customer comms). So every voice-filed re-service ALSO pages the owner through
+// the existing internal sender — no new notification mechanism.
+describe('re-service owner alert (owner ruling)', () => {
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; process.env.ADAM_PHONE = OWNER; });
+
+  const REQ = { lane: 'pest', category: 'pest_issue', urgency: 'urgent', issue: 'ants back in the kitchen', subject: 'Re-service request (phone assistant): ants back in the kitchen', covered: true, requestId: 'req-1', customerId: 'c-1' };
+
+  test('sends through the SAME internal sender, to the owner, internal_alert only', async () => {
+    expect(await relayAlert.alertOwnerReservice(REQ, { callSid: 'CA-rs' })).toBe(true);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
+    expect(to).toBe(OWNER);
+    expect(opts).toEqual({ messageType: 'internal_alert' });
+    expect(body).toMatch(/URGENT/);
+    expect(body).toContain('ants back in the kitchen');
+    expect(body).toMatch(/do not leave this in the request queue/i);
+    // Never customer-facing.
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailService.send).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+
+  test('gate off → no alert, no sender touched', async () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    expect(await relayAlert.alertOwnerReservice(REQ, {})).toBe(false);
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('fail-open: a send failure never throws (the ticket is already durable)', async () => {
+    TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    await expect(relayAlert.alertOwnerReservice(REQ, {})).resolves.toBe(false);
+  });
+
+  test('the body is bounded', () => {
+    const body = relayAlert.buildReserviceAlert({ ...REQ, issue: 'x'.repeat(5000), subject: 'y'.repeat(5000) });
+    expect(body.length).toBeLessThanOrEqual(relayAlert.MAX_ALERT_BODY);
+  });
+});
+
 describe('capture_lead → alert wiring (the live path)', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 

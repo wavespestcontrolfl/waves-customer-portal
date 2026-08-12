@@ -22,10 +22,12 @@
  * GATE: the existing context gate (VOICE_RELAY_CONTEXT_ENABLED === 'true',
  * fail-closed). Gate off ⇒ no alert, no sender loaded, no env read.
  *
- * IDEMPOTENT: at most ONE alert per call. The session owns the flag
+ * IDEMPOTENT: at most ONE SUCCESSFUL alert per call. The session owns the flag
  * (relay-conversation's tool ctx: ctx.ownerAlerted / ctx.markOwnerAlerted), so
  * a model that calls capture_lead twice — or a retry after a tool error —
- * cannot page the owner twice.
+ * cannot page the owner twice. The flag is set AFTER the send returns: a
+ * transient failure must not consume the one-per-call budget and silently
+ * swallow the page.
  *
  * FAIL-OPEN: an alert failure must never break the call or the lead write.
  * Everything is inside a try/catch that logs and returns false. Phone numbers
@@ -95,7 +97,6 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       ? ctx.isOwnerAlerted() === true
       : ctx.ownerAlerted === true;
     if (alreadyAlerted) return false;
-    if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
 
     const to = ownerAlertPhone();
     if (!to) {
@@ -117,14 +118,81 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // The SAME sender + messageType the self-booking confirm alert uses.
     const TwilioService = require('../twilio');
     await TwilioService.sendSMS(to, body, { messageType: 'internal_alert' });
+    // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
+    // meant a transient Twilio/DB blip PERMANENTLY consumed the one-per-call
+    // budget: the retry (or the second capture_lead) saw `alreadyAlerted` and
+    // returned quietly, and the hot lead — a swarm, a sting, an angry customer —
+    // was never paged at all. The failure path below now leaves the latch open
+    // so the next attempt on this call can still get through, and the send
+    // itself stays idempotent-by-latch once it succeeds.
+    if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
     logger.info(`[voice-relay-alert] hot-lead owner alert sent callSid=${ctx.callSid || 'n/a'} caller=${maskPhone(lead.phone)}`);
     return true;
   } catch (err) {
     // FAIL-OPEN, loudly: the lead is already written and the caller is still
-    // on the line — an alert failure can never surface to either.
+    // on the line — an alert failure can never surface to either. The
+    // one-per-call latch is deliberately NOT set here, so a later attempt on
+    // this same call can still page the owner.
     logger.error(`[voice-relay-alert] hot-lead owner alert FAILED callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
     return false;
   }
 }
 
-module.exports = { alertOwnerHotLead, buildHotLeadAlert, ownerAlertPhone, MAX_ALERT_BODY };
+/**
+ * Build the owner-facing body for a voice-filed RE-SERVICE. Internal surface.
+ */
+function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId }) {
+  const lines = [
+    `${urgency === 'urgent' ? '🚨 URGENT ' : ''}Re-service filed by the phone assistant`,
+    `Lane: ${alertSafe(lane, 20)}`,
+    alertSafe(subject || issue, 200),
+  ];
+  if (covered) lines.push('Covered by their plan (free re-service).');
+  if (requestId) lines.push(`Request ${alertSafe(requestId, 40)}`);
+  // The ticket queue is a known black hole — this alert IS the routing fix.
+  lines.push('Get them on the schedule — do not leave this in the request queue.');
+  return lines.join('\n').slice(0, MAX_ALERT_BODY);
+}
+
+/**
+ * ⭐ OWNER-RULED: every voice-filed re-service pages the owner.
+ *
+ * routes/requests.js 409s a covered pest/lawn ticket because the ticket queue
+ * is "a proven black hole — 14 requests, zero resolved". The voice agent must
+ * still file the ticket (it is the durable record) and cannot use the
+ * streamline's booking half (that fires customer comms, which the agent may
+ * never do) — so the alert is what makes the ticket reach a human.
+ *
+ * Reuses the SAME internal sender as the hot-lead alert. Not idempotent-latched
+ * like the hot-lead path: request_reservice already refuses to file a second
+ * ticket in a lane, so one filed ticket is one alert by construction.
+ *
+ * Returns true when an alert was actually sent. Never throws.
+ */
+async function alertOwnerReservice(request = {}, ctx = {}) {
+  try {
+    const { isContextEnabled } = require('./relay-context');
+    if (!isContextEnabled()) return false;
+    const to = ownerAlertPhone();
+    if (!to) {
+      logger.warn('[voice-relay-alert] re-service filed but ADAM_PHONE is unset — no owner alert sent');
+      return false;
+    }
+    const TwilioService = require('../twilio');
+    await TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' });
+    logger.info(`[voice-relay-alert] re-service owner alert sent callSid=${ctx.callSid || 'n/a'} request=${request.requestId || 'n/a'}`);
+    return true;
+  } catch (err) {
+    logger.error(`[voice-relay-alert] re-service owner alert FAILED callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = {
+  alertOwnerHotLead,
+  alertOwnerReservice,
+  buildHotLeadAlert,
+  buildReserviceAlert,
+  ownerAlertPhone,
+  MAX_ALERT_BODY,
+};

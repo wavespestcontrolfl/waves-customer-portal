@@ -162,11 +162,19 @@ export default function ScheduleCustomerSidebar({
   const canCancelSeries = !!service?.isRecurring;
   const canCancelAppointment = !['completed', 'skipped', 'cancelled'].includes(String(service?.status || '').toLowerCase());
   // Stricter than the cancel gate: SmartRebooker.reschedule 409s a no_show
-  // (terminal), and the dispatch route 409s an unreviewed outbound-callback
-  // booking (outbound_review_unconfirmed) — the menu must not offer a
-  // reschedule that can never work.
+  // (terminal), and the dispatch route 409s an unreviewed office-review booking
+  // (outbound_review_unconfirmed) — the menu must not offer a reschedule that
+  // can never work.
+  //
+  // ⚠️ MIRRORS OFFICE_REVIEW_PENDING_SOURCE_ACTIONS in
+  // server/services/call-booking-source-actions.js — the server-side single
+  // source of truth for "AI-created booking still awaiting office review".
+  // Keep the two in sync: the AI voice agent's own 'voice_agent' bookings joined
+  // that set server-side, and this list was the one consumer that missed it, so
+  // the menu kept offering a reschedule that admin-dispatch.js now 409s.
+  const OFFICE_REVIEW_PENDING_SOURCE_ACTIONS = ['ai_call_outbound_review', 'voice_agent'];
   const unreviewedCallbackBooking =
-    service?.sourceAction === 'ai_call_outbound_review'
+    OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(service?.sourceAction)
     && String(service?.status || '').toLowerCase() === 'pending'
     && !service?.customerConfirmed;
   const canRescheduleAppointment =

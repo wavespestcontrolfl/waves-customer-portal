@@ -49,9 +49,15 @@ const logger = require('../logger');
 const SERVICE_REPORT_FINDING_LIMIT = 6;
 const SERVICE_REPORT_APPLICATION_LIMIT = 6;
 
-// The tracker lifecycle values the customer-facing track page treats as live.
+// ⭐ THE REAL scheduled_services.track_state ENUM: scheduled | en_route |
+// on_property | complete. Two bugs came out of guessing at it: 'on_site' was in
+// the on-property set and is not a value the column ever holds (dead branch),
+// and 'complete' was unhandled — so during the completion window, before the
+// operational `status` catches up, the agent told a caller whose technician had
+// just finished that he "has not started toward the property yet".
 const EN_ROUTE_TRACK_STATE = 'en_route';
-const ON_PROPERTY_TRACK_STATES = new Set(['on_property', 'on_site']);
+const ON_PROPERTY_TRACK_STATE = 'on_property';
+const COMPLETE_TRACK_STATE = 'complete';
 // Terminal OPERATIONAL statuses that outrank a stale track_state (same
 // precedence as routes/track-public.js).
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
@@ -147,7 +153,12 @@ async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
     parts.push(status === 'completed'
       ? 'That visit is already marked complete for today.'
       : 'That visit is no longer active on today\'s schedule — do not promise an arrival; a team member can sort it out.');
-  } else if (ON_PROPERTY_TRACK_STATES.has(String(row.track_state))) {
+  } else if (String(row.track_state) === COMPLETE_TRACK_STATE) {
+    // The tracker reached 'complete' before the operational status did — the
+    // work IS done, and "has not started yet" would be flatly wrong.
+    parts.push('The technician has finished the visit — the service is complete. The paperwork may take a '
+      + 'few more minutes to catch up in the system.');
+  } else if (String(row.track_state) === ON_PROPERTY_TRACK_STATE) {
     parts.push('The technician is already at the property.');
   } else if (String(row.track_state) === EN_ROUTE_TRACK_STATE) {
     parts.push('The technician is EN ROUTE right now — on the way to the property.');
@@ -217,27 +228,36 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   }
 
   const structured = parseJson(record.structured_notes);
-  // Same predicate as routes/services.js suppressesCustomerArtifacts: any
-  // typed delivery posture other than auto_send keeps the report detail off
+  // THE predicate, imported from routes/services.js rather than re-implemented:
+  // any typed delivery posture other than auto_send keeps the report detail off
   // customer surfaces — and the phone is a customer surface.
-  if (structured.typedReportDelivery && structured.typedReportDelivery !== 'auto_send') {
+  const { suppressesCustomerArtifacts } = require('../../routes/services');
+  if (suppressesCustomerArtifacts(structured)) {
     return `A visit is on file for ${speakDate(record.service_date) || 'that date'}, but its detailed report is not `
       + 'released for customer delivery. Do NOT describe findings or products. Offer to have the office follow up '
       + 'with the report.';
   }
 
-  const [findings, products] = await Promise.all([
+  const [findings, allProducts] = await Promise.all([
     safeRows(db('service_findings')
       .where({ service_record_id: record.id })
       .orderBy('created_at', 'asc')
       .limit(SERVICE_REPORT_FINDING_LIMIT)
       .select('category', 'severity', 'title', 'detail', 'recommendation')),
+    // Columns are the UNION of what the spoken report needs and what
+    // buildReentryContext reads (id, applied_at, created_at, application_area,
+    // application_method, targets) — one read serves both.
     safeRows(db('service_products')
       .where({ service_record_id: record.id })
       .orderBy('created_at', 'asc')
-      .limit(SERVICE_REPORT_APPLICATION_LIMIT)
-      .select('product_name', 'application_area', 'application_method', 'targets')),
+      .select('id', 'product_name', 'applied_at', 'created_at',
+        'application_area', 'application_method', 'targets')),
   ]);
+
+  // The re-entry helper needs EVERY application (its anchor is the latest
+  // applied_at); the spoken list is capped for the phone.
+  const reentryApplications = Array.isArray(allProducts) ? allProducts : [];
+  const products = reentryApplications.slice(0, SERVICE_REPORT_APPLICATION_LIMIT);
 
   const { customerSafeServiceNotes } = require('../project-types');
   const noteText = promptSafeUntrusted(customerSafeServiceNotes(record.technician_notes, structured), 240);
@@ -280,7 +300,13 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   // customerSummary. Never composed, never paraphrased, never "safe".
   try {
     const { buildReentryContext } = require('../service-report/reentry');
-    const reentry = await buildReentryContext({ record, knex: db });
+    // The products were just read above — hand them over instead of letting
+    // buildReentryContext re-query service_products for the same rows. Its own
+    // fallback stays intact for every other caller.
+    const reentry = await buildReentryContext({
+      record: { ...record, applications: reentryApplications },
+      knex: db,
+    });
     const summary = promptSafe(reentry && reentry.customerSummary, 160);
     if (summary) lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
   } catch (err) {

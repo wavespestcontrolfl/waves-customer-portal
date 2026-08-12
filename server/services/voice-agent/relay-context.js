@@ -828,6 +828,10 @@ async function lookupCustomersText(input = {}, ctx = {}) {
 
 const PRICEABLE_SERVICES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
 const PEST_FREQUENCIES = ['quarterly', 'bimonthly', 'monthly'];
+// The engine's own PROPERTY_TYPE_ADJ keys (pricing-engine/constants.js).
+const PRICEABLE_PROPERTY_TYPES = [
+  'single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper',
+];
 
 function positiveNumber(value) {
   const n = Number(value);
@@ -866,7 +870,13 @@ async function pricingText(input = {}) {
     homeSqFt: sqft,
     lotSqFt: lot,
     ...(lawnSqFt ? { lawnSqFt: Math.max(500, Math.min(200000, lawnSqFt)) } : {}),
-    propertyType: 'single_family',
+    // Property type MATTERS to the price (PROPERTY_TYPE_ADJ discounts a condo
+    // or townhome by 8-22%), and hardcoding single_family quoted every condo
+    // caller a house price. The model can now say what the caller told it;
+    // anything unrecognised falls back to single_family, which is the
+    // conservative direction (no adjustment applied).
+    propertyType: PRICEABLE_PROPERTY_TYPES.includes(String(input.property_type || ''))
+      ? String(input.property_type) : 'single_family',
     features: {},
     services: {},
   };
@@ -904,7 +914,14 @@ async function pricingText(input = {}) {
     if (perApp) bits.push(`${perApp} per application on the ${line.frequency} plan`);
     if (line.visitsPerYear) bits.push(`${line.visitsPerYear} applications per year`);
     const setup = fmtMoney(line.initialFee);
-    if (setup) bits.push(`one-time ${setup} setup fee`);
+    // ⭐ THE FEE HAS A DOCUMENTED WAIVER (pricing-engine/public-ranges.js: the
+    // public copy says "waived when bundled with another recurring service or
+    // with annual prepay"). Stating it flatly overquoted every caller who was
+    // about to bundle, on the one number they are most likely to react to.
+    if (setup) {
+      bits.push(`one-time ${setup} initial service fee on standalone pest service — waived if they bundle `
+        + 'it with another recurring service, or pay for the year up front');
+    }
   } else if (service === 'termite_bait') {
     const install = fmtMoney(line.install && line.install.price);
     if (install) bits.push(`${install} station installation`);
@@ -990,5 +1007,6 @@ module.exports = {
   AUTHENTICATING_PHONE_COL,
   LOOKUP_MIN_CRITERIA_FOR_REF,
   LOOKUP_SESSION_BUDGET,
+  PRICEABLE_PROPERTY_TYPES,
   CONTEXT_RESOLVE_TIMEOUT_MS,
 };

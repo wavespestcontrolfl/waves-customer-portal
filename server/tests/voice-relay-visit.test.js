@@ -155,10 +155,31 @@ describe('get_today_eta', () => {
     assertNoWrites();
   });
 
+  // 'on_site' was in the on-property set and is not a value the column holds —
+  // a dead branch. An unknown value must fall through to the honest default.
+  test('an unknown track_state falls through to "no live arrival time"', async () => {
+    primeDb({ scheduled_services: [{ ...VISIT_TODAY, status: 'scheduled', track_state: 'on_site' }] });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toMatch(/has not started toward the property yet/i);
+    expect(out).not.toMatch(/already at the property/i);
+  });
+
   test('on_property → already at the property', async () => {
     primeDb({ scheduled_services: [{ ...VISIT_TODAY, track_state: 'on_property' }] });
     const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/already at the property/i);
+  });
+
+  // ⭐ THE REAL ENUM IS scheduled | en_route | on_property | complete. 'complete'
+  // was unhandled — so in the completion window, before the operational status
+  // catches up, the agent told a caller whose technician had just FINISHED that
+  // he "has not started toward the property yet".
+  test('track_state complete → says the visit is finished, never "has not started"', async () => {
+    primeDb({ scheduled_services: [{ ...VISIT_TODAY, status: 'scheduled', track_state: 'complete' }] });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toMatch(/finished the visit/i);
+    expect(out).not.toMatch(/has not started/i);
+    expect(out).not.toMatch(/EN ROUTE/i);
   });
 
   test('terminal status outranks a STALE track_state — a completed visit is never "on the way"', async () => {

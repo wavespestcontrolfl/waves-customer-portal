@@ -342,6 +342,12 @@ const CONTEXT_TOOLS = [
         lawn_track: { type: 'string', enum: ['st_augustine', 'bermuda', 'zoysia', 'bahia'], description: 'Grass type, if known' },
         lawn_tier: { type: 'string', enum: ['basic', 'standard', 'enhanced', 'premium'], description: 'Lawn program tier (default standard)' },
         mosquito_tier: { type: 'string', enum: ['seasonal9', 'monthly12'], description: 'Mosquito program (default monthly12)' },
+        property_type: {
+          type: 'string',
+          enum: ['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper'],
+          description: 'What kind of home it is, if the caller says. A condo or townhome prices lower than a '
+            + 'house, so pass it when you know it. Omit when they have not said — it defaults to a single-family home.',
+        },
       },
       required: ['service'],
     },
@@ -752,7 +758,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       return availabilityResultToText(res, ctx);
     }
 
-    return `Unknown tool "${name}". Do not retry; continue the conversation.`;
+    // The name is MODEL-supplied; bound and flatten it rather than echoing an
+    // arbitrary string straight back into the tool result.
+    return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
     logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
     if (name === 'capture_lead') {

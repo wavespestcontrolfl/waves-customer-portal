@@ -26,6 +26,13 @@ jest.mock('../services/reservice-scheduler', () => ({
   reserviceLanesForCustomer: jest.fn(async () => ['pest']),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
+// The INTERNAL owner alert (owner ruling: a filed re-service must reach a human,
+// not the ticket queue). Mocked here — its own behavior is covered in
+// voice-relay-alert.test.js.
+jest.mock('../services/voice-agent/relay-alert', () => ({
+  alertOwnerHotLead: jest.fn(async () => false),
+  alertOwnerReservice: jest.fn(async () => true),
+}));
 // Customer-facing spies — must stay un-called on every path.
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -34,6 +41,8 @@ jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jes
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
+const relayAlert = require('../services/voice-agent/relay-alert');
+const logger = require('../services/logger');
 const reserviceScheduler = require('../services/reservice-scheduler');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -209,12 +218,27 @@ describe('GATE ON', () => {
     expect(out).toMatch(/Do NOT tell the caller whether it is free/i);
   });
 
-  test('a lane/coverage lookup failure never blocks the filing (fail-soft)', async () => {
+  // COVERAGE affects the SCRIPT only ("this is free"), never permission — a
+  // failure there is genuinely fail-soft.
+  test('a COVERAGE lookup failure never blocks the filing (fail-soft)', async () => {
     reserviceScheduler.reserviceLanesForCustomer.mockRejectedValue(new Error('db down'));
-    reserviceScheduler.openReserviceCallbacks.mockRejectedValue(new Error('db down'));
     const out = await executeTool('request_reservice', GOOD, CTX);
     expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
     expect(out).toMatch(/Re-service request filed/i);
+    expect(out).toMatch(/Do NOT tell the caller whether it is free/i);
+  });
+
+  // ⭐ THE DEDUPE FAILS CLOSED. openReserviceCallbacks answers "is a free
+  // re-service ALREADY booked?" — a failure there used to be caught and
+  // continued, which reads exactly like "no", and filed a duplicate ticket for
+  // a customer who already had a visit on the calendar.
+  test('a DEDUPE lookup failure refuses to file (fail closed)', async () => {
+    reserviceScheduler.openReserviceCallbacks.mockRejectedValue(new Error('db down'));
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+    expect(out).toMatch(/could not check whether a re-service is already on the schedule/i);
+    expect(out).toMatch(/nothing was filed/i);
+    expect(out).not.toMatch(/filed for this account/i);
   });
 
   test('an admin-notification failure never loses the request', async () => {
@@ -222,6 +246,45 @@ describe('GATE ON', () => {
     const out = await executeTool('request_reservice', GOOD, CTX);
     expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
     expect(out).toMatch(/Re-service request filed/i);
+  });
+
+  // notifyAdmin SWALLOWS DB errors and returns null instead of throwing — which
+  // is exactly why routes/requests.js checks `if (!notif)`. A dropped return
+  // means the request is durable but INVISIBLE in the admin feed, silently.
+  test('a notifyAdmin that returns null (swallowed DB error) is logged LOUDLY', async () => {
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
+    expect(out).toMatch(/Re-service request filed/i);
+    const errors = logger.error.mock.calls.map(([m]) => String(m)).join(' | ');
+    expect(errors).toMatch(/did NOT persist/i);
+    expect(errors).toMatch(/unsurfaced in the admin feed/i);
+  });
+
+  // ⭐ OWNER-RULED ROUTING FIX: the ticket alone lands in a queue with a
+  // documented 0/14 resolution rate, so every voice-filed re-service also pages
+  // the owner through the existing internal alert path.
+  test('every filed re-service ALSO fires the internal owner alert', async () => {
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
+    expect(relayAlert.alertOwnerReservice).toHaveBeenCalledTimes(1);
+    const [payload] = relayAlert.alertOwnerReservice.mock.calls[0];
+    expect(payload).toMatchObject({ lane: 'pest', category: 'pest_issue' });
+    expect(payload.requestId).toBeTruthy();
+  });
+
+  test('an owner-alert failure never loses the request (fail-open)', async () => {
+    relayAlert.alertOwnerReservice.mockRejectedValue(new Error('twilio down'));
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
+    expect(out).toMatch(/Re-service request filed/i);
+  });
+
+  test('a REFUSED filing fires no owner alert', async () => {
+    reserviceScheduler.openReserviceCallbacks.mockResolvedValue({ pest: { date: '2026-08-20' } });
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
   });
 });
 
