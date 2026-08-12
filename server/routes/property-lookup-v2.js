@@ -167,6 +167,11 @@ async function performPropertyLookup(address, options = {}) {
   // backfill patches and the final saveLookup so a documented read-only run
   // truly leaves no rows behind.
   const persist = options.persist !== false;
+  // options.cacheOnly: latency-bound callers (the service-report cross-sell
+  // card renders inside a customer-facing report fetch) take a cached row
+  // as-is — no backfill provider round-trips — and get null on a miss
+  // instead of the live geocode/search/vision pipeline.
+  const cacheOnly = options.cacheOnly === true;
 
   // ── STEP -1: Cache ──
   // A verified-fresh row answers without re-running geocode/search/vision —
@@ -183,7 +188,8 @@ async function performPropertyLookup(address, options = {}) {
       // like the live path; a null result is NOT persisted — an outage must
       // not write "no zone" for the TTL — it simply retries next hit.
       if (
-        cached.property_record
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._floodZone === undefined
         && Number.isFinite(Number(cached.lat))
         && Number.isFinite(Number(cached.lng))
@@ -198,7 +204,8 @@ async function performPropertyLookup(address, options = {}) {
       // Permit-evidence backfill, same pattern: query once on hit, persist
       // even when empty (a checked marker), retry only on provider failure.
       if (
-        cached.property_record
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._poolPermits === undefined
         && cached.property_record._parcel?.paoParcelId
         && cached.property_record._parcel?.county
@@ -225,7 +232,8 @@ async function performPropertyLookup(address, options = {}) {
         ? typedNumberDisagreesWithRecord(address, cached.property_record)
         : null;
       if (
-        cached.property_record
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._addressAudit === undefined
         && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
       ) {
@@ -243,6 +251,11 @@ async function performPropertyLookup(address, options = {}) {
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
+
+  // Cache-only probe missed (or was combined with refresh): never fall
+  // through to the live pipeline — the caller prices from the stored
+  // profile alone.
+  if (cacheOnly) return null;
 
   const result = {
     address: String(address).trim(),

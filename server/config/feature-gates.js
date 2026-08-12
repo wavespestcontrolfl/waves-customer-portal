@@ -38,6 +38,7 @@
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -136,6 +137,17 @@ const gates = {
   // today). Money surface — fail-closed ==='true' in EVERY environment.
   // Kill switch: unset or any non-'true' value.
   completionBalanceSweep: process.env.GATE_COMPLETION_BALANCE_SWEEP === 'true',
+
+  // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
+  // report offers the next service family the customer lacks (pest ↔ lawn,
+  // then tree & shrub, then termite) with estimator-backed pricing, falling
+  // back to an unpriced request-a-quote CTA when property data can't support
+  // a real number. Customer-facing pricing surface — fail-closed ==='true'
+  // in EVERY environment. Gate off: report payloads carry no crossSell key
+  // and every report renders byte-identical to today. PDF/static/sms_preview
+  // renders never carry it at ANY setting (the PDF is a pricing-free
+  // permanent record and its S3 cache key does not vary on this gate).
+  reportCrossSell: process.env.GATE_REPORT_CROSS_SELL === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is

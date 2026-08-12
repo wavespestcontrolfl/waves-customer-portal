@@ -498,7 +498,23 @@ async function buildServiceReportV1ResponseData(service, token, {
   if (suppressedTypedReport(service)) {
     return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
-  return { ...data, dynamicContext, ...(staffViewer ? { staffViewer: true } : {}) };
+
+  // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL)
+  // — LIVE VIEWS ONLY by ruling: the PDF is a pricing-free permanent record
+  // (ServiceReportDocument header rule) and the S3 PDF cache key does not
+  // vary on this gate, so a non-live render must never carry it in either
+  // gate direction. Best-effort by contract: the builder returns null on any
+  // failure/suppression and the report renders exactly as today.
+  let crossSell = null;
+  if (mode === 'live') {
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('reportCrossSell')) {
+      const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+      crossSell = await buildReportCrossSell(service, db);
+    }
+  }
+
+  return { ...data, dynamicContext, ...(crossSell ? { crossSell } : {}), ...(staffViewer ? { staffViewer: true } : {}) };
 }
 
 async function findProjectByReportSegment(segment) {

@@ -240,3 +240,39 @@ describe('performPropertyLookup cache integration', () => {
     expect(verifiedYes.pool).toBe('YES');
   });
 });
+
+// cacheOnly: the latency-bound probe the service-report cross-sell card uses
+// — a miss must return null without ever entering the live pipeline, and a
+// hit must skip the backfill provider round-trips.
+describe('performPropertyLookup cacheOnly', () => {
+  it('a miss returns null and never runs geocode/search/vision', async () => {
+    mockDbHandler = () => fakeTable({ row: null });
+
+    const result = await performPropertyLookup(ADDRESS, { cacheOnly: true, persist: false });
+    expect(result).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('a hit serves the cached row with zero provider calls and zero writes', async () => {
+    const writes = [];
+    // cachedRow has no _floodZone/_poolPermits/_addressAudit — exactly the
+    // shape whose backfills would otherwise fire network calls on a hit.
+    mockDbHandler = () => fakeTable({ row: cachedRow(), writes });
+
+    const hit = await performPropertyLookup(ADDRESS, { cacheOnly: true, persist: false });
+    expect(hit.meta.cache).toBe('hit');
+    expect(hit.enriched.lotSqFt).toBe(10043);
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(writes.length).toBe(0);
+  });
+
+  it('cacheOnly combined with refresh still refuses the live pipeline', async () => {
+    mockDbHandler = () => fakeTable({ row: cachedRow() });
+
+    const result = await performPropertyLookup(ADDRESS, { cacheOnly: true, refresh: true, persist: false });
+    expect(result).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+  });
+});
