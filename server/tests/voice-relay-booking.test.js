@@ -815,6 +815,9 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 
   test('with no premise geocode it falls back to the account address, still never the offer\'s', async () => {
+    // A LEGACY account (no customer_properties rows at all): there is no
+    // property to resolve, so the on-file address is the premise.
+    primeDb({ propertyCount: 0 });
     resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
     booking.resolveBookingCoords.mockResolvedValue({ lat: 27.9, lng: -82.1 });
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
@@ -840,6 +843,16 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoCreateWrites();
   });
 
+  // ⭐ ONE property that cannot be MATCHED is the same ambiguity as two, only
+  // quieter: the row would carry no property_id and dispatch to the mirror
+  // address — the premise mix-up the guard exists to prevent.
+  test('a single property the linkage cannot resolve refuses too', async () => {
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/could not confirm the service address/i);
+    assertNoCreateWrites();
+  });
+
   test('a property count that cannot be answered refuses too (the guard fails CLOSED)', async () => {
     builders.customer_properties.first = jest.fn(() => Promise.reject(new Error('column does not exist')));
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
@@ -861,6 +874,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 
   test('an account whose service location cannot be resolved books NOTHING', async () => {
+    primeDb({ propertyCount: 0 });
     resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
     booking.resolveBookingCoords.mockResolvedValue({});
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());

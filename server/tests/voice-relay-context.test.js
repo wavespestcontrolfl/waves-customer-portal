@@ -767,7 +767,11 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     };
   }
 
-  test('looked-up (non-ANI) overview is REDACTED: dates + services + balance yes/no; no amounts, no window', async () => {
+  // ⭐ PAST dates survive; the UPCOMING visit does not. Telling an unverified
+  // caller that somebody WILL be at the property — and on which day — is the
+  // physical-security disclosure get_today_eta refuses outright, and a lookup
+  // ref would otherwise reach it here.
+  test('looked-up (non-ANI) overview is REDACTED: past dates + services + balance yes/no; NO upcoming visit at all', async () => {
     primeDb({
       scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],
       records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'gate code 4482', structured_notes: null, status: 'completed' }],
@@ -775,10 +779,13 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 231.75, count: 3, moreCount: 0, invoices: [] });
     const out = await executeTool('get_account_overview', { customer_ref: 'C1' }, refCtx({ ani: 'c-someone-else' }));
-    // Dates + service names survive:
+    // PAST dates + service names survive:
     expect(out).toContain('Pest Control');
-    expect(out).toContain('Tuesday August 18');
     expect(out).toContain('Friday July 31');
+    // …the UPCOMING visit is withheld entirely — no date, and no existence.
+    expect(out).not.toContain('Tuesday August 18');
+    expect(out).toMatch(/Upcoming appointments: not available for this caller/);
+    expect(out).toMatch(/Do NOT say whether one is scheduled/);
     // Balance is yes/no only — never the amount:
     expect(out).toMatch(/Open balance: yes/);
     expect(out).not.toContain('$231.75');

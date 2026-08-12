@@ -620,6 +620,20 @@ async function requestBookingText(input = {}, ctx = {}) {
     // Empty extraction ⇒ the helper falls back to the on-file address, matches
     // it against the property rows, and returns its geocode.
     propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {}, db);
+    // …and a ONE-property account whose property the helper could not match is
+    // the same ambiguity as a multi-property one, quietly: propertyLinkage stays
+    // null, the visit is written with no property_id, and dispatch falls back to
+    // the customer's primary mirror address — the exact premise mix-up this
+    // guard exists to prevent. A property on file that cannot be resolved is a
+    // question for a human, not a fallback.
+    if (propertyCount === 1 && !(propertyLinkage && propertyLinkage.propertyId)) {
+      logger.warn(
+        `[voice-relay-booking] customer ${customerId} has one property on file that the linkage could not `
+        + 'resolve — refusing the booking rather than dispatching to the mirror address'
+      );
+      return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
+        + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
+    }
   } catch (err) {
     logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
   }

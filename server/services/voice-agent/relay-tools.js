@@ -793,7 +793,24 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'a number or an address (AGENTS.md PII rule).'
         );
       }
-      if (input.do_not_contact_request === true && !emailOnlyRequest) {
+      // ⭐ AND IT REQUIRES A VERIFIED CALL. This is the one write the agent makes
+      // on the strength of the CALLING NUMBER alone, and suppression is
+      // destructive in the quiet direction: whoever holds the leaked WS key
+      // could declare a customer's number and switch off every automated text
+      // they get — reminders included — with no call at all. Same boundary the
+      // account tools sit behind: the setup-frame ANI must have matched the
+      // signature-verified /voice call_log row (and cleared the attestation
+      // rule, if it is on). Unverified ⇒ the request is still recorded on the
+      // lead for a human; nothing is mutated.
+      const callerVerified = ctx.callerVerified === true;
+      if (input.do_not_contact_request === true && !emailOnlyRequest && !callerVerified) {
+        logger.warn(
+          `[voice-relay] verbal do-not-contact from an UNVERIFIED session callSid=${ctx.callSid || 'n/a'} — no `
+          + 'messaging suppression written (an unverified ANI must not be able to silence a customer\'s texts); '
+          + 'recorded on the lead for a human'
+        );
+      }
+      if (input.do_not_contact_request === true && !emailOnlyRequest && callerVerified) {
         try {
           const { recordSuppression } = require('../messaging/validators/suppression');
           // ⭐ IT RESOLVES ON FAILURE. recordSuppression catches its own DB

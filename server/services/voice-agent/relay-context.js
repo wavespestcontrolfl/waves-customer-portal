@@ -676,12 +676,17 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
   if (Number.isFinite(sinceYear)) lines.push(`Customer since: ${sinceYear}`);
   const serviceNames = (services || []).map((s) => systemBlockSafe(s, 40)).filter(Boolean);
   lines.push(`Active recurring services: ${serviceNames.length ? serviceNames.join('; ') : 'none on file'}`);
-  if (nextAppointment && nextAppointment.date) {
+  if (redacted) {
+    // Same rule as the redacted tool tier: this caller's number matched only a
+    // service-contact slot (spouse, tenant, PRIOR OCCUPANT), so the block says
+    // nothing about whether a technician is coming or when — withholding just
+    // the window still disclosed that somebody will be at the property, and on
+    // which day.
+    lines.push('Upcoming appointments: not available for this caller — do not state whether one is scheduled, '
+      + 'a date, or a window');
+  } else if (nextAppointment && nextAppointment.date) {
     const svc = systemBlockSafe(nextAppointment.service, 60);
-    // The arrival WINDOW is withheld from an unverified contact-slot caller for
-    // the same reason the redacted tool tier withholds it: it says when a
-    // technician will be at that address.
-    const win = !redacted && nextAppointment.window ? ` (window starts ${promptSafe(nextAppointment.window, 20)})` : '';
+    const win = nextAppointment.window ? ` (window starts ${promptSafe(nextAppointment.window, 20)})` : '';
     lines.push(`Next appointment: ${nextAppointment.date}${svc ? ` — ${svc}` : ''}${win}`);
   } else {
     lines.push('Next appointment: none scheduled');
@@ -861,9 +866,20 @@ async function accountOverviewText(customerId, { tier = 'redacted' } = {}) {
   const lastVisit = visits[0] || null;
   const parts = [
     `Active recurring services: ${services.length ? services.join('; ') : 'none on file'}.`,
-    nextAppointment && nextAppointment.date
-      ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${!redacted && nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
-      : 'No upcoming appointment on the schedule.',
+    // ⭐ AN UPCOMING VISIT IS A PHYSICAL-SECURITY FACT, NOT A SCHEDULE DETAIL.
+    // Withholding only the WINDOW still told an unverified caller that somebody
+    // WILL be at that property, and on which day — the same disclosure
+    // get_today_eta refuses outright for this tier, reachable here with a
+    // lookup ref. The redacted answer is therefore identical whether or not a
+    // visit exists: no oracle. Past visits stay (they say nothing about who
+    // will be at the property next).
+    redacted
+      ? 'Upcoming appointments: not available for this caller. Do NOT say whether one is scheduled, and do NOT '
+        + 'give a date or a window — the account holder can see it in their portal, or the office can go over it '
+        + 'with them directly.'
+      : (nextAppointment && nextAppointment.date
+        ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
+        : 'No upcoming appointment on the schedule.'),
     lastVisit && lastVisit.date
       ? `Last completed visit: ${lastVisit.date}${lastVisit.service ? ` (${lastVisit.service})` : ''}.`
       : 'No completed visits on file.',

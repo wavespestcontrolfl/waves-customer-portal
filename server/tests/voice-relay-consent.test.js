@@ -369,7 +369,10 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     else process.env.VOICE_RELAY_CONTEXT_ENABLED = savedGate;
   });
 
-  const CTX = { callSid: 'CA-consent-tool', from: CALLER, to: '+19415559999' };
+  // callerVerified: the setup-frame ANI matched the signature-verified /voice
+  // call_log row. Suppression is the one write keyed on the calling number
+  // alone, so it requires that boundary (an unverified test below proves it).
+  const CTX = { callSid: 'CA-consent-tool', from: CALLER, to: '+19415559999', callerVerified: true };
 
   test('do_not_contact_request true → suppression recorded for the CALLER\'s number', async () => {
     await executeTool('capture_lead', {
@@ -500,6 +503,21 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       do_not_contact_request: true,
     }, CTX);
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
+  // ⭐ AN UNVERIFIED SESSION CANNOT SILENCE ANYONE'S TEXTS. Suppression is
+  // destructive in the quiet direction, so a leaked-key session that merely
+  // DECLARES a number must not reach it.
+  test('an UNVERIFIED session records the request but writes no suppression', async () => {
+    const logger = require('../services/logger');
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Asked to stop texting.',
+      contact_preference: 'stop texting me',
+      do_not_contact_request: true,
+    }, { ...CTX, callerVerified: false });
+    expect(recordSuppression).not.toHaveBeenCalled();
+    expect(out).toMatch(/Lead saved successfully|no new lead was created/i);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/UNVERIFIED session/i));
   });
 
   test('a preference that is NOT an opt-out records nothing', async () => {
