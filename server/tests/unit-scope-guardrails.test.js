@@ -393,11 +393,36 @@ describe('lead webhook engine-input property type', () => {
     body: {},
     readiness: { ready: true, serviceInterest: 'Pest Control' },
   };
-  test('gate ON: defaults to unknown with a review marker', () => {
+  test('gate ON: defaults to unknown with a review marker AND parks the draft', () => {
     withGate('true', () => {
       const { automation } = buildAutomatedLeadDraftEstimate(args);
       expect(automation.engineInput.propertyType).toBe('unknown');
       expect(automation.review).toContain('property_type_unresolved');
+      // The marker must change the status — a review string alone left the
+      // draft 'generated' and auto-sendable at default single-family
+      // pricing (codex r2 P1).
+      expect(automation.status).toBe('manual_review_required');
+      expect(automation.generated).toBe(false);
+    });
+  });
+  test('gate ON: a supplied type the pricer silently defaults also parks', () => {
+    withGate('true', () => {
+      const { automation } = buildAutomatedLeadDraftEstimate({
+        ...args,
+        body: { propertyType: 'Apartment' },
+      });
+      expect(automation.review).toContain('property_type_unresolved');
+      expect(automation.status).toBe('manual_review_required');
+    });
+  });
+  test('gate ON: a pricer-recognized type generates normally', () => {
+    withGate('true', () => {
+      const { automation } = buildAutomatedLeadDraftEstimate({
+        ...args,
+        body: { propertyType: 'condo_ground' },
+      });
+      expect(automation.review).not.toContain('property_type_unresolved');
+      expect(automation.status).toBe('generated');
     });
   });
   test('gate OFF: legacy Single Family default preserved', () => {

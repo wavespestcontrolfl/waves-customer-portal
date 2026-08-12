@@ -271,10 +271,23 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // engine's own normalizer prices it at the neutral default AND stamps
   // propertyTypeWasDefaulted/invalid_property_type warnings, so the default
   // is observable instead of masquerading as a classified single-family
-  // (owner ruling 2026-08-11).
+  // (owner ruling 2026-08-11). A SUPPLIED type gets the same vocabulary
+  // check as the engine path (codex r2 P1): 'Condo'/'Apartment'/arbitrary
+  // strings are truthy but the pest normalizer silently defaults them —
+  // without the marker such a draft stayed 'generated' with no review
+  // reason at default single-family pricing.
   const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || null;
-  if (unitScopeGuardrailsEnabled() && !resolvedPropertyType) {
-    review.push('property_type_unresolved');
+  if (unitScopeGuardrailsEnabled()) {
+    if (!resolvedPropertyType) {
+      review.push('property_type_unresolved');
+    } else {
+      try {
+        const { normalizePestPropertyType } = require('./pricing-engine/service-pricing');
+        if (normalizePestPropertyType(resolvedPropertyType).propertyTypeWasDefaulted) {
+          review.push('property_type_unresolved');
+        }
+      } catch { /* fail-open: normalizer unavailable keeps today's behavior */ }
+    }
   }
 
   return {
@@ -379,10 +392,19 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
       Number(estimate?.summary?.specialtyTotal || 0)
     );
 
-    automation.status = quoteRequired ? 'manual_review_required' : 'generated';
-    automation.generated = !quoteRequired;
+    // Gate ON: an unresolved/defaulted property type PARKS the draft
+    // (manual_review_required, never auto-sendable 'generated') — the
+    // review marker alone changed nothing about the status, so a draft
+    // priced on the silent single-family default could still auto-send
+    // (codex r2 P1). Totals stay visible as provisional amounts; only the
+    // status/generated flags park.
+    const typeUnresolved = unitScopeGuardrailsEnabled()
+      && automation.review.includes('property_type_unresolved');
+    automation.status = (quoteRequired || typeUnresolved) ? 'manual_review_required' : 'generated';
+    automation.generated = !quoteRequired && !typeUnresolved;
     automation.quoteRequired = quoteRequired;
-    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0] || null;
+    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
+      || (typeUnresolved ? 'property_type_unresolved' : null);
 
     return {
       automation,
