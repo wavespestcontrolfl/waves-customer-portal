@@ -484,6 +484,15 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }
   });
 
+  test('"do not contact me by email" is scoped too — the idiom is clause-checked', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Email opt-out.',
+      contact_preference: 'do not contact me by email',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
   test('"don\'t reach me by email" is scoped to email — no SMS suppression', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Email opt-out.',

@@ -787,11 +787,16 @@ async function executeTool(name, input = {}, ctx = {}) {
       // scopes it to a non-SMS channel ("don't reach me by email"), which is
       // the inverse mistake: suppressing texts the caller never mentioned.
       const NON_SMS_CHANNEL = /\b(?:e-?mail|mail|letter|post|call|calls|calling|phone)\b/i;
+      // EVERY total-stop pattern is clause-scoped — including the idioms. The
+      // unscoped fallback searched the WHOLE instruction, so "do not contact me
+      // by email" matched "do not contact" and suppressed texts the caller
+      // never withdrew: the clause-aware channel check above was doing its job
+      // and the fallback walked straight past it.
       const totalStop = stopClauses.some((c) => (
-        /\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c)
+        (/\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c)
+          || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(c))
         && !NON_SMS_CHANNEL.test(c)
-      ))
-        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText);
+      ));
       // ⭐ AND A BARE FLAG IS NOT EVIDENCE OF A CHANNEL. `contact_preference` is
       // optional, so `do_not_contact_request: true` with no words at all can be
       // the model's shorthand for "stop emailing me" just as easily as for
