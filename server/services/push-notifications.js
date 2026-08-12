@@ -100,7 +100,13 @@ class PushNotificationService {
   // delivering the remaining legs past it. Callers without the option
   // (bell notifications, admin alerts) are unaffected.
   async sendToCustomer(customerId, notification, opts = {}) {
-    const subs = await db('push_subscriptions').where({ customer_id: customerId, active: true });
+    // opts.minUpdatedAt: only fan out to subscriptions with a heartbeat at or
+    // after this instant (push_first freshness) — otherwise a stale
+    // accepting-but-silent token could count as the delivery that suppresses
+    // the SMS while the fresh device failed.
+    const query = db('push_subscriptions').where({ customer_id: customerId, active: true });
+    if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
+    const subs = await query;
     const results = [];
     for (const sub of subs) {
       if (typeof opts.shouldContinue === 'function') {

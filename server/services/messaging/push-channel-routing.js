@@ -72,6 +72,13 @@ const PUSH_ROUTING_POLICY = {
   autopay_charge_failed: 'push_and_sms',
   autopay_retry_failed: 'push_and_sms',
   autopay_retry_final_failed: 'push_and_sms',
+  // Concrete Stripe/ACH failure types (stripe-webhook.js overrides
+  // original_message_type with these — the generic payment_failure entry
+  // never matches the live sends).
+  ach_retry_notice: 'push_and_sms',
+  ach_suspended: 'push_and_sms',
+  bank_verification_incomplete: 'push_and_sms',
+  bank_verification_failed: 'push_and_sms',
 };
 
 // Lock-screen presentation per message family. Titles are plain Waves
@@ -94,6 +101,10 @@ const PRESENTATION = {
   autopay_charge_failed: PAYMENT_ISSUE,
   autopay_retry_failed: PAYMENT_ISSUE,
   autopay_retry_final_failed: PAYMENT_ISSUE,
+  ach_retry_notice: PAYMENT_ISSUE,
+  ach_suspended: PAYMENT_ISSUE,
+  bank_verification_incomplete: PAYMENT_ISSUE,
+  bank_verification_failed: PAYMENT_ISSUE,
 };
 
 function pushPresentation(messageType) {
@@ -138,10 +149,9 @@ async function hasActivePushDevice(customerId, knex = db) {
 const PUSH_FIRST_HEARTBEAT_HOURS = 72;
 
 async function hasFreshPushDevice(customerId, knex = db) {
-  const cutoff = new Date(Date.now() - PUSH_FIRST_HEARTBEAT_HOURS * 3600 * 1000);
   const row = await knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
-    .where('updated_at', '>=', cutoff)
+    .where('updated_at', '>=', heartbeatCutoff())
     .first('id')
     .catch(() => null);
   return Boolean(row);
@@ -166,6 +176,10 @@ const PREF_CHANNEL_COLUMN = {
   autopay_charge_failed: 'billing_channel',
   autopay_retry_failed: 'billing_channel',
   autopay_retry_final_failed: 'billing_channel',
+  ach_retry_notice: 'billing_channel',
+  ach_suspended: 'billing_channel',
+  bank_verification_incomplete: 'billing_channel',
+  bank_verification_failed: 'billing_channel',
 };
 
 // Channel columns that live on the account PRIMARY profile (see
@@ -261,7 +275,7 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, shouldContinue) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt } = {}) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -270,8 +284,12 @@ async function sendPush(customerId, messageType, body, shouldContinue) {
     url: link,
     category,
     tag: `push-routed:${messageType}`,
-  }, { shouldContinue });
+  }, { shouldContinue, minUpdatedAt });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+function heartbeatCutoff() {
+  return new Date(Date.now() - PUSH_FIRST_HEARTBEAT_HOURS * 3600 * 1000);
 }
 
 // Per-leg send-window gate for the fan-out: the sequential device walk can
@@ -327,7 +345,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return { delivered: false };
     if (!(await hasFreshPushDevice(customerId))) return { delivered: false };
-    const { delivered } = await sendPush(customerId, messageType, body, windowGuardFrom(preSendCheck));
+    // The fan-out itself is restricted to fresh-heartbeat rows — a stale
+    // accepting-but-silent token must not become the "delivery" that
+    // suppresses the SMS while a fresh device failed.
+    const { delivered } = await sendPush(customerId, messageType, body, {
+      shouldContinue: windowGuardFrom(preSendCheck),
+      minUpdatedAt: heartbeatCutoff(),
+    });
     if (!delivered) {
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
@@ -397,7 +421,9 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     if (!(await hasActivePushDevice(customerId))) return;
     // The companion starts only after Twilio accepted the SMS, but its own
     // fan-out can still cross the cutoff — same per-leg gate.
-    const { delivered } = await sendPush(customerId, messageType, body, windowGuardFrom(preSendCheck));
+    const { delivered } = await sendPush(customerId, messageType, body, {
+      shouldContinue: windowGuardFrom(preSendCheck),
+    });
     if (delivered) await recordBell(customerId, messageType, body);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
