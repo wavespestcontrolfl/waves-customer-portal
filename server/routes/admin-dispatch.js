@@ -12172,6 +12172,34 @@ router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/rain-out/target-check
+// body: { target: { date, window: { start, end } } }
+//
+// Advisory overlap probe for the Quick Move sheet: the custom-time picker
+// (and any selected preset) re-checks here on every change so the
+// dispatcher sees "this overlaps Trang Nguyen, 2-3 PM" BEFORE tapping
+// Move instead of discovering it as commit's SLOT_TAKEN rejection.
+// Warn-only + read-only: the sheet never disables Move on this data and
+// nothing is locked or reserved — the rebooker's rung-1-locked probe at
+// commit stays the enforcer.
+router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
+  try {
+    const { target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.checkTarget({
+      serviceId: req.params.serviceId,
+      target,
+    });
+    if (!result.ok) {
+      return res.status(result.reason === 'not_found' ? 404 : 400).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the

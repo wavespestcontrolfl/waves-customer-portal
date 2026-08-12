@@ -1241,6 +1241,28 @@ function RainOutSheet({ service, onClose, onDone }) {
   const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
 
+  // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
+  // pure clock offsets, so they can land on another booked stop — the
+  // options payload annotates each with `conflicts` (name + window) from
+  // the same occupancy predicate the server enforces at commit. Warn-only:
+  // Move stays enabled; commit's locked check rejects real overlaps.
+  const fmtHHMM = (v) => {
+    const m = hhmmMin(v);
+    if (m == null) return v;
+    const h = Math.floor(m / 60);
+    const h12 = h % 12 || 12;
+    return `${h12}:${String(m % 60).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  };
+  const selectedConflicts = selected?.conflicts || [];
+  const conflictLabel = (c) => {
+    const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
+    const when = c.windowStart
+      ? `, ${fmtHHMM(c.windowStart)}${c.windowEnd ? `-${fmtHHMM(c.windowEnd)}` : ''}`
+      : '';
+    const what = c.serviceType ? ` (${c.serviceType.toLowerCase()})` : '';
+    return `${who}${when}${what}`;
+  };
+
   // Reason side effects: no-show is single-stop only (server rejects route
   // scope); running late may hide the highlighted same-day preset.
   const pickReason = (code) => {
@@ -1380,18 +1402,38 @@ function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>
-                    {opt.rainChance != null && (
-                      <span style={{
-                        fontSize: 12, fontWeight: 700,
-                        color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
-                      }}>
-                        {opt.rainChance}% 🌧
+                    {(opt.conflicts?.length > 0 || opt.rainChance != null) && (
+                      <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        {opt.conflicts?.length > 0 && (
+                          <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
+                        )}
+                        {opt.rainChance != null && (
+                          <span style={{
+                            fontSize: 12, fontWeight: 700,
+                            color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
+                          }}>
+                            {opt.rainChance}% 🌧
+                          </span>
+                        )}
                       </span>
                     )}
                   </button>
                 );
               })}
             </div>
+
+            {/* Overlap disclaimer — warn-only: Move stays enabled, the
+                server's locked occupancy check rejects real overlaps. */}
+            {selectedConflicts.length > 0 && (
+              <div style={{
+                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 16,
+                background: '#f59e0b1a', border: '1px solid #f59e0b', color: '#f59e0b',
+              }}>
+                {`⚠️ This time overlaps ${conflictLabel(selectedConflicts[0])}`}
+                {selectedConflicts.length > 1 && ` and ${selectedConflicts.length - 1} more`}
+                {' — the schedule will block this move. Pick a different time.'}
+              </div>
+            )}
 
             {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && (
               <>

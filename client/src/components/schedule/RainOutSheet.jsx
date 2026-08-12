@@ -468,6 +468,50 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const customOverBudget = !!(customSeg && !customSeg.withinCap);
   const customMissing = !!(isCustomReason && notify && !note.trim());
 
+  // Overlap advisory (owner ask 2026-08-12): every selection change —
+  // preset OR custom time — re-checks the target against the schedule
+  // (POST rain-out/target-check → checkTarget: the same tech-blind
+  // occupancy predicate commit enforces) so the dispatcher sees "this
+  // overlaps Trang Nguyen, 2-3 PM" BEFORE tapping Move instead of
+  // discovering it as commit's SLOT_TAKEN rejection. Warn-only: Move
+  // stays enabled (this data can be seconds stale in either direction —
+  // the rebooker's locked probe at commit is the enforcer), and a fetch
+  // failure just hides the warning. While the live check is in flight
+  // the options payload's same-day preset annotation (opt.conflicts)
+  // fills in.
+  const [liveConflicts, setLiveConflicts] = useState(null);
+  useEffect(() => {
+    setLiveConflicts(null);
+    if (!(selectedDate && selectedStart && selectedEnd)) return undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out/target-check`, {
+          method: 'POST',
+          headers: authHeaders(),
+          signal: controller.signal,
+          body: JSON.stringify({
+            target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!controller.signal.aborted && res.ok && Array.isArray(data?.conflicts)) {
+          setLiveConflicts(data.conflicts);
+        }
+      } catch { /* advisory only — commit still rejects real overlaps */ }
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [selectedDate, selectedStart, selectedEnd, service.id]);
+  const activeConflicts = liveConflicts ?? selected?.conflicts ?? [];
+  const conflictLabel = (c) => {
+    const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
+    const when = c.windowStart
+      ? `, ${fmtTime(c.windowStart)}${c.windowEnd ? `-${fmtTime(c.windowEnd)}` : ''}`
+      : '';
+    const what = c.serviceType ? ` (${c.serviceType.toLowerCase()})` : '';
+    return `${who}${when}${what}`;
+  };
+
   const handleCommit = async () => {
     if (!selected || busy || noteBlocked || customMissing || customOverBudget) return;
     setBusy(true);
@@ -643,9 +687,16 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
-                    {opt.rainChance != null && (
-                      <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                        {opt.rainChance}% rain
+                    {(opt.conflicts?.length > 0 || opt.rainChance != null) && (
+                      <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        {opt.conflicts?.length > 0 && (
+                          <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
+                        )}
+                        {opt.rainChance != null && (
+                          <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
+                            {opt.rainChance}% rain
+                          </span>
+                        )}
                       </span>
                     )}
                   </button>
@@ -718,6 +769,20 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 {runningLateFloorMin > 0 && hhmmToMin(customWindow?.start) < runningLateFloorMin
                   ? `Running late needs a time after the current window — pick ${fmtTime(minTodayStart)} or later.`
                   : `That hour has already started today — pick ${fmtTime(minTodayStart)} or later.`}
+              </div>
+            )}
+
+            {/* Overlap disclaimer — warn-only (owner call 2026-08-12): the
+                Move button stays enabled; the server's locked occupancy
+                check at commit is the enforcer and rejects real overlaps. */}
+            {activeConflicts.length > 0 && selected && (
+              <div style={{
+                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
+                background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
+              }}>
+                {`⚠️ This time overlaps ${conflictLabel(activeConflicts[0])}`}
+                {activeConflicts.length > 1 && ` and ${activeConflicts.length - 1} more`}
+                {' — the schedule will block this move. Pick a different time.'}
               </div>
             )}
 

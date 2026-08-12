@@ -611,6 +611,76 @@ function sameDayOptions(now = new Date()) {
   return options;
 }
 
+// Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
+// picking a time that overlaps another appointment gave no warning until
+// commit's SLOT_TAKEN). Same tech-blind predicate AND the same status
+// exclusions the rebooker enforces at its commit gate (rebooker.js
+// occupancyClash: cancelled + completed don't occupy) so the sheet warns
+// on exactly what commit would reject — an offer/commit mismatch in either
+// direction is how the /book 409 dead-end loop happened. Read-only, no
+// rung-1 lock (offer surface — occupancy.js EXEMPT list); the rebooker's
+// locked probe stays the enforcer, this only makes the rejection visible
+// BEFORE the Move tap. Warn-only by design: the sheets never disable Move
+// on this data (it can be seconds stale in either direction).
+const TARGET_CONFLICT_LIMIT = 3;
+async function conflictsForTarget(serviceId, date, window) {
+  const { findConflictingVisits } = require('./scheduling/occupancy');
+  const rows = await findConflictingVisits({
+    date,
+    windowStart: window.start,
+    windowEnd: window.end,
+    excludeServiceIds: [serviceId],
+    excludeStatuses: ['cancelled', 'completed'],
+  });
+  if (!rows.length) return [];
+  const kept = rows.slice(0, TARGET_CONFLICT_LIMIT);
+  const customerIds = [...new Set(kept.map((r) => r.customer_id).filter(Boolean))];
+  const customers = customerIds.length
+    ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
+    : [];
+  const nameById = new Map(customers.map((c) => [
+    String(c.id),
+    [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || null,
+  ]));
+  return kept.map((row) => {
+    // window_end is nullable (admin edits can leave a start with no end) —
+    // derive the occupied end the same way the overlap predicate does, so
+    // the warning quotes the span that actually blocked.
+    let windowEnd = toHHMM(row.window_end);
+    const startMin = hhmmToMinutes(toHHMM(row.window_start));
+    if (!windowEnd && startMin != null) {
+      const duration = Number(row.estimated_duration_minutes) > 0
+        ? Number(row.estimated_duration_minutes)
+        : 60;
+      windowEnd = minutesToHHMM(startMin + duration);
+    }
+    return {
+      windowStart: toHHMM(row.window_start),
+      windowEnd,
+      customerName: row.customer_id ? (nameById.get(String(row.customer_id)) || null) : null,
+      serviceType: row.service_type || null,
+      // customer-NULL rows with a live reservation stamp are estimate-slot
+      // holds — real occupancy, but there's no customer name to show.
+      isHold: !row.customer_id && !!row.reservation_expires_at,
+    };
+  });
+}
+
+/**
+ * Advisory overlap check for a sheet-picked target (the admin sheet's
+ * custom time re-checks on every date/hour change). Never blocks anything —
+ * commit's locked probe is the enforcer.
+ */
+async function checkTarget({ serviceId, target }) {
+  if (!target?.date || !target.window?.start || !target.window?.end) {
+    return { ok: false, reason: 'bad_target' };
+  }
+  const service = await db('scheduled_services').where({ id: serviceId }).first('id');
+  if (!service) return { ok: false, reason: 'not_found' };
+  const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window);
+  return { ok: true, conflicts };
+}
+
 /**
  * Everything the tech sheet needs in one fetch: same-day windows,
  * route-scored day options with rain badges, the remaining-route count
@@ -626,6 +696,22 @@ async function getOptions(serviceId) {
   // candidates are built here). Fail-open helper.
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
   const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
+
+  // Overlap advisory on the same-day presets: +2h/+4h are pure clock
+  // offsets with no occupancy input, so they can land on a booked stop.
+  // Day options below skip the probe — findRescheduleOptions already
+  // filters its candidates against the same predicate (rebooker.js
+  // candidate clash check), so they arrive conflict-free. Best-effort:
+  // a probe failure renders the pill without a badge, never blocks the
+  // sheet (same fail-open posture as the rain badges).
+  for (const opt of sameDay) {
+    try {
+      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window);
+    } catch (err) {
+      logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
+      opt.conflicts = [];
+    }
+  }
 
   // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h
@@ -1445,10 +1531,12 @@ module.exports = {
   getOptions,
   commit,
   previewCustomSms,
+  checkTarget,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
     EXTRA_REASON_LEADS, isValidReason, sanitizeCustomerNote,
     CUSTOM_REASON, CUSTOM_TEMPLATE_KEY, customLinkClause, renderCustomMovedBody,
+    conflictsForTarget,
   },
 };

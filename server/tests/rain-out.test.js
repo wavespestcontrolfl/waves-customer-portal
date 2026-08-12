@@ -37,6 +37,12 @@ jest.mock('../services/reschedule-link', () => ({
 jest.mock('../services/workflows/missed-appointment', () => ({
   evaluateThreshold: jest.fn().mockResolvedValue(null),
 }));
+// Overlap advisory probe (conflictsForTarget) — mocked conflict-free by
+// default so getOptions' same-day annotation is inert in unrelated tests;
+// the overlap-advisory describe drives it per test.
+jest.mock('../services/scheduling/occupancy', () => ({
+  findConflictingVisits: jest.fn().mockResolvedValue([]),
+}));
 
 const db = require('../models/db');
 const MissedAppointment = require('../services/workflows/missed-appointment');
@@ -1736,6 +1742,84 @@ describe('rain-out service', () => {
       expect(options.extraReasonsEnabled).toBe(false);
     });
 
+    test('annotates same-day presets with overlap conflicts (name + window), day options skipped', async () => {
+      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([
+          { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+        ]);
+        findConflictingVisits.mockImplementation(async ({ windowStart }) => (
+          windowStart === '11:00'
+            ? [{
+              id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+              window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+            }]
+            : []
+        ));
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+          customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Trang', last_name: 'Nguyen' }] })],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.ok).toBe(true);
+        expect(options.sameDay).toHaveLength(2);
+        expect(options.sameDay[0].window.start).toBe('11:00');
+        // Same exclusions the rebooker's commit gate enforces — the badge
+        // must warn on exactly what commit would SLOT_TAKEN.
+        expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+          excludeServiceIds: ['svc-1'],
+          excludeStatuses: ['cancelled', 'completed'],
+        }));
+        expect(options.sameDay[0].conflicts).toEqual([{
+          windowStart: '11:00',
+          windowEnd: '12:00',
+          customerName: 'Trang Nguyen',
+          serviceType: 'Mosquito Treatment',
+          isHold: false,
+        }]);
+        expect(options.sameDay[1].conflicts).toEqual([]);
+        // Day options arrive conflict-free from the rebooker's own candidate
+        // probe — no annotation, no extra queries.
+        expect(options.days[0].conflicts).toBeUndefined();
+      } finally {
+        jest.useRealTimers();
+        findConflictingVisits.mockReset();
+        findConflictingVisits.mockResolvedValue([]);
+      }
+    });
+
+    test('a conflict-probe failure renders the preset without a badge, never blocks the sheet', async () => {
+      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        findConflictingVisits.mockRejectedValue(new Error('db down'));
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.ok).toBe(true);
+        expect(options.sameDay).toHaveLength(2);
+        expect(options.sameDay.every((opt) => Array.isArray(opt.conflicts) && opt.conflicts.length === 0)).toBe(true);
+      } finally {
+        jest.useRealTimers();
+        findConflictingVisits.mockReset();
+        findConflictingVisits.mockResolvedValue([]);
+      }
+    });
+
     test('extraReasonsEnabled mirrors GATE_QUICKMOVE_EXTRA_REASONS for the sheets', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       try {
@@ -1754,6 +1838,117 @@ describe('rain-out service', () => {
       } finally {
         delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
       }
+    });
+  });
+
+  describe('checkTarget (overlap advisory for the sheets)', () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+
+    afterEach(() => {
+      findConflictingVisits.mockReset();
+      findConflictingVisits.mockResolvedValue([]);
+    });
+
+    test('maps overlapping rows to name + window with the commit-gate exclusions', async () => {
+      findConflictingVisits.mockResolvedValue([{
+        id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+        window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]);
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Trang', last_name: 'Nguyen' }] })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result).toEqual({
+        ok: true,
+        conflicts: [{
+          windowStart: '14:00',
+          windowEnd: '15:00',
+          customerName: 'Trang Nguyen',
+          serviceType: 'Mosquito Treatment',
+          isHold: false,
+        }],
+      });
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        date: '2026-08-12',
+        windowStart: '14:00',
+        windowEnd: '15:00',
+        excludeServiceIds: ['svc-1'],
+        excludeStatuses: ['cancelled', 'completed'],
+      }));
+    });
+
+    test('a null window_end derives the occupied end from the duration, like the overlap predicate', async () => {
+      findConflictingVisits.mockResolvedValue([{
+        id: 'svc-9', customer_id: 'cust-9', status: 'pending', service_type: 'Lawn Treatment',
+        window_start: '14:00:00', window_end: null, estimated_duration_minutes: 90, reservation_expires_at: null,
+      }]);
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'Pat', last_name: null }] })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toEqual([expect.objectContaining({
+        windowStart: '14:00',
+        windowEnd: '15:30',
+        customerName: 'Pat',
+      })]);
+    });
+
+    test('a live estimate-slot hold is labeled isHold with no name lookup', async () => {
+      findConflictingVisits.mockResolvedValue([{
+        id: 'hold-1', customer_id: null, status: 'pending', service_type: null,
+        window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: null,
+        reservation_expires_at: new Date('2026-08-12T20:00:00Z'),
+      }]);
+      // No customers queue on purpose — a hold has no customer to look up.
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toEqual([expect.objectContaining({
+        customerName: null,
+        isHold: true,
+        windowStart: '14:00',
+        windowEnd: '15:00',
+      })]);
+    });
+
+    test('clear window → ok with no conflicts; bad target and missing service reject', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
+      });
+      const clear = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+      expect(clear).toEqual({ ok: true, conflicts: [] });
+
+      expect(await RainOut.checkTarget({ serviceId: 'svc-1', target: { date: '2026-08-12' } }))
+        .toEqual({ ok: false, reason: 'bad_target' });
+
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
+      });
+      expect(await RainOut.checkTarget({
+        serviceId: 'nope',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      })).toEqual({ ok: false, reason: 'not_found' });
     });
   });
 
