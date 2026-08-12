@@ -1088,6 +1088,30 @@ function linkBoostCap() {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LINK_BOOST_MAX_PER_RUN;
 }
 
+// THE persistence floor for an opportunity — single source of truth for
+// persistAll's admission gate and for every "is this candidate live?"
+// question asked elsewhere (parent-row protection, companion protection).
+// Two exceptions ride a lower floor than their action_type implies:
+// listicle_family blog/refresh rows keep the BLOG floor (aggregated
+// sub-50-impression demand admitted as a blog must not be discarded for
+// taking the safer refresh route), and a link_boost companion DERIVED from
+// a ctr_rewrite inherits the rewrite floor because it inherits that
+// parent's score by construction.
+function persistFloorFor(o) {
+  const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
+  if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
+    return minScoreToActFor('new_supporting_blog');
+  }
+  if (o.bucket === 'link_boost' && o.signal_metadata?.source_bucket === 'ctr_rewrite') {
+    return minScoreToActFor('rewrite_title_meta');
+  }
+  return minScoreToActFor(o.action_type);
+}
+
+function isPersistable(o) {
+  return (o?.score ?? 0) >= persistFloorFor(o || {});
+}
+
 // Companion dedupe keys the CURRENT batch still stands behind. A link_boost
 // key is (bucket, service, city, page) with NO query in it, so companions
 // are shared across queries and across source buckets — retiring one on a
@@ -1100,6 +1124,13 @@ function linkBoostCap() {
 function companionProtectionKeys(opportunities = []) {
   const keys = new Set();
   for (const o of opportunities) {
+    // Only candidates that will ACTUALLY PERSIST defend anything. A
+    // below-floor parent is dropped by persistAll, so protecting the
+    // companion it can no longer justify would leave that companion
+    // claimable at its stale higher score while the parent row itself is
+    // being retired (audit P1) — the same rule the reconciliation applies
+    // to parent rows, via the same shared floor.
+    if (!isPersistable(o)) continue;
     if (o.bucket === 'link_boost' && o.dedupe_key) keys.add(o.dedupe_key);
     if (o.page_url && LINK_BOOST_SOURCE_ACTIONS.has(o.action_type)) {
       keys.add(dedupeKey({
@@ -3259,24 +3290,7 @@ class GscOpportunityMiner {
       // Bounded to the lane's two intended actions: a demoted family row
       // (do_not_publish, or a rerouted city-service action) must NOT ride
       // the blog floor into the queue.
-      const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
-      // A link_boost companion INHERITS its parent's score by design
-      // (deriveLinkBoost) so the two gates move together — which means it
-      // must inherit the parent's FLOOR too. Without this, a ctr_rewrite
-      // admitted at a lowered AUTONOMOUS_REWRITE_MIN_SCORE persists while
-      // its promised companion silently dies against the global floor
-      // (audit P2). Bounded to ctr_rewrite parents: decay_refresh parents
-      // clear the global floor themselves, so their companions already do.
-      const rewriteDerivedLinkBoost = o.bucket === 'link_boost'
-        && o.signal_metadata?.source_bucket === 'ctr_rewrite';
-      let scoreFloor;
-      if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
-        scoreFloor = minScoreToActFor('new_supporting_blog');
-      } else if (rewriteDerivedLinkBoost) {
-        scoreFloor = minScoreToActFor('rewrite_title_meta');
-      } else {
-        scoreFloor = minScoreToActFor(o.action_type);
-      }
+      const scoreFloor = persistFloorFor(o);
       if (o.score < scoreFloor) {
         // Rollout hygiene for the near-me demotion: a previously persisted
         // new_supporting_blog row shares this candidate's dedupe_key, but a
@@ -3434,8 +3448,7 @@ class GscOpportunityMiner {
       // a below-floor candidate: persistAll skips it, so the stored row
       // keeps its stale higher score and would stay claimable on evidence
       // the current mine no longer supports (audit P1).
-      if (o.page_url && o.action_type === 'rewrite_title_meta'
-        && o.score >= minScoreToActFor(o.action_type)) {
+      if (o.page_url && o.action_type === 'rewrite_title_meta' && isPersistable(o)) {
         activeKeysByQuery.get(o.query).add(o.dedupe_key);
       }
     }

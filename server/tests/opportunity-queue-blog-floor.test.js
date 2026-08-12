@@ -431,6 +431,51 @@ describe('miner persistAll action-aware gate', () => {
     expect(companionRetirements).toHaveLength(0);
   });
 
+  test('a BELOW-FLOOR same-page parent does not protect the companion it can no longer justify', async () => {
+    // Symmetric to the parent-row rule: persistAll drops the below-floor
+    // parent, so its previously-persisted companion must not be shielded
+    // — it would stay claimable at its stale higher score while the
+    // parent row is being retired.
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    const { updates } = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/new-page/',
+        dedupe_key: 'ctr::new-page',
+      }),
+      // Same page as the stale row, but below the 60 floor → dropped by
+      // persistAll, so it defends nothing.
+      opp({
+        score: 45,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'bagworms florida',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/old-page/',
+        dedupe_key: 'ctr::old-page-weak',
+      }),
+    ]);
+
+    // The companion is NOT shielded by the below-floor parent: it is
+    // retired, keyed exactly. (The harness hands the same stale row to
+    // every query's lock, so the retirement can be issued more than once;
+    // what matters is that it happens and targets the right key.)
+    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
+      && u.filters?.bucket === 'link_boost');
+    expect(companionRetirements.length).toBeGreaterThanOrEqual(1);
+    for (const r of companionRetirements) {
+      expect(r.in).toEqual(['dedupe_key', ['link_boost::pest::_::https://x/old-page/']]);
+    }
+  });
+
   test('a companion still referenced by another live candidate is preserved', async () => {
     // Two queries legitimately target the same page; the companion key
     // carries no query, so retiring it for one query would delete the
