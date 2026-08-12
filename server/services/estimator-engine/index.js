@@ -1533,6 +1533,18 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     });
     result.propertyFacts = propertyFacts;
 
+    // Facts view for the SCOPE classifiers on a true property switch: the
+    // arbitration deliberately keeps the call's caller-stated facts (they
+    // describe the property discussed on the call), but a classifier must
+    // not read the ORIGINAL property's tenancy or type when the composer
+    // quoted a different address — with no record on the re-gathered
+    // lookup, that stale type could label the new address a unit and clear
+    // its lot (codex r22 P1). Non-destructive: the priced propertyFacts
+    // are untouched.
+    const scopeFacts = crossPropertyRegather
+      ? { ...propertyFacts, tenant: false, propertyType: null }
+      : propertyFacts;
+
     // Property Facts V2 — scoped measurement selection. Shadow by default:
     // computed and stored on the draft for evaluation, never priced from
     // until GATE_PROPERTY_FACTS_V2 flips. Fail-open (returns null on error).
@@ -1550,12 +1562,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // new building's county measurement as "suite evidence".
       extraction: crossPropertyRegather ? null : context.extraction,
       intent,
-      // Tenancy is inherited too: resolvePropertyFacts already copied the
-      // PRIMARY extraction's tenant flag onto propertyFacts, and V2 reads
-      // it directly — nulling only `extraction` still classified a newly
-      // gathered whole building as a suite and rejected its county area as
-      // wrong-scope (codex r21 P1; same clearing the unit-scope call does).
-      propertyFacts: crossPropertyRegather ? { ...propertyFacts, tenant: false } : propertyFacts,
+      // Tenancy/type are inherited too: resolvePropertyFacts copied the
+      // PRIMARY extraction's tenant flag and type onto propertyFacts, and
+      // V2 reads them directly — nulling only `extraction` still
+      // classified a newly gathered whole building as a suite and rejected
+      // its county area as wrong-scope (codex r21/r22 P1s).
+      propertyFacts: scopeFacts,
       address: intent.address || result.addressUsed || address,
     });
     result.propertyFactsV2 = propertyFactsV2;
@@ -1587,7 +1599,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
         extraction: crossPropertyRegather ? null : context.extraction,
         intent,
-        propertyFacts: crossPropertyRegather ? { ...propertyFacts, tenant: false } : propertyFacts,
+        propertyFacts: scopeFacts,
         address: intent.address || result.addressUsed || address,
       });
       if (crossPropertyRegather) unitScope.crossPropertyExtraction = true;
