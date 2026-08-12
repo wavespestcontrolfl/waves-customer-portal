@@ -278,6 +278,8 @@ describe('miner persistAll action-aware gate', () => {
 
   // Reconciliation harness: records every where/whereNotIn/whereIn/update
   // so the tests can assert exactly which rows a run would retire.
+  const SWEPT_BUCKETS = new Set(['ctr_rewrite', 'no_content_yet']);
+
   function reconcileHarness(staleRows) {
     const updates = [];
     const locks = [];
@@ -297,11 +299,11 @@ describe('miner persistAll action-aware gate', () => {
         // so predicate and update target are asserted apart).
         select: jest.fn(() => q),
         then: (resolve, reject) => Promise.resolve(
-          q._filters?.bucket === 'ctr_rewrite' ? staleRows : []
+          SWEPT_BUCKETS.has(q._filters?.bucket) ? staleRows : []
         ).then(resolve, reject),
         forUpdate: jest.fn(() => {
           locks.push({ table, filters: q._filters, notIn: q._notIn });
-          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? staleRows : []);
+          return Promise.resolve(SWEPT_BUCKETS.has(q._filters?.bucket) ? staleRows : []);
         }),
         update: jest.fn((u) => {
           updates.push({ table, filters: q._filters, notIn: q._notIn, in: q._in, updates: u });
@@ -321,11 +323,69 @@ describe('miner persistAll action-aware gate', () => {
     city: null,
   };
 
-  test('a stale parent cannot shield its OWN companion (it is still pending when protection is computed)', async () => {
-    // The live-parent lookup sees rows that are still 'pending' —
-    // including the very rows being retired. Without excluding them, each
-    // stale parent contributes its own companion key, the parent is
-    // expired, and the companion stays claimable forever.
+  test('the sweep retires pending rows whose dedupe key this mine did not re-emit', async () => {
+    // ONE mechanism now: a moved target, a recovered signal, a query that
+    // became served, and lost map evidence all present identically — the
+    // stored key is simply absent from this mine's persistable set.
+    const { updates, locks } = reconcileHarness([staleRow]);
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [
+      opp({
+        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
+        query: 'still qualifying', service: 'pest', city: null,
+        page_url: 'https://x/live/', dedupe_key: 'ctr::live',
+      }),
+    ]);
+
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
+    // Keyed on dedupe keys, not query strings: one query can produce
+    // several (query, service, city, intent) tuples, and a surviving
+    // tuple must not shelter a sibling whose evidence disappeared.
+    expect(lock.notIn).toEqual(['dedupe_key', ['ctr::live']]);
+
+    const sweeps = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_signal_recovered');
+    expect(sweeps.length).toBeGreaterThanOrEqual(1);
+    expect(sweeps[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
+    expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
+  });
+
+  test('a BELOW-FLOOR candidate does not defend its stored row (stale higher score would stay claimable)', async () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    const { locks } = reconcileHarness([staleRow]);
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [
+      opp({
+        score: 40, // under the 60 floor → persistAll drops it → defends nothing
+        bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm', service: 'pest', city: null,
+        page_url: 'https://x/new-page/', dedupe_key: 'ctr::weak',
+      }),
+    ]);
+
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.notIn).toBe(null); // no live keys at all
+  });
+
+  test('the sweep also covers no_content_yet (its stale rows CREATE pages)', async () => {
+    const { updates } = reconcileHarness([staleRow]);
+
+    await miner._sweepRecoveredQueries('no_content_yet', [
+      opp({
+        score: 60, bucket: 'no_content_yet', action_type: 'new_supporting_blog',
+        query: 'live gap', service: 'pest', city: null, page_url: null,
+        dedupe_key: 'ncy::live',
+      }),
+    ]);
+
+    expect(updates.some((u) => u.updates.skip_reason === 'no_content_yet_signal_recovered')).toBe(true);
+  });
+
+  test('a companion is protected by a LIVE QUEUE parent absent from this batch (errored/dipped bucket)', async () => {
+    // decay_refresh errors this run, or its signal dips: its refresh row
+    // is not in the batch, but it is still in the queue and still needs
+    // its shared companion. The rows being retired are excluded from that
+    // lookup so they cannot shield their own companions.
     const updates = [];
     db.mockImplementation((table) => {
       const q = {
@@ -336,13 +396,13 @@ describe('miner persistAll action-aware gate', () => {
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
         whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
         select: jest.fn(() => q),
-        // Live lookup returns the stale row itself — honouring the
-        // caller's dedupe_key exclusion is what makes this pass.
         then: (res, rej) => {
           const excluded = new Set(q._notIn?.[0] === 'dedupe_key' ? q._notIn[1] : []);
-          const rows = [{ page_url: staleRow.page_url, service: staleRow.service, city: staleRow.city, dedupe_key: staleRow.dedupe_key }]
-            .filter((r) => !excluded.has(r.dedupe_key));
-          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : rows).then(res, rej);
+          const live = [
+            { page_url: 'https://x/old-page/', service: 'pest', city: null, dedupe_key: 'decay::old' },
+            { page_url: staleRow.page_url, service: staleRow.service, city: staleRow.city, dedupe_key: staleRow.dedupe_key },
+          ].filter((r) => !excluded.has(r.dedupe_key));
+          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : live).then(res, rej);
         },
         forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
         update: jest.fn((u) => {
@@ -354,315 +414,13 @@ describe('miner persistAll action-aware gate', () => {
     });
     db.raw.mockResolvedValue({ rowCount: 1 });
 
-    await persistCanonical([
-      opp({
-        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm', service: 'pest', city: null,
-        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
-      }),
-    ]);
+    await miner._sweepRecoveredQueries('ctr_rewrite', []);
 
-    const companionRetirements = updates.filter((u) => u.filters?.bucket === 'link_boost');
-    expect(companionRetirements.length).toBeGreaterThanOrEqual(1);
-    expect(companionRetirements[0].in).toEqual(['dedupe_key', ['link_boost::pest::_::https://x/old-page/']]);
+    // Parent retired; companion spared by the unrelated live parent.
+    expect(updates.some((u) => u.in?.[1]?.includes(staleRow.dedupe_key))).toBe(true);
+    expect(updates.filter((u) => u.filters?.bucket === 'link_boost')).toHaveLength(0);
   });
 
-  test('a NONCANONICAL mine is additive — it never retires the canonical mine\'s target', async () => {
-    // A manual 7/14-day run sees a smaller qualifying set; letting it
-    // reconcile would expire targets the authoritative 28-day mine chose.
-    const { updates } = reconcileHarness([staleRow]);
-
-    await miner.persistAll([
-      opp({
-        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm', service: 'pest', city: null,
-        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
-      }),
-    ]); // no canonicalMine flag → additive
-
-    expect(updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toHaveLength(0);
-  });
-
-  test('a moved ctr_rewrite target retires the superseded row and its companion by EXACT key', async () => {
-    // The ranking URL for a query moves A → B between mines. B queues
-    // under a new dedupe key (page_url is in the key), so A's pending row
-    // would stay claimable for 14 days and rewrite a page the current
-    // evidence no longer selects.
-    const { updates, locks } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/new-page/',
-        dedupe_key: 'ctr::new-page',
-      }),
-    ]);
-
-    // Selection: pending rows for the query that are NOT the current
-    // target — taken under FOR UPDATE so a concurrent claim cannot slip
-    // between the read and the retirement.
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
-    expect(lock.notIn).toEqual(['dedupe_key', ['ctr::new-page']]);
-
-    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
-    expect(retirements).toHaveLength(2);
-    // 1. the parent, updated by the exact LOCKED key
-    expect(retirements[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
-    expect(retirements[0].updates.status).toBe('expired'); // revivable, not sticky-skipped
-    // 2. the companion by EXACT dedupe key — never by page, since a
-    //    link_boost key carries no query and is shared across queries.
-    expect(retirements[1].filters).toMatchObject({ bucket: 'link_boost', status: 'pending' });
-    expect(retirements[1].in[0]).toBe('dedupe_key');
-    expect(retirements[1].in[1]).toEqual(['link_boost::pest::_::https://x/old-page/']);
-  });
-
-  test('a query with NO actionable target this run retires all of its pending rewrites', async () => {
-    // Coverage vanished / CTR recovered / materiality failed → page_url
-    // null. The previous target must not stay claimable just because the
-    // new candidate is non-actionable.
-    const { updates, locks } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'do_not_publish',
-        query: 'plaster bagworm',
-        page_url: null,
-        dedupe_key: 'ctr::no-target',
-      }),
-    ]);
-
-    expect(updates.some((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toBe(true);
-    // No active key to exclude — every pending row for the query goes.
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
-    expect(lock.notIn).toBe(null);
-  });
-
-  test('a BELOW-FLOOR candidate does not defend its stored row (stale higher score would stay claimable)', async () => {
-    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    const { updates, locks } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 40, // under the 60 floor → persistAll drops it
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/new-page/',
-        dedupe_key: 'ctr::weak',
-      }),
-    ]);
-
-    expect(updates.some((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toBe(true);
-    // Nothing persisted, so nothing defends the query: no key exclusion.
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.notIn).toBe(null);
-  });
-
-  test("a decay_refresh parent's companion is protected even when the per-run cap omitted it", async () => {
-    const { updates } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/new-page/',
-        dedupe_key: 'ctr::new-page',
-      }),
-      // Live decay_refresh parent on the OLD page — its link-boost
-      // companion shares the stale row's companion key and must survive,
-      // even though LINK_BOOST_MAX_PER_RUN emitted no link_boost row.
-      opp({
-        score: 87,
-        bucket: 'decay_refresh',
-        action_type: 'refresh_existing_page',
-        query: null,
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/old-page/',
-        dedupe_key: 'decay::old-page',
-      }),
-    ]);
-
-    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
-      && u.filters?.bucket === 'link_boost');
-    expect(companionRetirements).toHaveLength(0);
-  });
-
-  test('a BELOW-FLOOR same-page parent does not protect the companion it can no longer justify', async () => {
-    // Symmetric to the parent-row rule: persistAll drops the below-floor
-    // parent, so its previously-persisted companion must not be shielded
-    // — it would stay claimable at its stale higher score while the
-    // parent row is being retired.
-    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    const { updates } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/new-page/',
-        dedupe_key: 'ctr::new-page',
-      }),
-      // Same page as the stale row, but below the 60 floor → dropped by
-      // persistAll, so it defends nothing.
-      opp({
-        score: 45,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'bagworms florida',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/old-page/',
-        dedupe_key: 'ctr::old-page-weak',
-      }),
-    ]);
-
-    // The companion is NOT shielded by the below-floor parent: it is
-    // retired, keyed exactly. (The harness hands the same stale row to
-    // every query's lock, so the retirement can be issued more than once;
-    // what matters is that it happens and targets the right key.)
-    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
-      && u.filters?.bucket === 'link_boost');
-    expect(companionRetirements.length).toBeGreaterThanOrEqual(1);
-    for (const r of companionRetirements) {
-      expect(r.in).toEqual(['dedupe_key', ['link_boost::pest::_::https://x/old-page/']]);
-    }
-  });
-
-  test('a companion still referenced by another live candidate is preserved', async () => {
-    // Two queries legitimately target the same page; the companion key
-    // carries no query, so retiring it for one query would delete the
-    // other's still-valid work. The protection covers candidates whose
-    // companion the per-run cap omitted, hence it is derived from the
-    // rewrite candidates themselves.
-    const { updates } = reconcileHarness([staleRow]);
-
-    await persistCanonical([
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/new-page/',
-        dedupe_key: 'ctr::new-page',
-      }),
-      // Another query still points at the OLD page → its companion lives.
-      opp({
-        score: 87,
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'bagworms florida',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/old-page/',
-        dedupe_key: 'ctr::old-page-other-query',
-      }),
-    ]);
-
-    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
-      && u.filters?.bucket === 'link_boost');
-    expect(companionRetirements).toHaveLength(0);
-  });
-
-  test('recovered-query sweep expires pending rewrites the bucket no longer emits', async () => {
-    // A query whose CTR climbed back, or whose impressions/position left
-    // the gates, vanishes from mineCtrRewrite entirely — per-query
-    // reconciliation never sees it, so the lane sweep must.
-    const { updates, locks } = reconcileHarness([staleRow]);
-
-    await miner._sweepRecoveredQueries('ctr_rewrite', [
-      opp({
-        bucket: 'ctr_rewrite',
-        action_type: 'rewrite_title_meta',
-        query: 'still qualifying',
-        service: 'pest',
-        city: null,
-        page_url: 'https://x/live/',
-        dedupe_key: 'ctr::live',
-      }),
-    ]);
-
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
-    // Only queries the bucket no longer emits are swept.
-    expect(lock.notIn).toEqual(['query', ['still qualifying']]);
-
-    const sweeps = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_signal_recovered');
-    expect(sweeps.length).toBeGreaterThanOrEqual(1);
-    expect(sweeps[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
-    expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
-  });
-
-  test('a companion is protected by a LIVE QUEUE parent absent from this batch (errored/dipped bucket)', async () => {
-    // decay_refresh errors this run, or its signal dips: its pending
-    // refresh row is not in the batch, but it is still in the queue and
-    // still needs its shared companion.
-    const updates = [];
-    db.mockImplementation((table) => {
-      const q = {
-        _filters: null, _notIn: null, _in: null,
-        where: jest.fn((f) => { q._filters = f; return q; }),
-        whereNot: jest.fn(() => q), whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
-        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
-        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
-        select: jest.fn(() => q),
-        // The live-parent lookup (no bucket filter) returns BOTH the
-        // still-pending stale rewrite row and an unrelated refresh row on
-        // the same page — the stale one must be excluded by the caller,
-        // the refresh one must protect.
-        then: (res, rej) => Promise.resolve(
-          q._filters?.bucket === 'ctr_rewrite'
-            ? [staleRow]
-            : [
-              { page_url: 'https://x/old-page/', service: 'pest', city: null },
-              { page_url: staleRow.page_url, service: staleRow.service, city: staleRow.city },
-            ]
-        ).then(res, rej),
-        forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
-        update: jest.fn((u) => {
-          updates.push({ table, filters: q._filters, in: q._in, updates: u });
-          return Promise.resolve(1);
-        }),
-      };
-      return q;
-    });
-    db.raw.mockResolvedValue({ rowCount: 1 });
-
-    await persistCanonical([
-      opp({
-        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
-        query: 'plaster bagworm', service: 'pest', city: null,
-        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
-      }),
-    ]);
-
-    // Parent row retired (updated by its locked key), companion spared by
-    // the live queue parent.
-    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
-    expect(retirements.some((u) => u.in?.[1]?.includes(staleRow.dedupe_key))).toBe(true);
-    expect(retirements.filter((u) => u.filters?.bucket === 'link_boost')).toHaveLength(0);
-  });
 
   test('recovered-query sweep rethrows so a failure rolls back the persist transaction', async () => {
     db.mockImplementation(() => {

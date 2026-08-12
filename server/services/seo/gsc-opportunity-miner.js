@@ -1570,9 +1570,7 @@ class GscOpportunityMiner {
         // The lock is taken even for an empty family batch when the sweep
         // will run.
         const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
-        persisted = await this.persistAll(revalidated, trx, {
-          canonicalMine: periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS,
-        });
+        persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
         // then means "didn't run", not "no signal").
@@ -3319,13 +3317,10 @@ class GscOpportunityMiner {
 
   // ── persistence ────────────────────────────────────────────────────
 
-  // canonicalMine: only the authoritative 28-day run may RETIRE rows. A
-  // manual 7/14-day window sees a different (smaller) qualifying set, so
-  // its reconciliation would expire targets the canonical mine chose —
-  // the same trap the lane sweeps are gated against. Noncanonical mines
-  // stay purely additive. Defaults false so any caller that does not
-  // declare itself canonical cannot destroy queued work.
-  async persistAll(opportunities, trx = null, { canonicalMine = false } = {}) {
+  // persistAll is purely ADDITIVE. Every retirement lives in the
+  // canonical-mine sweeps (_sweepRecoveredQueries / _sweepStaleFamilyRows)
+  // so a manual short-window run can never destroy queued work.
+  async persistAll(opportunities, trx = null) {
     const runner = trx || db;
     if (!opportunities.length) return 0;
     let count = 0;
@@ -3478,48 +3473,27 @@ class GscOpportunityMiner {
       // (the WHERE guard skipped the update) and must not count as persisted.
       count += result.rowCount ?? 0;
     }
-    if (canonicalMine) await this._reconcileCtrRewriteTargets(runner, opportunities);
     return count;
   }
 
   /**
-   * The ranking URL a query lands on MOVES between mines, and a ctr_rewrite
-   * dedupe key embeds page_url — so a new target queues under a fresh key
-   * while the previous page's row stays pending and claimable for its full
-   * 14 days, pointing an automated rewrite at a page the current evidence
-   * no longer selects (audit P2).
-   *
-   * Reconciliation is by QUERY against the batch's currently-actionable
-   * keys, which covers the moved-target case AND the case where the query
-   * produced no actionable target at all this run — map coverage vanished,
-   * the selected page's CTR recovered, materiality failed. A "only when the
-   * new candidate has a page" cleanup would leave the stale row claimable
-   * in exactly those fail-closed situations (audit P1).
-   *
-   * Companions are retired by EXACT dedupe key, never by page: a link_boost
-   * key is (bucket, service, city, page) with no query in it, so several
-   * queries legitimately share one companion. Any page still referenced by
-   * a live candidate in this batch is protected — including candidates
-   * whose companion the per-run cap omitted (audit P1).
-   *
-   * 'expired' rather than 'skipped': revivable by contract if the target
-   * moves back. Pending rows only — claimed/in-review work is in flight.
-   * Fail-soft: reconciliation must never abort the mining pass.
-   */
-  /**
-   * Companion keys that must survive this reconciliation: the ones the
+   * Companion keys that must survive a retirement pass: the ones the
    * current batch stands behind, UNION the ones live queue rows do.
    *
    * The batch alone is not enough. A link_boost key carries no query and
    * no source bucket, so it is shared across parents — and a parent can be
-   * absent from this batch for reasons that have nothing to do with its
-   * validity: its bucket errored this run, or its signal dipped for a
-   * window. Reading live page-editing rows straight from the queue covers
-   * both cases without needing to know which bucket failed (audit P1).
+   * absent from this batch for reasons unrelated to its validity: its
+   * bucket errored this run, or its signal dipped for a window. Reading
+   * live page-editing rows straight from the queue covers both without
+   * needing to know which bucket failed.
    *
-   * Fails CLOSED on a query error: an empty protection set would expire
-   * every companion in sight, so the error path returns a set that
-   * protects everything by reporting failure to the caller.
+   * retiringKeys are excluded: those rows are still 'pending' right now,
+   * so each would otherwise contribute its OWN companion key and shield
+   * it — retiring the parent while its companion stayed claimable, the
+   * exact leak this protection exists to prevent.
+   *
+   * Fails CLOSED on a query error by returning null: callers skip
+   * companion retirement entirely rather than expiring everything.
    */
   async _companionProtection(runner, opportunities = [], retiringKeys = new Set()) {
     const keys = companionProtectionKeys(opportunities);
@@ -3528,11 +3502,6 @@ class GscOpportunityMiner {
         .whereIn('status', ['pending', 'claimed', 'pending_review'])
         .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
         .whereNotNull('page_url');
-      // The rows being retired RIGHT NOW are still 'pending' in the queue,
-      // so without this exclusion every stale parent would contribute its
-      // own companion key and shield it — retiring the parent while its
-      // companion stayed claimable, the exact leak this protection exists
-      // to prevent (audit P1).
       if (retiringKeys.size) liveQ = liveQ.whereNotIn('dedupe_key', Array.from(retiringKeys));
       const live = await liveQ.select('page_url', 'service', 'city');
       for (const r of live) {
@@ -3543,82 +3512,22 @@ class GscOpportunityMiner {
       return keys;
     } catch (err) {
       logger.warn(`[gsc-opp-miner] companion protection lookup failed (${err.message}) — companion retirement suppressed this run`);
-      return null; // null = protect everything (callers skip companion retirement)
-    }
-  }
-
-  async _reconcileCtrRewriteTargets(runner, opportunities = []) {
-    const activeKeysByQuery = new Map();
-    for (const o of opportunities) {
-      if (o.bucket !== 'ctr_rewrite' || !o.query) continue;
-      if (!activeKeysByQuery.has(o.query)) activeKeysByQuery.set(o.query, new Set());
-      // Only an actionable rewrite that will ACTUALLY PERSIST defends its
-      // row. A demoted candidate (no resolvable/material target) leaves an
-      // empty set, retiring every pending row for the query — and so does
-      // a below-floor candidate: persistAll skips it, so the stored row
-      // keeps its stale higher score and would stay claimable on evidence
-      // the current mine no longer supports (audit P1).
-      if (o.page_url && o.action_type === 'rewrite_title_meta' && isPersistable(o)) {
-        activeKeysByQuery.get(o.query).add(o.dedupe_key);
-      }
-    }
-    if (!activeKeysByQuery.size) return;
-
-    for (const [query, activeKeys] of activeKeysByQuery) {
-      try {
-        // FOR UPDATE + update-by-locked-key, same reason as the sweep: a
-        // concurrent claimNext between the select and the update would
-        // leave the parent claimed but its companion expired (audit P1).
-        let staleQ = runner('opportunity_queue')
-          .where({ bucket: 'ctr_rewrite', query, status: 'pending' });
-        if (activeKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(activeKeys));
-        const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
-        if (!stale.length) continue;
-
-        await runner('opportunity_queue')
-          .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
-          .update({
-            status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
-          });
-
-        // Protection is computed AFTER the stale set is known, with those
-        // rows excluded — they are still 'pending' and would otherwise
-        // shield their own companions.
-        const protectedCompanionKeys = await this._companionProtection(
-          runner, opportunities, new Set(stale.map((r) => r.dedupe_key))
-        );
-        // null protection = lookup failed = protect everything.
-        const companionKeys = protectedCompanionKeys === null ? [] : stale
-          .filter((r) => r.page_url)
-          .map((r) => dedupeKey({
-            bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
-          }))
-          .filter((k) => !protectedCompanionKeys.has(k));
-        if (companionKeys.length) {
-          await runner('opportunity_queue')
-            .where({ bucket: 'link_boost', status: 'pending' })
-            .whereIn('dedupe_key', companionKeys)
-            .update({
-              status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
-            });
-        }
-      } catch (err) {
-        // Never log the raw query: GSC search terms are arbitrary external
-        // text and routinely contain names, addresses, and phone numbers
-        // (AGENTS.md non-card PII rule). A stable digest is enough to
-        // correlate repeat failures.
-        logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (query ${queryDigest(query)}): ${err.message}`);
-      }
+      return null;
     }
   }
 
   /**
-   * Lane sweep for queries that RECOVERED. _reconcileCtrRewriteTargets can
-   * only reason about queries the bucket still emits; a query whose CTR
-   * climbed back over the threshold — or whose impressions or position
-   * left the gates — vanishes from the bucket entirely, so its pending
-   * rewrite would sit claimable for the full 14 days and optimize a page
-   * that is now performing fine (audit P1).
+   * THE retirement mechanism for the query buckets this PR revives — one
+   * sweep, no siblings (AGENTS.md). Any pending row whose dedupe key the
+   * current mine did not re-emit as persistable is stale evidence: the
+   * signal recovered (CTR climbed back, impressions or position left the
+   * gates), the query became served, the map evidence stopped being
+   * trustworthy, or the target page MOVED (a ctr_rewrite key embeds
+   * page_url, so a moved target retires the old key by construction).
+   * Left alone, those rows stay claimable for the full 14 days and act on
+   * evidence the mine has already withdrawn — optimizing a page that now
+   * performs fine, or worse, publishing a page for a query an owned page
+   * has since started serving.
    *
    * Mirrors the family sweep's contract: the CALLER guards on a successful
    * bucket run (an errored bucket's empty output means "didn't run", not
@@ -3628,8 +3537,14 @@ class GscOpportunityMiner {
    */
   async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null) {
     const runner = trx || db;
-    const liveQueries = new Set(
-      bucketOpportunities.filter((o) => o.query).map((o) => String(o.query))
+    // Keyed on persistable DEDUPE KEYS, not query strings: one query can
+    // produce several (query, service, city, intent) candidates, so a
+    // surviving tuple would otherwise shelter a sibling tuple whose
+    // evidence disappeared (audit P1). Below-floor candidates are not
+    // live — persistAll drops them, so the stored row keeps a stale
+    // higher score.
+    const liveKeys = new Set(
+      bucketOpportunities.filter(isPersistable).map((o) => o.dedupe_key).filter(Boolean)
     );
     try {
       // FOR UPDATE: claimNext can otherwise claim a row between the select
@@ -3639,7 +3554,7 @@ class GscOpportunityMiner {
       // re-running the predicate against a moved target (audit P1).
       let staleQ = runner('opportunity_queue')
         .where({ bucket, status: 'pending' });
-      if (liveQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(liveQueries));
+      if (liveKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(liveKeys));
       const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
       if (!stale.length) return;
 
