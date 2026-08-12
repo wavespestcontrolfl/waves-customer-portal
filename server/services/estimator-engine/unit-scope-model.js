@@ -302,7 +302,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // gated); the V2 shadow path opts out by default — see inferServiceScope.
   let serviceScope = shadowPrivate.inferServiceScope({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
-    unitScopeSuites: true, partBuilding: partBuildingEvidence,
+    unitScopeSuites: true, partBuilding: partBuildingEvidence, subpremise: subpremiseSignal,
   });
   // An explicit Unit/Apt/Suite subpremise on a residential job whose type
   // is missing or generic reads as a UNIT — a misclassified or

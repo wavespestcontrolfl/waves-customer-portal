@@ -124,9 +124,19 @@ function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType })
 
 function inferServiceScope({
   propertyType, isCommercial, tenant, aggregated, unitSignal,
-  unitScopeSuites = false, partBuilding = false,
+  unitScopeSuites = false, partBuilding = false, subpremise = false,
 }) {
   if (isCommercial) {
+    // ASSOCIATION/aggregate first when nobody occupies one unit: an owner or
+    // manager buying whole-complex service on a stacked aggregate parcel is
+    // an association job, and `unitSignal` alone is true for any
+    // apartment-TYPED record, so the suite branch used to swallow it and the
+    // apply then discarded the complex's valid measurements (codex r42 P1).
+    const occupiesOneUnit = tenant === true || subpremise === true;
+    if (unitScopeSuites && !occupiesOneUnit
+      && (aggregated || ASSOCIATION_TYPES.test(String(propertyType || '')))) {
+      return 'association_common_area';
+    }
     // Suite decision:
     //  - lane ON (`unitScopeSuites`): tenancy OR any unit signal counts,
     //    but ONLY with positive part-building evidence — a whole-building
@@ -442,16 +452,16 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       extraction,
       enhanced: unitScopeSuites,
     });
+    const subpremiseSignalForScope = hasSubpremiseSignal({
+      address: address || propertyRecord?.formattedAddress,
+      extraction,
+    });
     const partBuilding = hasPartBuildingEvidence({
-      subpremiseSignal: hasSubpremiseSignal({
-        address: address || propertyRecord?.formattedAddress,
-        extraction,
-      }),
-      aggregated,
-      propertyType,
+      subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
     });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
+      subpremise: subpremiseSignalForScope,
     });
     const ownershipType = inferOwnershipType({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
