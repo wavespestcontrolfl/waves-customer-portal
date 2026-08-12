@@ -673,6 +673,10 @@ describe('the series creators consume the guard (source guards)', () => {
     // P0) — a transient catalog failure must not complete billing without
     // the sold palm program.
     expect(converterSrc).toContain("if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'");
+    // …and the outer comboErr catch rethrows them too (codex r24 pre-push
+    // P0) — every fail-soft layer on the reserved path passes the abort
+    // through.
+    expect(converterSrc).toContain("if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'");
     expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
     // Invalid-but-recurring palm lines never proceed as name-only rows
     // (codex r18 pre-push P0): the auto-schedule loop skips them to manual

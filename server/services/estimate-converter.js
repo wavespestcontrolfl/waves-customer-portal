@@ -4229,6 +4229,11 @@ const EstimateConverter = {
           logger.info(`[estimate-converter] reserved row ${row.id} combined → "${combo.route.name}" (picked slot preserved)`);
         }
       } catch (comboErr) {
+        // Palm identity aborts must reach the caller (codex r24 pre-push
+        // P0): this fail-soft catch would otherwise complete
+        // acceptance/billing without the sold palm series.
+        if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
+          || comboErr.code === 'PALM_RECURRING_LINE_INVALID') throw comboErr;
         logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
       }
 
