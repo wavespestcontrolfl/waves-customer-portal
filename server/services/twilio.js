@@ -507,7 +507,8 @@ const TwilioService = {
       // 20:00 ET cutoff, so checking any earlier lets a 19:59 send reach
       // Twilio at 20:01. Fail closed: a throwing check blocks the send.
       // Legacy direct sendSMS callers don't pass it and are unaffected.
-      if (typeof options.preSendCheck === "function") {
+      const runPreSendCheck = async () => {
+        if (typeof options.preSendCheck !== "function") return null;
         let verdict;
         try {
           verdict = await options.preSendCheck();
@@ -533,7 +534,10 @@ const TwilioService = {
             nextAllowedAt: verdict?.nextAllowedAt,
           };
         }
-      }
+        return null;
+      };
+      const preSendBlockedResult = await runPreSendCheck();
+      if (preSendBlockedResult) return preSendBlockedResult;
       // Push channel routing (GATE_PUSH_CHANNEL_ROUTING, default OFF).
       // Placed HERE — after owner silence, feature gates, the per-template
       // kill switch, validateOutbound, and the caller's send-window
@@ -572,6 +576,12 @@ const TwilioService = {
           );
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
         }
+        // The push attempt consumed real time (each leg is bounded at 8s but
+        // a multi-device fan-out adds up) — the 20:00 ET boundary can pass
+        // mid-attempt, so the fallback SMS re-checks the window before the
+        // Twilio handoff exactly like a fresh send.
+        const postPushBlocked = await runPreSendCheck();
+        if (postPushBlocked) return postPushBlocked;
       }
       const message = await c.messages.create(msgPayload);
       logger.info(

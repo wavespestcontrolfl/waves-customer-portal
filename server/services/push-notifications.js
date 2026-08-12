@@ -41,7 +41,11 @@ async function sendSubscription(sub, notification) {
     const result = await apns.send(sub.device_token, notification);
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      // Best-effort cleanup on every platform path: a failed deactivation
+      // UPDATE must never reject the fan-out — that would discard an
+      // earlier device's successful delivery and make push-channel-routing
+      // send a duplicate SMS after a push the customer already received.
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
@@ -52,7 +56,7 @@ async function sendSubscription(sub, notification) {
     const result = await fcm.send(sub.device_token, notification);
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
@@ -71,7 +75,7 @@ async function sendSubscription(sub, notification) {
     return { sent: true };
   } catch (err) {
     if (err.statusCode === 410 || err.statusCode === 404) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, statusCode: err.statusCode, reason: 'subscription_expired' };
     }
     logger.error(`Push failed: ${err.message}`);

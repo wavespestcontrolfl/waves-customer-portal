@@ -176,9 +176,40 @@ export async function initNativePush() {
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       await PushNotifications.register();
+    } else {
+      // Permission was REVOKED in OS Settings after a registration existed:
+      // APNs/FCM still accept the token but the OS never presents the alert,
+      // so the server would count a push "delivered" and skip the SMS —
+      // leaving the customer with no visible message at all. Release the
+      // server row so channel routing falls back to SMS for this account.
+      await revokeRegistrationForDeniedPermission();
     }
   } catch (err) {
     console.error('[nativePush] init failed:', err?.message || err);
+  }
+}
+
+// Deactivate this device's server registration because notification
+// permission is no longer granted. Unlike logout deactivation this CLEARS
+// the remembered token on success instead of re-arming it — re-posting a
+// token the OS will never present would just re-open the silent-drop gap.
+// On failure the memory stays, so the next app launch retries.
+async function revokeRegistrationForDeniedPermission() {
+  const token = rememberedToken();
+  if (!token) return; // this device never registered — nothing to release
+  let refreshJwt = null;
+  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
+  if (!authToken() && !refreshJwt) return;
+  try {
+    await api.request('/push/native-unsubscribe', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
+    pendingToken = null;
+    lastToken = null;
+    try { localStorage.removeItem(LAST_TOKEN_KEY); } catch { /* storage unavailable */ }
+  } catch (err) {
+    console.warn('[nativePush] denied-permission revoke failed (will retry next launch):', err?.message || err);
   }
 }
 
