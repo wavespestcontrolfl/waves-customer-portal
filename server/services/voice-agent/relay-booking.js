@@ -578,6 +578,38 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
   const bookingDurationMinutes = resolveVoiceBookingDuration(catalogRow, offer);
 
+  // ⭐ WHICH PROPERTY? A voice booking has no address field — the visit is
+  // serviced at the account's address — but an account can have more than one
+  // (a home and a rental). `scheduled_services.property_id` +
+  // `service_address_*` exist precisely because a booking with no property
+  // linkage renders and dispatches to the customer's primary mirror address,
+  // which is how a rental's visit ended up at the owner's house. The agent
+  // cannot ask "which property" (there is no parameter for it, and a voice
+  // answer is not evidence), so a MULTI-PROPERTY account fails closed here and
+  // a human calls back. Single-property and legacy accounts resolve through the
+  // call pipeline's own linkage helper, and the visit carries the stamp.
+  let propertyLinkage = null;
+  try {
+    const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
+    const propertyCount = await db('customer_properties')
+      .where({ customer_id: customerId })
+      .whereNull('deleted_at')
+      .count('* as count')
+      .first()
+      .then((r) => parseInt((r && r.count) || 0, 10))
+      .catch(() => 0);
+    if (propertyCount > 1) {
+      return 'This account has more than one property on file, and I cannot tell which one this visit is for, '
+        + 'so nothing was booked. Capture the lead with the property they mean and their preferred time, and '
+        + 'tell the caller a Waves team member will call to confirm which address.';
+    }
+    // Empty extraction ⇒ the helper falls back to the on-file address, matches
+    // it against the property rows, and returns its geocode.
+    propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {}, db);
+  } catch (err) {
+    logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
+  }
+
   // ⭐ RE-VALIDATE AT THE ADDRESS THE TECH WILL ACTUALLY DRIVE TO.
   //
   // The OFFER was route-scored from whatever address the model handed
@@ -597,13 +629,17 @@ async function requestBookingText(input = {}, ctx = {}) {
   // start) — see revalidateSlot's note on why dropping those loses slots. If
   // the slot does not survive at the real address, that is a stale offer like
   // any other: nothing is booked and the agent finds fresh times.
-  const bookingCoords = await require('../../routes/booking')._internals.resolveBookingCoords({
-    lat: customer.latitude || null,
-    lng: customer.longitude || null,
-    address: [customer.address_line1, customer.city, customer.state, customer.zip]
-      .filter(Boolean).join(', ') || null,
-    city: customer.city || null,
-  }).catch(() => ({}));
+  // The property linkage's own geocode wins when it resolved one: that is the
+  // pin the visit will carry, so it is the origin the route must be scored from.
+  const bookingCoords = (propertyLinkage && propertyLinkage.lat && propertyLinkage.lng)
+    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+    : await require('../../routes/booking')._internals.resolveBookingCoords({
+      lat: customer.latitude || null,
+      lng: customer.longitude || null,
+      address: [customer.address_line1, customer.city, customer.state, customer.zip]
+        .filter(Boolean).join(', ') || null,
+      city: customer.city || null,
+    }).catch(() => ({}));
   if (!bookingCoords || !bookingCoords.lat || !bookingCoords.lng) {
     return 'Could not verify the service location for this account, so no booking request was placed. '
       + 'Capture the lead with the preferred time; a team member will call to schedule.';
@@ -729,6 +765,20 @@ async function requestBookingText(input = {}, ctx = {}) {
     booking_source: 'phone_call',
     source_call_log_id: callLogId,
     source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
+    // WHICH ADDRESS THIS VISIT IS FOR, stamped rather than inferred — the
+    // linkage columns #3 of the 2026-07-08 call-pipeline audit added, written
+    // by the same resolver the call pipeline's own bookings use. Readers
+    // COALESCE these over `customers.address_*`, so a null stamp is exactly
+    // today's behaviour for a single-address account; a multi-property account
+    // never reaches here (refused above).
+    property_id: (propertyLinkage && propertyLinkage.propertyId) || null,
+    ...(propertyLinkage && propertyLinkage.address ? {
+      service_address_line1: propertyLinkage.address.line1 || null,
+      service_address_line2: propertyLinkage.address.line2 || null,
+      service_address_city: propertyLinkage.address.city || null,
+      service_address_state: propertyLinkage.address.state || null,
+      service_address_zip: propertyLinkage.address.zip || null,
+    } : {}),
   };
 
   const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));

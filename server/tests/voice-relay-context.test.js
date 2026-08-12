@@ -554,12 +554,16 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 
   // Mirrors the session ctx relay-conversation builds: opaque refs + the
   // per-call lookup budget + the caller's own ANI.
-  function lookupCtx({ from = FROM, budget = relayContext.LOOKUP_SESSION_BUDGET } = {}) {
+  function lookupCtx({ from = FROM, budget = relayContext.LOOKUP_SESSION_BUDGET, callerVerified = true } = {}) {
     const refs = new Map();
     let used = 0;
     return {
       customerId: null,
       from,
+      // The session was cross-checked against the signature-verified /voice
+      // call_log row. lookup_customer is the one tool an UNMATCHED caller can
+      // reach, so it is the one that must check this itself.
+      callerVerified,
       consumeLookup: () => {
         if (used >= budget) return false;
         used += 1;
@@ -604,7 +608,11 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('phone alone is enough ONLY when it IS the caller\'s own ANI', async () => {
+  // ⭐ THE ONE-CRITERION ANI SHORTCUT IS GONE. It read `ctx.from` — the
+  // UNVERIFIED WebSocket setup-frame value — as proof of identity, so anyone
+  // holding the shared WS key could declare a target number and have it satisfy
+  // its own single criterion. Two independent criteria, always.
+  test('phone alone is never enough — not even the number the session declared', async () => {
     primeDb({ customers: [ROW] });
     const foreign = await executeTool('lookup_customer', { phone: '941-555-0999' }, lookupCtx());
     expect(foreign).toMatch(/need two details/i);
@@ -612,7 +620,26 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 
     primeDb({ customers: [ROW] });
     const own = await executeTool('lookup_customer', { phone: FROM }, lookupCtx({ from: FROM }));
-    expect(own).toMatch(/customer_ref: C1/);
+    expect(own).toMatch(/need two details/i);
+    expect(own).not.toMatch(/customer_ref/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // ⭐ AND AN UNVERIFIED SESSION CANNOT LOOK ANYTHING UP AT ALL. Every other
+  // tool needs a matched customerId (which only exists after verification);
+  // this one is reachable by an unmatched caller by design, so it carries the
+  // check. The refusal says nothing about whether anything matched.
+  test('a session that never proved a live call is refused before any query', async () => {
+    primeDb({ customers: [ROW] });
+    const out = await executeTool(
+      'lookup_customer',
+      { name: 'Dana Whitfield', street: 'Palmetto Grove' },
+      lookupCtx({ callerVerified: false }),
+    );
+    expect(out).toMatch(/cannot pull up an account on this call/i);
+    expect(out).not.toMatch(/customer_ref/);
+    expect(out).not.toContain('Dana');
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('per-call lookup budget: 3 DB-reaching lookups, then the tool is closed', async () => {

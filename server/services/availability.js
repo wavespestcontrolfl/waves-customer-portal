@@ -50,7 +50,21 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
     })
     .count('* as count')
     .first();
-  return parseInt(row?.count || 0, 10);
+  // ⭐ THE VOICE AGENT IS A SELF-BOOKING PRODUCER TOO, AND IT WRITES NO ROW
+  // HERE. Its bookings land straight in `scheduled_services` (the outbound-
+  // review pending lifecycle), so a cap that counted only
+  // `self_booked_appointments` let each voice call re-read the same day as
+  // having room: the cap was checked and never consumed, and the availability
+  // builder kept offering a day that was already full. Counted on the OTHER
+  // table and scoped to the voice source_action, so a portal booking — which
+  // writes both rows — is still counted exactly once.
+  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
+  const voiceRow = await trx('scheduled_services')
+    .where({ scheduled_date: String(dateStr), source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION })
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .count('* as count')
+    .first();
+  return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count || 0, 10);
 }
 
 class AvailabilityEngine {

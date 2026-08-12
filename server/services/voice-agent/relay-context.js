@@ -676,12 +676,17 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, verification: preVerified = null } = {}) {
   if (!isContextEnabled()) return null;
   const work = (async () => {
     // The WS setup frame is unverified input — cross-check it against the
     // signature-verified /voice webhook's call_log row BEFORE any account read.
-    const verification = await verifyInboundCaller({ callSid, from });
+    // A caller may hand us the result it already has: the session needs to know
+    // whether the call was verified even when NOTHING matched (an unmatched but
+    // real caller can still use lookup_customer; a WS client that never proved
+    // a call cannot), and verifying twice would burn the single-use claim on
+    // the first pass and fail the second.
+    const verification = preVerified || await verifyInboundCaller({ callSid, from });
     if (!verification.verified) {
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
       return null;
@@ -880,7 +885,6 @@ async function lookupCustomersText(input = {}, ctx = {}) {
   const name = promptSafe(input.name, 80);
   const street = promptSafe(input.street, 80);
   const phoneKey = aniDigitKey(input.phone);
-  const aniKey = aniDigitKey(ctx.from);
 
   const criteria = [];
   if (name.length >= LOOKUP_MIN_NAME_LEN) criteria.push('name');
@@ -890,14 +894,34 @@ async function lookupCustomersText(input = {}, ctx = {}) {
     return 'Not enough to search on yet — ask the caller for the account holder\'s name, the street address of the property, or the phone number on the account, then call lookup_customer again.';
   }
 
-  // TWO INDEPENDENT CRITERIA, or a phone that IS the caller's own verified ANI.
-  // Checked BEFORE the query so a one-criterion fishing expedition never
-  // reaches the DB at all — and so the refusal is identical whether or not
-  // anything would have matched. A refusal that differs on match/no-match is
-  // itself the oracle.
-  const phoneIsOwnAni = Boolean(phoneKey && aniKey && phoneKey === aniKey);
-  const refEligible = criteria.length >= LOOKUP_MIN_CRITERIA_FOR_REF
-    || (criteria.length === 1 && criteria[0] === 'phone' && phoneIsOwnAni);
+  // ⭐ THE CALL ITSELF MUST BE PROVEN FIRST. Every OTHER tool needs a matched
+  // `ctx.customerId`, which only exists after the setup frame was cross-checked
+  // against the signature-verified /voice row — but lookup_customer is
+  // deliberately reachable by an UNMATCHED caller, so it is the one tool that
+  // has to check verification itself. Without this, anyone holding the shared
+  // WS key could open a socket, declare any ANI, skip the call entirely and
+  // fish. Same refusal text as a criteria failure: it must not be an oracle
+  // either.
+  if (ctx.callerVerified !== true) {
+    logger.warn(`[voice-relay-context] lookup_customer refused — session not verified against a live call (callSid=${ctx.callSid || 'n/a'})`);
+    return 'I cannot pull up an account on this call. Ask the caller for their name, the service address and '
+      + 'what they need, capture the lead, and tell them a Waves team member will call them back. Do NOT tell '
+      + 'the caller whether anything matched, and do not confirm or deny that an account exists.';
+  }
+
+  // TWO INDEPENDENT CRITERIA. Checked BEFORE the query so a one-criterion
+  // fishing expedition never reaches the DB at all — and so the refusal is
+  // identical whether or not anything would have matched. A refusal that
+  // differs on match/no-match is itself the oracle.
+  //
+  // The old "…or a phone that IS the caller's own ANI" shortcut is GONE. It
+  // read `ctx.from` — the unverified setup-frame value — as proof of identity,
+  // so declaring a target number satisfied its own single criterion. The
+  // verification gate above closes that, and the shortcut bought nothing a
+  // recognised caller does not already have: their ANI match sets customerId
+  // directly, and an ambiguous ANI is exactly the case that must NOT resolve to
+  // one account on one criterion.
+  const refEligible = criteria.length >= LOOKUP_MIN_CRITERIA_FOR_REF;
   if (!refEligible) {
     logger.info(`[voice-relay-context] lookup_customer refused (single criterion) caller=${maskPhone(ctx.from)} criteria=${criteria.join('+')}`);
     return 'I need two details to pull up an account — the account holder\'s name AND the street address '

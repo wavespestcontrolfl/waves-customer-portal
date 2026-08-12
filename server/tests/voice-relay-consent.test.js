@@ -385,6 +385,21 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }));
   });
 
+  // ⭐ THE NUMBER THAT OPTED OUT, NOT THE CALLBACK. The lead's callback_phone
+  // is the number to REACH them on — the schema's own example is "stop texting
+  // me, call my husband instead" — so suppressing it would silence the husband
+  // and leave the caller's own texts running.
+  test('a callback_phone override never becomes the suppressed number', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Stop texting me; call my husband instead.',
+      contact_preference: 'stop texting me, call my husband Dave',
+      callback_phone: '+19415557777',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+    expect(recordSuppression).not.toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415557777' }));
+  });
+
   test('a preference that is NOT an opt-out records nothing', async () => {
     await executeTool('capture_lead', {
       first_name: 'Pat',

@@ -740,8 +740,16 @@ async function executeTool(name, input = {}, ctx = {}) {
           // un-inspected await here would log "honoured" over a caller whose
           // texts are still enabled. The flag is the only truth about whether
           // the opt-out actually landed.
+          // ⭐ AND IT SUPPRESSES THE NUMBER THAT OPTED OUT, NOT THE CALLBACK.
+          // `callerPhone` prefers the model-supplied callback_phone, which is
+          // right for reaching the lead and WRONG here: the schema's own
+          // example is "stop texting me, call my husband instead", so using it
+          // would silence the husband's number and leave the caller's own
+          // texts running — the exact inversion of what they asked for. The
+          // withdrawal belongs to the number on the call.
+          const optOutPhone = toE164(ctx.from || '') || callerPhone;
           const suppression = await recordSuppression({
-            phone: callerPhone,
+            phone: optOutPhone,
             reason: 'opt_out_natural_language',
             source: 'voice_agent',
             capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),

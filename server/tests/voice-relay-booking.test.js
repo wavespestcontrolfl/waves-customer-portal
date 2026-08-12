@@ -30,6 +30,10 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/call-recording-processor', () => ({
   CONTACT_MATCH_PHONE_COLS: ['phone'],
   summarizePriorCall: jest.fn(),
+  // The CALL PIPELINE'S OWN property/address linkage resolver — reused, not
+  // re-implemented, so a voice booking stamps the same premise a phone booking
+  // does.
+  resolveCallBookingPropertyLinkage: jest.fn(),
 }));
 jest.mock('../routes/booking', () => ({
   _internals: {
@@ -89,6 +93,8 @@ const EmailService = require('../services/email');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
 
+const { resolveCallBookingPropertyLinkage } = require('../services/call-recording-processor');
+
 const relayBooking = require('../services/voice-agent/relay-booking');
 const { activeTools, executeTool, BOOKING_TOOLS } = require('../services/voice-agent/relay-tools');
 const sourceActions = require('../services/call-booking-source-actions'); // REAL module on purpose
@@ -140,6 +146,9 @@ let trxBuilders;
 let trx;
 function primeDb({
   customers = [CUSTOMER], scheduled = [], callLog = [{ id: 'cl-77' }],
+  // How many customer_properties rows the account has. >1 ⇒ the agent cannot
+  // tell which premise the visit is for and must refuse.
+  propertyCount = 1,
   // The partial unique index `triage_items_open_unique_idx` returns NO row from
   // the conflict-ignore insert when this call already holds an open review
   // card. That is the DB-side one-booking-per-call invariant, so the fixture
@@ -147,6 +156,12 @@ function primeDb({
   reviewCardTaken = false,
 } = {}) {
   builders = {
+    customer_properties: (() => {
+      const b = makeBuilder([]);
+      b.count = jest.fn(() => b);
+      b.first = jest.fn(() => Promise.resolve({ count: propertyCount }));
+      return b;
+    })(),
     customers: makeBuilder(customers),
     scheduled_services: makeBuilder(scheduled),
     call_log: makeBuilder(callLog),
@@ -214,6 +229,15 @@ beforeEach(() => {
   isEnabled.mockReturnValue(true);
   booking.loadBookingConfig.mockResolvedValue(CONFIG);
   booking.resolveBookingCoords.mockResolvedValue({ lat: 27.4, lng: -82.5 });
+  // The account's single property, resolved by the call pipeline's helper:
+  // its geocode is the pin the visit carries, so it is also the origin the
+  // commit re-check scores from.
+  resolveCallBookingPropertyLinkage.mockResolvedValue({
+    propertyId: 'prop-1',
+    address: { line1: '12 Shore Dr', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+    lat: 27.55,
+    lng: -82.55,
+  });
   booking.buildBookingAvailability.mockResolvedValue(AVAILABILITY);
   booking.validateBookingSlotDate.mockReturnValue(null);
   booking.bookingSlotWindow.mockReturnValue({ maxPerDay: 3 });
@@ -614,13 +638,15 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 
   // timeOfDay is not just a narrowing filter: dropping it lets morning
-  // candidates push an offered afternoon slot out of the per-day cap.
-  test('the re-check re-runs the engine with the OFFER\'s own inputs (timeOfDay, coords)', async () => {
+  // candidates push an offered afternoon slot out of the per-day cap. Coords
+  // are the one input deliberately NOT taken from the offer — they are the
+  // premise the tech will drive to (see the premise test above).
+  test('the re-check re-runs the engine with the OFFER\'s own shape inputs (timeOfDay, day)', async () => {
     await executeTool('request_booking', { slot_ref: 'S2', service: 'ants' }, slotCtx());
     expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
       rangeFrom: BOOK_DATE, rangeTo: BOOK_DATE,
       timeOfDay: 'afternoon', expandOpenDays: true,
-      lat: 27.4, lng: -82.5,
+      lat: 27.55, lng: -82.55,
     }));
   });
 
@@ -778,22 +804,57 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   // caller's speech; the booked row carries no address at all and is serviced
   // at the customer's stored one. Re-validating on the offer's coordinates
   // would drive-time-check a route nobody takes.
-  test('the commit re-check is scored from the CUSTOMER address, not the offered coordinates', async () => {
+  test('the commit re-check is scored from the PREMISE, not the offered coordinates', async () => {
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Booking REQUEST submitted/);
+    // The resolved property's geocode IS the pin the visit carries, so it is
+    // the origin the route was scored from — not the offer's (27.4/-82.5).
+    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      lat: 27.55, lng: -82.55,
+    }));
+  });
+
+  test('with no premise geocode it falls back to the account address, still never the offer\'s', async () => {
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
     booking.resolveBookingCoords.mockResolvedValue({ lat: 27.9, lng: -82.1 });
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
     expect(out).toMatch(/Booking REQUEST submitted/);
-    // Resolved from the account's own stored address/coords…
     expect(booking.resolveBookingCoords).toHaveBeenCalledWith(expect.objectContaining({
       address: expect.stringContaining('12 Shore Dr'),
       city: 'Bradenton',
     }));
-    // …and THOSE coordinates are what the engine re-checked, not the offer's.
     expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
       lat: 27.9, lng: -82.1,
     }));
   });
 
+  // ⭐ WHICH PROPERTY? The booked row carries no address of its own unless it is
+  // stamped, and readers COALESCE over the customer's PRIMARY mirror address —
+  // which is how a rental's visit gets dispatched to the owner's house. The
+  // agent has no way to ask, so a multi-property account is refused.
+  test('a MULTI-PROPERTY account books nothing — the agent cannot pick the premise', async () => {
+    primeDb({ propertyCount: 2 });
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/more than one property on file/i);
+    expect(out).toMatch(/Capture the lead/i);
+    assertNoCreateWrites();
+  });
+
+  test('a single-property account stamps the resolved property and address on the visit', async () => {
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Booking REQUEST submitted/);
+    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+    expect(row.property_id).toBe('prop-1');
+    expect(row.service_address_line1).toBe('12 Shore Dr');
+    expect(row.service_address_city).toBe('Bradenton');
+    // …and the engine was re-scored from THAT property's geocode.
+    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      lat: 27.55, lng: -82.55,
+    }));
+  });
+
   test('an account whose service location cannot be resolved books NOTHING', async () => {
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
     booking.resolveBookingCoords.mockResolvedValue({});
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
     expect(out).toMatch(/Could not verify the service location/i);

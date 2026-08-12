@@ -393,6 +393,11 @@ class RelayConversation {
     // Phase 1. resolveCallerContext itself is internally time-bounded, so
     // awaiting _contextReady in _runLoop can never hang a turn.
     this._callerContext = null;
+    // Did the SIGNATURE-VERIFIED /voice call_log row vouch for this session's
+    // (CallSid, from)? Independent of whether an account matched — an
+    // unmatched-but-real caller is verified; a WS client that declared an ANI
+    // is not. Read by the tool ctx below.
+    this._callerVerified = false;
     this._contextReady = null;
     // Session-scoped lookup ref registry (Phase B lookup_customer): refs are
     // OPAQUE per-call handles — raw customer ids never cross the model
@@ -447,10 +452,22 @@ class RelayConversation {
     this._officeHoursReady = null;
     if (isContextEnabled()) {
       // ONE relay session per CallSid — burned atomically inside
-      // resolveCallerContext's verification (relay-context), where every
-      // instance can see it. A replayed setup frame simply resolves to no
-      // caller context: a stranger's session, not an error.
-      this._contextReady = resolveCallerContext(this.from, { callSid: this.callSid })
+      // verifyInboundCaller (relay-context), where every instance can see it.
+      // A replayed setup frame simply resolves to no caller context: a
+      // stranger's session, not an error.
+      //
+      // The verification runs HERE, once, and its result is threaded into
+      // resolveCallerContext rather than re-derived: the session needs
+      // `_callerVerified` even when no account matched, because that is what
+      // separates a real caller whose number is not on file (may still use
+      // lookup_customer) from a WS client that declared an ANI and never
+      // proved a call (may not).
+      const { verifyInboundCaller } = require('./relay-context');
+      this._contextReady = verifyInboundCaller({ callSid: this.callSid, from: this.from })
+        .then((verification) => {
+          this._callerVerified = verification && verification.verified === true;
+          return resolveCallerContext(this.from, { callSid: this.callSid, verification });
+        })
         .then((ctx) => { this._callerContext = ctx; })
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');
@@ -609,6 +626,12 @@ class RelayConversation {
       // contact-slot recognition caps at 'redacted' (relay-context
       // findUniqueCustomerByAni). Fail closed when absent.
       customerTier: (this._callerContext && this._callerContext.tier === 'full') ? 'full' : 'redacted',
+      // The signature-verified-call flag. Account tools already need a matched
+      // customerId (only set after verification), but lookup_customer is
+      // reachable by an UNMATCHED caller by design — so it is the one tool that
+      // must check this itself, or a WS client holding the shared key could
+      // declare any ANI and go fishing.
+      callerVerified: this._callerVerified === true,
       // Per-call lookup budget: true while the caller still has lookups left.
       consumeLookup: () => {
         const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
