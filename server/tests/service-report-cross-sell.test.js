@@ -384,6 +384,22 @@ describe('buildReportCrossSell', () => {
     expect(result.serviceKey).toBe('lawn_care');
   });
 
+  test('a property-linked row that cannot be resolved suppresses the strict scope entirely', async () => {
+    // property_id set but no customer_properties row: the premises are
+    // unprovable, and defaulting the row to the primary would count a
+    // possibly-secondary plan there (pre-push P0) — the strict scope
+    // throws and the card fails closed.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'r3', service_type: 'Lawn Care', scheduled_date: FUTURE_SCHEDULED_DATE,
+        status: 'scheduled', is_recurring: true, property_id: 'prop-missing',
+      }],
+    });
+    expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+  });
+
   test('a report stamped at a different property than the primary is suppressed', async () => {
     const db = dbFor({
       serviceTypes: ['Pest Control'],

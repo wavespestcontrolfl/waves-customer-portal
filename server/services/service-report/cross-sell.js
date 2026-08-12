@@ -402,10 +402,20 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         return !ladderVocab.some((key) => ownedVocab.has(key) || billedVocab.has(key));
       });
       if (uncorroborated.length) {
-        const reportDate = service.service_date || service.created_at || null;
-        const reportMs = reportDate ? new Date(reportDate).getTime() : NaN;
-        const reportRecent = Number.isFinite(reportMs)
-          && (Date.now() - reportMs) <= 90 * 24 * 3600 * 1000;
+        // ET calendar discipline (pre-push P1): service_date is a DATE —
+        // compare ET calendar days, never UTC-midnight milliseconds, or
+        // the suppress/offer boundary moves hours early around DST.
+        const { etDateString } = require('../../utils/datetime-et');
+        const rawDate = service.service_date || service.created_at || null;
+        const dayKey = rawDate instanceof Date
+          ? etDateString(rawDate)
+          : String(rawDate || '').slice(0, 10);
+        const toUtcNoonMs = (key) => {
+          const [y, m, d] = key.split('-').map(Number);
+          return Date.UTC(y, m - 1, d, 12);
+        };
+        const reportRecent = /^\d{4}-\d{2}-\d{2}$/.test(dayKey)
+          && (toUtcNoonMs(etDateString()) - toUtcNoonMs(dayKey)) <= 90 * 24 * 3600 * 1000;
         if (reportRecent) return null;
         reportFamilies = reportFamilies.filter((fam) => !uncorroborated.includes(fam));
       }

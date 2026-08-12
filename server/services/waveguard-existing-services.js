@@ -368,8 +368,22 @@ async function filterRowsToStreet(database, rows, streetScope) {
             ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
             : null);
         }
-        street = propKeyCache.get(row.property_id) || street;
-      } catch { /* fall through to the estimate / primary default */ }
+      } catch (propErr) {
+        // Strict scopes must not degrade a property-LINKED row to the
+        // primary default (pre-push P0): a swallowed lookup failure would
+        // pass requireSharedLocality trivially and count a secondary
+        // property's plan at the primary. Default consumers keep the
+        // legacy fall-through.
+        if (streetScope.requireSharedLocality) throw propErr;
+      }
+      const propKey = propKeyCache.get(row.property_id);
+      if (propKey) {
+        street = propKey;
+      } else if (streetScope.requireSharedLocality && propKeyCache.has(row.property_id)) {
+        // Linked to a property row that is missing or cannot be keyed —
+        // unprovable premises for a strict scope.
+        throw new Error('property-linked row unresolvable for strict street scope');
+      }
     }
     if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
       try {
