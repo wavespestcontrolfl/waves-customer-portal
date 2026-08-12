@@ -129,12 +129,14 @@ function commercialCategoryConflict({ extraction, intent }) {
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
   if (!type) return null;
   if (HOA_COMMON_AREA_TYPE_RE.test(type)) return type;
-  // A PROPERTY MANAGER on a multifamily/apartment property is the module's
-  // own commercial contract ("Commercial applies when the client is the
-  // association, complex owner, or property manager") — the residential
-  // exemption below is for unit OCCUPANTS, so it must not swallow a
-  // manager whose composed intent stayed residential (codex r2 P1).
-  if (/apartment|multi.?family/.test(type)
+  // A PROPERTY MANAGER on a multifamily/apartment/condo property is the
+  // module's own commercial contract ("Commercial applies when the client
+  // is the association, complex owner, or property manager") — the
+  // residential exemption below is for unit OCCUPANTS, so it must not
+  // swallow a manager whose composed intent stayed residential (codex r2
+  // P1; condo added in r5 — a condo manager matched neither the HOA nor
+  // the commercial families).
+  if (/apartment|multi.?family|condo/.test(type)
     && resolveCustomerRelationship(extraction) === 'property_manager') {
     return `property_manager:${type}`;
   }

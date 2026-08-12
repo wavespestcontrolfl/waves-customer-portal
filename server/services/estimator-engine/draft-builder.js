@@ -608,6 +608,14 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
+  } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')) {
+    // A unit/suite scope has NO individual lot by design — but a
+    // lot-driven service (lawn/mosquito/T&S) on that scope has nothing to
+    // price from: the engine's zero-area fallback returns a minimum-priced
+    // line that would otherwise green-lane (codex r5 P1). The resolved
+    // not_applicable lot is correct for pest; for lot-driven work only a
+    // unit-scoped treatable-area measurement can make the draft real.
+    reasons.push('lot-driven service on a unit/suite scope — no individual lot exists; measure the treatable area before send');
   } else if (usesLot && String(propertyFacts?.lot?.confidence || '').toLowerCase() === 'low') {
     // A retained V1 lot can be caller-stated at LOW confidence (the V2
     // gate-on apply keeps real parcels instead of stamping a false "no

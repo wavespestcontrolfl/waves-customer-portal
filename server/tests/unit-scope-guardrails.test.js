@@ -126,6 +126,22 @@ describe('commercialCategoryConflict', () => {
       intent: { is_commercial: false },
     })).toBeNull();
   });
+  test('a property manager on a CONDO conflicts too (r5 — matched neither HOA nor commercial families)', () => {
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'property manager' },
+        property: { property_type: 'condo' },
+      },
+      intent: { is_commercial: false },
+    })).toBe('property_manager:condo');
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'tenant' },
+        property: { property_type: 'condo' },
+      },
+      intent: { is_commercial: false },
+    })).toBeNull();
+  });
   test('a property manager on a multifamily property conflicts; a tenant does not', () => {
     // The module's own contract: commercial applies when the client is the
     // association, complex owner, or property manager — the residential
@@ -333,7 +349,7 @@ describe('classifyLane guardrails', () => {
     });
   });
 
-  test('a not_applicable lot never yellow-lanes a lot-driven check', () => {
+  test('a not_applicable lot is quiet for non-lot-driven services (pest)', () => {
     withGate('true', () => {
       const out = classifyLane({
         ...baseArgs,
@@ -342,7 +358,27 @@ describe('classifyLane guardrails', () => {
           lot: { value: null, source: 'not_applicable:leased_land', confidence: 'high' },
         },
       });
-      expect(out.reasons.join(' ')).not.toMatch(/lot sqft/);
+      expect(out.reasons.join(' ')).not.toMatch(/lot sqft|lot-driven/);
+    });
+  });
+
+  test('a lot-driven service on a unit scope parks — no lot means nothing to price turf from', () => {
+    withGate('true', () => {
+      // codex r5 P1: after the master-parcel lot clears, the lawn pricer's
+      // zero-area fallback returns a minimum-priced line that would
+      // otherwise green-lane.
+      const out = classifyLane({
+        ...baseArgs,
+        intent: { ...baseArgs.intent, services: { lawn: { track: 'st_augustine' } } },
+        engineResult: { lineItems: [{ service: 'lawn_care', monthlyAfterDiscount: 40, annualAfterDiscount: 480 }] },
+        totals: { monthly: 40, annual: 480, oneTime: 0 },
+        propertyFacts: {
+          ...baseArgs.propertyFacts,
+          lot: { value: null, source: 'not_applicable:common_master_parcel', confidence: 'high' },
+        },
+      });
+      expect(out.lane).toBe('yellow');
+      expect(out.reasons.join(' ')).toMatch(/lot-driven service on a unit\/suite scope/);
     });
   });
 });
