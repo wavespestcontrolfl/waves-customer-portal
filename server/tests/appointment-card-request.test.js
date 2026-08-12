@@ -331,13 +331,13 @@ describe('the send', () => {
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))[0];
     expect(insert[1].status).toBe('pending');
     expect(insert[1].trigger).toBe('ai_call_pipeline');
-    expect(insert[1].token).toMatch(/^[a-f0-9]{64}$/);
+    expect(insert[1].token).toMatch(/^[A-Za-z0-9_-]{22}$/);
 
     // The link is the UNSHORTENED 64-hex bearer URL — never a short code.
     expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card', expect.objectContaining({
       first_name: 'Pat',
       service_type: 'Pest Control',
-      secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
+      secure_link: expect.stringMatching(/\/secure\/[A-Za-z0-9_-]{22}$/),
       date_line: expect.stringContaining(' on '),
       // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
       // send that reaches the template — the $0/unpriced guard upstream is
@@ -568,7 +568,9 @@ describe('inline delivery (the /book wizard card step)', () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow', delivery: 'inline' });
     expect(res.action).toBe('link_created');
     expect(res.requested).toBe(true);
-    expect(res.secureUrl).toMatch(/\/secure\/[a-f0-9]{64}$/);
+    // Current mint shape: 22-char base64url (randomBytes(16)) — sized so the
+    // SMS link fits 2 GSM segments; legacy 64-hex rows stay resolvable.
+    expect(res.secureUrl).toMatch(/\/secure\/[A-Za-z0-9_-]{22}$/);
 
     const insert = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))[0];
@@ -1357,7 +1359,7 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
       customerId: 'cust-1',
       scheduledServiceId: 'svc-1',
       serviceType: 'Pest Control',
-      secureUrl: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
+      secureUrl: expect.stringMatching(/\/secure\/[A-Za-z0-9_-]{22}$/),
       dateLine: expect.stringContaining(' on '),
     }));
   });
@@ -1581,7 +1583,7 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
       expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
       expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card_plans', expect.objectContaining({
-        secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
+        secure_link: expect.stringMatching(/\/secure\/[A-Za-z0-9_-]{22}$/),
       }));
       // Observability records which copy actually went out.
       expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)

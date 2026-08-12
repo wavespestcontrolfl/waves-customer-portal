@@ -58,6 +58,15 @@ const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback
 const ESTIMATE_BEARER_PARENTS = new Set(['estimate', 'estimates']);
 const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;
 
+// Secure-card capture links (appointment-card-request.js) mint
+// crypto.randomBytes(16).toString('base64url') → 22 chars — below the 40+
+// generic base64url rule above, so scope the shorter shape to the secure-card
+// parents: the SPA path (/secure/<token>) and the API mount
+// (/api/public/secure-card/<token>[/complete|/select-plan]). Legacy 64-hex
+// secure-card tokens are already caught by the 32+-hex rule.
+const SECURE_CARD_BEARER_PARENTS = new Set(['secure', 'secure-card']);
+const SECURE_CARD_SHORT_TOKEN = /^[A-Za-z0-9_-]{22}$/;
+
 function isTokenLikePathSegment(segment, previousSegment) {
   const decoded = decodeQueryPart(segment);
   if (/^[a-f0-9]{32,}$/i.test(decoded)) return true;
@@ -68,6 +77,8 @@ function isTokenLikePathSegment(segment, previousSegment) {
   // → 43 chars. 40+ continuous base64url chars is a token, not a slug/id.
   if (/^[A-Za-z0-9_-]{40,}$/.test(decoded)) return true;
   if (UUID_SEGMENT.test(decoded) && UUID_BEARER_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
+  if (SECURE_CARD_SHORT_TOKEN.test(decoded)
+    && SECURE_CARD_BEARER_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
   if (!UUID_SEGMENT.test(decoded)
     && LEGACY_ESTIMATE_SLUG.test(decoded)
     && ESTIMATE_BEARER_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;

@@ -17,6 +17,12 @@ const https = require('https');
 const logger = require('./logger');
 
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+// AMBIGUITY, deliberate: destroying after handoff cannot retract bytes
+// the provider already accepted — the push may still deliver. Routing
+// classifies timeouts as undelivered ON PURPOSE (at-least-once: a rare
+// duplicate beats silent loss; see push-channel-routing.js rule 1).
+// Bounded requests — see APNS_REQUEST_TIMEOUT_MS in apns.js for rationale.
+const FCM_REQUEST_TIMEOUT_MS = 8000;
 
 function readConfig() {
   const raw = (process.env.FCM_SERVICE_ACCOUNT || '').trim();
@@ -49,7 +55,7 @@ if (configured) {
 let jwtClient = null;
 function getJwtClient() {
   if (!jwtClient) {
-    // eslint-disable-next-line global-require
+     
     const { google } = require('googleapis');
     jwtClient = new google.auth.JWT({
       email: cfg.clientEmail,
@@ -61,8 +67,19 @@ function getJwtClient() {
 }
 
 async function getAccessToken() {
-  const res = await getJwtClient().getAccessToken();
-  return res && res.token;
+  // Bounded: the OAuth token fetch runs BEFORE the 8s request timer starts,
+  // so an unbounded stall here would still pin callers. A timeout resolves
+  // null → the send fails soft as fcm_token_unavailable.
+  let timer;
+  try {
+    const res = await Promise.race([
+      getJwtClient().getAccessToken(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), FCM_REQUEST_TIMEOUT_MS); }),
+    ]);
+    return res && res.token;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -132,6 +149,7 @@ function send(deviceToken, notification) {
         const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
 
         try {
+          let wallClockKiller;
           const req = https.request(
             {
               method: 'POST',
@@ -163,7 +181,18 @@ function send(deviceToken, notification) {
               });
             },
           );
-          req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+          req.on('error', (err) => { clearTimeout(wallClockKiller); finish({ ok: false, failed: true, reason: err.message }); });
+          // setTimeout's socket-inactivity timer only starts once the socket
+          // is CONNECTED — a DNS/TCP/TLS stall never reaches it. The
+          // wall-clock timer covers the whole request lifetime and destroy()
+          // both fails the leg and prevents any late delivery.
+          wallClockKiller = setTimeout(() => {
+            req.destroy(new Error('fcm_timeout'));
+          }, FCM_REQUEST_TIMEOUT_MS);
+          req.setTimeout(FCM_REQUEST_TIMEOUT_MS, () => {
+            req.destroy(new Error('fcm_timeout'));
+          });
+          req.on('close', () => clearTimeout(wallClockKiller));
           req.end(body);
         } catch (err) {
           finish({ ok: false, failed: true, reason: err.message });

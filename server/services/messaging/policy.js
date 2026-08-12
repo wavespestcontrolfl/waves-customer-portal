@@ -323,10 +323,12 @@ const PURPOSE_POLICY = {
   // Card-on-file capture link for a booked visit (appointment-card-request
   // funnel). No invoice exists yet — nothing is charged from this message —
   // so it is payment_link's pre-service sibling: same trust bar, customer
-  // id required, no invoice id. 3 segments, not 2: the link is the
-  // UNSHORTENED /secure/<64-hex> bearer URL (a 5-char short code is too
-  // weak a credential for a card-capture page), which alone runs ~100
-  // GSM characters.
+  // id required, no invoice id. The link is the UNSHORTENED /secure/<token>
+  // bearer URL (a 5-char /l/ short code is too weak a credential for a
+  // card-capture page); since 2026-08-12 the token is 22-char base64url
+  // (~57 schemeless GSM chars), which puts the base invite at 2 segments.
+  // The cap stays 3, not 2: the plan-choice variant and reused legacy
+  // 64-hex tokens (already-texted links) still legitimately reach 3.
   card_request: {
     allowEmoji: false,
     allowExactPrice: false,

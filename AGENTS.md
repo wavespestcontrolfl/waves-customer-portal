@@ -1161,9 +1161,10 @@ violations at the severity noted.
   "secure your appointment" card-on-file capture page for the
   appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
   AND the `secure_appointment_card` SMS template are both enabled, and
-  unreachable until the funnel mints links. 64-hex bearer token
-  (`appointment_card_requests.token`) with format gate + generic 404 (no
-  existence oracle); its own 60 req/min limiter on top of the global /api
+  unreachable until the funnel mints links. Bearer token
+  (`appointment_card_requests.token` — 22-char base64url / 128-bit since
+  2026-08-12 so the SMS link fits 2 GSM segments; legacy 64-hex rows stay
+  accepted) with format gate + generic 404 (no existence oracle); its own 60 req/min limiter on top of the global /api
   limiter; `private, no-store` / `Referrer-Policy: no-referrer` /
   `X-Robots-Tag: noindex` on EVERY outcome including 404s (the SPA shell
   for `/secure/:token` carries the same headers via

@@ -63,6 +63,21 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/api/service-outlines/${b64url}/cta-click`)).toBe('/api/service-outlines/[REDACTED]/cta-click');
   });
 
+  test('redacts short secure-card tokens (22-char base64url) under secure parents', () => {
+    // appointment-card-request.js mints crypto.randomBytes(16).toString('base64url')
+    // → 22 chars — below the generic 40+ base64url rule, so it's scoped to
+    // the secure-card parents (SPA /secure/<token>, API /secure-card/<token>).
+    const short = 'Ab1-_c2Def3Ghi4Jkl5Mno';
+    expect(short).toHaveLength(22);
+    expect(redactRequestUrl(`/secure/${short}`)).toBe('/secure/[REDACTED]');
+    expect(redactRequestUrl(`/api/public/secure-card/${short}`)).toBe('/api/public/secure-card/[REDACTED]');
+    expect(redactRequestUrl(`/api/public/secure-card/${short}/complete`)).toBe('/api/public/secure-card/[REDACTED]/complete');
+    // Legacy 64-hex secure-card tokens ride the existing hex rule.
+    expect(redactRequestUrl(`/secure/${'a'.repeat(64)}`)).toBe('/secure/[REDACTED]');
+    // Scoped: the same 22-char shape elsewhere is a slug/id, not a token.
+    expect(redactRequestUrl(`/learn/${short}`)).toBe(`/learn/${short}`);
+  });
+
   test('redacts legacy estimate slug tokens (nameSlug-8hex) under estimate parents', () => {
     // Pre-estimate-versions admin share links — estimate-public and
     // estimate-slots-public TOKEN_REs still accept them, so they are live
