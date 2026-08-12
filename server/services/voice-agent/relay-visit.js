@@ -305,16 +305,36 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`
     + `${record.service_type ? ` — ${promptSafeUntrusted(record.service_type, 60)}` : ''}.`];
 
+  // ⭐ AND THE STRUCTURED FINDINGS TAKE THE COMPLIANCE SCREEN TOO.
+  // promptSafeUntrusted blocks prompt injection; it knows nothing about
+  // "pet-safe", "EPA-approved" or a fixed drying time. Those are
+  // TECHNICIAN-ENTERED fields, the written report screens them with
+  // findBannedCustomerCopy (the same list technicianReportCustomerCopy nulls
+  // its body on), and speaking them unscreened would extend a banned claim to
+  // one more customer surface — the thing AGENTS.md says to sweep for, not add
+  // to. A matched line is DROPPED, never paraphrased: the office can go over
+  // it, and nothing here is worth inventing safer wording for.
+  const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
+  const complianceSafe = (value, max) => {
+    const text = promptSafeUntrusted(value, max);
+    if (!text) return null;
+    const hits = findBannedCustomerCopy(text);
+    if (hits.length) {
+      logger.warn(`[voice-relay-visit] finding text withheld — banned customer copy (${hits.length} match(es)) on record ${record.id}`);
+      return null;
+    }
+    return text;
+  };
   if (findings.length) {
     const rendered = findings
       .map((f) => {
-        const head = promptSafeUntrusted(f.title, 80);
-        const detail = promptSafeUntrusted(f.detail, 140);
+        const head = complianceSafe(f.title, 80);
+        const detail = complianceSafe(f.detail, 140);
         return [head, detail].filter(Boolean).join(': ');
       })
       .filter(Boolean);
     if (rendered.length) lines.push(`What the technician found: ${rendered.join(' | ')}.`);
-    const recs = findings.map((f) => promptSafeUntrusted(f.recommendation, 120)).filter(Boolean);
+    const recs = findings.map((f) => complianceSafe(f.recommendation, 120)).filter(Boolean);
     if (recs.length) lines.push(`Recommended next steps: ${recs.join(' | ')}.`);
   }
 

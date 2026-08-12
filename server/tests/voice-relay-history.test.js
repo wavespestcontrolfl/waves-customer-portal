@@ -188,6 +188,28 @@ describe('GATE ON — ANI-VERIFIED ONLY (the hard Phase C rule)', () => {
 describe('GATE ON — get_call_history read shape', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
+  // ⭐ UNFLAGGED SPAM MUST NOT EAT THE PAGE. The post-parse is_spam guard exists
+  // for rows whose processing_status was never updated — at a bare LIMIT they
+  // consume the whole read and the tool reports no history at all.
+  test('a page of unflagged spam never hides older real calls', async () => {
+    const spam = (n) => ({
+      created_at: `2026-08-${String(10 - (n % 9)).padStart(2, '0')}T14:00:00Z`,
+      direction: 'inbound',
+      call_summary: `Auto warranty robocall ${n}`,
+      ai_extraction: JSON.stringify({ is_spam: true }),
+    });
+    const real = {
+      created_at: '2026-07-20T14:00:00Z',
+      direction: 'inbound',
+      call_summary: 'Asked about ants in the kitchen',
+      ai_extraction: '{}',
+    };
+    primeDb({ call_log: [...Array.from({ length: 12 }, (_, i) => spam(i)), real] });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
+    expect(out).toMatch(/Asked about ants in the kitchen/);
+    expect(out).not.toMatch(/robocall/i);
+  });
+
   test('reuses summarizePriorCall exclusions and renders dated one-liners, newest first', async () => {
     primeDb({ call_log: CALL_ROWS });
     const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM });
@@ -200,7 +222,10 @@ describe('GATE ON — get_call_history read shape', () => {
     expect(b.whereNotNull).toHaveBeenCalledWith('ai_extraction');
     expect(b.whereNotIn).toHaveBeenCalledWith('processing_status', ['spam', 'voicemail']);
     expect(b.orderBy).toHaveBeenCalledWith('created_at', 'desc');
-    expect(b.limit).toHaveBeenCalledWith(relayHistory.CALL_HISTORY_LIMIT);
+    // The READ overfetches (the is_spam guard is a post-parse filter, so a page
+    // of unflagged spam would otherwise hide real history); the SPOKEN list is
+    // still cut to CALL_HISTORY_LIMIT.
+    expect(b.limit.mock.calls[0][0]).toBeGreaterThan(relayHistory.CALL_HISTORY_LIMIT);
 
     expect(out).toContain('Asked about ants in the kitchen');
     expect(out).toContain('Confirmed the quarterly visit'); // lead_synopsis fallback

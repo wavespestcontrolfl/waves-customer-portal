@@ -3622,7 +3622,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // reminders for them too.)
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
-      await runOfficeConfirmActivation(db, svc, 'admin-dispatch');
+      // A TECHNICIAN token on this route is a FIELD confirm (the endpoint is
+      // requireTechOrAdmin): the tech is driving to meet the customer and
+      // collects a card in person, so the office-only card-request funnel — and
+      // the clearance stamp that arms the pre-visit sweep behind it — must not
+      // fire. Same distinction admin-schedule and tech-track draw.
+      await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
+        skipCardRequest: req.techRole === 'technician',
+      });
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.

@@ -325,7 +325,13 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
     .whereNull('payer_id')
     .whereNull('payer_statement_id')
     .orderBy('created_at', 'desc')
-    .limit(INVOICE_HISTORY_LIMIT)
+    // ⭐ OVERFETCH: the payer test below is LIVE, not SQL. The null-column
+    // filter above is a cheap pre-cut, and a row that passes it can still
+    // resolve to a third-party payer at read time — so limiting to six first
+    // let six newer payer-billed invoices consume the page and hide an older
+    // self-pay one, leaving "did my payment go through?" unanswerable. Cut to
+    // the limit AFTER resolution.
+    .limit(INVOICE_HISTORY_LIMIT * 5)
     .select('invoice_number', 'status', 'service_type', 'service_date', 'created_at', 'total',
       'scheduled_service_id');
   const PayerService = require('../payer');
@@ -343,6 +349,7 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
       continue;
     }
     paidRows.push(row);
+    if (paidRows.length >= INVOICE_HISTORY_LIMIT) break; // enough SELF-PAY rows
   }
 
   const parts = [];

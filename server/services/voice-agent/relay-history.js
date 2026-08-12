@@ -108,7 +108,12 @@ async function callHistoryText(fromPhone) {
     .whereNotNull('ai_extraction')
     .whereNotIn('processing_status', ['spam', 'voicemail'])
     .orderBy('created_at', 'desc')
-    .limit(CALL_HISTORY_LIMIT)
+    // ⭐ OVERFETCH: the spam test below is a POST-PARSE guard, and it exists
+    // precisely for rows whose `processing_status` was never updated to 'spam'
+    // — so those rows pass the SQL filter and, at a bare LIMIT 10, could eat
+    // the whole page and make the tool report no processed calls while real
+    // history sat just behind them. Cut to CALL_HISTORY_LIMIT after filtering.
+    .limit(CALL_HISTORY_LIMIT * 5)
     .select('created_at', 'direction', 'call_summary', 'lead_synopsis', 'ai_extraction');
   const lines = rows
     .filter((row) => parsedExtraction(row.ai_extraction).is_spam !== true)
@@ -119,7 +124,8 @@ async function callHistoryText(fromPhone) {
       const dir = row.direction === 'outbound' ? ' (our call to them)' : '';
       return `${date || 'Undated'}${dir}: ${summary}`;
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .slice(0, CALL_HISTORY_LIMIT);
   if (!lines.length) {
     return 'No processed past calls on file for this number. Do not guess at what earlier calls covered.';
   }

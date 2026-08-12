@@ -228,12 +228,26 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let leadId = null;
   let created = false;
 
-  let customer = await findCustomerByPhone(phone);
+  // ⭐ IDENTITY CAN BE HANDED IN, AND WHEN IT IS, IT WINS. The voice relay knows
+  // WHO is on the call from the ANI cross-check against the signature-verified
+  // /voice row — and it may pass a DIFFERENT `phone` here, because the caller
+  // gave an alternate callback number (the capture_lead schema asks for one
+  // explicitly, e.g. calling from a blocked line). Resolving identity from that
+  // alternate number instead would surface this call — and any contact
+  // instruction on it — against whoever else owns that number, or mint a fresh
+  // lead for a customer we already recognised. `identityCustomerId` keeps the
+  // two apart: the matched account is the identity, the phone is only where to
+  // call back.
+  let customer = opts.identityCustomerId
+    ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
+    : await findCustomerByPhone(phone);
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than
   // attach the call + language hint to the wrong customer.
-  if (customer && nameConflicts(extracted, customer)) {
+  // The name guard is for a PHONE match on a shared line; a caller the ANI
+  // already authenticated is not a guess to second-guess.
+  if (customer && !opts.identityCustomerId && nameConflicts(extracted, customer)) {
     logger.info(`[voice-agent-lead] Captured name conflicts with customer on ${maskPhone(phone)}; not linking`);
     customer = null;
   }

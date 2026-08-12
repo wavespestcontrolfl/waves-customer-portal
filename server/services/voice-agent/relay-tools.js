@@ -858,6 +858,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       const leadResult = await createLeadFromExtraction(extracted, {
         phone: callerPhone,
+        // WHO this call is, kept separate from WHERE to call back: callerPhone
+        // may be the alternate number the caller gave, and resolving identity
+        // from that would attach this call to whoever else owns it. Only a
+        // FULL-tier ANI match is an identity — a contact-slot recognition
+        // authenticates nobody, so it stays a phone match like any other.
+        identityCustomerId: matchedCallerTier(ctx) === 'full' ? (ctx.customerId || null) : null,
         toPhone: ctx.to || null,
         callSid: ctx.callSid || null,
         language: ctx.language || null,
