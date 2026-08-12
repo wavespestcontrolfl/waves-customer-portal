@@ -91,7 +91,8 @@ const TOOLS = [
         do_not_contact_request: {
           type: 'boolean',
           description: 'True ONLY if the caller asked us to stop contacting them (or stop texting/emailing them). '
-            + 'You do not act on this yourself — it is recorded for a Waves team member to handle.',
+            + 'You do not act on this yourself and you do not promise anything about it — recording it here is '
+            + 'what stops our automated texts, and a Waves team member reviews it.',
         },
       },
       required: ['call_summary'],
@@ -709,13 +710,44 @@ async function executeTool(name, input = {}, ctx = {}) {
         pain_points: input.pain_points || null,
         call_summary: input.call_summary || null,
         lead_quality: LEAD_QUALITIES.includes(input.lead_quality) ? input.lead_quality : null,
-        // Phase E — CAPTURED, NEVER ACTED ON. These ride into the lead's
-        // extracted_data for a human to action; nothing in the voice agent
-        // writes an opt-out, a messaging preference, or a suppression.
+        // Phase E — a PREFERENCE is captured for a human to action; nothing
+        // here starts messaging anyone, changes a channel, or grants consent.
+        // The one exception is directly below: an explicit "stop texting me"
+        // is honoured immediately, because the only thing that write can do is
+        // STOP messages.
         contact_preference: input.contact_preference || null,
         preferred_contact_method: input.preferred_contact_method || null,
         do_not_contact_request: input.do_not_contact_request === true,
       };
+      // ⭐ AN EXPLICIT VERBAL OPT-OUT IS HONOURED, NOT JUST FILED.
+      //
+      // This used to land only in `leads.extracted_data` for a human to read.
+      // A caller who says "stop texting me" has withdrawn consent the moment
+      // they say it, and every automated SMS path between that call and
+      // whenever someone opens the lead would still have treated them as
+      // contactable — the TCPA/consent rule in AGENTS.md is not satisfied by a
+      // note in a JSON blob. So it goes through `recordSuppression`, the same
+      // canonical writer the inbound STOP webhook uses, with its own reason so
+      // the source is auditable and an admin can clear it exactly like any
+      // other record. This is the ONLY consent write the agent makes and it is
+      // one-directional: it can stop messages, never start them (nothing here
+      // ever calls clearSuppression).
+      if (input.do_not_contact_request === true) {
+        try {
+          const { recordSuppression } = require('../messaging/validators/suppression');
+          await recordSuppression({
+            phone: callerPhone,
+            reason: 'opt_out_natural_language',
+            source: 'voice_agent',
+            capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),
+          });
+          logger.info(`[voice-relay] verbal do-not-contact honoured — suppression recorded callSid=${ctx.callSid || 'n/a'}`);
+        } catch (err) {
+          // The lead still records the request; a failed suppression must not
+          // lose the lead, and the owner alert below still pages a human.
+          logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+        }
+      }
       const leadResult = await createLeadFromExtraction(extracted, {
         phone: callerPhone,
         toPhone: ctx.to || null,

@@ -977,10 +977,26 @@ class RelayConversation {
       },
       { phone: callerPhone, toPhone: this.to, callSid: this.callSid, language: this.language }
     ).then(
-      () => {
+      async (result) => {
         // The flag the transcript stamp reads — set here, on the write itself.
         this.leadCaptured = true;
         logger.info(`[voice-relay] capture-floor lead written callSid=${this.callSid} reason=${reason || 'end'}`);
+        // ⭐ THE FLOOR OWES THE BOOKING CARD ITS LEAD ID TOO. A caller who books
+        // and then hangs up before capture_lead runs gets their lead from here
+        // — and dropping the id on the floor left the review card's
+        // `lead_id: null`, which outbound-review-confirm treats as
+        // authoritative for voice cards (it deliberately skips the
+        // single-active-lead fallback). Office confirm would then leave this
+        // call's own lead open and eligible for unrelated follow-up. Same
+        // back-fill capture_lead does, idempotent on a card that already has one.
+        const floorLeadId = result && result.leadId;
+        if (floorLeadId) {
+          this._leadId = this._leadId || floorLeadId;
+          if (this._bookingRequested) {
+            const { attachLeadToVoiceBookingCard } = require('./relay-booking');
+            await attachLeadToVoiceBookingCard(this.callSid, floorLeadId).catch(() => {});
+          }
+        }
         return true;
       },
       (err) => {

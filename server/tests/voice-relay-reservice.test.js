@@ -108,6 +108,8 @@ afterAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  // Unverified-requester writes are gated OFF unless a test says otherwise.
+  delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
   primeDb();
   reserviceScheduler.openReserviceCallbacks.mockResolvedValue({});
   reserviceScheduler.reserviceLanesForCustomer.mockResolvedValue(['pest']);
@@ -195,6 +197,7 @@ describe('GATE ON', () => {
   // else's account AND paged the owner with nothing saying who was on the line.
   // The filing stays allowed; every surface it lands on is stamped.
   test('a REDACTED-tier contact-slot caller files on the matched account but is stamped UNVERIFIED everywhere', async () => {
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     const ctx = { ...CTX, customerTier: 'redacted' };
     const out = await executeTool('request_reservice', GOOD, ctx);
 
@@ -228,6 +231,7 @@ describe('GATE ON', () => {
   });
 
   test('a ctx with no customerTier at all is treated as UNVERIFIED (fail closed)', async () => {
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     const ctx = { ...CTX };
     delete ctx.customerTier;
     await executeTool('request_reservice', GOOD, ctx);
@@ -324,6 +328,7 @@ describe('GATE ON', () => {
   // account and authenticates nobody, so the dedupe answer must lose its date
   // and window — the same line every READ path in the lane already draws.
   test('a REDACTED-tier caller is told it is booked, but never when', async () => {
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     reserviceScheduler.openReserviceCallbacks.mockResolvedValue({
       pest: { date: '2026-08-20', windowStart: '09:00', serviceType: 'Re-Service' },
     });
@@ -333,6 +338,20 @@ describe('GATE ON', () => {
     expect(out).not.toMatch(/August 20/i);
     expect(out).not.toContain('09:00');
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
+  });
+
+  // ⭐ FILING MUTATES THE ACCOUNT AND PAGES THE OWNER. The UNVERIFIED stamp is
+  // a signal for the human who reads the ticket, not a permission check — so a
+  // prior occupant or a spoofed secondary number gets the same answer
+  // request_booking gives them: nothing written, a human calls back.
+  test('a REDACTED-tier caller files NOTHING while the third-party write gate is off', async () => {
+    const out = await executeTool('request_reservice', GOOD, { ...CTX, customerTier: 'redacted' });
+    expect(out).toMatch(/only filed for the account the caller's own phone number matches/i);
+    expect(out).toMatch(/Capture the lead/i);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+    assertNoComms();
   });
 
   test('coverage is stated only when the plan actually grants the lane', async () => {

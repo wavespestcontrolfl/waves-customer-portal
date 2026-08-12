@@ -337,7 +337,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     process.env.GATE_VOICE_AI_BOOKING = 'true';
     // The third-party sub-gate is OFF unless a test says otherwise: by default
     // only a FULL ANI match may have a booking written for it.
-    delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING;
+    delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
   });
 
   test('creates a PENDING voice_agent row — never confirmed, no comms, no confirm-hook side effects', async () => {
@@ -435,7 +435,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 
   test('booking for a looked-up account via customer_ref works; invented ref refused', async () => {
-    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING = 'true';
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     const ctx = slotCtx({
       customerId: null,
       customerTier: 'redacted',
@@ -477,7 +477,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   // without an explicit confirm step. The write is still allowed (a spouse
   // calling about the family account is the common case); it is MARKED.
   test('a REDACTED-tier contact-slot caller books on the matched account but is stamped UNVERIFIED', async () => {
-    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING = 'true';
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     await executeTool('request_booking', GOOD_INPUT, slotCtx({ customerTier: 'redacted' }));
     expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
     const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
@@ -503,7 +503,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
 
   // Fail closed: a ctx with NO tier at all is redacted, not full.
   test('a ctx with no customerTier at all is treated as UNVERIFIED (fail closed)', async () => {
-    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING = 'true';
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
     const ctx = slotCtx();
     delete ctx.customerTier;
     await executeTool('request_booking', GOOD_INPUT, ctx);
@@ -515,7 +515,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   // ⭐ A STAMP IS NOT AN AUTHORIZATION CONTROL. lookup_customer needs a name and
   // a street — not a secret — so writing a pending row on a stranger's calendar
   // is gated, not merely annotated. Default OFF: full ANI match or no booking.
-  describe('VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING (default OFF)', () => {
+  describe('VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES (default OFF)', () => {
     test('a looked-up account books NOTHING and is captured as a lead instead', async () => {
       const ctx = slotCtx({
         customerId: null,

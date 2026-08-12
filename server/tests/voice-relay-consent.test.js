@@ -1,10 +1,17 @@
 /**
  * Voice-relay Phase E item 5 — CONSENT / CONTACT-PREFERENCE CAPTURE.
  *
- * The rule being tested: a caller's stated instruction ("stop texting me",
- * "call my husband instead, not me", "email only") must LAND in the capture —
- * and the agent must NOT act on it. Capturing is the whole job; suppression
- * and messaging-preference changes are a human's.
+ * The rule being tested: a caller's stated instruction ("call my husband
+ * instead, not me", "email only") must LAND in the capture, and the agent must
+ * NOT act on it — routing preferences are a human's call.
+ *
+ * ⭐ ONE EXCEPTION, ADDED AFTER REVIEW: an EXPLICIT do-not-contact request
+ * ("stop texting me", "take me off your list") is honoured immediately,
+ * through `recordSuppression` — the same canonical writer the inbound STOP
+ * webhook uses. Consent is withdrawn the moment the caller says it, and every
+ * automated SMS path between the call and whenever a human opens the lead
+ * would otherwise still treat them as contactable. That write is
+ * one-directional: it can only STOP messages, never start them.
  *
  * Matrix:
  *   - the capture_lead schema carries the field trio, using the SAME
@@ -13,7 +20,8 @@
  *     ai_triage activity metadata)
  *   - saying nothing about contact preference writes nothing (a later
  *     preference-free call can never erase a recorded instruction)
- *   - NO suppression / opt-out / messaging-preference write happens anywhere
+ *   - the LEAD PIPELINE still writes no suppression / opt-out / messaging-
+ *     preference state of its own (the tool layer owns the one exception)
  *   - no customer-facing comms
  */
 
@@ -28,14 +36,20 @@ jest.mock('../services/email', () => ({ send: jest.fn() }));
 // (the same NotificationService the re-service lane files to). Internal only —
 // it is a bell/push entry for a human, never a customer-facing send.
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
+// The canonical suppression writer (the inbound STOP webhook's own).
+jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(async () => ({ ok: true })) }));
+// capture_lead's internal owner alert — covered by voice-relay-alert.test.js.
+jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerHotLead: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailService = require('../services/email');
 
+const { recordSuppression } = require('../services/messaging/validators/suppression');
+
 const { createLeadFromExtraction, contactPreferenceFields } = require('../services/lead-from-extraction');
-const { TOOLS } = require('../services/voice-agent/relay-tools');
+const { TOOLS, executeTool } = require('../services/voice-agent/relay-tools');
 
 // Synthetic fixtures only.
 const CALLER = '+19415550142';
@@ -340,5 +354,54 @@ describe('the prompt says capture, not act', () => {
     expect(p).toContain('contact_preference');
     expect(p).toMatch(/cannot change anything about how Waves contacts them/i);
     expect(p).toMatch(/Never promise they will stop receiving messages/i);
+  });
+});
+
+// ⭐ THE ONE CONSENT WRITE THE AGENT MAKES. A verbal "stop texting me" is a
+// withdrawal of consent the moment it is said; filing it in a JSON blob for a
+// human to notice later leaves every automated SMS path treating the caller as
+// contactable in the meantime. It goes through recordSuppression — the same
+// writer the inbound STOP webhook uses — and only ever in the stop direction.
+describe('capture_lead honours an explicit do-not-contact request', () => {
+  const savedGate = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  afterAll(() => {
+    if (savedGate === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    else process.env.VOICE_RELAY_CONTEXT_ENABLED = savedGate;
+  });
+
+  const CTX = { callSid: 'CA-consent-tool', from: CALLER, to: '+19415559999' };
+
+  test('do_not_contact_request true → suppression recorded for the CALLER\'s number', async () => {
+    await executeTool('capture_lead', {
+      first_name: 'Pat',
+      call_summary: 'Asked to be taken off the list.',
+      contact_preference: 'take me off your list',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({
+      phone: CALLER,
+      reason: 'opt_out_natural_language',
+      source: 'voice_agent',
+    }));
+  });
+
+  test('a preference that is NOT an opt-out records nothing', async () => {
+    await executeTool('capture_lead', {
+      first_name: 'Pat',
+      call_summary: 'Prefers a call.',
+      contact_preference: 'call my husband Dave instead',
+      preferred_contact_method: 'phone',
+      do_not_contact_request: false,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
+  test('a failed suppression write never loses the lead', async () => {
+    recordSuppression.mockRejectedValueOnce(new Error('table gone'));
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Stop texting me.',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(out).toMatch(/Lead saved successfully/i);
   });
 });

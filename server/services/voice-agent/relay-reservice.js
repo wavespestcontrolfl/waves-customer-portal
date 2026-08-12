@@ -118,6 +118,15 @@ async function requestReserviceText(input = {}, ctx = {}) {
   const { matchedCallerTier } = require('./relay-tools');
   const unverifiedRequester = matchedCallerTier(ctx) !== 'full';
   const unverifiedNote = unverifiedRequester ? unverifiedRequesterStamp(ctx.from) : null;
+  // …and the stamp does not authorize the write, exactly as it does not for
+  // request_booking. Filing here mutates the account AND pages the owner, so a
+  // prior occupant or a spoofed secondary number could do both. Same single
+  // switch as the booking write, same default: OFF ⇒ full ANI match only.
+  if (unverifiedRequester && !require('./relay-booking').allowsThirdPartyWrites()) {
+    return 'Re-service requests are only filed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with what they are seeing and where, and tell them a Waves team member will call '
+      + 'them back about it. Do NOT tell the caller a re-service has been scheduled or filed.';
+  }
 
   const lane = String(input.lane || '').trim().toLowerCase();
   if (!LANE_CATEGORY[lane]) {

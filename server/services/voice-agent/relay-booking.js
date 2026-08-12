@@ -55,10 +55,12 @@ function isBookingGateOn() {
 }
 
 // Sub-gate: may an UNVERIFIED requester (a looked-up account, or an ANI that
-// matched only a service-contact slot) have a booking written for them? Off by
-// default — see the call site. Same exact-'true' shape as every gate here.
-function allowsThirdPartyBooking() {
-  return String(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING || '').toLowerCase() === 'true';
+// matched only a service-contact slot) have ANYTHING written for them — a
+// booking here, a re-service ticket in relay-reservice? Off by default; one
+// switch for both, because they are one question. Same exact-'true' shape as
+// every gate here.
+function allowsThirdPartyWrites() {
+  return String(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES || '').toLowerCase() === 'true';
 }
 
 /** Both gates, fail closed. */
@@ -525,10 +527,10 @@ async function requestBookingText(input = {}, ctx = {}) {
   // now itself gated, and the gate ships OFF: by default only a FULL ANI match
   // (the calling number IS `customers.phone`) may write a booking, and everyone
   // else — looked-up refs and contact-slot matches alike — is captured as a
-  // lead for a human to call back. `VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING=true`
+  // lead for a human to call back. `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES=true`
   // restores the spouse/landlord case, with the UNVERIFIED stamps below as the
   // human-facing signal. Owner decision, one flag, either way reviewable.
-  if (thirdParty && !allowsThirdPartyBooking()) {
+  if (thirdParty && !allowsThirdPartyWrites()) {
     return 'Booking requests are only placed for the account the caller\'s own phone number matches. '
       + 'Capture the lead with the caller\'s name, the account they are calling about and their preferred '
       + 'time, and tell them a Waves team member will call to confirm. Do NOT tell the caller anything is booked.';
@@ -833,6 +835,7 @@ async function attachLeadToVoiceBookingCard(callSid, leadId) {
 }
 
 module.exports = {
+  allowsThirdPartyWrites,
   attachLeadToVoiceBookingCard,
   isBookingEnabled,
   isBookingGateOn,

@@ -230,6 +230,43 @@ describe('RelayConversation — explicit end after capture', () => {
       expect(createLeadFromExtraction).not.toHaveBeenCalled(); // …and the floor still did NOT race it
     });
 
+    // ⭐ THE FLOOR OWES THE BOOKING CARD ITS LEAD ID. A caller who books and
+    // then hangs up before capture_lead gets their lead from the floor — and
+    // dropping the id there leaves the review card's `lead_id: null`, which
+    // outbound-review-confirm treats as authoritative for voice cards (it
+    // skips the single-active-lead fallback on purpose). Office confirm would
+    // then leave this call's own lead open.
+    test('the hangup floor attaches its lead to the booking card', async () => {
+      jest.useRealTimers();
+      const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-floor-1' });
+      const relayBooking = require('../services/voice-agent/relay-booking');
+      const attach = jest.spyOn(relayBooking, 'attachLeadToVoiceBookingCard').mockResolvedValue(true);
+
+      const convo = new RelayConversation({ callSid: 'CA-floor-1', from: '+19415551234', send: jest.fn() });
+      convo._bookingRequested = true; // a booking landed earlier on this call
+      await convo._runCaptureFloor('hangup');
+
+      expect(createLeadFromExtraction).toHaveBeenCalled();
+      expect(attach).toHaveBeenCalledWith('CA-floor-1', 'lead-floor-1');
+      expect(convo._leadId).toBe('lead-floor-1');
+      attach.mockRestore();
+    });
+
+    test('with no booking on the call the floor attaches nothing', async () => {
+      jest.useRealTimers();
+      const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-floor-2' });
+      const relayBooking = require('../services/voice-agent/relay-booking');
+      const attach = jest.spyOn(relayBooking, 'attachLeadToVoiceBookingCard').mockResolvedValue(true);
+
+      const convo = new RelayConversation({ callSid: 'CA-floor-2', from: '+19415551234', send: jest.fn() });
+      await convo._runCaptureFloor('hangup');
+
+      expect(attach).not.toHaveBeenCalled();
+      attach.mockRestore();
+    });
+
     test('a fast tool is untouched by the bound', async () => {
       jest.useRealTimers(); // no clock nudging — the work simply wins the race
       jest.spyOn(relayTools, 'executeTool').mockResolvedValue('the real answer');
