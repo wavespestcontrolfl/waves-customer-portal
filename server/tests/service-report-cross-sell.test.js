@@ -267,6 +267,47 @@ describe('buildReportCrossSell', () => {
     }
   });
 
+  test('the seed replays the top-level attachedGarage input (PR r15 P1)', async () => {
+    // attachedGarage is a top-level estimator input, not a features member,
+    // so copying inputs.features alone dropped it — while pest pricing adds
+    // a real garage adjustment and the customers table has no column to
+    // fall back on. A lawn-derived seed for an attached-garage property
+    // would price-lock a Pest Control amount BELOW the true one.
+    // Asserted on the seed itself: what it carries out of the accepted
+    // estimate is the money-bearing contract, and the pricer already honors
+    // features.attachedGarage (hasAttachedGarageForPest).
+    const { loadEstimateSeed } = _private;
+    const seedDb = (inputs) => dbFor({
+      estimates: [{
+        id: 'est-garage',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'accepted',
+        estimate_data: { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1, ...inputs } },
+      }],
+    });
+    // Derived through the same normalizer the loader uses — a hand-written
+    // key would be testing address parsing, not the seed's serialization.
+    const street = require('../services/estimate-property-linkage')
+      .normalizedEstimateStreet('123 Gulf Dr, Sarasota, FL 34236');
+
+    const withGarage = await loadEstimateSeed(seedDb({ attachedGarage: true }), 'cust-1', street);
+    expect(withGarage.features.attachedGarage).toBe(true);
+
+    const withoutGarage = await loadEstimateSeed(seedDb({ attachedGarage: false }), 'cust-1', street);
+    expect(withoutGarage.features.attachedGarage).toBe(false);
+
+    // Absent input stays absent — never invented as false-y evidence.
+    const silent = await loadEstimateSeed(seedDb({}), 'cust-1', street);
+    expect(silent.features === null || silent.features.attachedGarage === undefined).toBe(true);
+
+    // A features member of the same name still round-trips.
+    const nested = await loadEstimateSeed(
+      seedDb({ features: { attachedGarage: true, pool: true } }), 'cust-1', street,
+    );
+    expect(nested.features.attachedGarage).toBe(true);
+    expect(nested.features.pool).toBe(true);
+  });
+
   test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {
     // Mosquito occupies no ladder rung, so it was exempt from
     // corroboration — but it still landed in the evidence list, and a

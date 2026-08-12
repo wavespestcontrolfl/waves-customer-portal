@@ -287,6 +287,38 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
   });
 });
 
+describe('offer composition is opt-in, and only the render path opts in (PR r15 P2)', () => {
+  // A CONTRACT test on the route source, not an integration test: the
+  // builder is module-private and a happy-path /data render would need the
+  // entire report pipeline stood up. What must not regress is narrow and
+  // structural — composing the offer runs the whole ownership → property →
+  // estimate → pricing pipeline plus a referral-settings read, and the Q&A
+  // endpoint calls the same builder purely for report context while
+  // consuming neither key. The risk this guards cuts both ways: default-off
+  // means a wiring slip silently REMOVES the card from the report rather
+  // than failing loudly, and nothing else asserts the payload carries it.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF', () => {
+    expect(src).toMatch(/composeOffers = false/);
+  });
+
+  test('composition is gated on it, not on live mode alone', () => {
+    expect(src).toMatch(/if \(mode === 'live' && composeOffers\)/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/composeOffers: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true/);
+  });
+
+  test('the Q&A call site does NOT opt in', () => {
+    // The ask handler's call, verbatim — it must stay offer-free.
+    expect(src).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+  });
+});
+
 describe('storedRevisionMatches (cross-sell resubmit no-op, PR r11 P2)', () => {
   const { storedRevisionMatches } = reportsRouter;
   const snapshot = {

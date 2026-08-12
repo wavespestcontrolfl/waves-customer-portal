@@ -67,6 +67,18 @@ function hasVerifyFlagMatching(enriched, matcher) {
 // become a medium-confidence T&S price with no review reason. A quote
 // without it simply falls back to the lot inference, which carries its own
 // review markers.
+// The FLAG half of lookupBedAreaIsTrustworthy, value-agnostic: did the
+// lookup flag the bed-area read (or the turf/imagery read it comes from —
+// same picture)? A consumer that must tell "the lookup REFUSED this read"
+// from "the lookup carried no value" needs this one, since the predicate
+// below folds both into a single false and treating a missing value as a
+// refusal would block evidence the caller is entitled to use.
+function lookupBedAreaReadIsFlagged(enriched) {
+  return hasVerifyFlagMatching(enriched, (field) => (
+    field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf')
+  ));
+}
+
 function lookupBedAreaIsTrustworthy(enriched) {
   const area = Number(enriched?.estimatedBedAreaSf);
   if (!Number.isFinite(area) || area <= 0) return false;
@@ -82,9 +94,7 @@ function lookupBedAreaIsTrustworthy(enriched) {
   const fieldConfidence = Number(enriched?.bedAreaConfidence ?? enriched?._bedAreaConfidence);
   if (!Number.isFinite(fieldConfidence) || fieldConfidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
   if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
-  return !hasVerifyFlagMatching(enriched, (field) => (
-    field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf')
-  ));
+  return !lookupBedAreaReadIsFlagged(enriched);
 }
 
 // Trust of the turf READ itself, value-agnostic: adequate confidence and no
@@ -283,6 +293,7 @@ module.exports = {
   hasGlobalVerifyFlag,
   lookupConfidenceIsAdequate,
   lookupBedAreaIsTrustworthy,
+  lookupBedAreaReadIsFlagged,
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,

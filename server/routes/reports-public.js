@@ -335,6 +335,14 @@ async function buildServiceReportV1ResponseData(service, token, {
   pestPressureConfig,
   staffViewer = false,
   pinnedLawnAssessmentId = null,
+  // OPT-IN, and only the /data render path opts in (codex #3367 PR r15).
+  // Composing the offer runs the whole ownership → property → estimate →
+  // pricing pipeline plus a referral-settings read. The Q&A endpoint calls
+  // this builder purely for report CONTEXT and consumes neither key, so
+  // every customer question was paying for pricing work nobody reads —
+  // under the general report limiter, repeatedly. Defaulting to off means a
+  // future caller cannot inherit that cost by accident either.
+  composeOffers = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -564,7 +572,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
   let referral = null;
-  if (mode === 'live') {
+  if (mode === 'live' && composeOffers) {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
@@ -2009,7 +2017,9 @@ router.get('/:token/data', async (req, res, next) => {
       }
       const pinnedLawnAssessmentId = requestedAssessment;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
-        mode, staffViewer, pinnedLawnAssessmentId,
+        // The render path is the only consumer of the cross-sell/referral
+        // keys, so it is the only caller that pays to compose them.
+        mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

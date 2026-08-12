@@ -311,9 +311,22 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (!pick) return null;
   const inputs = pick.inputs;
   const cleanString = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null);
-  const cleanedFeatures = inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
+  let cleanedFeatures = inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
     ? { ...inputs.features }
     : null;
+  // attachedGarage is a TOP-LEVEL estimator input, not a features member
+  // (property-lookup-v2 builds the inputs that way), so copying
+  // inputs.features alone dropped it — while pest pricing adds a real
+  // garage adjustment for it and the customers table has no column to fall
+  // back on. A lawn-derived seed for an attached-garage property could
+  // therefore price-lock a Pest Control per-application amount BELOW the
+  // true one. Replayed into the feature evidence, where the pricer's
+  // hasAttachedGarageForPest already looks (property.features.attachedGarage),
+  // so it inherits the same fill-only and lookup-rejection safeguards as
+  // every other modifier.
+  if (inputs.attachedGarage !== undefined && inputs.attachedGarage !== null) {
+    cleanedFeatures = { ...(cleanedFeatures || {}), attachedGarage: !!inputs.attachedGarage };
+  }
   let zeroTreeCountAmbiguous = false;
   if (cleanedFeatures
     && Object.prototype.hasOwnProperty.call(cleanedFeatures, 'treeCount')
@@ -795,5 +808,11 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
 module.exports = {
   buildReportCrossSell,
   // Test hooks: ladder + priceability are the card's two decisions.
-  _private: { pickOfferTarget, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER },
+  _private: {
+    pickOfferTarget, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
+    // Test hook: what the seed actually carries out of an accepted estimate
+    // is the money-bearing contract here — every modifier it drops prices
+    // as if the property did not have it.
+    loadEstimateSeed, estimateRequiresFieldVerification,
+  },
 };

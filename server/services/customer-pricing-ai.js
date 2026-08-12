@@ -347,7 +347,8 @@ function lookupEnabled() {
 // them; the gate below is what has to open for it to be consulted.
 // Shared trust predicates — the agent draft path applies the same rule.
 const {
-  lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
+  lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
   lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
@@ -478,6 +479,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         if (!lookupDimensionIsTrustworthy(p, 'lotSqFt')) lookupRejectedFields.add('lotSqFt');
         if (!lookupDimensionIsTrustworthy(p, 'stories')) lookupRejectedFields.add('stories');
         if (!lookupTurfReadIsTrustworthy(p)) lookupRejectedFields.add('lawnSqFt');
+        // Bed area is flag-rejected by its OWN flag or by the turf/imagery
+        // flag it shares a picture with (codex #3367 PR r15). Only the flag
+        // counts: lookupBedAreaIsTrustworthy also returns false for a
+        // missing value, which is the ordinary gap the seed exists to fill.
+        if (lookupBedAreaReadIsFlagged(p)) lookupRejectedFields.add('bedArea');
       }
       if (lookupDescribesThisProperty) {
       // Weak or conflicting core dimensions arrive with their own

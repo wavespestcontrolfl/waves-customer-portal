@@ -369,6 +369,31 @@ describe('customer pricing AI helpers', () => {
     // A flag on ONE dimension leaves the others fillable.
     const partial = await run({ flags: [{ field: 'squareFootage', priority: 'high' }], seed });
     expect(partial.property?.lotSqFt).toBe(8000);
+
+  });
+
+  test('a flagged bed-area read keeps the seed out of the Tree & Shrub price (PR r15 P1)', async () => {
+    // The response's property block does not surface bedArea, so the price
+    // itself is the observable: a seeded bed area and the lot inference the
+    // pricer falls back to do not agree.
+    const run = (flags) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { stories: 1, fieldVerifyFlags: flags }, propertyRecord: {} }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-bed', property_sqft: null, lot_sqft: null }),
+      propertySeed: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', bedArea: 1200 },
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const seeded = await run([]);
+    expect(price(seeded)).toBeGreaterThan(0);
+
+    // Its OWN flag, and the turf/imagery flag it shares a picture with,
+    // both reject the read — the seed may not stand in for it.
+    for (const field of ['estimatedBedAreaSf', 'bed_area', 'estimatedTurfSf']) {
+      const flagged = await run([{ field, priority: 'high' }]);
+      expect(price(flagged)).not.toBe(price(seeded));
+    }
   });
 
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
