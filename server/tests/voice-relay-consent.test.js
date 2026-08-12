@@ -61,11 +61,15 @@ function makeBuilder(table, rows) {
 }
 
 let tables;
+// An existing lead for this phone number — the merge tests set it so the
+// "second capture_lead" (or a call next week, since leads resolve BY PHONE)
+// path is exercised rather than the fresh-insert path.
+let existingLead = null;
 function primeDb() {
   writes.length = 0;
   tables = {
     customers: makeBuilder('customers', []),
-    leads: makeBuilder('leads', []),
+    leads: makeBuilder('leads', existingLead ? [existingLead] : []),
     lead_activities: makeBuilder('lead_activities', []),
     lead_sources: makeBuilder('lead_sources', []),
   };
@@ -93,6 +97,7 @@ function leadUpdate() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  existingLead = null;
   primeDb();
 });
 
@@ -212,6 +217,66 @@ describe('persistence through the lead pipeline', () => {
     expect(extracted).not.toHaveProperty('contact_preference');
     expect(extracted).not.toHaveProperty('do_not_contact_request');
     assertNoSuppressionWrite();
+  });
+});
+
+// ⭐ A STATED INSTRUCTION MUST SURVIVE THE NEXT capture_lead. The lead is
+// resolved BY PHONE, so "the next payload" is not only the second tool call on
+// this call — it is also a call NEXT WEEK from the same number.
+describe('extracted_data is MERGED, not replaced', () => {
+  test('a second, preference-free capture does not erase the recorded instruction', async () => {
+    existingLead = {
+      id: LEAD_ID,
+      extracted_data: JSON.stringify({
+        source: 'voice_agent',
+        pain_points: 'ants',
+        contact_preference: 'stop texting me',
+        preferred_contact_method: 'phone',
+        do_not_contact_request: true,
+      }),
+    };
+    primeDb();
+    await createLeadFromExtraction(
+      { call_summary: 'Called back about scheduling.' },
+      { phone: CALLER, callSid: 'CA-consent-merge' },
+    );
+    const extracted = JSON.parse(leadUpdate().extracted_data);
+    expect(extracted).toMatchObject({
+      contact_preference: 'stop texting me',
+      preferred_contact_method: 'phone',
+      do_not_contact_request: true,
+      pain_points: 'ants', // fill-forward, not nulled out
+    });
+    assertNoSuppressionWrite();
+  });
+
+  test('do_not_contact_request is STICKY-ON — a later payload may set it, never clear it', async () => {
+    existingLead = { id: LEAD_ID, extracted_data: JSON.stringify({ do_not_contact_request: true }) };
+    primeDb();
+    await createLeadFromExtraction(
+      { call_summary: 'Wants a quote.', preferred_contact_method: 'email' },
+      { phone: CALLER },
+    );
+    const extracted = JSON.parse(leadUpdate().extracted_data);
+    expect(extracted.do_not_contact_request).toBe(true);
+    expect(extracted.preferred_contact_method).toBe('email'); // new detail still lands
+  });
+
+  test('a first capture with no prior data still records the explicit false', async () => {
+    existingLead = null;
+    await createLeadFromExtraction(
+      { call_summary: 'Quote.', contact_preference: 'email only', preferred_contact_method: 'email' },
+      { phone: CALLER },
+    );
+    expect(JSON.parse(leadUpdate().extracted_data).do_not_contact_request).toBe(false);
+  });
+
+  test('unparseable / non-object prior extracted_data degrades to an empty merge base', async () => {
+    existingLead = { id: LEAD_ID, extracted_data: 'not json at all' };
+    primeDb();
+    await createLeadFromExtraction({ call_summary: 'Quote.' }, { phone: CALLER });
+    expect(() => JSON.parse(leadUpdate().extracted_data)).not.toThrow();
+    expect(JSON.parse(leadUpdate().extracted_data)).toMatchObject({ source: 'voice_agent' });
   });
 });
 

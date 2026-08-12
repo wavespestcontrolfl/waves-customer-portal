@@ -50,6 +50,16 @@ const { composeServiceInterest } = require('../utils/lead-service-interest');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
 
+/** jsonb column → plain object ({} for null / string-encoded / array / garbage). */
+function parseJsonObject(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // Mirrors caller.preferred_contact_method in the call-extraction schemas.
 const CONTACT_METHODS = new Set(['phone', 'sms', 'email', 'unspecified']);
 
@@ -259,17 +269,36 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
     if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
-    // Contact preference / consent instruction: recorded for a HUMAN to
-    // action. Spread only when the caller actually stated one, so a later
-    // preference-free payload cannot erase a recorded instruction.
+    // ⭐ extracted_data is MERGED, never replaced.
+    //
+    // contactPreferenceFields returning null was supposed to mean "a
+    // preference-free payload cannot erase a recorded instruction" — but the
+    // write below was a wholesale JSON.stringify of a freshly built object, so
+    // the spread-or-not was irrelevant: the SECOND capture_lead on the same
+    // call (or a call NEXT WEEK, since the lead is resolved by phone) rebuilt
+    // extracted_data from scratch and dropped every consent key that was not in
+    // that payload. A caller who said "stop texting me" and then answered one
+    // more question lost the instruction.
+    const priorExtracted = parseJsonObject(current?.extracted_data);
+    const merged = { ...priorExtracted };
+    // Fill-forward: a payload that simply didn't mention a field keeps the
+    // value already on the lead rather than nulling it.
+    merged.pain_points = extracted.pain_points || priorExtracted.pain_points || null;
+    merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
+    merged.source = 'voice_agent';
+    merged.language = language || priorExtracted.language || null;
     const contactPreference = contactPreferenceFields(extracted);
-    leadUpdates.extracted_data = JSON.stringify({
-      pain_points: extracted.pain_points,
-      preferred_date_time: extracted.preferred_date_time,
-      source: 'voice_agent',
-      language,
-      ...(contactPreference || {}),
-    });
+    if (contactPreference) {
+      if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;
+      if (contactPreference.preferred_contact_method) merged.preferred_contact_method = contactPreference.preferred_contact_method;
+      // do_not_contact_request is STICKY-ON. Lifting a stated do-not-contact is
+      // a human decision (the agent cannot act on one either way), so a later
+      // payload may SET it and never clear it. The false is still recorded on a
+      // lead that has never carried a true.
+      if (contactPreference.do_not_contact_request === true) merged.do_not_contact_request = true;
+      else if (merged.do_not_contact_request !== true) merged.do_not_contact_request = false;
+    }
+    leadUpdates.extracted_data = JSON.stringify(merged);
     // Only touch is_qualified when the agent sent a recognized quality, so a
     // later quality-less payload can't demote a previously qualified lead.
     if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
