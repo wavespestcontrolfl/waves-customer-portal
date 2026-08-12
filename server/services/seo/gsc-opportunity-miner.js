@@ -906,6 +906,20 @@ function pickCtrRewriteTargetPage(rows = []) {
   return best ? best.page_url : null;
 }
 
+// The selected page must ITSELF be underperforming. The bucket's gate is a
+// query-level CTR aggregate across every page and domain, so a weak
+// secondary page can drag the aggregate under the threshold while the
+// most-impressed page is perfectly healthy — rewriting that page's title
+// would damage a working snippet (audit P1 #9). Fail closed: no rows, no
+// pick, or a healthy pick → null → do_not_publish.
+function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
+  const url = pickCtrRewriteTargetPage(pageRows);
+  if (!url) return null;
+  const row = pageRows.find((r) => r.page_url === url);
+  if (!row) return null;
+  return recomputeCtr(row.clicks, row.impressions) < thresholds.ctrRewriteMaxCtr ? url : null;
+}
+
 // Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
 // possibly a sync hole? Map syncs run and fail independently per domain
 // (and stale rows linger), while candidates aggregate gsc_queries across
@@ -1587,19 +1601,24 @@ class GscOpportunityMiner {
       .whereRaw('lower(domain) = ANY(?)', [Array.from(coveredDomains)])
       .select('query')
       .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      // Per-page clicks ride along so the selected target can be held to
+      // the CTR threshold on its OWN performance (ctrRewriteTargetFor),
+      // and the mapped-domain set so the caller can require evidence from
+      // every contributing domain.
+      .select(db.raw('array_agg(DISTINCT lower(domain)) as domains'))
+      .sum('clicks as clicks')
       .sum('impressions as impressions')
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
       .groupBy('query')
       .groupByRaw(CANON_URL_SQL);
-    const byQuery = new Map();
-    for (const r of rows) {
-      if (!byQuery.has(r.query)) byQuery.set(r.query, []);
-      byQuery.get(r.query).push(r);
-    }
     const out = new Map();
-    for (const [query, list] of byQuery) {
-      const page = pickCtrRewriteTargetPage(list);
-      if (page) out.set(query, page);
+    for (const r of rows) {
+      if (!out.has(r.query)) out.set(r.query, { pages: [], domains: new Set() });
+      const entry = out.get(r.query);
+      entry.pages.push(r);
+      for (const d of (Array.isArray(r.domains) ? r.domains : [])) {
+        if (d) entry.domains.add(String(d).toLowerCase());
+      }
     }
     return out;
   }
@@ -1766,9 +1785,14 @@ class GscOpportunityMiner {
 
     // Target the page the query ACTUALLY ranks with (true query→page
     // rows), not the service+city segment's biggest page: a rewrite PR
-    // must edit the URL whose snippet is losing the clicks. Unmapped
-    // query, or any contributing domain without fresh map coverage →
-    // null page → do_not_publish (fail closed, nothing to rewrite).
+    // must edit the URL whose snippet is losing the clicks. Three
+    // independent fail-closed conditions, any of which yields no page →
+    // do_not_publish: a contributing domain without FRESH map coverage
+    // (stale rows could nominate an obsolete page); a contributing domain
+    // that never mapped this query (partial evidence — another domain's
+    // page must not stand in for it); or a selected page whose own CTR is
+    // healthy (the query-level aggregate can be dragged under the
+    // threshold by a weak sibling page).
     const covered = await this._queryPageMapCoveredDomains(since);
     const rankingPages = await this._rankingPageByQuery(
       filtered.map((r) => r.query), since, covered
@@ -1777,8 +1801,11 @@ class GscOpportunityMiner {
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
-      const pageUrl = queryDomainsCovered(r.domains, covered)
-        ? (rankingPages.get(r.query) || null)
+      const mapped = rankingPages.get(r.query);
+      const pageUrl = (queryDomainsCovered(r.domains, covered)
+        && mapped
+        && queryDomainsCovered(r.domains, mapped.domains))
+        ? ctrRewriteTargetFor(mapped.pages)
         : null;
       const opp = {
         bucket: 'ctr_rewrite',
@@ -3296,6 +3323,7 @@ module.exports._internals = {
   noContentYetMapEmittable,
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
+  ctrRewriteTargetFor,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every

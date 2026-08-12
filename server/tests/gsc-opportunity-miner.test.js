@@ -40,6 +40,7 @@ const {
   noContentYetMapEmittable,
   noContentYetEmittable,
   pickCtrRewriteTargetPage,
+  ctrRewriteTargetFor,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
@@ -438,6 +439,27 @@ describe('pickCtrRewriteTargetPage', () => {
     expect(pickCtrRewriteTargetPage([])).toBe(null);
     expect(pickCtrRewriteTargetPage()).toBe(null);
     expect(pickCtrRewriteTargetPage([{ page_url: null, impressions: '500' }])).toBe(null);
+  });
+});
+
+describe('ctrRewriteTargetFor (the selected page must itself underperform)', () => {
+  test('selected page below the CTR threshold → target', () => {
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/b/', impressions: '900', clicks: '5', page_position: '6.4' },
+    ])).toBe('https://x/b/');
+  });
+  test('a weak sibling drags the query aggregate down but the top page is healthy → no rewrite', () => {
+    // Query-level CTR ≈ 1.6% (under 2%), yet the most-impressed page
+    // converts at 5% — rewriting its title would damage a working
+    // snippet.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/healthy/', impressions: '1000', clicks: '50', page_position: '3.0' },
+      { page_url: 'https://x/weak/', impressions: '900', clicks: '0', page_position: '7.9' },
+    ])).toBe(null);
+  });
+  test('no rows → null', () => {
+    expect(ctrRewriteTargetFor([])).toBe(null);
+    expect(ctrRewriteTargetFor()).toBe(null);
   });
 });
 
