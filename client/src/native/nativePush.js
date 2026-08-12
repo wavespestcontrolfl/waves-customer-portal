@@ -238,9 +238,15 @@ async function revokeRegistrationForDeniedPermission() {
 export function flushNativePushToken() {
   if (!isNativeApp()) return;
   // A revocation owed from a signed-out/offline denied-permission launch
-  // retries now that credentials exist — before any re-registration, so a
-  // dead token can't outlive the login that could have released it.
-  void retryPendingRevocation();
+  // retries now that credentials exist. Serialized through the SAME latch
+  // postToken awaits (inflightDeactivation) — firing it unawaited would
+  // race the re-subscribe, and a subscribe landing last would re-activate
+  // a token the OS will never present.
+  const revocation = retryPendingRevocation();
+  inflightDeactivation = revocation;
+  revocation.finally(() => {
+    if (inflightDeactivation === revocation) inflightDeactivation = null;
+  });
   if (!pendingToken) return;
   const token = pendingToken;
   pendingToken = null;
