@@ -75,6 +75,21 @@ function parseExtractedAddress(raw) {
  * service interest are required by the readiness gate — an email without
  * them stays a plain lead exactly as today. Never sends anything.
  */
+// The sender's OWN request text: quoted-history lines dropped, body cut at
+// the first reply/signature marker. Conservative — an unrecognized
+// signature style just means extra text reaches the scan, which the
+// commercial patterns already require strong premises wording to match.
+function emailProseForScan(body) {
+  const lines = String(body || '').split('\n');
+  const out = [];
+  for (const line of lines) {
+    if (/^\s*>/.test(line)) continue; // quoted history
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:|From:\s|Sent from |Best regards|Kind regards|Sincerely|Thanks,|Thank you,)/i.test(line)) break;
+    out.push(line);
+  }
+  return out.join('\n').slice(0, 2000);
+}
+
 async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
   const {
     buildAutomatedLeadDraftEstimate,
@@ -101,8 +116,10 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     // The sender's own prose — the readiness gate's commercial-signal scan
     // reads intake.message; without it an email describing an industrial/
     // office property with a generic "Pest Control" interest bypassed the
-    // category guard entirely (codex pre-push P1).
-    message: String(email?.body_text || email?.snippet || '').slice(0, 4000),
+    // category guard entirely (codex pre-push P1). Signature/quoted-history
+    // stripped first: a residential inquiry sent under a work signature
+    // ("Suite 200") must not read as a commercial premises (codex r9 P2).
+    message: emailProseForScan(email?.body_text || email?.snippet || ''),
     normalizedAddress: {
       line1: addr.line1,
       city: addr.city,

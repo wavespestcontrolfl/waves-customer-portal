@@ -106,6 +106,12 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     '(?:service|treat|spray)\\w*\\s+(?:my|our)\\s+business\\b',
     'business\\s+(?:location|premises|property|address)',
     'commercial\\s+(?:pest|lawn|mosquito|rodent|termite)\\b',
+    // Service-qualified premises without an article/possessive — "pest
+    // control for a warehouse", "spraying at warehouse" (codex r9 P1: the
+    // possessive/article forms above miss indefinite phrasings that are
+    // unambiguously about a commercial premises when anchored to the
+    // service ask).
+    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza)\\b',
   ].join('|'),
   'i',
 );

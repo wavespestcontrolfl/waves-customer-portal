@@ -348,6 +348,9 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
 const LOOKUP_ATTEMPT_STATUSES = new Set([
   'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
   'incomplete_address', 'vacant_or_unassessed', 'provider_timeout',
+  // Terminal stamp for a lookup that THREW after the pending stamp — a
+  // pending row must mean "running", never "died mid-pipeline".
+  'error',
 ]);
 
 async function markLookupAttempt(address, status, reason = null) {

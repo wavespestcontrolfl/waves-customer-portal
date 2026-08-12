@@ -165,7 +165,24 @@ function isTimeoutFailure(err, timeout) {
 // public-property-lookup.js can run the same AI search + satellite + trio
 // AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
+// Thin wrapper: an uncaught throw anywhere after the 'pending' attempt
+// stamp would otherwise leave the row pending forever — indistinguishable
+// from a running lookup, silently undercounting the failure segments
+// (codex r9 P2). The wrapper stamps a terminal 'error' outcome and
+// rethrows; behavior toward callers is unchanged.
 async function performPropertyLookup(address, options = {}) {
+  try {
+    return await performPropertyLookupCore(address, options);
+  } catch (err) {
+    if (options.persist !== false) {
+      await markLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200))
+        .catch(() => {});
+    }
+    throw err;
+  }
+}
+
+async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
   // replay/diagnostic callers (estimator-replay) — skips the cache-hit
