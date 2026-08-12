@@ -87,6 +87,7 @@ function pickOption(options = [], targetKey) {
 // scopeKeysShareLocality moved to estimate-property-linkage (PR r7) — one
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
+const { hasPresenceValue } = require('../pricing-engine/property-calculator');
 
 // True only when NOTHING on file contradicts "this customer has a single
 // premises, the primary one" (codex #3367 PR r11 P1). Used by the unlinked-
@@ -336,8 +337,15 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // Normalized the same way the pricer's own adoption does — any value that
   // is not 'NONE' is adjacency — and only ever upgraded to true, so a
   // features member that already says true is never contradicted.
-  const seededWater = String(inputs.nearWater || '').trim().toUpperCase();
-  if (seededWater && seededWater !== 'NONE' && seededWater !== 'UNKNOWN') {
+  // Normalized through the ENGINE'S OWN presence rule, not a hand-rolled
+  // list (pre-push P0): V2 inputs routinely carry the negative spelling
+  // 'NO', which a NONE/UNKNOWN denylist read as adjacency and would have
+  // ADDED the water adjustment — inflating a customer-visible, price-locked
+  // offer. hasPresenceValue is the same predicate normalizeFeatureInputs
+  // uses to derive features.nearWater, so the replay agrees with the engine
+  // by construction. Only ever upgrades to true; a features member that
+  // already says true is never contradicted.
+  if (hasPresenceValue(inputs.nearWater)) {
     cleanedFeatures = { ...(cleanedFeatures || {}), nearWater: true };
   }
   let zeroTreeCountAmbiguous = false;

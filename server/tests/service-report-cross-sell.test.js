@@ -316,8 +316,11 @@ describe('buildReportCrossSell', () => {
       );
       expect(water.features.nearWater).toBe(true);
     }
-    // 'NONE' and 'UNKNOWN' are not adjacency, and must not invent it.
-    for (const value of ['NONE', 'UNKNOWN', '']) {
+    // Every NEGATIVE spelling the engine recognizes must stay negative
+    // (pre-push P0): V2 inputs routinely carry 'NO', and reading that as
+    // adjacency would ADD the water adjustment and inflate a price-locked
+    // offer. Normalized through the engine's own hasPresenceValue.
+    for (const value of ['NO', 'NONE', 'FALSE', 'N', '0', 'UNKNOWN', '', false, 0]) {
       const dry = await loadEstimateSeed(
         seedDb({ nearWater: value, features: { nearWater: false } }), 'cust-1', street,
       );
