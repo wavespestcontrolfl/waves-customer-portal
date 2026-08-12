@@ -383,8 +383,22 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
         + 'once they are dry, and the technician confirms timing on site. Do NOT give a clock time, a number '
         + 'of hours, or say anything is "safe".');
     } else {
+      // …and even the "ready" branch re-checks the TEXT, not just the clock.
+      // The pending test above and buildReentrySummary's own render read
+      // Date.now() at different instants, so a target that crosses readiness
+      // between them can leave a timestamped summary in hand while this branch
+      // believes everything is ready. A rendered clock time never gets spoken,
+      // whichever branch produced it.
       const summary = promptSafe(reentry && reentry.customerSummary, 160);
-      if (summary) lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
+      const carriesAClockTime = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b|\b\d+\s*(?:hours?|hrs?|minutes?|mins?)\b/i.test(summary || '');
+      if (summary && !carriesAClockTime) {
+        lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
+      } else if (summary) {
+        logger.warn(`[voice-relay-visit] re-entry summary withheld — it carries a fixed time (record ${record.id})`);
+        lines.push('Re-entry guidance, stated in these words and no others: treated areas are ready to use '
+          + 'once they are dry, and the technician confirms timing on site. Do NOT give a clock time, a number '
+          + 'of hours, or say anything is "safe".');
+      }
     }
   } catch (err) {
     logger.warn(`[voice-relay-visit] re-entry context skipped: ${err.message}`);

@@ -91,8 +91,8 @@ const TOOLS = [
         do_not_contact_request: {
           type: 'boolean',
           description: 'True ONLY if the caller asked us to stop contacting them (or stop texting/emailing them). '
-            + 'You do not act on this yourself and you do not promise anything about it — recording it here is '
-            + 'what stops our automated texts, and a Waves team member reviews it.',
+            + 'You do not act on this yourself, and you do NOT promise anything about it — say a Waves team '
+            + 'member will take care of it, never that it is already done. It is recorded for a human to action.',
         },
       },
       required: ['call_summary'],
@@ -802,6 +802,16 @@ async function executeTool(name, input = {}, ctx = {}) {
       // signature-verified /voice call_log row (and cleared the attestation
       // rule, if it is on). Unverified ⇒ the request is still recorded on the
       // lead for a human; nothing is mutated.
+      // ⭐ VERIFIED CALLS ONLY — AND ONLY WHILE THE CONTEXT GATE IS ON. Caller
+      // verification is part of the context lane (the gate-off session makes no
+      // DB read at all, which is the byte-identical-to-Phase-0 promise this
+      // branch is pinned to), so with the gate OFF nothing here is verified and
+      // nothing is suppressed: the request is recorded on the lead and a human
+      // actions it, exactly as it did before this lane existed. The tool
+      // description promises no more than that. Turning the suppression write
+      // into a gate-off capability means running signed-call verification
+      // outside the context gate — a deliberate change to that promise, and an
+      // owner call, not a silent one.
       const callerVerified = ctx.callerVerified === true;
       if (input.do_not_contact_request === true && !emailOnlyRequest && !callerVerified) {
         logger.warn(

@@ -339,12 +339,40 @@ describe('get_service_report', () => {
     expect(out).not.toContain('We treated the exterior perimeter');
   });
 
-  test('re-entry wording comes ONLY from the shaping helper, quoted verbatim', async () => {
+  // ⭐ A FIXED RE-ENTRY TIME IS NEVER SPOKEN. buildReentrySummary renders
+  // "<area> ready at 4:30 PM" for pending targets — banned customer copy
+  // (AGENTS.md: "never a fixed re-entry/drying minute figure — the idiom is
+  // 'safe once dry' + technician confirms timing"). The written report carrying
+  // it is a remediation backlog; speaking it would EXTEND the banned class.
+  test('a timestamped re-entry summary is replaced by the approved idiom, never quoted', async () => {
     primeDb({ service_records: [RECORD] });
     buildReentryContext.mockResolvedValue({ customerSummary: 'Exterior ready at 4:30 PM.' });
     const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(buildReentryContext).toHaveBeenCalled();
-    expect(out).toContain('"Exterior ready at 4:30 PM."');
+    expect(out).not.toContain('4:30 PM');
+    expect(out).toMatch(/ready to use once they are dry/i);
+    expect(out).toMatch(/technician confirms timing/i);
+  });
+
+  // The pending-target branch (structured targets, not the rendered string).
+  test('pending targets get the approved idiom without consulting the rendered summary', async () => {
+    primeDb({ service_records: [RECORD] });
+    buildReentryContext.mockResolvedValue({
+      customerSummary: 'Lawn ready at 10:45 AM.',
+      targets: [{ label: 'Lawn', readyAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() }],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toContain('10:45');
+    expect(out).toMatch(/ready to use once they are dry/i);
+  });
+
+  // A summary with NO time in it is the shaping helper's own approved wording
+  // and is still spoken verbatim.
+  test('an already-ready summary carries no time and IS quoted verbatim', async () => {
+    primeDb({ service_records: [RECORD] });
+    buildReentryContext.mockResolvedValue({ customerSummary: 'Treated areas are ready for normal use.' });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toContain('"Treated areas are ready for normal use."');
   });
 
   test('no re-entry context → no re-entry sentence is composed at all', async () => {
