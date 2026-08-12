@@ -1678,7 +1678,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
       engineInput = buildEngineInput({
         intent,
-        propertyFacts,
+        // Gate ON: a true property switch must not PRICE the quoted
+        // property with the original property's type either — scopeFacts
+        // fences it, so an unresolved type reaches the pricer as 'unknown'
+        // (neutral default) and the stamp below parks the draft instead of
+        // green-laning on a type that describes another address (codex r26
+        // P1). Same object as propertyFacts on every other path.
+        propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
+          && crossPropertyRegather) ? scopeFacts : propertyFacts,
         context,
         priorQualifyingServices,
         profileDescribesQuotedProperty,
@@ -1710,10 +1717,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           // fallback — codex r3 P1: customers.property_type='multifamily'
           // collapses through pricingSafePropertyType's /family/ branch
           // exactly like the others).
+          // On a cross-property switch only the RE-GATHERED record
+          // describes the quoted property — the extraction and profile
+          // describe the original one, so they must not make the type look
+          // resolved (codex r26 P1).
           const rawType = String(
             (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
-            || context.extraction?.property?.property_type
-            || (profileDescribesQuotedProperty ? trustedCustomer?.property_type : '')
+            || (crossPropertyRegather ? '' : (context.extraction?.property?.property_type
+              || (profileDescribesQuotedProperty ? trustedCustomer?.property_type : '')))
             || '',
           ).toLowerCase();
           const meta = normalizePestPropertyType(engineInput.propertyType);
