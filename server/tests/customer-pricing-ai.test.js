@@ -416,6 +416,73 @@ describe('customer pricing AI helpers', () => {
     expect(price(await run({ garage: undefined }))).toBe(price(without));
   });
 
+  test('an observed-NEGATIVE garage outranks a stale seed (pre-push P0)', async () => {
+    // The county recorded a garage and it is not attached. That is newer
+    // evidence than any accepted estimate, so a seeded attachedGarage:true
+    // must not restore the adjustment — marking only the POSITIVE
+    // lookup-backed let exactly that happen. detectAttachedGarage also
+    // returns false for "no garageType on file", so the negative counts
+    // only when the record actually named a type.
+    const run = ({ garageType, seedGarage }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9,
+          hasAttachedGarage: false, garageType,
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-garage-neg' }),
+      propertySeed: { homeSqFt: 2100, features: { attachedGarage: seedGarage } },
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const baseline = await run({ garageType: 'DETACHED', seedGarage: false });
+    // County says DETACHED → the seed's true may not restore the adjustment.
+    expect(price(await run({ garageType: 'DETACHED', seedGarage: true }))).toBe(price(baseline));
+    // No garageType on file → no observation, so the seed still fills.
+    expect(price(await run({ garageType: '', seedGarage: true }))).toBeGreaterThan(price(baseline));
+  });
+
+  test('a REJECTED structural fact is not refilled from the seed (pre-push P0)', async () => {
+    // structuralFactIsTrustworthy withholds a fact whose record evidence is
+    // weak or conflicting. Restoring it from an older estimate hands the
+    // engine exactly the input the lookup just refused.
+    // Asserted on the resolved property INPUT, not the price: these facts
+    // feed termite/WDO and rodent modifiers that do not move at these
+    // dimensions, so a price assertion here would pass either way.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (fieldEvidence) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-struct', property_sqft: null, lot_sqft: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9 },
+        propertyRecord: { constructionMaterial: 'CBS', foundationType: 'SLAB', _fieldEvidence: fieldEvidence },
+      }),
+      propertySeed: { homeSqFt: 2100, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE' },
+    });
+
+    // Trusted: the county fact wins and the seed never applies (fill-only).
+    const trusted = await resolve({});
+    expect(trusted.propertyInput.constructionMaterial).toBe('CBS');
+
+    // Disputed: the fact is WITHHELD — and stays withheld. The seed's
+    // WOOD_FRAME must not stand it back up.
+    const disputed = await resolve({ constructionMaterial: { fieldVerify: true } });
+    expect(disputed.propertyInput.constructionMaterial).toBeNull();
+    // A fact that was NOT disputed still resolves normally in the same run.
+    expect(disputed.propertyInput.foundationType).toBe('SLAB');
+
+    // Each rejected fact is independent.
+    const bothDisputed = await resolve({
+      constructionMaterial: { fieldVerify: true },
+      foundationType: { fieldVerify: true },
+    });
+    expect(bothDisputed.propertyInput.constructionMaterial).toBeNull();
+    expect(bothDisputed.propertyInput.foundationType).toBeNull();
+  });
+
   test('a flagged bed-area read keeps the seed out of the Tree & Shrub price (PR r15 P1)', async () => {
     // The response's property block does not surface bedArea, so the price
     // itself is the observable: a seeded bed area and the lot inference the

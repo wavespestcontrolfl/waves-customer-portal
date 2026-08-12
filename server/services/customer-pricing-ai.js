@@ -573,6 +573,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // Year built drives the pest/WDO age modifiers — same evidence gate
       // as the structural facts below (the enriched value is a mirror of
       // the same record merge, so one evidence bit covers both legs).
+      if (!structuralFactIsTrustworthy({ record, field: 'yearBuilt' })) {
+        // Same rejection bookkeeping as the structural facts below.
+        lookupRejectedFields.add('yearBuilt');
+      }
       yearBuilt = yearBuilt
         || (structuralFactIsTrustworthy({ record, field: 'yearBuilt' })
           ? (p.yearBuilt || record.yearBuilt)
@@ -593,7 +597,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // carries same-named RISK notices on authoritative values, which must
       // keep pricing; see structuralFactIsTrustworthy.)
       const structuralFact = (field, recordValue, enrichedValue) => {
-        if (!structuralFactIsTrustworthy({ record, field })) return null;
+        // A disputed fact is a REJECTION, not a gap (pre-push P0): without
+        // recording it, the seed block below restores the stale value the
+        // lookup just refused and the engine prices on it.
+        if (!structuralFactIsTrustworthy({ record, field })) {
+          lookupRejectedFields.add(field);
+          return null;
+        }
         return knownFact(recordValue)
           || (visionFactsOk ? knownFact(enrichedValue) : null)
           || null;
@@ -628,6 +638,16 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // replay free to fill it.
       if (p.hasAttachedGarage === true) {
         features.attachedGarage = true;
+        lookupFeatureKeys.add('attachedGarage');
+      } else if (p.hasAttachedGarage === false && String(p.garageType || '').trim()) {
+        // An observed NEGATIVE is evidence too (pre-push P0): the county
+        // recorded a garage and it is not attached (DETACHED, CARPORT).
+        // Marking only the positive lookup-backed let a stale seed restore
+        // attachedGarage:true over that newer county fact and price-lock
+        // the adjustment. detectAttachedGarage returns false for "no
+        // garageType on file" as well, which is why the negative counts
+        // only when the record actually named a garage type.
+        features.attachedGarage = false;
         lookupFeatureKeys.add('attachedGarage');
       }
       // Record-backed pool/cage survive a low AI grade — assessor data, not
@@ -780,10 +800,17 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
       propertyType = propertySeed.propertyType;
     }
-    yearBuilt = yearBuilt || propertySeed.yearBuilt || null;
-    constructionMaterial = constructionMaterial || propertySeed.constructionMaterial || null;
-    foundationType = foundationType || propertySeed.foundationType || null;
-    roofType = roofType || propertySeed.roofType || null;
+    // A structural fact the lookup REJECTED (weak or conflicting evidence on
+    // the record's own _fieldEvidence) is not a gap the seed may refill —
+    // restoring the stale value hands the engine exactly the input the
+    // lookup just refused, and the offer publishes an exact price on it
+    // (pre-push P0).
+    if (seedMayFill('yearBuilt')) yearBuilt = yearBuilt || propertySeed.yearBuilt || null;
+    if (seedMayFill('constructionMaterial')) {
+      constructionMaterial = constructionMaterial || propertySeed.constructionMaterial || null;
+    }
+    if (seedMayFill('foundationType')) foundationType = foundationType || propertySeed.foundationType || null;
+    if (seedMayFill('roofType')) roofType = roofType || propertySeed.roofType || null;
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
