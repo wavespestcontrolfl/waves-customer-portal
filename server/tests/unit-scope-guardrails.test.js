@@ -204,6 +204,25 @@ describe('commercialCategoryConflict', () => {
   });
 });
 
+describe('kill-switch isolation from the V2 gate (r12)', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+
+  test('owner-unit suites are opt-in per call, so the V2 path cannot inherit them', () => {
+    const args = {
+      propertyType: 'industrial', isCommercial: true, tenant: false,
+      aggregated: false, unitSignal: true,
+    };
+    // Default (the V2 shadow path with the unit-scope gate off): prior behavior.
+    expect(shadowPrivate.inferServiceScope(args)).toBe('entire_commercial_building');
+    expect(shadowPrivate.inferOwnershipType(args)).toBe('fee_simple');
+    // Opt-in (the unit-scope lane, or V2 with both gates on).
+    expect(shadowPrivate.inferServiceScope({ ...args, unitScopeSuites: true })).toBe('commercial_suite');
+    expect(shadowPrivate.inferOwnershipType({ ...args, unitScopeSuites: true })).toBe('commercial_condominium');
+    // A TENANT suite is pre-existing behavior and stays gate-independent.
+    expect(shadowPrivate.inferServiceScope({ ...args, tenant: true })).toBe('commercial_suite');
+  });
+});
+
 describe('resolveUnitScopeModel — subpremise on a type-less residential job', () => {
   test('a Unit suffix with a missing/generic type reads as a unit and clears the master parcel', () => {
     const model = resolveUnitScopeModel({

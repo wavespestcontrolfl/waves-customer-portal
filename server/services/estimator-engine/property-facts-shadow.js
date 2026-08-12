@@ -63,14 +63,19 @@ function hasUnitSignal({ tenant, address, extraction }) {
   return String(extraction?.property?.property_type || '') === 'apartment';
 }
 
-function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
+function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites = false }) {
   if (isCommercial) {
     // Positive unit evidence (a Unit/Suite subpremise) makes this a SUITE
     // whether the caller rents or OWNS it — an owner-occupied commercial
     // condo/flex unit is still one unit of a larger parcel, and building
     // scope would let lot-driven services price the whole complex
     // (codex r8 P1). Tenancy alone still implies a suite.
-    if (tenant || unitSignal) return 'commercial_suite';
+    // OWNER-unit suites are opt-in per call (`unitScopeSuites`): this
+    // module also feeds the independently-gated V2 pricing path, and
+    // reading GATE_UNIT_SCOPE_GUARDRAILS implicitly would let the new
+    // behavior ride GATE_PROPERTY_FACTS_V2 after an operator flipped the
+    // advertised kill switch off (codex r12 P1).
+    if (tenant || (unitSignal && unitScopeSuites)) return 'commercial_suite';
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
     return 'entire_commercial_building';
   }
@@ -88,12 +93,14 @@ function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, uni
   return 'entire_residential_structure';
 }
 
-function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
+function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites = false }) {
   if (tenant) return isCommercial ? 'leased_suite' : 'leased_land';
   // Owner-occupied commercial UNIT (positive unit evidence, no tenancy):
   // a commercial condominium — its lot is the development's master parcel,
   // never a private lot (pairs with the suite scope above, codex r8 P1).
-  if (isCommercial && unitSignal) return 'commercial_condominium';
+  // Same opt-in as inferServiceScope so the V2 path can't inherit the new
+  // behavior with the unit-scope kill switch off (codex r12 P1).
+  if (isCommercial && unitSignal && unitScopeSuites) return 'commercial_condominium';
   if (aggregated) return 'association_common_property';
   const type = String(propertyType || '');
   // Multifamily without positive unit evidence is an OWNED whole-property
@@ -344,8 +351,20 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
     const propertyType = propertyRecord?.propertyType || extraction?.property?.property_type || null;
 
     const unitSignal = hasUnitSignal({ tenant, address: address || propertyRecord?.formattedAddress, extraction });
-    const serviceScope = inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal });
-    const ownershipType = inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal });
+    // Owner-unit suites reach the V2 PRICING path only when the unit-scope
+    // kill switch is also on, so disabling it restores prior V2 behavior
+    // exactly (codex r12 P1). Lazily required: unit-scope-model requires
+    // this module at load time, so an eager import would cycle.
+    let unitScopeSuites = false;
+    try {
+      unitScopeSuites = require('./unit-scope-model').unitScopeGuardrailsEnabled();
+    } catch { /* predicate unavailable — stay on prior behavior */ }
+    const serviceScope = inferServiceScope({
+      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
+    });
+    const ownershipType = inferOwnershipType({
+      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
+    });
     const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
     if (!evidence.length) return null;
 

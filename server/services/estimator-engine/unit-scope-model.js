@@ -229,8 +229,11 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     extraction,
   });
   const subpremiseSignal = shadowPrivate.hasSubpremiseSignal({ address: modelAddress, extraction });
+  // This module IS the unit-scope lane, so owner-unit suites are always on
+  // for the model it composes (its pricing-affecting apply is separately
+  // gated); the V2 shadow path opts out by default — see inferServiceScope.
   let serviceScope = shadowPrivate.inferServiceScope({
-    propertyType, isCommercial, tenant, aggregated, unitSignal,
+    propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites: true,
   });
   // An explicit Unit/Apt/Suite subpremise on a residential job whose type
   // is missing or generic reads as a UNIT — a misclassified or
@@ -246,7 +249,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     serviceScope = 'residential_unit';
   }
   const ownershipType = shadowPrivate.inferOwnershipType({
-    propertyType, isCommercial, tenant, aggregated, unitSignal,
+    propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites: true,
   });
 
   // propertyFacts.tenant came from the same extraction field; keep the two
