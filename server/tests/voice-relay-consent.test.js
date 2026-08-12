@@ -484,6 +484,53 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }
   });
 
+  // ⭐ THE PHRASING PEOPLE BORROW FROM THE MESSAGES THEMSELVES. "Opt me out"
+  // and "no longer" are as explicit a withdrawal as "stop", and matched no stop
+  // verb at all — so the request read as "no channel named" and the texts the
+  // caller had just withdrawn kept sending.
+  test('"opt me out of texts" / "no longer want texts" suppress SMS', async () => {
+    for (const words of ['opt me out of texts', 'please opt out of your text messages', 'I no longer want texts']) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Asked to be taken off texts.',
+        contact_preference: words,
+        do_not_contact_request: true,
+      }, CTX);
+      expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+    }
+  });
+
+  // ⭐ THE INVERSE MISTAKE. A carve-out names the channel the caller KEPT, and
+  // it sits inside the stop clause — reading the clause as one string turned
+  // "text me and nothing else" into a text withdrawal, silencing the only way
+  // in they left open.
+  test('a texty carve-out never suppresses the channel the caller kept', async () => {
+    for (const words of [
+      'do not contact me except by text',
+      'stop contacting me, except by text message',
+      'do not reach me at all, only text me',
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Texts only from here on.',
+        contact_preference: words,
+        do_not_contact_request: true,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
+  // …and the same carve-out naming a NON-texty channel is still a real SMS
+  // withdrawal: email is the only way in they left open.
+  test('"do not contact me except by email" still suppresses SMS', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Email only from here on.',
+      contact_preference: 'do not contact me except by email',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   test('"do not contact me by email" is scoped too — the idiom is clause-checked', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Email opt-out.',

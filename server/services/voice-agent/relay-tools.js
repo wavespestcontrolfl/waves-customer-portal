@@ -760,13 +760,35 @@ async function executeTool(name, input = {}, ctx = {}) {
       // consent. So the stop verb's OWN clause is what decides: everything from
       // the stop word to the next clause boundary, with the replacement channel
       // that follows deliberately out of scope.
-      const STOP = '(?:stop|no more|don\'?t|do not|quit|cease|remove|unsubscribe|take me off)';
+      // ⭐ AND "OPT ME OUT" IS A STOP VERB. The list was built from the imperative
+      // phrasings ("stop", "don't", "take me off") and missed the one people
+      // borrow from the messages themselves: "opt me out of texts", "I no longer
+      // want texts". Neither matched, so an explicit, unambiguous withdrawal of
+      // SMS consent classified as "no stop clause at all" and left the caller
+      // fully text-eligible — the exact failure the TCPA/consent rule exists to
+      // prevent.
+      const STOP = '(?:stop|no more|no longer|don\'?t|do not|quit|cease|remove'
+        + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out|take me off)';
+      // The carve-out a caller attaches to a stop: "…except by text", "…only
+      // text me". What follows one of these words is a channel they KEPT, and
+      // it can sit inside the stop clause or just past its boundary.
+      const EXCEPT = '(?:except(?:\\s+for)?|other than|besides|apart from|unless|only)';
+      const EXCEPT_INLINE = new RegExp(`\\s+\\b${EXCEPT}\\b`, 'i');
+      const EXCEPT_HEAD = new RegExp(`^[\\s,;.!?—–]*\\b${EXCEPT}\\b`, 'i');
       // ⭐ EVERY STOP CLAUSE, NOT JUST THE FIRST. A caller can name more than
       // one: "don't email me, don't text me" puts the SMS withdrawal in the
       // SECOND clause, and reading only the first classified the whole request
       // as email-only — leaving running exactly the texts they stopped. Each
       // clause still ends at its own boundary, so a replacement channel
       // ("…, text me instead") stays outside the clause that stopped anything.
+      //
+      // ⭐ AND EACH CLAUSE SPLITS INTO STOPPED vs KEPT. "Do not contact me
+      // except by text" names texting INSIDE the stop clause while asking for
+      // precisely that channel — reading the clause as one string turned a
+      // request FOR texts into a withdrawal OF them, silencing the only channel
+      // the caller left open. The exception marker is the seam: everything
+      // before it is what they stopped, everything after is what they kept, and
+      // the kept half can only ever VETO a suppression, never cause one.
       const stopClauses = (() => {
         const out = [];
         const re = new RegExp(`\\b${STOP}\\b`, 'gi');
@@ -774,13 +796,24 @@ async function executeTool(name, input = {}, ctx = {}) {
         while (m) {
           const rest = preferenceText.slice(m.index);
           const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b/i);
-          out.push(cut === -1 ? rest : rest.slice(0, cut));
+          let stopped = cut === -1 ? rest : rest.slice(0, cut);
+          // A carve-out survives the clause boundary — "don't contact me, except
+          // by text" puts it after the comma — so the text just past the cut is
+          // read too, and only when it actually opens with an exception word.
+          const after = cut === -1 ? '' : rest.slice(cut);
+          let kept = EXCEPT_HEAD.test(after) ? after.split(/[;.!?]/)[0] : '';
+          const inline = stopped.search(EXCEPT_INLINE);
+          if (inline !== -1) {
+            kept = `${stopped.slice(inline)} ${kept}`;
+            stopped = stopped.slice(0, inline);
+          }
+          out.push({ stopped, kept });
           m = re.exec(preferenceText);
         }
         return out;
       })();
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
-      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c));
+      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept));
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
       // anymore", "take me off your list". It is NOT total when the same clause
@@ -792,10 +825,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // by email" matched "do not contact" and suppressed texts the caller
       // never withdrew: the clause-aware channel check above was doing its job
       // and the fallback walked straight past it.
+      // The kept channel vetoes the total stop as well: "don't contact me except
+      // by text" is total in its stopped half and still must not switch off the
+      // texts they asked to keep. ("…except by email" keeps no texty channel, so
+      // it stays a real SMS withdrawal — they left email as the only way in.)
       const totalStop = stopClauses.some((c) => (
-        (/\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c)
-          || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(c))
-        && !NON_SMS_CHANNEL.test(c)
+        (/\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c.stopped)
+          || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(c.stopped))
+        && !NON_SMS_CHANNEL.test(c.stopped)
+        && !TEXTY.test(c.kept)
       ));
       // ⭐ AND A BARE FLAG IS NOT EVIDENCE OF A CHANNEL. `contact_preference` is
       // optional, so `do_not_contact_request: true` with no words at all can be
