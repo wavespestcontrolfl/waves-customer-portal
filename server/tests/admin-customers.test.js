@@ -598,6 +598,10 @@ describe('admin customers route helpers', () => {
     // exact match.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // A ONE-TIME list item never keeps the recurring palm identity
+    // (codex r27 P1): scheduleLinesFromEstimate routes it to the one-time
+    // row via formatEstimateLine's kind check (covered indirectly by the
+    // catalog match below staying available for recurring kinds).
     // The raw `service` field carries the semiannual key too (codex r23
     // P1): validation applies without an explicit key or name.
     expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();

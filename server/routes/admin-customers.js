@@ -585,7 +585,15 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   const price = perVisitPrice != null ? perVisitPrice : monthlyFallbackPrice;
   if (kind !== 'recurring' && price == null) return null;
 
-  const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  let rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  // A ONE-TIME list item must never keep the recurring palm identity
+  // (codex r27 P1): the modal would submit a non-recurring visit carrying
+  // the semiannual service id + recurring completion profile — completing
+  // with recurring posture and skipping its one-time invoice. Route to
+  // the one-time palm row when the index has it, else stay unmatched.
+  if (kind !== 'recurring' && rawMatched?.service_key === 'palm_injection_semiannual') {
+    rawMatched = serviceIndex.byKey.get('palm_injection') || null;
+  }
   // The matched catalog row's own cadence beats the hardcoded quarterly
   // fallback (codex r18 pre-push P0): a bare explicit semiannual palm
   // selection carries no line cadence data, and a quarterly prefill on a
