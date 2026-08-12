@@ -3303,21 +3303,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
-    // A pending outbound-callback booking must be office-CONFIRMED before any
-    // day-of transition — advancing it straight to en_route texts the customer a
-    // tracking link, bypassing the review (and its reminder-arming confirm hook).
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
-
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state
@@ -3601,12 +3586,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
-      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -7321,15 +7300,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
-        }
-        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-          // Completing a pending outbound-review booking is an expected block
-          // from the shared writer — record the failed attempt and conflict.
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
-          return res.status(409).json({
-            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-            code: 'outbound_review_unconfirmed',
-          });
         }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
@@ -12341,23 +12311,6 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-
-    // A pending outbound-callback booking must be office-CONFIRMED before it can
-    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
-    // without the confirmation hook's reminder/lead/triage side effects. Confirm
-    // it first, then reschedule.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
-        .first('source_action', 'status', 'customer_confirmed');
-      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.

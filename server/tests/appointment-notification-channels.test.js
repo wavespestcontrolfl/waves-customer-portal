@@ -5,6 +5,9 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: jest.fn(() => []),
   isServiceContactRole: jest.fn(() => false),
+  // Same marker shape as the real sentinel — getReminderPrefs' fail-closed
+  // `unavailable` flag keys on __prefsUnavailable.
+  PREFS_UNAVAILABLE: Object.freeze({ __prefsUnavailable: true }),
 }));
 jest.mock('../services/appointment-email', () => ({
   sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
@@ -196,6 +199,36 @@ describe('getReminderPrefs account-level channel resolution', () => {
     expect(prefs.serviceReminder72h).toBe(true);
   });
 
+  test('a FAILED owner-profile resolution marks prefs unavailable — the email fallback fails closed (Codex #3361 r28 P1)', async () => {
+    // A swallowed owner-resolution failure is NOT "no row": the resolved
+    // channel/opt-out state is the child/default fallback, not the account
+    // owner's stored choices — prefsKnown must go false so the
+    // consent-blocked confirmation email fallback (which bypasses the
+    // sendCustomerMessage opt-out validator) never mails past an opt-out
+    // it never read.
+    const failingChain = () => {
+      const q = {};
+      ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => { throw new Error('conn reset'); });
+      return q;
+    };
+    setDbQueues({
+      notification_prefs: [
+        // property's own prefs read fine…
+        firstChain({ appointment_confirmation_channel: 'sms' }),
+        // …but the owner's prefs read FAILS
+        failingChain(),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: false }),
+        firstChain({ id: 'primary-1' }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('secondary-1');
+    expect(prefs.unavailable).toBe(true);
+  });
+
   test('primary profile uses its own channel without an extra lookup', async () => {
     setDbQueues({
       notification_prefs: [
@@ -271,6 +304,91 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(smsAttempt).toHaveBeenCalledTimes(1);
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     expect(reached).toBe(false);
+  });
+
+  test("'sms' preference: a consent-blocked text (smsPermanentlyBlocked) falls back to the confirmation email", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      scheduled_services: [
+        // scheduledServiceApptTime resolves the slot for the email body...
+        firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
+        // ...then buildRescheduleLink reads the row (no token → no CTA link).
+        firstChain({ id: 'ss1', customer_id: 'c1', reschedule_token: null }),
+      ],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    const callArg = AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0];
+    expect(callArg.appointmentTime instanceof Date).toBe(true);
+    expect(reached).toBe(true);
+  });
+
+  test("'sms' preference: a delivered text never triggers the smsPermanentlyBlocked email leg", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(reached).toBe(true);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test("'sms' preference: an ordinary failed send (no smsPermanentlyBlocked) still never emails — deferrals/sweeps own the retry", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt });
+
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('unreadable prefs (transient lookup failure): smsPermanentlyBlocked fails closed — no email', async () => {
+    // getReminderPrefs swallows the failed lookup into open defaults
+    // (confirmationOn=true); the fallback must treat that as "opt-out
+    // unknown" and stay silent, since the email path bypasses the
+    // sendCustomerMessage validator that would re-check the stored toggle.
+    const failChain = {};
+    ['where', 'whereIn'].forEach((m) => { failChain[m] = jest.fn(() => failChain); });
+    failChain.first = jest.fn(async () => { throw new Error('connection reset'); });
+    setDbQueues({
+      notification_prefs: [failChain],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('opted-out customer: smsPermanentlyBlocked never emails (the email path bypasses the opt-out validator)', async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation: false })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 
   test('falls back to the SMS send when channel prefs are unavailable', async () => {

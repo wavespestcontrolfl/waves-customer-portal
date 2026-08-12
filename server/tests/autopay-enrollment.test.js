@@ -9,10 +9,24 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}) }));
+jest.mock('../services/card-enrollment-email', () => ({ sendAutopayEnrollmentConfirmation: jest.fn(async () => {}) }));
 
 const db = require('../models/db');
 const { logAutopay } = require('../services/autopay-log');
+const { sendAutopayEnrollmentConfirmation } = require('../services/card-enrollment-email');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+
+// A caller-owned transaction handle (the appointment auto-secure passes its
+// outer trx as dbh, Codex #3361 r26 P1) — knex stamps isTransaction on
+// transaction objects, and that marker is what flips the side-effect
+// deferral (Codex #3361 r27 P1). Table reads delegate to the shared queue.
+function makeCallerTrx() {
+  const fn = jest.fn((table) => db(table));
+  fn.raw = jest.fn((sql) => sql);
+  fn.transaction = jest.fn(async (cb) => cb(fn));
+  fn.isTransaction = true;
+  return fn;
+}
 
 // Chainable query mock: builder methods return `this`; `.first()` resolves
 // the configured value; `.update()` records its arg and resolves.
@@ -174,5 +188,71 @@ describe('enrollConsentedMethod', () => {
 
     expect(result).toEqual({ enrolled: true, methodId: 'pm-new', inChargeMethodId: 'pm-new' });
     expect(custUpdate.update).toHaveBeenCalledWith({ autopay_enabled: true, autopay_payment_method_id: 'pm-new' });
+  });
+
+  test('standalone mode still fires the enrollment email inline (target in charge)', async () => {
+    setQueues({
+      customers: [qb({ first: custRow() }), qb()],
+      payment_methods: [qb({ first: TARGET }), qb({ first: null }), qb(), qb()],
+    });
+
+    const result = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'portal_add_card' });
+
+    expect(result.enrolled).toBe(true);
+    expect(result.sendEnrollmentConfirmation).toBeUndefined();
+    expect(sendAutopayEnrollmentConfirmation).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodRowId: 'pm-new' });
+  });
+});
+
+describe('enrollConsentedMethod — savepoint mode side effects honor the outer commit (Codex #3361 r27 P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('audit rides the caller transaction as REQUIRED and the email is deferred to the returned callback', async () => {
+    setQueues({
+      customers: [qb({ first: custRow() }), qb()],
+      payment_methods: [qb({ first: TARGET }), qb({ first: null }), qb(), qb()],
+    });
+    const callerTrx = makeCallerTrx();
+
+    const result = await enrollConsentedMethod({
+      customerId: 'cust-1',
+      paymentMethodId: 'pm-new',
+      source: 'save_card_consent',
+      dbh: callerTrx,
+    });
+
+    expect(result.enrolled).toBe(true);
+    // The audit row is written THROUGH the outer handle and a failure must
+    // roll the enrollment back with it — never the global pool, never
+    // warn-only: a rolled-back enrollment with a committed audit event
+    // contradicts the all-or-nothing contract.
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'autopay_enabled', expect.objectContaining({
+      db: callerTrx,
+      required: true,
+    }));
+    // Nothing customer-facing fired before the outer commit — the email is
+    // handed back for the caller's post-commit.
+    expect(sendAutopayEnrollmentConfirmation).not.toHaveBeenCalled();
+    expect(typeof result.sendEnrollmentConfirmation).toBe('function');
+    result.sendEnrollmentConfirmation();
+    expect(sendAutopayEnrollmentConfirmation).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodRowId: 'pm-new' });
+  });
+
+  test('a healthy incumbent in charge → no email callback at all (the wrong-card rule, Codex #2698 r1)', async () => {
+    setQueues({
+      customers: [qb({ first: custRow({ autopay_enabled: true, autopay_payment_method_id: 'pm-old' }) }), qb()],
+      payment_methods: [qb({ first: TARGET }), qb({ first: { id: 'pm-old', method_type: 'card' } }), qb()],
+    });
+
+    const result = await enrollConsentedMethod({
+      customerId: 'cust-1',
+      paymentMethodId: 'pm-new',
+      source: 'save_card_consent',
+      dbh: makeCallerTrx(),
+    });
+
+    expect(result.enrolled).toBe(true);
+    expect(result.sendEnrollmentConfirmation).toBeUndefined();
+    expect(sendAutopayEnrollmentConfirmation).not.toHaveBeenCalled();
   });
 });

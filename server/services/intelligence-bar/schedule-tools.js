@@ -614,6 +614,16 @@ async function moveStopsToDay(input) {
   // per stop; failures land in notification_failures.
   for (const s of movable) {
     if (!movedIds.has(s.id)) continue;
+    // Activate a moved LEGACY outbound-review row regardless of the notify
+    // flag (Codex #3361 r3 P0 — same gap as the admin bulk path): this
+    // writer moves rows directly, and a legacy row has no reminder row, so
+    // the notify branch below would report "no reminder record" without
+    // ever reaching the notice sender's activation belt. No-op for every
+    // other row; best-effort by the helper's contract.
+    try {
+      await require('../outbound-review-confirm')
+        .activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
+    } catch { /* helper is internally best-effort; never strand the batch */ }
     // Opt-in customer text — LAST: after the live-job release and the
     // reschedule_log audit, so a slow
     // SMS provider can never hold tech_status/tracker on the moved job.
@@ -624,17 +634,7 @@ async function moveStopsToDay(input) {
     if (notifyCustomers) {
       try {
         const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        // An unreviewed outbound-callback booking gets NO customer text and
-        // no handleReschedule cover (which would claim its still-pending
-        // confirmation slot) — the office reviews it first, same guard as
-        // the dispatch routes.
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../call-booking-source-actions');
-        const unreviewedCallback = s.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-          && String(s.status) === 'pending'
-          && !s.customer_confirmed;
-        if (unreviewedCallback) {
-          notificationFailures.push({ id: s.id, reason: 'Pending office review (outbound-callback booking) — not texted' });
-        } else if (!start) {
+        if (!start) {
           notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
         } else {
           const reminderRow = await db('appointment_reminders')

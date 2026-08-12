@@ -592,6 +592,15 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+  // Shared belt for every notice path (update-details, bulk reschedule, IB
+  // schedule tools): a LEGACY outbound-review row (pending before the
+  // 2026-08-11 review-hold removal) must be activated — reminders armed,
+  // lead converted, review card resolved — before a definitive reschedule
+  // text goes out (Codex #3361 r2 P0). The direct writers call this too;
+  // the helper's guarded stamp makes the hook at-most-once. No-op for
+  // every other row.
+  const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+  await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'reschedule-notice');
   const start = normalizeHHMM(startHHMM);
   if (!start) {
     // A date-only visit has no arrival window to promise — never fabricate
@@ -612,19 +621,9 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
   try {
     const svc = await db('scheduled_services')
       .where({ id: serviceId })
-      .first('customer_id', 'service_type', 'status', 'customer_confirmed', 'source_action');
-    // An unreviewed outbound-callback booking must never receive a definitive
-    // reschedule text — the office confirms it first (same guard the dispatch
-    // routes apply before any customer-facing transition).
-    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-    const unreviewedCallback = svc
-      && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-      && String(svc.status) === 'pending'
-      && !svc.customer_confirmed;
+      .first('customer_id', 'service_type');
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
-    if (unreviewedCallback) {
-      error = 'This outbound-callback booking is pending office review — no reschedule text was sent';
-    } else if (!customer) {
+    if (!customer) {
       error = 'Customer not found';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
@@ -4634,6 +4633,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // mark/re-arm. Default stays the silent resync this branch
                 // always did.
                 const bulkNotify = payload?.notifyCustomer === true;
+                // Activate a moved LEGACY outbound-review row BEFORE the
+                // reminder lookup below (Codex #3361 r3 P0): such a row has
+                // no reminder row until activation, so notifyThisRow would
+                // read false and the notice sender's own belt call — the
+                // only other activation seam on this path — would never
+                // run; a silent bulk move skipped activation entirely.
+                // No-op for every other row; at-most-once via the helper.
+                await require('../services/outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, id, 'bulk-reschedule');
                 // handleReschedule claims a still-pending creation
                 // confirmation (its reschedule notice normally replaces
                 // it), but with sendNotification:false no notice goes
@@ -4645,31 +4653,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
                   .first('id', 'confirmation_sent', 'suppressed_by_sibling');
-                // An unreviewed outbound-callback booking never texts (the
-                // office confirms first) — and routing it through the silent
-                // path below also re-arms the pending creation confirmation
-                // the cover call would otherwise claim.
-                const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-                // Own catch, fail-closed: a transient failure here must not
-                // ride the outer empty catch and silently skip both the
-                // reminder sync and the failure report.
-                let reviewFlags = null;
-                let reviewLookupFailed = false;
-                if (bulkNotify) {
-                  try {
-                    reviewFlags = await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed');
-                    if (!reviewFlags) reviewLookupFailed = true;
-                  } catch { reviewLookupFailed = true; }
-                }
-                const unreviewedCallback = !!reviewFlags
-                  && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-                  && String(reviewFlags.status) === 'pending'
-                  && !reviewFlags.customer_confirmed;
                 // A sibling-suppressed row's slot OWNER carries the customer
                 // messaging — sending here too would text the customer once
                 // per sibling for one slot. Suppressed rows move silently
                 // (by design, so not a notification failure).
-                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback && !reviewLookupFailed;
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
                   sendNotification: false,
                   coverDueWindows: notifyThisRow,
@@ -4684,10 +4672,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
-                } else if (bulkNotify && reviewLookupFailed) {
-                  notificationFailures.push({ id, reason: 'Could not verify the booking\'s review status — not texted' });
-                } else if (bulkNotify && unreviewedCallback) {
-                  notificationFailures.push({ id, reason: 'Pending office review (outbound-callback booking) — not texted' });
                 } else if (bulkNotify && !reminderBefore) {
                   notificationFailures.push({ id, reason: 'No reminder record for this visit — not texted' });
                 }
@@ -6588,6 +6572,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
+    // A moved LEGACY outbound-review row (pending before the 2026-08-11
+    // review-hold removal) activates here even on a SILENT move — this
+    // writer bypasses transitionJobStatus, and without activation the
+    // resynced reminder times have no registered reminders to follow
+    // (Codex #3361 r2 P0). At-most-once via the helper's guarded stamp
+    // (the notice sender's own belt call no-ops after this one); no-op for
+    // every other row.
+    if (scheduleMoveForNotice) {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');
+    }
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -6604,45 +6600,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
-        // Check the review gate BEFORE the cover call — handleReschedule
-        // claims a still-pending creation confirmation, and an unreviewed
-        // outbound-callback booking must keep that confirmation pending
-        // (the office-confirm sender is its customer message).
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-        // Best-effort, fail-closed: the edit itself already committed, so a
-        // transient failure here must degrade to "not texted" in the
-        // response — never a 500 that invites a retry of a succeeded edit.
-        const reviewFlags = await db('scheduled_services')
-          .where({ id: req.params.id })
-          .first('source_action', 'status', 'customer_confirmed')
-          .catch(() => undefined);
-        const unreviewedCallback = !!reviewFlags
-          && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-          && String(reviewFlags.status) === 'pending'
-          && !reviewFlags.customer_confirmed;
-        if (!reviewFlags) {
-          notificationSent = false;
-          notificationError = 'Could not verify the booking\'s review status — no reschedule text was sent';
-        } else if (unreviewedCallback) {
-          notificationSent = false;
-          notificationError = 'This outbound-callback booking is pending office review — no reschedule text was sent';
-        } else {
-          try {
-            // Cover any already-due reminder window before sending so the
-            // 15-min cron can't fire a day-before reminder in the gap between
-            // the commit above and the notice landing (same coverDueWindows
-            // contract the dispatch reschedule route uses).
-            await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
-              sendNotification: false,
-              coverDueWindows: true,
-            });
-          } catch (e) {
-            logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
-          }
-          const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
-          notificationSent = notice.sent;
-          notificationError = notice.error;
+        try {
+          // Cover any already-due reminder window before sending so the
+          // 15-min cron can't fire a day-before reminder in the gap between
+          // the commit above and the notice landing (same coverDueWindows
+          // contract the dispatch reschedule route uses).
+          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+            sendNotification: false,
+            coverDueWindows: true,
+          });
+        } catch (e) {
+          logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
         }
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        notificationSent = notice.sent;
+        notificationError = notice.error;
       }
     }
 
@@ -8354,22 +8326,6 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
-    // A pending outbound-callback booking must be office-CONFIRMED before any
-    // day-of transition — advancing it straight to en_route texts the customer a
-    // tracking link, bypassing the review (and its reminder-arming confirm hook).
-    // Only 'confirmed' / 'cancelled' are allowed until the office confirms it.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
-
     const fromStatus = svc.status;
     if (toStatus === 'en_route') {
       const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -8433,15 +8389,6 @@ router.put('/:id/status', async (req, res, next) => {
         // transaction — nothing was written. 404 (not 403): same
         // no-existence-oracle contract as the pre-check.
         return res.status(404).json({ error: 'Service not found' });
-      }
-      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-        // Expected block from the shared writer's review-booking guard —
-        // conflict, not a 500 (mirrors the pre-guard above for statuses it
-        // doesn't cover, e.g. a race past it).
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
       }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
