@@ -709,7 +709,11 @@ async function performPropertyLookup(address, options = {}) {
       reason = result.errors.find((e) => e.source === 'satellite')?.message || null;
     } else if (record && vacantSuspected) {
       status = 'vacant_or_unassessed';
-    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
+    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId
+      // Address-search county records carry their confirmed parcel id on
+      // _raw (no GIS parcel object → no _parcel meta) — a normal fallback
+      // path that must not read as no_parcel (codex r7 P2).
+      || record._raw?.parcelId || hasCountyEvidence(record))) {
       status = 'resolved';
     } else if (record) {
       status = 'no_parcel';

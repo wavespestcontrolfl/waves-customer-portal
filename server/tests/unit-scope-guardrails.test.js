@@ -167,6 +167,28 @@ describe('commercialCategoryConflict', () => {
     expect(commercialTextSignal('can you service our business monthly')).toBe(true);
     expect(commercialTextSignal('ants at the house, my business is slow lately')).toBe(false);
   });
+  test('a populated commercial_subtype conflicts regardless of the type text (r7)', () => {
+    // Owner quoting their whole multi-unit building: 'multi_family' text +
+    // subtype 'multi_unit_residential' slipped every text family.
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'multi_family', commercial_subtype: 'multi_unit_residential' } },
+      intent: { is_commercial: false },
+    })).toBe('commercial_subtype:multi_unit_residential');
+    // Null/other subtypes carry no positive signal.
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'apartment', commercial_subtype: null } },
+      intent: { is_commercial: false },
+    })).toBeNull();
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'apartment', commercial_subtype: 'other' } },
+      intent: { is_commercial: false },
+    })).toBeNull();
+  });
+  test('"the office" without a possessive stays quiet; possessives still fire (r7)', () => {
+    expect(commercialTextSignal('I work at the office downtown, but the ants are at my house')).toBe(false);
+    expect(commercialTextSignal('ants in my office at the shop')).toBe(true);
+    expect(commercialTextSignal('roaches at the restaurant')).toBe(true);
+  });
   test('the structured hoa_common_area_service boolean outranks a residential type text', () => {
     // A condo ASSOCIATION's common-area job reads property_type 'condo' —
     // the boolean is the schema's commercial routing signal (codex r2 P1).

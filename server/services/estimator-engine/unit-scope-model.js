@@ -83,7 +83,12 @@ const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail
 // "industrial building" / "office and warehouse" / "suite 101"…).
 const COMMERCIAL_TEXT_RE = new RegExp(
   [
-    '(?:my|our|the)\\s+(?:office|warehouse|shop|store|restaurant|clinic|storefront)\\b',
+    // Weak premises nouns (office/shop/store — common in residential
+    // prose: "I work at the office downtown") need a possessive; strong
+    // ones (warehouse/restaurant/clinic/storefront) accept the definite
+    // article too (codex r7 P2).
+    '(?:my|our)\\s+(?:office|shop|store)\\b',
+    '(?:my|our|the)\\s+(?:warehouse|restaurant|clinic|storefront)\\b',
     'industrial\\s+(?:building|park|unit|space|suite)',
     'office\\s+(?:and|&|\\+)\\s+warehouse',
     'warehouse\\s+(?:and|&|\\+)\\s+office',
@@ -126,6 +131,16 @@ function commercialCategoryConflict({ extraction, intent }) {
   // schema routes that commercial by definition (call-triage-flags applies
   // the same rule).
   if (extraction?.property?.hoa_common_area_service === true) return 'hoa_common_area_service';
+  // A populated commercial_subtype (schema enum: restaurant/office/…/
+  // multi_unit_residential) means the extraction positively classified the
+  // JOB as commercial — e.g. an owner quoting their whole multi-unit
+  // building — regardless of what the property_type text says (codex r7
+  // P1: 'multi_family' + subtype 'multi_unit_residential' + owner slipped
+  // every text family).
+  const subtype = String(extraction?.property?.commercial_subtype || '').trim().toLowerCase();
+  if (subtype && subtype !== 'null' && subtype !== 'none' && subtype !== 'other') {
+    return `commercial_subtype:${subtype}`;
+  }
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
   if (!type) return null;
   if (HOA_COMMON_AREA_TYPE_RE.test(type)) return type;
