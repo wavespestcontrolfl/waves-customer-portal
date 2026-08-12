@@ -242,6 +242,61 @@ describe('customer pricing AI helpers', () => {
     const silent = await run(null);
     expect(silent.property.propertyType).toBe('condo');
   });
+
+  test('a SYNTHESIZED Single Family display default never blocks the seeded type (PR r7 P1)', async () => {
+    // buildEnrichedProfile supplies 'Single Family' when neither record nor
+    // vision classified the property; the _observed provenance bit is the
+    // only way to tell it from an observation.
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          propertyType: 'Single Family',
+          _observed: { propertyType: false, shrubDensity: false, treeDensity: false, landscapeComplexity: false, irrigationVisible: false },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-type-synth', property_type: null }),
+      propertySeed: { propertyType: 'condo' },
+    });
+    expect(result.property.propertyType).toBe('condo');
+  });
+
+  test('synthesized density defaults stay open for seeded features; observed ones do not (PR r7 P1)', async () => {
+    // Trusted cache hit whose AI omitted the densities: the profile still
+    // carries 'MODERATE', so provenance must come from _observed, not
+    // presence — otherwise heavy seeded shrubs/trees from the accepted
+    // estimate are discarded and a lower rate price-locks.
+    const run = (observed, features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          shrubDensity: 'MODERATE', treeDensity: 'MODERATE',
+          _observed: { propertyType: false, shrubDensity: observed, treeDensity: observed, landscapeComplexity: false, irrigationVisible: false },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-density-prov' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        bedArea: 3000, bedAreaSource: 'explicit',
+        ...(features ? { features } : {}),
+      },
+    });
+    const synthesizedWithSeed = await run(false, { shrubs: 'heavy', trees: 'heavy' });
+    const synthesizedBare = await run(false, null);
+    const observedWithSeed = await run(true, { shrubs: 'heavy', trees: 'heavy' });
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    expect(price(synthesizedBare)).toBeGreaterThan(0);
+    // Synthesized defaults: the seeded heavy densities must move the price.
+    expect(price(synthesizedWithSeed)).toBeGreaterThan(price(synthesizedBare));
+    // Observed MODERATE: the seed must NOT override the observation.
+    expect(price(observedWithSeed)).toBe(price(synthesizedBare));
+  });
 });
 
 describe('count-based WaveGuard tier truth', () => {

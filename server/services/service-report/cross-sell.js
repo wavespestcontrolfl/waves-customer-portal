@@ -84,16 +84,9 @@ function pickOption(options = [], targetKey) {
 // Anything else demotes the card to an unpriced request-a-quote CTA — a
 // fallback-derived number on a customer surface is the trap this check
 // exists to close.
-// At least one locality field (city or zip) present on BOTH keys and equal.
-// sameScopeKey compares each locality field only when both sides carry it,
-// so disjoint evidence — a city-only primary against a zip-only stamp —
-// matches across cities (codex #3367 PR r6). Property equality here needs
-// one SHARED locality proof, not merely the absence of contradiction.
-function scopeKeysShareLocality(a, b) {
-  const [, ac, az] = String(a || '').split('|');
-  const [, bc, bz] = String(b || '').split('|');
-  return (!!ac && !!bc && ac === bc) || (!!az && !!bz && az === bz);
-}
+// scopeKeysShareLocality moved to estimate-property-linkage (PR r7) — one
+// authority for the property-equality proof, shared with filterRowsToStreet.
+const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 
 function optionIsPriceable(option) {
   if (!option) return false;
@@ -260,7 +253,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       linkedVisit = await database('scheduled_services')
         .where({ id: service.scheduled_service_id })
         .first('service_address_line1', 'service_address_line2', 'service_address_city',
-          'service_address_zip', 'source', 'is_recurring');
+          'service_address_zip', 'source', 'is_recurring', 'source_estimate_id', 'property_id');
       if (linkedVisit && linkedVisit.service_address_line1) {
         const rawKey = linkage.normalizedStampedStreet(
           linkedVisit.service_address_line1, linkedVisit.service_address_line2,
@@ -272,8 +265,31 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         // (city-only vs zip-only) — sameScopeKey's per-field wildcard
         // accepts that across cities; require one shared proof (PR r6).
         if (!scopeKeysShareLocality(rawKey, primaryStreet)) return null;
+      } else if (linkedVisit && (linkedVisit.property_id || linkedVisit.source_estimate_id)) {
+        // Unstamped but LINKED (codex #3367 PR r7): dispatch's own rule
+        // resolves an unstamped row through its property row / creating
+        // estimate before falling back to primary — assuming primary here
+        // would publish a primary-profile price for a secondary-property
+        // visit. Same proofs as a raw stamp; unresolvable = no card.
+        let resolvedKey = null;
+        if (linkedVisit.property_id) {
+          const prop = await database('customer_properties')
+            .where({ id: linkedVisit.property_id })
+            .first('address_line1', 'address_line2', 'city', 'zip');
+          resolvedKey = prop
+            ? linkage.normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
+            : null;
+        } else {
+          const src = await database('estimates')
+            .where({ id: linkedVisit.source_estimate_id })
+            .first('address');
+          resolvedKey = linkage.normalizedEstimateStreet(src?.address);
+        }
+        if (!resolvedKey || linkage.scopeKeyLacksLocality(resolvedKey)) return null;
+        if (!linkage.sameScopeKey(resolvedKey, primaryStreet)) return null;
+        if (!scopeKeysShareLocality(resolvedKey, primaryStreet)) return null;
       }
-      // No raw stamped line1 → the visit ran at the primary property.
+      // No raw stamp and no linkage → the visit ran at the primary property.
     } else {
       const reportStreet = linkage.normalizedStampedStreet(
         service.address_line1, service.address_line2, service.city, service.zip
@@ -287,8 +303,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // what the customer already buys, so no recommendation may render (same
     // doctrine as customer-pricing-ai's PRICING_UNAVAILABLE).
     const { loadOwnedRecurringServiceKeys, ownershipKeysForRow, loadCatalogFieldsByRowId } = require('../waveguard-existing-services');
+    // requireSharedLocality (codex #3367 PR r7): a same-street recurring
+    // row whose locality cannot be proven shared may be another property's
+    // obligation — filterRowsToStreet THROWS for opted-in consumers, and
+    // the outer try turns that into no card. The pricer's internal reload
+    // stays default-scoped: if a row is unprovable this frame died here
+    // first, so the reload never prices an unearned combined tier for a
+    // card that renders.
     const streetScope = primaryStreet
-      ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
+      ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet, requireSharedLocality: true }
       : null;
     const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
 
@@ -319,8 +342,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // would advance the ladder past pest and offer tree & shrub instead of
     // the missing recurring pest plan.
     const { isOneTimeBookingSource } = require('../self-booking-plan-sync');
-    const reportRowIsOneTime = !!linkedVisit
-      && (isOneTimeBookingSource(linkedVisit.source) || linkedVisit.is_recurring === false);
+    // service.is_callback covers reports with NO linked row (older
+    // service_records — codex #3367 PR r7): a "Pest Control Re-Service"
+    // callback is not a live plan any more than a one-time visit is.
+    const reportRowIsOneTime = !!service.is_callback
+      || (!!linkedVisit
+        && (isOneTimeBookingSource(linkedVisit.source) || linkedVisit.is_recurring === false));
     const reportFamilies = reportRowIsOneTime ? [] : ownershipKeysForRow(reportIdentity);
     // The catalog-enriched identity feeds the commercial gate too (codex
     // #3367 PR r5): a 'Commercial Pest Control' catalog row under stale

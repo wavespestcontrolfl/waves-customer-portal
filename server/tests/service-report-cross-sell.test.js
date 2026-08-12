@@ -316,6 +316,49 @@ describe('buildReportCrossSell', () => {
     expect(result.serviceKey).toBe('pest_control');
   });
 
+  test('a callback report with no linked row owns nothing (persisted is_callback flag)', async () => {
+    // Older service_records have nullable scheduled_service_id; the
+    // persisted flag is the only lifecycle evidence — a re-service label
+    // must not claim ownership and skip the ladder rung.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control', is_callback: true });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+  });
+
+  test('an unstamped linked visit resolves through its creating estimate — another city suppresses', async () => {
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{ id: 'v1', status: 'completed', source_estimate_id: 'est-9' }],
+      estimates: [{ id: 'est-9', address: '123 Gulf Dr, Venice, FL 34285', status: 'sent' }],
+    });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'v1' }), db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('an owned recurring row with disjoint locality evidence suppresses the whole card', async () => {
+    // Primary is city-only, the recurring row's stamp is zip-only: the row
+    // may belong to another property, and both counting and dropping it
+    // can be wrong — filterRowsToStreet throws for the strict scope and
+    // the card fails closed.
+    const db = dbFor({
+      customer: CUSTOMER({ zip: null }),
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'r1', service_type: 'Pest Control', scheduled_date: FUTURE_SCHEDULED_DATE,
+        status: 'scheduled', is_recurring: true,
+        service_address_line1: '123 Gulf Dr', service_address_zip: '34236',
+      }],
+    });
+    expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+  });
+
   test('a report stamped at a different property than the primary is suppressed', async () => {
     const db = dbFor({
       serviceTypes: ['Pest Control'],

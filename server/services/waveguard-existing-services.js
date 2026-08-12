@@ -318,7 +318,7 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
 // re-resolved via the creating estimate).
 async function filterRowsToStreet(database, rows, streetScope) {
   if (!streetScope || !streetScope.estimateStreet) return rows;
-  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const kept = [];
   for (const row of rows) {
     let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
@@ -329,7 +329,23 @@ async function filterRowsToStreet(database, rows, streetScope) {
       } catch { /* fall through to the primary-street default */ }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
-    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) {
+      // Opt-in property-equality proof (codex #3367 PR r7): sameScopeKey's
+      // per-field wildcard accepts disjoint locality evidence (a city-only
+      // primary against a zip-only stamp) across cities. Consumers pricing
+      // MONEY off this scope (report cross-sell) set requireSharedLocality:
+      // a same-street row that cannot be localized may be another
+      // property's obligation, and both keeping and dropping it can be
+      // wrong (unearned combined tier vs offering an owned family) — so
+      // the frame fails loudly and the caller's fail-closed machinery
+      // suppresses. Default consumers (the never-re-price panel scope,
+      // where over-recognition is the documented safe direction) are
+      // unchanged.
+      if (streetScope.requireSharedLocality && !scopeKeysShareLocality(street, streetScope.estimateStreet)) {
+        throw new Error('recurring row locality unprovable for street scope');
+      }
+      kept.push(row);
+    }
   }
   return kept;
 }

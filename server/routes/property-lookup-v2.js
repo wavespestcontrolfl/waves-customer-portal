@@ -1752,6 +1752,23 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     poolPermit: rc?._poolPermits?.poolPermit || null,
     enclosurePermit: rc?._poolPermits?.enclosurePermit || null,
 
+    // Per-field observation provenance (codex #3367 PR r7): this profile
+    // synthesizes defaults for unobserved fields ('MODERATE' densities,
+    // irrigationVisible false, the 'Single Family' display type), and a
+    // pricing consumer replaying accepted-estimate evidence must be able
+    // to tell an observation from a default — the synthesized value is
+    // otherwise indistinguishable at the consumer boundary. True = the raw
+    // record/vision evidence actually supplied the field. Built on every
+    // profile build, so cache-hit rebuilds carry it without a backfill.
+    _observed: {
+      propertyType: commercialProfile
+        || !!((rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial') || visionPropertyType),
+      shrubDensity: !!ai?.shrubDensity,
+      treeDensity: !!ai?.treeDensity,
+      landscapeComplexity: !!ai?.landscapeComplexity,
+      irrigationVisible: ai?.irrigationVisible === 'YES' || ai?.irrigationVisible === 'NO',
+    },
+
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
     treeDensity: ai?.treeDensity || 'MODERATE',

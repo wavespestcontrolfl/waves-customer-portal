@@ -1059,7 +1059,7 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
             // classifies the report by its catalog identity exactly like
             // the read path (codex #3367 PR r4) — omitting it made every
             // valid click 409 whenever the catalog reclassified stale text.
-            'sr.id', 'sr.customer_id', 'sr.service_type', 'sr.scheduled_service_id',
+            'sr.id', 'sr.customer_id', 'sr.service_type', 'sr.scheduled_service_id', 'sr.is_callback',
             db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
             db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
             db.raw('COALESCE(ss.service_address_city, c.city) as city'),

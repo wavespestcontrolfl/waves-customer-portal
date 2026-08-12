@@ -521,7 +521,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // the record in place (rc.propertyType, _propertyTypeSource:
       // 'satellite'), so a bare record read would hand the rejected
       // satellite type straight back.
-      const adoptedLookupType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
+      // The enriched propertyType may be the builder's synthesized
+      // 'Single Family' display default, indistinguishable by value from
+      // an observation (codex #3367 PR r7) — trust it only when the
+      // profile's provenance bit says the record/vision supplied it.
+      // Legacy cached profiles without _observed keep the old behavior.
+      const typeObserved = !p._observed || p._observed.propertyType !== false;
+      const adoptedLookupType = (typeObserved && lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
         || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null);
       if (adoptedLookupType) {
         propertyType = adoptedLookupType;
@@ -591,16 +597,24 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       } else {
         // A field is lookup-backed only when the trusted payload actually
         // carried a value for it — a silent field keeps its default here
-        // and stays open for the seed's fill below.
+        // and stays open for the seed's fill below. The densities,
+        // complexity, and irrigation flags are SYNTHESIZED by
+        // buildEnrichedProfile when unobserved ('MODERATE'/false), so
+        // presence alone lies for them (codex #3367 PR r7) — their backing
+        // comes from the profile's _observed provenance bits instead.
+        // Legacy cached profiles without _observed keep presence semantics.
+        const obs = (p._observed && typeof p._observed === 'object') ? p._observed : null;
         for (const [key, present] of Object.entries({
           pool: !!p.pool,
           poolCage: !!p.poolCage,
           poolCageSize: !!p.poolCageSize,
           nearWater: !!p.nearWater,
-          shrubs: !!p.shrubDensity,
-          trees: !!p.treeDensity,
-          complexity: !!p.landscapeComplexity,
-          irrigation: p.irrigationVisible !== undefined && p.irrigationVisible !== null,
+          shrubs: obs ? !!obs.shrubDensity : !!p.shrubDensity,
+          trees: obs ? !!obs.treeDensity : !!p.treeDensity,
+          complexity: obs ? !!obs.landscapeComplexity : !!p.landscapeComplexity,
+          irrigation: obs
+            ? !!obs.irrigationVisible
+            : (p.irrigationVisible !== undefined && p.irrigationVisible !== null),
           treeCount: lookupTreeCountIsTrustworthy(p),
         })) {
           if (present) lookupFeatureKeys.add(key);
