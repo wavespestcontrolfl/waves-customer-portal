@@ -550,7 +550,6 @@ module.exports = {
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
-  loadCatalogFieldsByRowId,
   loadOwnedRecurringServiceKeys,
   ownershipKeysForRow,
   isMembershipCustomerRow,
