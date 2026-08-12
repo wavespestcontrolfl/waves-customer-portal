@@ -1415,6 +1415,12 @@ class GscOpportunityMiner {
     // One facts-readiness verdict per city::service per run — shared by
     // family subgroup selection AND the boost (Codex r32).
     const factsReadyCache = new Map();
+    // Queries whose EVIDENCE was unavailable this run (map coverage
+    // missing for a contributing domain). Their pending rows must survive
+    // the canonical sweep: absent evidence is not a recovered signal, and
+    // expiring them would let a sync outage drain the lane one domain at
+    // a time. Same shape and purpose as familyExemptions above.
+    const sweepExemptQueries = { ctr_rewrite: new Set(), no_content_yet: new Set() };
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1440,13 +1446,13 @@ class GscOpportunityMiner {
 
     const runs = [
       ['striking_distance', () => this.mineStrikingDistance(since, ownPagesByServiceCity)],
-      ['ctr_rewrite', () => this.mineCtrRewrite(since)],
+      ['ctr_rewrite', () => this.mineCtrRewrite(since, { exemptQueries: sweepExemptQueries.ctr_rewrite })],
       ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
       // cannibalization + page_type_mismatch retired 2026-08-12 — see the
       // header's RETIRED note for the canonical mechanisms.
       ['local_gap', () => this.mineLocalGap(since, ownPagesByServiceCity)],
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
-      ['no_content_yet', () => this.mineNoContentYet(since, { periodDays })],
+      ['no_content_yet', () => this.mineNoContentYet(since, { periodDays, exemptQueries: sweepExemptQueries.no_content_yet })],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
@@ -1665,7 +1671,8 @@ class GscOpportunityMiner {
               bucket,
               revalidated.filter((o) => o.bucket === bucket),
               trx,
-              revalidated
+              revalidated,
+              sweepExemptQueries[bucket]
             );
           }
         }
@@ -2063,7 +2070,7 @@ class GscOpportunityMiner {
     });
   }
 
-  async mineCtrRewrite(since) {
+  async mineCtrRewrite(since, { exemptQueries = new Set() } = {}) {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
@@ -2143,6 +2150,14 @@ class GscOpportunityMiner {
         ? ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains))
         : null;
       const targetId = resolved ? routeIdentity(resolved) : null;
+      // Coverage/mapping unavailable for a contributing domain means we
+      // could not JUDGE this query — its pending row must survive the
+      // sweep rather than read as a recovered signal (audit P1).
+      if (!queryDomainsCovered(r.domains, covered)
+        || !mapped
+        || !queryDomainsCovered(r.domains, mapped.domains)) {
+        exemptQueries.add(r.query);
+      }
       const pageUrl = (
         // The older seo_actions queue owns this page — yield to it.
         (resolved && ownedBySeoActions.has(targetId))
@@ -3367,7 +3382,7 @@ class GscOpportunityMiner {
     }
   }
 
-  async mineNoContentYet(since, { periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS } = {}) {
+  async mineNoContentYet(since, { periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, exemptQueries = new Set() } = {}) {
     // Queries with impressions but no owned page USEFULLY ranking for them
     // — served-ness on TRUE query→page rows, not classification overlap.
     // Two earlier iterations both broke in opposite directions: raw
@@ -3416,11 +3431,14 @@ class GscOpportunityMiner {
     // fail independently per domain, so one domain's rows must not vouch
     // for another domain's absences.
     const covered = await this._queryPageMapCoveredDomains(since);
-    if (!covered.size) {
-      // Same contract as the ctr_rewrite fence: throw so mineAll marks the
-      // bucket errored and its sweep is suppressed. An empty return would
-      // let a sync outage retire every pending content-gap row (audit P1).
-      throw new Error('gsc_query_page_map has no fresh coverage for the window');
+    if (!covered.has(HUB_DOMAIN)) {
+      // This bucket is HUB-ONLY, so hub coverage is the only coverage
+      // that matters: a fresh SPOKE would otherwise satisfy a bare
+      // "any domain covered" test, every hub candidate would be skipped,
+      // and the bucket would look successful-but-empty — letting the
+      // canonical sweep expire the whole content-gap lane (audit P1).
+      // Throw so mineAll marks the bucket errored and suppresses it.
+      throw new Error(`gsc_query_page_map has no fresh coverage for ${HUB_DOMAIN}`);
     }
     const bestMapped = await this._bestMappedPositionByQueryDomain(
       candidates.map((c) => c.q.query), since
@@ -3440,7 +3458,11 @@ class GscOpportunityMiner {
     let uncovered = 0;
     const out = [];
     for (const { q, service, city } of candidates) {
-      if (!queryDomainsCovered(q.domains, covered)) { uncovered += 1; continue; }
+      if (!queryDomainsCovered(q.domains, covered)) {
+        uncovered += 1;
+        exemptQueries.add(q.query); // evidence missing, not signal recovered
+        continue;
+      }
       // Evidence per CONTRIBUTING DOMAIN — every one must map this query
       // to a weakly-ranking page (see noContentYetEmittable).
       const domainPositions = (Array.isArray(q.domains) ? q.domains : [])
@@ -3701,7 +3723,7 @@ class GscOpportunityMiner {
    * 'expired' — revivable the moment the signal returns. Companions follow
    * their parent, minus anything the current batch still stands behind.
    */
-  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null) {
+  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null, exemptQueries = new Set()) {
     const runner = trx || db;
     // Keyed on persistable DEDUPE KEYS, not query strings: one query can
     // produce several (query, service, city, intent) candidates, so a
@@ -3721,6 +3743,9 @@ class GscOpportunityMiner {
       let staleQ = runner('opportunity_queue')
         .where({ bucket, status: 'pending' });
       if (liveKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(liveKeys));
+      // Rows for queries we could not judge this run are preserved: the
+      // sweep retires RECOVERED signals, never unavailable evidence.
+      if (exemptQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(exemptQueries));
       const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
       if (!stale.length) return;
 

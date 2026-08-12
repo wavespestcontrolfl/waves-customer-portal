@@ -460,8 +460,19 @@ describe('degraded buckets THROW so mineAll suppresses their sweep', () => {
   test('the seo_actions fence throws rather than returning empty', () => {
     expect(src).toMatch(/ownedBySeoActions === null\) \{[\s\S]{0,600}throw new Error\('seo_actions ownership fence unavailable/);
   });
-  test('the empty query-page map path throws rather than returning empty', () => {
-    expect(src).toMatch(/!covered\.size\) \{[\s\S]{0,500}throw new Error\('gsc_query_page_map has no fresh coverage/);
+  test('the hub-coverage guard throws rather than returning empty', () => {
+    // no_content_yet is hub-only, so a fresh SPOKE must not satisfy the
+    // guard: that would skip every hub candidate, look successful, and
+    // let the sweep expire the lane.
+    expect(src).toMatch(/!covered\.has\(HUB_DOMAIN\)\) \{[\s\S]{0,600}throw new Error\(`gsc_query_page_map has no fresh coverage for \$\{HUB_DOMAIN\}`\)/);
+  });
+
+  test('queries whose evidence was unavailable are EXEMPT from the sweep', () => {
+    // Absent evidence is not a recovered signal — the pending row must
+    // survive rather than be retired by a partial outage.
+    expect(src).toMatch(/exemptQueries\.add\(q\.query\)/);
+    expect(src).toMatch(/exemptQueries\.add\(r\.query\)/);
+    expect(src).toMatch(/if \(exemptQueries\.size\) staleQ = staleQ\.whereNotIn\('query', Array\.from\(exemptQueries\)\)/);
   });
   test('mineAll skips the sweep for any bucket that errored', () => {
     expect(src).toMatch(/for \(const bucket of \['ctr_rewrite', 'no_content_yet'\]\) \{[\s\S]{0,120}if \(errors\[bucket\]\) continue;/);
