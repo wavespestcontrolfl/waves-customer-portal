@@ -179,14 +179,31 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
               });
             if (rows && !armed.suppressed_by_sibling) {
               // The conversion demoted a slot OWNER: a real visit
-              // registered at the 08:00 fallback slot may sit suppressed
-              // beneath it, and no trigger event fires for this app-side
-              // demotion — promote exactly as the trigger does on slot
-              // departure, carrying the owner's delivered-window state.
+              // registered at the same slot may sit suppressed beneath it,
+              // and no trigger event fires for this app-side demotion —
+              // promote exactly as the trigger does on slot departure,
+              // carrying the owner's delivered-window state. The vacated
+              // slot is the one the ARMED ROW actually occupies, so its
+              // date/window params are the ET decomposition of the row's
+              // own appointment_time (Codex #3361 r23 P2) — NOT the
+              // post-move service slot: when the windowless edit landed
+              // BEFORE our registration inserted (the stale-read ordering
+              // the r11 verify exists for), the row still sits at the
+              // pre-move real slot (e.g. 09:00, possibly a different
+              // date), and passing the post-move date + NULL(→08:00)
+              // window could never match the 09:00 sibling's service row
+              // in the promotion's candidate filter. Decomposing
+              // appointment_time inverts exactly the (date + COALESCE
+              // window) AT TIME ZONE composition the trigger builds slot
+              // times with, so it is right in both orderings.
               await trx.raw(
-                'SELECT promote_suppressed_reminder_sibling(?::uuid, ?::uuid, ?::timestamptz, ?::date, NULL::time, ?, ?, ?, ?)',
+                `SELECT promote_suppressed_reminder_sibling(
+                   ?::uuid, ?::uuid, ?::timestamptz,
+                   ((?::timestamptz) AT TIME ZONE 'America/New_York')::date,
+                   ((?::timestamptz) AT TIME ZONE 'America/New_York')::time,
+                   ?, ?, ?, ?)`,
                 [armed.customer_id, svc.id, armed.appointment_time,
-                  dateOnly(postSlot.scheduled_date),
+                  armed.appointment_time, armed.appointment_time,
                   armed.reminder_72h_sent === true, armed.reminder_72h_sent_at || null,
                   armed.reminder_24h_sent === true, armed.reminder_24h_sent_at || null],
               );

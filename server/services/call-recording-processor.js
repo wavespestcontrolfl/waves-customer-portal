@@ -11800,6 +11800,47 @@ const CallRecordingProcessor = {
                   } catch (confirmRepairErr) {
                     logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                   }
+                } else if (v2SmsBlocked && !v2EmailBlocked) {
+                  // Consent-blocked SMS with email still permitted: the
+                  // inline r21 fallback emails the confirmation, but a crash
+                  // between the committed insert and that send loses it — and
+                  // the sweep re-arm above is (correctly) skipped for a
+                  // consent-blocked booking, so nothing would ever retry the
+                  // email (Codex #3361 r23 P2). Repair the EMAIL leg only:
+                  // evidence-gated on the email audit ledger, idempotent at
+                  // the sender (per-occurrence keys), future visits only, and
+                  // never touching the stranded-confirmation sweep (its
+                  // canonical sender is an SMS rail).
+                  try {
+                    const emailEvidence = await db('customer_interactions')
+                      .where({ interaction_type: 'email_outbound' })
+                      .whereRaw("metadata->>'scheduled_service_id' = ?", [String(svc.id)])
+                      .whereRaw("metadata->>'status' = 'sent'")
+                      .first('id');
+                    const replayApptTime = parseETDateTime(
+                      `${replayDate}T${svc.window_start ? String(svc.window_start).slice(0, 5) : '23:59'}`,
+                    );
+                    if (!emailEvidence && replayApptTime.getTime() > Date.now()) {
+                      const AppointmentReminders = require('./appointment-reminders');
+                      const reached = await AppointmentReminders.deliverConfirmationByChannel({
+                        customerId,
+                        scheduledServiceId: svc.id,
+                        serviceLabel: svc.service_type,
+                        smsPermanentlyBlocked: true,
+                        // Stub, no SMS side effects: the primary text is
+                        // consent-blocked on this run's verdict, and the
+                        // helper enforces the channel prefs, the
+                        // confirmation opt-out, and the prefs-unavailable
+                        // fail-closed rule before its email fallback runs.
+                        smsAttempt: async () => false,
+                      });
+                      if (reached) {
+                        logger.info(`[call-proc] replay of ${svc.id}: consent-blocked SMS — confirmation email repaired`);
+                      }
+                    }
+                  } catch (emailRepairErr) {
+                    logger.warn(`[call-proc] replay email-confirmation repair failed for ${svc.id}: ${emailRepairErr.message}`);
+                  }
                 }
               }
               if (!svc.technician_id) {

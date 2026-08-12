@@ -424,9 +424,37 @@ describe('windowless repair — canonical placeholder conversion (Codex r22 P2)'
     // Demoting an armed owner must promote a suppressed sibling exactly as
     // the trigger's slot-departure path does — no trigger event fires for
     // this app-side demotion.
-    expect(hook).toContain('promote_suppressed_reminder_sibling(?::uuid, ?::uuid, ?::timestamptz, ?::date, NULL::time, ?, ?, ?, ?)');
+    expect(hook).toContain('SELECT promote_suppressed_reminder_sibling(');
+    // The promotion's slot date/window are the ET decomposition of the
+    // armed row's OWN appointment_time (Codex r23 P2) — never the post-move
+    // service slot, which misses the pre-move sibling when the windowless
+    // edit landed before the stale-read registration inserted.
+    expect(hook).toContain("((?::timestamptz) AT TIME ZONE 'America/New_York')::date");
+    expect(hook).toContain("((?::timestamptz) AT TIME ZONE 'America/New_York')::time");
+    expect(hook).not.toContain('NULL::time');
     // Slot advisory lock first, same order as registration and the trigger.
     expect(hook).toContain('pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))');
+  });
+});
+
+describe('same-key replay — consent-blocked email confirmation repair (Codex r23 P2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('a replay with SMS consent-blocked but email permitted retries the email leg, evidence-gated', () => {
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    // The branch exists and is scoped to the partial TCPA block.
+    expect(callProc).toContain('} else if (v2SmsBlocked && !v2EmailBlocked) {');
+    // Evidence gate on the email audit ledger before re-sending, and the
+    // repair goes through the channel-aware helper (opt-out + prefs
+    // fail-closed enforced there) with the SMS leg stubbed off.
+    const branchAt = callProc.indexOf('} else if (v2SmsBlocked && !v2EmailBlocked) {');
+    const branchSlice = callProc.slice(branchAt, branchAt + 3000);
+    expect(branchSlice).toContain("interaction_type: 'email_outbound'");
+    expect(branchSlice).toContain('smsPermanentlyBlocked: true,');
+    expect(branchSlice).toContain('smsAttempt: async () => false,');
+    // It must never re-arm the SMS sweep (that rail has no consent context).
+    expect(branchSlice).not.toContain('confirmation_sent: false');
   });
 });
 
