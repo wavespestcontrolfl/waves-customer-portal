@@ -785,6 +785,47 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(new Set(out.match(/\$[\d.]+/g) || [])).toEqual(new Set(['$88']));
   });
 
+  // ⭐ AGENTS.md (estimator engine authority): engine low-confidence markers
+  // (fpSource fallback, low pricingConfidence, turfBasis fallbacks) route to
+  // the review lane and never auto-apply — and a price spoken down the phone
+  // is the most binding auto-apply there is. The gate used to read only the
+  // explicit manual-review/quote flags, so a lawn line priced off an ESTIMATED
+  // turf area (no lawn size from the caller, so the engine derived one from
+  // the lot) was read out as an exact number.
+  test('low-confidence engine markers refuse the price, exactly like a manual-review line', async () => {
+    const priceable = {
+      service: 'lawn_care', perApp: 78, monthly: 78, monthlyAfterDiscount: 78,
+      visitsPerYear: 12, requiresManualReview: false,
+    };
+    for (const marker of [
+      { turfBasis: 'lotFallback' },
+      { turfBasis: 'estimatedTurfSf' },
+      { turfBasis: 'countyPrior' },
+      { pricingConfidence: 'LOW' },
+      { pricingConfidence: 'medium' },
+      { fpSource: 'county_fallback' },
+    ]) {
+      generateEstimate.mockReturnValue({ lineItems: [{ ...priceable, ...marker }], summary: {} });
+      const out = await executeTool(
+        'get_pricing',
+        { service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000 },
+        { customerId: 'c-1111' },
+      );
+      expect(out).toMatch(/needs a custom quote/i);
+      expect(out).not.toMatch(/\$\d/);
+    }
+    // A line the engine priced off a real turf figure still quotes.
+    generateEstimate.mockReturnValue({
+      lineItems: [{ ...priceable, turfBasis: 'lawnSqFt', pricingConfidence: 'HIGH' }], summary: {},
+    });
+    const quoted = await executeTool(
+      'get_pricing',
+      { service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000, lawn_sqft: 5000 },
+      { customerId: 'c-1111' },
+    );
+    expect(quoted).toMatch(/\$78/);
+  });
+
   test('manual-review line → refuses to state a price', async () => {
     generateEstimate.mockReturnValue({
       lineItems: [{ service: 'tree_shrub', perApp: 90, requiresManualReview: true }],

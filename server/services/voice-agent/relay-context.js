@@ -840,6 +840,30 @@ async function lookupCustomersText(input = {}, ctx = {}) {
 
 const PRICEABLE_SERVICES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
 const PEST_FREQUENCIES = ['quarterly', 'bimonthly', 'monthly'];
+
+// ⭐ ENGINE LOW-CONFIDENCE MARKERS NEVER AUTO-APPLY — and a price read down the
+// phone is the most binding auto-apply there is. AGENTS.md (estimator engine
+// authority): "engine low-confidence markers (fpSource fallback, low
+// pricingConfidence, turfBasis fallbacks) route to the review lane, never
+// auto-apply". The refusal gate below checked only the explicit
+// requiresManualReview / quote flags, so a lawn line priced off an ESTIMATED
+// turf area (the caller did not give a lawn size, so the engine derived one
+// from the lot) was spoken as an exact number.
+//
+// Confident bases are the two that come from a real measurement or the
+// caller's own figure; every other basis is the engine estimating, and the
+// conservative answer on the phone is "a team member will go over exact
+// pricing". Same direction for pricingConfidence: only an explicitly HIGH (or
+// absent, i.e. not a confidence-scored lane) line may be quoted.
+const CONFIDENT_TURF_BASES = new Set(['measuredTurfSf', 'lawnSqFt']);
+function engineLineIsLowConfidence(line) {
+  if (!line) return true;
+  const confidence = String(line.pricingConfidence || '').trim().toUpperCase();
+  if (confidence && confidence !== 'HIGH') return true;
+  if (line.fpSource && /fallback|estimate|prior/i.test(String(line.fpSource))) return true;
+  if (line.turfBasis && !CONFIDENT_TURF_BASES.has(String(line.turfBasis))) return true;
+  return false;
+}
 // The engine's own PROPERTY_TYPE_ADJ keys (pricing-engine/constants.js).
 const PRICEABLE_PROPERTY_TYPES = [
   'single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper',
@@ -913,7 +937,8 @@ async function pricingText(input = {}) {
   const { generateEstimate } = require('../pricing-engine');
   const est = generateEstimate(engineInput);
   const line = (est && est.lineItems || []).find((l) => l && l.service === service);
-  if (!line || line.requiresManualReview || line.quoteRequired || line.requiresQuote) {
+  if (!line || line.requiresManualReview || line.quoteRequired || line.requiresQuote
+    || engineLineIsLowConfidence(line)) {
     return 'This one needs a custom quote — do not state a price. Tell the caller a Waves team member will go over exact pricing on the follow-up call.';
   }
 
