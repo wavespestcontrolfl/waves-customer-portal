@@ -37,14 +37,21 @@ const ASSOCIATION_TYPES = /multifamily|apartment|hoa common area/i;
 // structure: tenancy, or a unit/apt/suite subpremise in the service address.
 const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+|#\s*\w+)\s*$/i;
 
-function hasUnitSignal({ tenant, address, extraction }) {
-  if (tenant) return true;
+// The ADDRESS half of the unit signal alone: an explicit unit/apt/suite
+// subpremise on the service address (never tenancy — a tenant of a plain
+// single-family rental treats the whole house).
+function hasSubpremiseSignal({ address, extraction }) {
   if (address && SUBPREMISE_RE.test(String(address).replace(/,?\s*[A-Za-z .]+,\s*FL.*$/i, ''))) return true;
   const extractionAddress = extraction?.property?.service_address;
   const rawLine = typeof extractionAddress === 'string'
     ? extractionAddress
     : (extractionAddress?.raw || extractionAddress?.line1 || '');
-  if (rawLine && SUBPREMISE_RE.test(String(rawLine))) return true;
+  return !!(rawLine && SUBPREMISE_RE.test(String(rawLine)));
+}
+
+function hasUnitSignal({ tenant, address, extraction }) {
+  if (tenant) return true;
+  if (hasSubpremiseSignal({ address, extraction })) return true;
   return String(extraction?.property?.property_type || '') === 'apartment';
 }
 
@@ -490,5 +497,6 @@ module.exports = {
     inferOwnershipType,
     buildMeasurementEvidence,
     hasUnitSignal,
+    hasSubpremiseSignal,
   },
 };

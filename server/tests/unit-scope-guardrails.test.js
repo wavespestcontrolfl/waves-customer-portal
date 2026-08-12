@@ -204,6 +204,32 @@ describe('commercialCategoryConflict', () => {
   });
 });
 
+describe('resolveUnitScopeModel — subpremise on a type-less residential job', () => {
+  test('a Unit suffix with a missing/generic type reads as a unit and clears the master parcel', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit 12, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '900 Bayview Ter, Unit 12, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('residential_unit');
+    const facts = { lot: { value: 120000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.lot.value).toBeNull();
+  });
+  test('a positively whole-structure type is respected over the address token', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: { property_type: 'townhouse' } },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit A, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { source: 'county_assessed' } },
+      address: '900 Bayview Ter, Unit A, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('entire_residential_structure');
+  });
+});
+
 describe('resolveUnitScopeModel — unknown stays unknown in the audit', () => {
   test('a schema-valid unknown (or unrecognized) type never records single_family', () => {
     const model = resolveUnitScopeModel({

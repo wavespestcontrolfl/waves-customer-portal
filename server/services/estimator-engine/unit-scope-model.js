@@ -216,14 +216,29 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     || propertyFacts?.propertyType
     || null;
 
+  const modelAddress = address || propertyRecord?.formattedAddress || intent?.address;
   const unitSignal = shadowPrivate.hasUnitSignal({
     tenant,
-    address: address || propertyRecord?.formattedAddress || intent?.address,
+    address: modelAddress,
     extraction,
   });
-  const serviceScope = shadowPrivate.inferServiceScope({
+  const subpremiseSignal = shadowPrivate.hasSubpremiseSignal({ address: modelAddress, extraction });
+  let serviceScope = shadowPrivate.inferServiceScope({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
   });
+  // An explicit Unit/Apt/Suite subpremise on a residential job whose type
+  // is missing or generic reads as a UNIT — a misclassified or
+  // record-less unit otherwise came back entire_residential_structure and
+  // kept the development's master parcel for lot-driven pricing (codex
+  // pre-push P1). A type that positively names a whole structure
+  // (single-family/duplex/townhome/villa/mobile — the V2 bridge's own
+  // whole-structure vocabulary) is respected over the address token.
+  const WHOLE_STRUCTURE_TYPES = /single_?\s?family|duplex|triplex|quadplex|townhou|town\s?home|villa|mobile_?\s?home|manufactured/i;
+  if (!isCommercial && subpremiseSignal
+    && serviceScope === 'entire_residential_structure'
+    && !WHOLE_STRUCTURE_TYPES.test(String(propertyType || ''))) {
+    serviceScope = 'residential_unit';
+  }
   const ownershipType = shadowPrivate.inferOwnershipType({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
   });
@@ -246,6 +261,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     sizeBasis: propertyFacts?.home?.source || 'unresolved',
     lotApplicability: lotApplicabilityFor({ propertySubtype: propertyType, ownershipType }),
     unitSignal,
+    subpremiseSignal,
   };
 }
 
@@ -269,7 +285,12 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   // development's master parcel (property-facts-shadow doctrine).
   const noIndividualLot = model.lotApplicability === 'common_master_parcel'
     || model.lotApplicability === 'no_individual_lot'
-    || model.lotApplicability === 'leased_land';
+    || model.lotApplicability === 'leased_land'
+    // A subpremise-driven unit whose generic type left ownership at
+    // fee_simple (lotApplicability private_parcel) still sits on a parcel
+    // it doesn't own alone — the resolvable lot is the development's
+    // (codex pre-push P1, same family as the r8 owner-occupied suite fix).
+    || model.subpremiseSignal === true;
   if (unitScoped && noIndividualLot) {
     const priorValue = Number(propertyFacts?.lot?.value) > 0 ? Number(propertyFacts.lot.value) : null;
     propertyFacts.lot = {
