@@ -12057,6 +12057,36 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
+// body: { message, target: { date, window } }
+//
+// Server-side segment counter for the Quick Move sheet's Custom mode:
+// renders the EXACT body commit() would send (same template row, link
+// selection, and renderer normalizations) and returns the 2-segment math —
+// the sheet keeps no client-side render mirrors (codex #3363 r9).
+// Advisory + read-only: never mints short codes, never moves anything;
+// commit() re-renders and enforces.
+router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+  try {
+    const { message, target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.previewCustomSms({
+      serviceId: req.params.serviceId,
+      customMessage: message,
+      target,
+    });
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : ['bad_reason', 'bad_target'].includes(result.reason) ? 400 : 409;
+      return res.status(code).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the

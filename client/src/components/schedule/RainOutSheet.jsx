@@ -41,10 +41,12 @@ const EXTRA_REASONS = [
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 // Custom reason (rendered only when the options payload says
-// GATE_QUICKMOVE_CUSTOM_REASON is on): the dispatcher's message opens the
-// SMS and the templated move line + reschedule link close it. Single stop
-// only; the assembled text is capped at 2 SMS segments (server renders the
-// real body pre-move and enforces — the counter below is the mirror).
+// GATE_QUICKMOVE_CUSTOM_REASON is on AND the template row is live): the
+// dispatcher's message opens the SMS and the templated move line +
+// reschedule link close it. Single stop only; the assembled text is capped
+// at 2 SMS segments — the live counter is SERVER-rendered via the
+// custom-preview endpoint (no client render mirrors), and commit()
+// re-renders and enforces fail-closed.
 const CUSTOM_REASON = 'custom';
 
 // Friendly copy for the server's structured rejections.
@@ -256,125 +258,6 @@ function normalizeForLinkCheck(raw) {
   return out;
 }
 
-// ——— Custom-reason 2-segment counter mirrors (server: segment-counter.js +
-// gsm-normalize.js + the rain_out_moved_custom_v1 template) — advisory here;
-// commit() renders the real body pre-move and is the enforcer. ———
-// GSM 03.38 basic alphabet; extension chars cost 2 slots each. Any char
-// outside both sets flips the WHOLE message to UCS-2 (2 segments = 134
-// UTF-16 units instead of 306 GSM slots).
-const GSM_BASIC_SET = new Set(
-  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
-);
-const GSM_EXT_SET = new Set(['{', '}', '[', ']', '~', '|', '\\', '^', '€', '\f']);
-// Compact mirror of the send path's GSM punctuation normalizer: smart
-// quotes/dashes → plain, Unicode space family → space, invisibles dropped.
-// Counting the normalized form keeps an iOS smart apostrophe from reading
-// as a UCS-2 flip the send path will prevent. Ellipsis is handled
-// conditionally below, mirroring the server.
-function gsmNormalizeForCount(text) {
-  return String(text)
-    .replace(/[‘’‚‛′ʼ`´]/g, "'")
-    .replace(/[“”„‟″]/g, '"')
-    .replace(/[‐‑‒–—―−•]/g, '-')
-    .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-    .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '');
-}
-// GSM-7 slot count, or null when any char forces UCS-2.
-function gsmSlotsOrNull(text) {
-  let slots = 0;
-  for (const ch of text) {
-    if (GSM_EXT_SET.has(ch)) { slots += 2; continue; }
-    if (!GSM_BASIC_SET.has(ch)) return null;
-    slots += 1;
-  }
-  return slots;
-}
-function segmentCount(text) {
-  const slots = gsmSlotsOrNull(text);
-  if (slots != null) return slots <= 160 ? (slots ? 1 : 0) : Math.ceil(slots / 153);
-  return text.length <= 70 ? 1 : Math.ceil(text.length / 67);
-}
-// Characters left inside the 2-segment cap for a predicted body (negative =
-// over). GSM-7: 2×153 = 306 slots; UCS-2: 2×67 = 134 UTF-16 units.
-// Ellipsis mirrors the server's CONDITIONAL expansion (gsm-normalize.js):
-// '…' becomes '...' only when that lands the whole body on GSM-7 without
-// costing segments — when another non-GSM char keeps the body UCS-2, the
-// server keeps the cheaper one-unit '…' and so must this counter (codex
-// PR P2: always-expanding disagreed with the server at the 134-unit
-// boundary).
-function twoSegmentRemaining(body) {
-  let norm = gsmNormalizeForCount(body);
-  if (norm.includes('…')) {
-    const expanded = norm.replace(/…/g, '...');
-    if (gsmSlotsOrNull(expanded) != null && segmentCount(expanded) <= segmentCount(norm)) {
-      norm = expanded;
-    }
-  }
-  const slots = gsmSlotsOrNull(norm);
-  if (slots != null) return { remaining: 306 - slots, ucs2: false };
-  return { remaining: 134 - norm.length, ucs2: true };
-}
-// Mirror of the server's customer-facing option label (customerArrivalOption
-// in rain-out.js): "Fri, Aug 14, 8:00 AM - 10:00 AM" — the arrival window
-// quoted to customers is always 2 hours from the start, independent of the
-// booked 1-hour block.
-function smsDateLabel(dateStr) {
-  const d = new Date(`${dateStr}T12:00:00Z`);
-  if (Number.isNaN(d.getTime())) return String(dateStr);
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: TIMEZONE });
-}
-function smsNewOption(dateStr, startHHMM) {
-  const startMin = hhmmToMin(startHHMM);
-  if (startMin == null) return smsDateLabel(dateStr);
-  const endMin = (startMin + 120) % (24 * 60);
-  return `${smsDateLabel(dateStr)}, ${fmtTime(minToHHMM(startMin))} - ${fmtTime(minToHHMM(endMin))}`;
-}
-// Mirror of the renderer's formatSmsTemplateVars for the one var a
-// dispatcher can type free-form: a value that IS exactly a bare time
-// ("09:00") or a bare range ("9:00-11:00") renders as "9:00 AM" /
-// "9:00 AM - 11:00 AM", a couple characters longer than typed (codex r7
-// P2). The other vars can't match these whole-string shapes (name,
-// service type, link clause, and the already-formatted option label all
-// fail them), so only the message needs the pass.
-function formatSmsVarMirror(value) {
-  const t = String(value).trim();
-  // Server parseHHMM validates 0-23h / 0-59m and leaves invalid values
-  // untouched — including PER SIDE inside a range.
-  const valid = (s) => {
-    const m = String(s).match(/^(\d{1,2}):(\d{2})$/);
-    return !!m && +m[1] <= 23 && +m[2] <= 59;
-  };
-  const side = (s) => (valid(s) ? fmtTime(s) : s);
-  if (valid(t)) return fmtTime(t);
-  const m = t.match(/^(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})$/);
-  if (m) return `${side(m[1])} - ${side(m[2])}`;
-  return value;
-}
-
-// Predicted body assembled from the ACTIVE template the server sent in the
-// options payload (customCompose.template) — never a hardcoded copy of the
-// migration body, which an admin template edit would silently desync from
-// what commit() actually renders (codex PR P1). Same global `{key}`
-// substitution as the server's renderer.
-function predictedCustomBody(compose, message, option) {
-  const vars = {
-    first_name: compose.firstName,
-    custom_message: formatSmsVarMirror(message),
-    service_type: compose.serviceType,
-    new_option: smsNewOption(option.date, option.window?.start),
-    link_clause: compose.linkClause,
-  };
-  let body = compose.template;
-  for (const [key, value] of Object.entries(vars)) {
-    body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), () => value);
-  }
-  // Same whitespace tidy the renderer applies after substitution
-  // (admin-sms-templates.js getTemplate): blank-line runs collapse and the
-  // ends trim — counting whitespace the server never sends would disable
-  // Move at the boundary (codex r4 P2).
-  return body.replace(/\n{3,}/g, '\n\n').trim();
-}
-
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
 const CUSTOM_KEY = 'custom';
@@ -545,18 +428,44 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         : ERROR_COPY.note_compliance_blocked;
 
   // Custom-reason state: the message is REQUIRED when a text is going out
-  // (it's the front of the SMS), and the predicted assembled body must fit
-  // 2 segments. Advisory mirror — the server renders the real body pre-move.
+  // (it's the front of the SMS), and the assembled body must fit 2
+  // segments. The count comes from the SERVER's own render
+  // (POST rain-out/custom-preview → previewCustomSms), debounced — the
+  // client keeps no render mirrors (codex r9 P1: mirroring
+  // gsm-normalize/segment-counter/sms-time-format/substitution meant any
+  // server-side change could desync the counter at the boundary). The
+  // preview is advisory; commit() re-renders and enforces fail-closed, so
+  // a preview fetch failure just hides the counter, never blocks Move.
   const isCustomReason = reason === CUSTOM_REASON;
-  const compose = options?.customCompose || null;
-  // Predict with the message the SERVER will embed: sanitizeCustomerNote
-  // collapses every whitespace run to one space before rendering, so
-  // counting the raw value (doubled spaces, line breaks) would overstate
-  // the body near the boundary (codex r3 P2).
-  const customSeg = (isCustomReason && notify && compose && selected)
-    ? twoSegmentRemaining(predictedCustomBody(compose, note.replace(/\s+/g, ' ').trim(), selected))
-    : null;
-  const customOverBudget = !!(customSeg && customSeg.remaining < 0);
+  const customAvailable = !!options?.customCompose;
+  const [customSeg, setCustomSeg] = useState(null);
+  const selectedDate = selected?.date || null;
+  const selectedStart = selected?.window?.start || null;
+  const selectedEnd = selected?.window?.end || null;
+  useEffect(() => {
+    if (!(isCustomReason && notify && customAvailable && selectedDate && selectedStart)) {
+      setCustomSeg(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out/custom-preview`, {
+          method: 'POST',
+          headers: authHeaders(),
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: note,
+            target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!controller.signal.aborted) setCustomSeg(res.ok && data?.ok ? data : null);
+      } catch { /* advisory only — the server enforces at commit */ }
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [isCustomReason, notify, customAvailable, note, selectedDate, selectedStart, selectedEnd, service.id]);
+  const customOverBudget = !!(customSeg && !customSeg.withinCap);
   const customMissing = !!(isCustomReason && notify && !note.trim());
 
   const handleCommit = async () => {

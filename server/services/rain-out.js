@@ -128,6 +128,67 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 // non-GSM char survives normalization.
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
+// Send-layer blockers the note guards can't see because they live in the
+// TEMPLATE's static text (an admin-saved emoji, a broken-render marker
+// like '1970'): discovering them AFTER the move strands a moved visit with
+// no SMS, so commit() runs the send layer's own checks on the assembled
+// body pre-move (codex r9 P2).
+function customBodySendBlocked(body) {
+  const { validateOutbound } = require('./sms-guard');
+  if (!validateOutbound(body).ok) return true;
+  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
+  return findEmoji(body).found;
+}
+
+/**
+ * Server-side counter for the sheet's Custom mode: renders the EXACT body
+ * commit() would send — same template row (base, noVariants), same
+ * existing-short-code link selection, same renderer normalizations — and
+ * returns the 2-segment math. The client keeps NO render mirrors (codex r9
+ * P1: reimplementing gsm-normalize/segment-counter/sms-time-format/
+ * substitution client-side meant any server-side change could silently
+ * desync the advisory counter). Advisory + read-only: never mints a short
+ * code, never moves anything; commit() re-renders and enforces.
+ */
+async function previewCustomSms({ serviceId, customMessage, target }) {
+  if (!customReasonEnabled()) return { ok: false, reason: 'bad_reason' };
+  const service = await loadServiceWithCustomer(serviceId);
+  if (!service) return { ok: false, reason: 'not_found' };
+  if (!target?.date || !target.window?.start) return { ok: false, reason: 'bad_target' };
+  // Count the message the commit path embeds: sanitizeCustomerNote
+  // collapses whitespace runs. The full guard suite stays at commit — the
+  // preview only answers "how long".
+  const message = String(customMessage == null ? '' : customMessage).replace(/\s+/g, ' ').trim();
+  const { existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
+  const url = service.reschedule_token
+    ? ((await existingShortUrlFor({
+      kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
+    })) || `${shortLinkBaseUrl()}/l/xxxxxxxxxx`)
+    : null;
+  const body = await renderCustomMovedBody({
+    firstName: service.first_name,
+    serviceType: service.service_type,
+    date: target.date,
+    window: target.window,
+    customMessage: message,
+    rescheduleUrl: url,
+    serviceId,
+  });
+  if (!body) return { ok: false, reason: 'custom_message_unavailable' };
+  const { countSegments } = require('./messaging/segment-counter');
+  const seg = countSegments(body);
+  const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
+  const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : body.length;
+  return {
+    ok: true,
+    segments: seg.segmentCount,
+    maxSegments: CUSTOM_SMS_MAX_SEGMENTS,
+    withinCap: seg.segmentCount <= CUSTOM_SMS_MAX_SEGMENTS,
+    remaining: perSegment * CUSTOM_SMS_MAX_SEGMENTS - used,
+    encoding: seg.encoding,
+  };
+}
+
 
 // Dispatcher-typed note appended to the end of the moved SMS ("Gate code
 // still works, see you Friday!"). Two hard limits, both re-checked here
@@ -598,52 +659,20 @@ async function getOptions(serviceId) {
 
   const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
 
-  // Custom-reason compose info: everything the sheet's live 2-segment
-  // counter needs to predict the assembled SMS. The link clause uses the
-  // visit's EXISTING short link when one was already minted (read-only —
-  // opening the sheet must not grow short_codes) and otherwise a
-  // same-length placeholder code. commit() prefers the SAME existing code
-  // when it builds the real body (codex PR P2 — a legacy odd-length code
-  // vs a fresh mint must not flip a boundary case between counter and
-  // enforcer); the counter stays advisory, commit() is the enforcer.
+  // Custom-reason availability for the sheet: the option renders only when
+  // the gate is on AND the template row is live — a missing/disabled row
+  // would send every Move into commit()'s custom_message_unavailable
+  // rejection, so hide the option instead. The sheet's live 2-segment
+  // counter is SERVER-rendered (previewCustomSms, called by the
+  // custom-preview route) — the client keeps no render mirrors (codex r9
+  // P1), so no compose payload is served here.
   let customCompose = null;
   if (customReasonEnabled()) {
-    // The sheet's counter must measure the ACTIVE template body, never a
-    // client-side copy of the migration literal — admins edit templates,
-    // and a drifted mirror disables Move on bodies the server accepts (or
-    // vice versa) at the boundary (codex PR P1). The base row is exactly
-    // what commit() renders: the custom rung pins it with noVariants
-    // (codex r3 P1 — weighted variants can't be previewed). Row
-    // missing/disabled ⇒ no compose ⇒ the sheet hides the Custom option
-    // entirely, matching commit()'s custom_message_unavailable rejection.
     const row = await db('sms_templates')
       .where({ template_key: CUSTOM_TEMPLATE_KEY })
-      .first('body', 'is_active');
-    if (row?.body && row.is_active !== false) {
-      // Everything link/body served here goes through the renderer's OWN
-      // stripPortalUrlScheme — never a hand-rolled strip: the renderer
-      // keeps https:// on hosts outside SCHEMELESS_SMS_HOSTS (a non-owned
-      // SHORTLINK_BASE_URL, a preview origin), and a blanket strip made
-      // the counter undercount those by 8 chars (codex r5/r6 P2).
-      const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
-      let composeUrl = null;
-      if (service.reschedule_token) {
-        const { existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
-        // No existing code ⇒ same-length placeholder from the SAME origin
-        // the send's mint will use (short-url's base chain, not portalUrl's
-        // — the two env chains differ).
-        composeUrl = (await existingShortUrlFor({
-          kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
-        })) || `${shortLinkBaseUrl()}/l/xxxxxxxxxx`;
-        composeUrl = stripPortalUrlScheme(String(composeUrl));
-      }
-      customCompose = {
-        template: stripPortalUrlScheme(row.body),
-        firstName: service.first_name || 'there',
-        serviceType: (service.service_type || 'service').toLowerCase(),
-        linkClause: customLinkClause(composeUrl),
-        maxSegments: CUSTOM_SMS_MAX_SEGMENTS,
-      };
+      .first('is_active');
+    if (row && row.is_active !== false) {
+      customCompose = { maxSegments: CUSTOM_SMS_MAX_SEGMENTS };
     }
   }
 
@@ -1042,6 +1071,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       // reason can't send, so fail the move here instead of silently
       // moving the visit messageless.
       if (!body) return { ok: false, reason: 'custom_message_unavailable' };
+      // Template statics can carry send-layer blockers the note guards
+      // never saw — reject pre-move, not after (codex r9 P2).
+      if (customBodySendBlocked(body)) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} assembled body trips the send guards for ${serviceId} — rejecting pre-move`);
+        return { ok: false, reason: 'custom_message_unavailable' };
+      }
       const { countSegments } = require('./messaging/segment-counter');
       const seg = countSegments(body);
       if (seg.segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {
@@ -1409,6 +1444,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 module.exports = {
   getOptions,
   commit,
+  previewCustomSms,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
