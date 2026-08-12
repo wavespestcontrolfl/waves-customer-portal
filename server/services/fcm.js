@@ -145,6 +145,7 @@ function send(deviceToken, notification) {
         const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
 
         try {
+          let wallClockKiller;
           const req = https.request(
             {
               method: 'POST',
@@ -176,10 +177,18 @@ function send(deviceToken, notification) {
               });
             },
           );
-          req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+          req.on('error', (err) => { clearTimeout(wallClockKiller); finish({ ok: false, failed: true, reason: err.message }); });
+          // setTimeout's socket-inactivity timer only starts once the socket
+          // is CONNECTED — a DNS/TCP/TLS stall never reaches it. The
+          // wall-clock timer covers the whole request lifetime and destroy()
+          // both fails the leg and prevents any late delivery.
+          wallClockKiller = setTimeout(() => {
+            req.destroy(new Error('fcm_timeout'));
+          }, FCM_REQUEST_TIMEOUT_MS);
           req.setTimeout(FCM_REQUEST_TIMEOUT_MS, () => {
             req.destroy(new Error('fcm_timeout'));
           });
+          req.on('close', () => clearTimeout(wallClockKiller));
           req.end(body);
         } catch (err) {
           finish({ ok: false, failed: true, reason: err.message });

@@ -94,10 +94,23 @@ class PushNotificationService {
     };
   }
 
-  async sendToCustomer(customerId, notification) {
+  // opts.shouldContinue: optional async gate re-checked before EVERY
+  // provider leg (push-channel-routing passes its send-window boundary
+  // check) — a sequential fan-out that straddles a cutoff stops instead of
+  // delivering the remaining legs past it. Callers without the option
+  // (bell notifications, admin alerts) are unaffected.
+  async sendToCustomer(customerId, notification, opts = {}) {
     const subs = await db('push_subscriptions').where({ customer_id: customerId, active: true });
     const results = [];
     for (const sub of subs) {
+      if (typeof opts.shouldContinue === 'function') {
+        let go = false;
+        try { go = await opts.shouldContinue(); } catch { go = false; }
+        if (!go) {
+          results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
+          continue;
+        }
+      }
       results.push(await sendSubscription(sub, notification));
     }
     return summarize(results, subs.length);

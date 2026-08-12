@@ -66,8 +66,12 @@ router.post('/native-unsubscribe', async (req, res, next) => {
     const { token } = req.body || {};
     const q = db('push_subscriptions').where({ customer_id: req.customerId }).whereIn('platform', ['ios', 'android']);
     if (token) q.andWhere({ device_token: token });
-    await q.update({ active: false });
-    res.json({ ok: true });
+    // deactivated count matters to the client: a zero-row "success" means
+    // the token row belongs to a DIFFERENT profile (e.g. a failed property
+    // re-point) — the caller must not clear its local token memory on that
+    // answer, or the orphaned active row can never be released.
+    const deactivated = await q.update({ active: false });
+    res.json({ ok: true, deactivated: Number(deactivated) || 0 });
   } catch (err) { next(err); }
 });
 

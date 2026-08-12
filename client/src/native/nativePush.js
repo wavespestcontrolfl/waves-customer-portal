@@ -201,13 +201,23 @@ async function revokeRegistrationForDeniedPermission() {
   try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
   if (!authToken() && !refreshJwt) return;
   try {
-    await api.request('/push/native-unsubscribe', {
+    const res = await api.request('/push/native-unsubscribe', {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
-    pendingToken = null;
-    lastToken = null;
-    try { localStorage.removeItem(LAST_TOKEN_KEY); } catch { /* storage unavailable */ }
+    // Zero rows deactivated = the token row sits under a DIFFERENT profile
+    // (a fire-and-forget property re-point that failed leaves it there).
+    // Keep the memory in that case: a later login's re-point supersedes the
+    // row server-side and the next launch retries this release under the
+    // profile that owns it. Clearing here would orphan an active row that
+    // can silently swallow SMS forever.
+    if (Number(res?.deactivated) > 0) {
+      pendingToken = null;
+      lastToken = null;
+      try { localStorage.removeItem(LAST_TOKEN_KEY); } catch { /* storage unavailable */ }
+    } else {
+      console.warn('[nativePush] denied-permission revoke matched no row under this profile — keeping token for a later re-point/retry');
+    }
   } catch (err) {
     console.warn('[nativePush] denied-permission revoke failed (will retry next launch):', err?.message || err);
   }

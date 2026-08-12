@@ -132,9 +132,17 @@ function send(deviceToken, notification) {
     const finish = (result) => {
       if (settled) return;
       settled = true;
+      clearTimeout(wallClockKiller);
       try { client.close(); } catch { /* noop */ }
       resolve(result);
     };
+    // Same connection-phase gap as fcm.js: stream timers only run once the
+    // session is connected — a DNS/TCP/TLS stall on http2.connect never
+    // reaches them. destroy() fails the leg and prevents late delivery.
+    const wallClockKiller = setTimeout(() => {
+      try { client.destroy(); } catch { /* noop */ }
+      finish({ ok: false, failed: true, reason: 'apns_timeout' });
+    }, APNS_REQUEST_TIMEOUT_MS);
 
     client.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
 

@@ -569,6 +569,8 @@ const TwilioService = {
           // Proof-of-send linkage for the scheduled-SMS recovery sweep —
           // without it a crash window makes the sweep resend the message.
           scheduledSmsLogId: options.scheduledSmsLogId,
+          // Per-leg send-window gate inside the fan-out (round-4 P1).
+          preSendCheck: options.preSendCheck,
         });
         if (pushed.delivered) {
           logger.info(
@@ -595,6 +597,7 @@ const TwilioService = {
           to,
           body,
           messageType: options.messageType,
+          preSendCheck: options.preSendCheck,
         }).catch(() => {});
       }
 

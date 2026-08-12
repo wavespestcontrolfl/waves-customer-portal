@@ -239,7 +239,7 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body) {
+async function sendPush(customerId, messageType, body, shouldContinue) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -248,8 +248,25 @@ async function sendPush(customerId, messageType, body) {
     url: link,
     category,
     tag: `push-routed:${messageType}`,
-  });
+  }, { shouldContinue });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+// Per-leg send-window gate for the fan-out: the sequential device walk can
+// straddle the 20:00 ET cutoff (each leg is bounded at 8s but they add up),
+// and a push landing after the cutoff is exactly what the window exists to
+// stop. Built from the caller's own boundary check; absent check = no gate
+// (non-window senders).
+function windowGuardFrom(preSendCheck) {
+  if (typeof preSendCheck !== 'function') return undefined;
+  return async () => {
+    try {
+      const verdict = await preSendCheck();
+      return Boolean(verdict && verdict.ok === true);
+    } catch {
+      return false; // unknown window state → stop the fan-out
+    }
+  };
 }
 
 // Durable in-app record, written only AFTER delivery is proven so retry
@@ -284,11 +301,11 @@ async function recordBell(customerId, messageType, body) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return { delivered: false };
     if (!(await hasActivePushDevice(customerId))) return { delivered: false };
-    const { delivered } = await sendPush(customerId, messageType, body);
+    const { delivered } = await sendPush(customerId, messageType, body, windowGuardFrom(preSendCheck));
     if (!delivered) {
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
@@ -352,11 +369,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     if (!(await hasActivePushDevice(customerId))) return;
-    const { delivered } = await sendPush(customerId, messageType, body);
+    // The companion starts only after Twilio accepted the SMS, but its own
+    // fan-out can still cross the cutoff — same per-leg gate.
+    const { delivered } = await sendPush(customerId, messageType, body, windowGuardFrom(preSendCheck));
     if (delivered) await recordBell(customerId, messageType, body);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
