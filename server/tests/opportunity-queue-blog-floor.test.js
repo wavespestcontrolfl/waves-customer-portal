@@ -209,7 +209,7 @@ describe('miner persistAll action-aware gate', () => {
   }
 
   test('persists blog rows at/above the blog floor, drops below it; non-blog still needs the global floor', async () => {
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
     const persisted = await persistCanonical([
       opp({ score: 49, dedupe_key: 'blog-49' }),                                  // blog ≥45 → kept
@@ -228,7 +228,7 @@ describe('miner persistAll action-aware gate', () => {
 
   test('AUTONOMOUS_REWRITE_MIN_SCORE admits rewrite rows at the tuned floor', async () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
     const persisted = await persistCanonical([
       opp({ score: 69, action_type: 'rewrite_title_meta', page_url: 'https://x/p/', dedupe_key: 'rw-69-open' }), // ≥60 → kept
@@ -245,7 +245,7 @@ describe('miner persistAll action-aware gate', () => {
 
   test('a ctr_rewrite-derived link_boost companion inherits the rewrite floor (both gates move together)', async () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
     const persisted = await persistCanonical([
       // Companion carries the parent's score by design — it must clear
@@ -279,6 +279,7 @@ describe('miner persistAll action-aware gate', () => {
   // Reconciliation harness: records every where/whereNotIn/whereIn/update
   // so the tests can assert exactly which rows a run would retire.
   const SWEPT_BUCKETS = new Set(['ctr_rewrite', 'no_content_yet']);
+  const SINCE = '2026-07-15'; // any since → the sweep consults coverage
 
   function reconcileHarness(staleRows) {
     const updates = [];
@@ -312,7 +313,9 @@ describe('miner persistAll action-aware gate', () => {
       };
       return q;
     });
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    // db.raw serves the persist upsert (rowCount) AND
+    // _queryPageMapCoveredDomains (rows). staleRow's page host is 'x'.
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }, { domain: 'wavespestcontrol.com' }] });
     return { updates, locks };
   }
 
@@ -335,7 +338,7 @@ describe('miner persistAll action-aware gate', () => {
         query: 'still qualifying', service: 'pest', city: null,
         page_url: 'https://x/live/', dedupe_key: 'ctr::live',
       }),
-    ]);
+    ], null, null, new Set(), SINCE);
 
     const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
     expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
@@ -361,10 +364,24 @@ describe('miner persistAll action-aware gate', () => {
         query: 'plaster bagworm', service: 'pest', city: null,
         page_url: 'https://x/new-page/', dedupe_key: 'ctr::weak',
       }),
-    ]);
+    ], null, null, new Set(), SINCE);
 
     const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
     expect(lock.notIn).toBe(null); // no live keys at all
+  });
+
+  test('rows on a domain WITHOUT fresh coverage are never swept', async () => {
+    // ctr_rewrite mines every property, so one stale spoke sync makes that
+    // property's queries vanish from the candidate set entirely — they
+    // never reach exemptQueries — and their pending rows would read as
+    // recovered. A row is judged only when ITS page's domain is covered.
+    const { updates } = reconcileHarness([staleRow]);
+    // Coverage excludes staleRow's host ('x').
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'wavespestcontrol.com' }] });
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
+
+    expect(updates.filter((u) => u.updates?.skip_reason === 'ctr_rewrite_signal_recovered')).toHaveLength(0);
   });
 
   test('the sweep also covers no_content_yet (its stale rows CREATE pages)', async () => {
@@ -376,7 +393,7 @@ describe('miner persistAll action-aware gate', () => {
         query: 'live gap', service: 'pest', city: null, page_url: null,
         dedupe_key: 'ncy::live',
       }),
-    ]);
+    ], null, null, new Set(), SINCE);
 
     expect(updates.some((u) => u.updates.skip_reason === 'no_content_yet_signal_recovered')).toBe(true);
   });
@@ -408,9 +425,9 @@ describe('miner persistAll action-aware gate', () => {
       };
       return q;
     });
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
-    await miner._sweepRecoveredQueries('ctr_rewrite', []);
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
 
     // Both locks precede both expiries.
     expect(order).toEqual([
@@ -449,9 +466,9 @@ describe('miner persistAll action-aware gate', () => {
       };
       return q;
     });
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
-    await miner._sweepRecoveredQueries('ctr_rewrite', []);
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
 
     // Parent retired; companion spared by the unrelated live parent.
     expect(updates.some((u) => u.in?.[1]?.includes(staleRow.dedupe_key))).toBe(true);
@@ -470,7 +487,7 @@ describe('miner persistAll action-aware gate', () => {
       return q;
     });
 
-    await expect(miner._sweepRecoveredQueries('ctr_rewrite', [])).rejects.toThrow('boom');
+    await expect(miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE)).rejects.toThrow('boom');
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {
@@ -482,7 +499,7 @@ describe('miner persistAll action-aware gate', () => {
       };
       return q;
     });
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
 
     // near-me query demoted to do_not_publish by actionForOpportunity →
     // score 49 < 75 non-blog floor → dropped, but the stale pending

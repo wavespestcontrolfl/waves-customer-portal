@@ -1683,7 +1683,8 @@ class GscOpportunityMiner {
               revalidated.filter((o) => o.bucket === bucket),
               trx,
               revalidated,
-              sweepExemptQueries[bucket]
+              sweepExemptQueries[bucket],
+              since
             );
           }
         }
@@ -3793,7 +3794,7 @@ class GscOpportunityMiner {
    * 'expired' — revivable the moment the signal returns. Companions follow
    * their parent, minus anything the current batch still stands behind.
    */
-  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null, exemptQueries = new Set()) {
+  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null, exemptQueries = new Set(), since = null) {
     const runner = trx || db;
     // Keyed on persistable DEDUPE KEYS, not query strings: one query can
     // produce several (query, service, city, intent) candidates, so a
@@ -3816,7 +3817,24 @@ class GscOpportunityMiner {
       // Rows for queries we could not judge this run are preserved: the
       // sweep retires RECOVERED signals, never unavailable evidence.
       if (exemptQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(exemptQueries));
-      const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
+      const locked = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
+      if (!locked.length) return;
+
+      // DOMAIN-SCOPED. ctr_rewrite mines across every property, so a
+      // single stale spoke sync makes that property's queries vanish from
+      // the candidate set entirely — they never even reach exemptQueries —
+      // and their pending rows would read as recovered (audit P1). A row
+      // is only judged when the domain of the page it targets has fresh
+      // coverage. Rows without a page (hub-only buckets) ride HUB
+      // coverage. Coverage unavailable → judge nothing.
+      const sweepCovered = since ? await this._queryPageMapCoveredDomains(since) : null;
+      const stale = locked.filter((r) => {
+        if (!sweepCovered) return false;
+        const host = r.page_url
+          ? String(routeIdentity(r.page_url) || '').split('::')[0]
+          : HUB_DOMAIN;
+        return !!host && sweepCovered.has(host);
+      });
       if (!stale.length) return;
 
       // Parents and companions are locked BEFORE either is expired.
