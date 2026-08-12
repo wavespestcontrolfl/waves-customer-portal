@@ -525,6 +525,26 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     });
     expect(model.serviceScope).toBe('residential_unit');
   });
+  test('an OWNER at an explicit unit address is a unit occupant on a flattened record (r46)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: { caller: { relationship_to_property: 'owner' }, property: { property_type: 'condo' } },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit 12, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { value: 3400, source: 'county_assessed' } },
+      address: '900 Bayview Ter, Unit 12, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('residential_unit');
+  });
+  test('a property MANAGER at a unit address is not a unit occupant (r46)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: { caller: { relationship_to_property: 'property manager' }, property: {} },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit 12, Venice, FL 34285' },
+      propertyFacts: { tenant: false, home: { value: 3400, source: 'county_assessed' } },
+      address: '900 Bayview Ter, Unit 12, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('entire_residential_structure');
+  });
   test('a positively whole-structure type is respected over the address token', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,

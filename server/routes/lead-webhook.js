@@ -1086,6 +1086,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                   serviceInterest: triageServiceInterestUpdate,
                 },
                 customer,
+                // Structured commercial flags must survive the triage
+                // re-evaluation too, or a concrete generic service label
+                // replaces the blocked snapshot with an auto-sendable
+                // residential one (codex r46 P1).
+                body,
                 phone: phoneFormatted,
                 serviceInterest: triageServiceInterestUpdate,
               }));

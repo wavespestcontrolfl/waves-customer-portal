@@ -319,13 +319,24 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // unit occupant even on a generic single-family record — a subdivided
   // house, or a multifamily record the provider flattened. Without this,
   // lot-driven work could be sized to the entire property (codex r20 P1).
+  // Who can occupy ONE unit: a tenant, an owner (a condo owner owns their
+  // unit), or an unstated relationship. A property MANAGER is excluded —
+  // managing the complex is the association case.
+  const unitOccupantRelationship = relationship === 'tenant' || relationship === 'owner'
+    || relationship === 'unknown';
+  // The whole-structure type veto is bypassed by TENANCY + a subpremise
+  // (a whole-house renter's address rarely carries a unit line — codex
+  // r20 P1). An OWNER keeps the veto unless the EXTRACTION positively
+  // names a unit type, so "owner, Unit A, townhouse" stays a whole
+  // structure while "owner, Unit 12, condo (record flattened to Single
+  // Family)" is a unit (codex r46 P1).
   const tenantOfSubpremise = subpremiseSignal && relationship === 'tenant';
   // A TENANT whose own words classify the premises as an apartment/condo/
   // multifamily unit is a unit occupant even when the provider flattened
   // the record to Single Family and the address carries no Apt/Unit line
   // (codex r37 P1) — otherwise the county building area and parcel lot
   // stayed authoritative and lot-driven work priced the whole property.
-  const tenantOfExtractedUnitType = relationship === 'tenant'
+  const tenantOfExtractedUnitType = unitOccupantRelationship
     && /apartment|condo|multi.?family/i.test(String(extraction?.property?.property_type || ''));
   if (!isCommercial
     && (subpremiseSignal || tenantOfExtractedUnitType)

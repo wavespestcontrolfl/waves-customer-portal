@@ -1554,8 +1554,38 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       && effectiveSignals.propertyRecord?.propertyType)
       ? (propertyFacts.propertyType || null)
       : null;
+    // CALLER-STATED / profile measurements describe the property discussed
+    // on the call, not a different quoted address: leaving them let a
+    // switched-to commercial building price off the original unit's stated
+    // area and duck the 10,000-sqft relationship threshold (codex r46 P1).
+    // County/lookup values come from the RE-GATHERED record and stay.
+    const EXTRACTION_SOURCED_FACTS = new Set(['caller_stated', 'customer_profile']);
+    const fenceExtractionFact = (fact, label) => {
+      const source = String(fact?.source || '');
+      if (!EXTRACTION_SOURCED_FACTS.has(source) || !Number(fact?.value)) return fact;
+      return {
+        value: null,
+        source: 'unresolved',
+        confidence: 'none',
+        rejected: [
+          ...(fact.rejected || []),
+          {
+            value: Number(fact.value),
+            source,
+            reason: `describes the originally discussed property, not the quoted ${label}`,
+          },
+        ],
+      };
+    };
+    const fenceCrossPropertyFacts = (facts) => ({
+      ...facts,
+      tenant: false,
+      propertyType: regatheredPropertyType || null,
+      home: fenceExtractionFact(facts.home, 'address'),
+      lot: fenceExtractionFact(facts.lot, 'address'),
+    });
     const scopeFacts = crossPropertyRegather
-      ? { ...propertyFacts, tenant: false, propertyType: regatheredPropertyType || null }
+      ? fenceCrossPropertyFacts(propertyFacts)
       : propertyFacts;
 
     // Property Facts V2 — scoped measurement selection. Shadow by default:
@@ -1703,7 +1733,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // charge for a lot the lane review shows as cleared (codex r27 P1).
         propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
           && crossPropertyRegather)
-          ? { ...propertyFacts, tenant: false, propertyType: regatheredPropertyType || null }
+          ? fenceCrossPropertyFacts(propertyFacts)
           : propertyFacts,
         context,
         priorQualifyingServices,
