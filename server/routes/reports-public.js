@@ -1017,6 +1017,22 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     // validate-first + a single transaction, so an event row can never
     // exist without its actionable service_requests row (codex #3367 r7).
     if (eventName !== 'cross_sell_requested') {
+      // Write mirrors read (AGENTS.md report-token rule; local codex r11):
+      // the referral card only renders when LIVE settings exist and the
+      // program is active, so a crafted referral click against a dark or
+      // unconfigured program must not pollute referral analytics. Same
+      // strict read as the card composer; an unreadable settings row
+      // rejects rather than records.
+      if (eventName === 'referral_cta_clicked') {
+        try {
+          const settings = await require('../services/referral-engine').getLiveSettings();
+          if (!settings?.program_active) {
+            return res.status(409).json({ error: 'Referral program is not active' });
+          }
+        } catch {
+          return res.status(503).json({ error: 'Could not record the event — please try again' });
+        }
+      }
       await recordServiceReportEvent(service, eventName, channel, req, metadata);
       return res.json({ ok: true });
     }
@@ -1057,7 +1073,14 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
         // COMPARED against server truth here, never persisted as the offer.
         const clickedKey = String(metadata.serviceKey || '').trim();
         const clickedMode = String(metadata.offerMode || '').trim();
-        const clickedPer = Number(metadata.perApplication);
+        // STRICT type check before any numeric handling (AGENTS.md
+        // report-token rule; local codex r11): Number() coerces '', null,
+        // false, and [] to 0, which slipped malformed bodies through the
+        // quote-mode branch. A priced click must carry an actual finite
+        // positive number; a quote click must carry null/absent — the
+        // exact shapes the card emits.
+        const rawPer = metadata.perApplication;
+        const clickedPer = typeof rawPer === 'number' && Number.isFinite(rawPer) ? rawPer : null;
         const serverPer = Number(crossSell?.option?.perVisit);
         // Key AND mode must match, and a priced offer must match to the
         // cent (codex #3367 r8: a quote-only card that became priced before
@@ -1067,8 +1090,9 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
           || !clickedKey || clickedKey !== crossSell.serviceKey
           || !clickedMode || clickedMode !== crossSell.mode
           || (crossSell.mode === 'priced'
-            ? !(Number.isFinite(clickedPer) && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005)
-            : (Number.isFinite(clickedPer) && clickedPer > 0));
+            ? !(clickedPer !== null && clickedPer > 0
+              && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005)
+            : !(rawPer === null || rawPer === undefined));
         if (offerMismatch) {
           return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
         }
