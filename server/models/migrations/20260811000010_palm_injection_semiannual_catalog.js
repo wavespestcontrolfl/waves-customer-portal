@@ -231,7 +231,16 @@ exports.up = async function up(knex) {
     .where({ service_key: SERVICE.service_key })
     .first();
   if (existingProfile) {
-    console.warn(`[palm-semiannual] ${SERVICE.service_key}: completion profile already exists — leaving untouched`);
+    // An existing profile must satisfy the recurring invariants (codex r26
+    // P1): completion resolution prefers it, and admin-dispatch reads its
+    // billing_type for the one-time invoice posture — a stale one_time
+    // profile under this key would bill semiannual visits per-application
+    // on top of the plan. Same deploy-block as the service-row gates.
+    if (existingProfile.billing_type && existingProfile.billing_type !== 'recurring') {
+      await recordState(knex, inserted);
+      throw new Error(`[palm-semiannual] existing ${SERVICE.service_key} completion profile carries billing_type=${existingProfile.billing_type} — the recurring palm identity would inherit one-time invoice posture. Fix or remove the profile, then re-run the migration.`);
+    }
+    console.warn(`[palm-semiannual] ${SERVICE.service_key}: completion profile already exists (recurring invariants verified) — leaving untouched`);
     await recordState(knex, inserted);
     return;
   }

@@ -81,6 +81,19 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combos[0].service.frequency).toBe('bimonthly');
   });
 
+  test('Enhanced lawn + 9x T&S with NUMERIC nine cadences combine at every_6_weeks (codex r26 P1)', () => {
+    // Engine-backed lines carry frequency: 9 — the generic bucket read
+    // both as bimonthly and the seeding gate then rejected the combined
+    // row's cadence/visits mismatch.
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Care', service: 'lawn_care', frequency: 9, visitsPerYear: 9 },
+      { name: 'Tree & Shrub Care Program', frequency: 9, visitsPerYear: 9 },
+    ]);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.frequency).toBe('every_6_weeks');
+    expect(combos[0].service.visitsPerYear).toBe(9);
+  });
+
   test('9-app lawn never combines with a 6-visit T&S program (same bimonthly pattern bucket)', () => {
     // patternFromVisitsPerYear buckets 6–11 visits as "bimonthly" — explicit
     // visit counts are the cadence truth (Codex P1).

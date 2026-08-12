@@ -229,6 +229,22 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     await expect(migration.up(fakeKnex(db3))).rejects.toThrow(/NOT a verified recurring\/semiannual/);
   });
 
+  test('up() THROWS when an existing profile carries one-time billing (codex r26 P1)', async () => {
+    // Completion resolution prefers the existing profile — a stale
+    // one_time billing_type would invoice semiannual visits
+    // per-application on top of the plan.
+    const db = emptyDb();
+    db.services.push({ id: 'admin-pre', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
+    db.service_completion_profiles.push({ id: 'p1', service_key: KEY, billing_type: 'one_time', active: true });
+    await expect(migration.up(fakeKnex(db))).rejects.toThrow(/one-time invoice posture/);
+    // A recurring profile passes untouched.
+    const db2 = emptyDb();
+    db2.services.push({ id: 'admin-pre', service_key: KEY, name: 'Semiannual Palm Injection Service', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: true });
+    db2.service_completion_profiles.push({ id: 'p2', service_key: KEY, billing_type: 'recurring', active: true });
+    await migration.up(fakeKnex(db2));
+    expect(db2.service_completion_profiles.filter((r) => r.service_key === KEY)).toHaveLength(1);
+  });
+
   test('up() skips the profile for a row an admin deactivated (posture preserved)', async () => {
     const db = emptyDb();
     db.services.push({ id: 'admin-palm', service_key: KEY, name: 'Palm Program', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2, is_active: false });

@@ -455,10 +455,30 @@ function lawnCadenceFieldForService(svc = {}) {
 }
 
 function explicitServiceCadence(svc = {}) {
-  const fromFields = explicitCadenceFieldForService(svc);
+  // Lawn-scoped numeric-nine normalization applies in combine routing too
+  // (codex r26 P1): Enhanced lawn + 9x T&S lines can both carry numeric
+  // frequency: 9, which the generic bucket reads as bimonthly — the
+  // combined row then fails the exact-cadence seeding gates. Lawn reads
+  // through lawnCadenceFieldForService / LAWN_VISITS_PATTERNS; a
+  // tree_shrub-family line whose fields are ALL numeric nine (the
+  // engine-backed Enhanced shape) reads every_6_weeks the same way.
+  // Mosquito and every other family keep the generic buckets.
+  const fam = seedingFamilyKey(svc);
+  const isLawn = fam === 'lawn_care';
+  const isTreeShrub = fam === 'tree_shrub';
+  const allNumericNineFields = (() => {
+    const raws = cadenceFieldRawValues(svc);
+    return raws.length > 0 && raws.every((value) => Number(value) === 9);
+  })();
+  const fromFields = isLawn
+    ? lawnCadenceFieldForService(svc)
+    : (isTreeShrub && allNumericNineFields ? 'every_6_weeks' : explicitCadenceFieldForService(svc));
   if (fromFields) return fromFields;
   const visits = visitsPerYearForRecurringService(svc);
-  if (visits) return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
+  if (visits) {
+    if (isLawn && LAWN_VISITS_PATTERNS[visits]) return LAWN_VISITS_PATTERNS[visits];
+    return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
+  }
   return [svc.label, svc.name, svc.displayName, svc.service_type]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
     .find(Boolean) || null;
@@ -562,12 +582,17 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const companionVisitsRaw = visitCountFieldsConflict(companion)
       ? null
       : visitsPerYearForRecurringService(companion);
-    const primaryVisits = primaryVisitsRaw
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(primaryVisitsRaw) === primaryPattern
+    // Nine visits AGREE with every_6_weeks (codex r26 P1): the generic
+    // 6-11 bucket reads nine as bimonthly, so the Enhanced lawn/T&S pair
+    // (day-gap cadence, not month-based) would never satisfy the
+    // visits-match requirement.
+    const visitsAgreeWithPattern = (visits, pattern) => !!visits
+      && (RecurringAppointmentSeeder.patternFromVisitsPerYear(visits) === pattern
+        || (pattern === 'every_6_weeks' && visits === 9));
+    const primaryVisits = visitsAgreeWithPattern(primaryVisitsRaw, primaryPattern)
       ? primaryVisitsRaw
       : null;
-    const companionVisits = companionVisitsRaw
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(companionVisitsRaw) === companionPattern
+    const companionVisits = visitsAgreeWithPattern(companionVisitsRaw, companionPattern)
       ? companionVisitsRaw
       : null;
     if (primaryVisits && companionVisits && primaryVisits !== companionVisits) continue;
@@ -581,8 +606,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     // over-seed follow-ups (12 visits at quarterly spacing — pre-push P1).
     // Omitted, the seeder uses the pattern's own visit default.
     const candidateVisits = firstPositiveNumber(primaryVisits, companionVisits);
-    const consistentVisits = candidateVisits
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(candidateVisits) === primaryPattern
+    const consistentVisits = visitsAgreeWithPattern(candidateVisits, primaryPattern)
       ? candidateVisits
       : null;
     combos.push({
@@ -2668,7 +2692,9 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
 // terms keep gap-filling. Every INJECTION-specific gate asks here instead
 // of the raw family resolver.
 const PALM_NUTRITIONAL_RE = /nutritional|fertil/i;
-const PALM_INJECTION_TOKEN_RE = /injection/i;
+// 'Semiannual Palm' is the recurring catalog row's SHORT NAME (codex r26
+// P1) — positive injection evidence even without the injection token.
+const PALM_INJECTION_TOKEN_RE = /injection|semiannual\s*palm/i;
 function isPalmInjectionFamily(svc = {}, parentRow = {}) {
   if (seedingFamilyKey(svc, parentRow) !== 'palm_injection') return false;
   const labels = [
