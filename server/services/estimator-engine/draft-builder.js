@@ -114,7 +114,12 @@ const MEASURED_TURF_BASES = new Set(['measuredTurfSf', 'lawnSqFt', 'estimatedTur
 // A unit quote with such a measurement needs no lot: its treated area is
 // already known, so the missing-lot review reason would be false (codex
 // r18 P2).
-function turfAreaFullyMeasured(lines = []) {
+function turfAreaFullyMeasured(lines = [], engineInput = null) {
+  // The engine INPUT is authoritative: priceOneTimeLawn consumes the
+  // measured area through its recurring calculation but omits turfBasis/
+  // turfSf from the returned line, so a line-metadata-only test parked
+  // every measured one-time lawn unit quote (codex r35 P1).
+  if (positive(engineInput?.measuredTurfSf)) return true;
   const turfLines = lines.filter((l) => l.turfBasis != null
     || l.turfSf || l.turfSqFt || l.treatableArea);
   return turfLines.length > 0
@@ -537,7 +542,7 @@ function verifyEvidenceQuotes(intent, context) {
 }
 
 // ── Lane classification ───────────────────────────────────────
-function classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context }) {
+function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
 
   if (!intent || intent.decision !== 'draft') {
@@ -626,7 +631,7 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
   } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')
-    && !turfAreaFullyMeasured(lines)) {
+    && !turfAreaFullyMeasured(lines, engineInput)) {
     // A unit/suite scope has NO individual lot by design — but a
     // lot-driven service (lawn/mosquito/T&S) on that scope has nothing to
     // price from: the engine's zero-area fallback returns a minimum-priced

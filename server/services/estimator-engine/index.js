@@ -1805,7 +1805,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
     const { lane, reasons, causes = [] } = (engineResult || !draftable)
-      ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
+      ? classifyLane({ intent, propertyFacts, engineResult, engineInput, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
     result.reasons = reasons;

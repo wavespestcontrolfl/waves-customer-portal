@@ -709,6 +709,25 @@ describe('classifyLane guardrails', () => {
     });
   });
 
+  test('a measured ONE-TIME lawn unit quote is not parked (r35)', () => {
+    withGate('true', () => {
+      // priceOneTimeLawn omits turfBasis/turfSf from its line, so the
+      // engine INPUT is what proves the area was measured.
+      const out = classifyLane({
+        ...baseArgs,
+        intent: { ...baseArgs.intent, services: { oneTimeLawn: { track: 'st_augustine' } } },
+        engineResult: { lineItems: [{ service: 'one_time_lawn', priceAfterDiscount: 120 }] },
+        engineInput: { measuredTurfSf: 1800 },
+        totals: { monthly: 0, annual: 0, oneTime: 120 },
+        propertyFacts: {
+          ...baseArgs.propertyFacts,
+          lot: { value: null, source: 'not_applicable:common_master_parcel', confidence: 'high' },
+        },
+      });
+      expect(out.reasons.join(' ')).not.toMatch(/lot-driven service on a unit\/suite scope/);
+    });
+  });
+
   test('a lot-driven service on a unit scope parks — no lot means nothing to price turf from', () => {
     withGate('true', () => {
       // codex r5 P1: after the master-parcel lot clears, the lawn pricer's
