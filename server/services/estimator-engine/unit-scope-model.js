@@ -66,14 +66,13 @@ function hasPrimaryStreetNumber(address) {
 // premises, matched by FAMILY (the extraction field is free-form —
 // 'industrial_flex', 'industrial building', and 'commercial property' must
 // all count; an exact-string set let every variant evade the guard, codex
-// pre-push P1). Residential families are excluded FIRST and win ties:
-// 'multifamily'/'apartment'/'condo' are NOT commercial signals here — a
-// unit tenant is residential; the ≥5-unit whole-property rule lives in
-// detectCategory.
-// 'town' alone would swallow 'downtown office', and a bare house-suffix
-// match would swallow 'warehouse' — townhome spellings only, and
-// house/home only as standalone words.
-const RESIDENTIAL_TYPE_FAMILY_RE = /apartment|multi.?family|condo|town\s?(?:home|house)|single|duplex|triplex|quadplex|villa|mobile|manufactured|residential|\bhouse\b|\bhome\b/;
+// pre-push P1). Commercial families take precedence over residential text:
+// a pure residential type ('apartment', 'condo', 'townhouse') carries no
+// commercial token and never conflicts — a unit tenant is residential and
+// the ≥5-unit whole-property rule lives in detectCategory — while a MIXED
+// type ('single tenant office', 'office villa') red-lanes to a human
+// (codex r3 P1). 'home office' as free text conflicts too; conservative
+// direction: red = operator look, never a silently wrong price.
 const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex/;
 
 // Free-text commercial signal for intake paths that carry prose instead of
@@ -115,8 +114,8 @@ function commercialTextSignal(text) {
 // conflicting type (truthy) or null.
 // HOA/common-area/association types trigger commercial handling by schema
 // even though their text often carries residential words ('condo
-// association') — checked BEFORE the residential exclusion so the
-// exclusion can't swallow them (codex r1 P1).
+// association') — checked before the general family matching so a
+// residential-looking label can't hide them (codex r1 P1).
 const HOA_COMMON_AREA_TYPE_RE = /hoa|common.?area|association/;
 
 function commercialCategoryConflict({ extraction, intent }) {
@@ -139,8 +138,14 @@ function commercialCategoryConflict({ extraction, intent }) {
     && resolveCustomerRelationship(extraction) === 'property_manager') {
     return `property_manager:${type}`;
   }
-  if (RESIDENTIAL_TYPE_FAMILY_RE.test(type)) return null;
-  return COMMERCIAL_TYPE_FAMILY_RE.test(type) ? type : null;
+  // Commercial families take PRECEDENCE over residential ones: a mixed
+  // type ('single tenant office', 'office villa') carries a positive
+  // commercial signal, and letting the residential exemption win there
+  // suppressed the conflict (codex r3 P1). The exemption exists for pure
+  // unit-occupant families — a mixed string red-lanes to a human instead
+  // of pricing residential.
+  if (COMMERCIAL_TYPE_FAMILY_RE.test(type)) return type;
+  return null;
 }
 
 // ── Property use ────────────────────────────────────────────────
