@@ -84,6 +84,17 @@ function pickOption(options = [], targetKey) {
 // Anything else demotes the card to an unpriced request-a-quote CTA — a
 // fallback-derived number on a customer surface is the trap this check
 // exists to close.
+// At least one locality field (city or zip) present on BOTH keys and equal.
+// sameScopeKey compares each locality field only when both sides carry it,
+// so disjoint evidence — a city-only primary against a zip-only stamp —
+// matches across cities (codex #3367 PR r6). Property equality here needs
+// one SHARED locality proof, not merely the absence of contradiction.
+function scopeKeysShareLocality(a, b) {
+  const [, ac, az] = String(a || '').split('|');
+  const [, bc, bz] = String(b || '').split('|');
+  return (!!ac && !!bc && ac === bc) || (!!az && !!bz && az === bz);
+}
+
 function optionIsPriceable(option) {
   if (!option) return false;
   if (option.manualReview) return false;
@@ -146,6 +157,9 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // disambiguation, no seed (an older fully-qualified estimate may still
     // seed instead).
     if (linkage.scopeKeyLacksLocality(street)) continue;
+    // Same shared-locality proof as the visit stamp (PR r6): disjoint
+    // locality fields (city-only vs zip-only) must not match across cities.
+    if (!scopeKeysShareLocality(street, scopeStreet)) continue;
     candidates.push({ row, inputs });
   }
   // Rows arrive newest-first, so the first surviving candidate is the most
@@ -241,17 +255,23 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // a raw-localized stamp compares strictly. Rows without a linked visit
     // keep the joined-row comparison (a divergent line1 there is still a
     // genuinely stamped divergence).
+    let linkedVisit = null;
     if (service.scheduled_service_id) {
-      const rawStamp = await database('scheduled_services')
+      linkedVisit = await database('scheduled_services')
         .where({ id: service.scheduled_service_id })
-        .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
-      if (rawStamp && rawStamp.service_address_line1) {
+        .first('service_address_line1', 'service_address_line2', 'service_address_city',
+          'service_address_zip', 'source', 'is_recurring');
+      if (linkedVisit && linkedVisit.service_address_line1) {
         const rawKey = linkage.normalizedStampedStreet(
-          rawStamp.service_address_line1, rawStamp.service_address_line2,
-          rawStamp.service_address_city, rawStamp.service_address_zip
+          linkedVisit.service_address_line1, linkedVisit.service_address_line2,
+          linkedVisit.service_address_city, linkedVisit.service_address_zip
         );
         if (!rawKey || linkage.scopeKeyLacksLocality(rawKey)) return null;
         if (!linkage.sameScopeKey(rawKey, primaryStreet)) return null;
+        // Both keys carry locality, but possibly in DISJOINT fields
+        // (city-only vs zip-only) — sameScopeKey's per-field wildcard
+        // accepts that across cities; require one shared proof (PR r6).
+        if (!scopeKeysShareLocality(rawKey, primaryStreet)) return null;
       }
       // No raw stamped line1 → the visit ran at the primary property.
     } else {
@@ -292,7 +312,16 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       if (!catalogById) throw new Error('report catalog identity join failed');
       reportIdentity = { ...reportIdentity, ...(catalogById.get(service.scheduled_service_id) || {}) };
     }
-    const reportFamilies = ownershipKeysForRow(reportIdentity);
+    // One-time visits own nothing (codex #3367 PR r6): an estimate-accept
+    // or self-booked one-time under a normal recurring catalog identity is
+    // not a live plan — the same one-time/lifecycle predicate the ownership
+    // loader applies. Without it a lawn customer's one-time pest visit
+    // would advance the ladder past pest and offer tree & shrub instead of
+    // the missing recurring pest plan.
+    const { isOneTimeBookingSource } = require('../self-booking-plan-sync');
+    const reportRowIsOneTime = !!linkedVisit
+      && (isOneTimeBookingSource(linkedVisit.source) || linkedVisit.is_recurring === false);
+    const reportFamilies = reportRowIsOneTime ? [] : ownershipKeysForRow(reportIdentity);
     // The catalog-enriched identity feeds the commercial gate too (codex
     // #3367 PR r5): a 'Commercial Pest Control' catalog row under stale
     // generic text with a blank property_type passed both earlier

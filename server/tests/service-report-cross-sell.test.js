@@ -280,6 +280,42 @@ describe('buildReportCrossSell', () => {
     expect(result).toBeNull();
   });
 
+  test('disjoint locality evidence (city-only primary vs zip-only stamp) suppresses the card', async () => {
+    // Neither key lacks locality, but they carry it in different fields —
+    // sameScopeKey's per-field wildcard would accept the match across
+    // cities; property equality needs one SHARED locality proof.
+    const db = dbFor({
+      customer: CUSTOMER({ zip: null }),
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'stamp-1', status: 'completed',
+        service_address_line1: '123 Gulf Dr', service_address_zip: '34236',
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'stamp-1' }), db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('a one-time visit under a recurring catalog identity owns nothing — the ladder still offers that family', async () => {
+    // estimate-accept one-time pest visit with a General Pest Control
+    // catalog row: without the one-time gate the report identity claims
+    // pest and the ladder would advance to lawn care.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      catalogRows: [{ id: 'ot-1', service_key: 'general_pest_control', service_name: 'General Pest Control' }],
+      stampRows: [{
+        id: 'ot-1', status: 'completed', source: 'estimate-accept',
+        service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236',
+      }],
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control', scheduled_service_id: 'ot-1' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+  });
+
   test('a report stamped at a different property than the primary is suppressed', async () => {
     const db = dbFor({
       serviceTypes: ['Pest Control'],
