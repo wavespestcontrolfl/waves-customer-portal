@@ -227,14 +227,17 @@ describe('replay repair — windowless reused rows register the placeholder (Cod
     // registerScheduleSideEffects forwards closeReminderWindows into
     // registerAppointment (the canonical pre-closed placeholder path)...
     expect(callProc).toContain('{ sendConfirmation: false, closeReminderWindows }');
-    // ...and the same-key replay caller derives it from the reused row,
-    // never fabricating a start for a cleared arrival time.
-    expect(callProc).toContain('closeReminderWindows: !svc.window_start,');
+    // ...and the same-key replay caller derives it from a FRESH slot
+    // re-read (Codex r25 P2 — the reuse-trx snapshot can predate an office
+    // edit that cleared the arrival time before this post-commit repair
+    // ran), never fabricating a start for a cleared arrival time.
+    expect(callProc).toContain('const freshReplaySlot = await db(\'scheduled_services\')');
+    expect(callProc).toContain('closeReminderWindows: !replaySlotStart,');
     expect(callProc).not.toContain("String(svc.window_start).slice(0, 5) : '09:00'");
     // Confirmation repairs (sweep re-arm AND the email leg) are scoped to
-    // visits that still have an arrival time, with a write-time
-    // windows_preclosed belt on the re-arm.
-    expect(callProc).toContain('if (svc.window_start && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
+    // visits that still have an arrival time per the fresh read, with a
+    // write-time windows_preclosed belt on the re-arm.
+    expect(callProc).toContain('if (replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
     expect(callProc).toContain('.where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })');
   });
 });
@@ -529,12 +532,13 @@ describe('same-key replay — consent-blocked email confirmation repair (Codex r
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     // The branch exists, scoped to the partial TCPA block AND to visits
     // that still have an arrival time (a windowless visit has no time to
-    // confirm — Codex r24 P1).
-    expect(callProc).toContain('} else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {');
+    // confirm — Codex r24 P1; the start comes from the FRESH slot re-read,
+    // not the reuse-trx snapshot — Codex r25 P2).
+    expect(callProc).toContain('} else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
     // Evidence gate on the email audit ledger before re-sending, and the
     // repair goes through the channel-aware helper (opt-out + prefs
     // fail-closed enforced there) with the SMS leg stubbed off.
-    const branchAt = callProc.indexOf('} else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {');
+    const branchAt = callProc.indexOf('} else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
     const branchSlice = callProc.slice(branchAt, branchAt + 3000);
     expect(branchSlice).toContain("interaction_type: 'email_outbound'");
     expect(branchSlice).toContain('smsPermanentlyBlocked: true,');

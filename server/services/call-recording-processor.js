@@ -11730,9 +11730,31 @@ const CallRecordingProcessor = {
                 // (registration dedupes by scheduled_service_id; redemption
                 // is evidence-gated), so a replay whose first attempt did
                 // complete is a no-op.
-                const replayDate = svc.scheduled_date instanceof Date
-                  ? svc.scheduled_date.toISOString().split('T')[0]
-                  : String(svc.scheduled_date || '').split('T')[0];
+                // Register against the CURRENT slot, not the reuse-trx
+                // snapshot (Codex #3361 r25 P2, same rule as the confirm
+                // hook's registration leg): an office edit clearing or
+                // moving the arrival time between the snapshot read and
+                // this post-commit repair fired its reminder sync before
+                // any reminder row existed — registering from the stale
+                // snapshot would then insert an ARMED reminder at a start
+                // the office already removed. An edit landing after this
+                // read finds the just-registered row and the DB sync
+                // trigger owns its state from there, the same contract
+                // every live booking's reminder row carries.
+                let replaySlotDate = svc.scheduled_date;
+                let replaySlotStart = svc.window_start;
+                try {
+                  const freshReplaySlot = await db('scheduled_services')
+                    .where({ id: svc.id })
+                    .first('scheduled_date', 'window_start');
+                  if (freshReplaySlot) {
+                    replaySlotDate = freshReplaySlot.scheduled_date;
+                    replaySlotStart = freshReplaySlot.window_start;
+                  }
+                } catch { /* fall back to the reuse snapshot */ }
+                const replayDate = replaySlotDate instanceof Date
+                  ? replaySlotDate.toISOString().split('T')[0]
+                  : String(replaySlotDate || '').split('T')[0];
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
                   customerId,
@@ -11742,9 +11764,9 @@ const CallRecordingProcessor = {
                   // canonical windowless pre-closed placeholder, never an
                   // armed reminder at a fabricated 09:00 — the office
                   // explicitly removed that time (Codex #3361 r24 P1).
-                  windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : null,
+                  windowStart: replaySlotStart ? String(replaySlotStart).slice(0, 5) : null,
                   serviceType: svc.service_type,
-                  closeReminderWindows: !svc.window_start,
+                  closeReminderWindows: !replaySlotStart,
                 });
                 // Confirmation repair, evidence-gated: the reused-row branch
                 // below never re-sends inline, and selfHealMissingReminderRows
@@ -11765,7 +11787,7 @@ const CallRecordingProcessor = {
                 // time to confirm — its registration above is the pre-closed
                 // placeholder, and any confirmation would render a time
                 // nobody chose (Codex #3361 r24 P1).
-                if (svc.window_start && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                if (replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
                   try {
                     // ALL THREE delivery ledgers, not just messaging_audit_log
                     // (Codex #3361 r7 P2): appointment EMAILS audit into
@@ -11820,7 +11842,7 @@ const CallRecordingProcessor = {
                   } catch (confirmRepairErr) {
                     logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                   }
-                } else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {
+                } else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {
                   // Consent-blocked SMS with email still permitted: the
                   // inline r21 fallback emails the confirmation, but a crash
                   // between the committed insert and that send loses it — and
@@ -11838,7 +11860,7 @@ const CallRecordingProcessor = {
                       .whereRaw("metadata->>'status' = 'sent'")
                       .first('id');
                     const replayApptTime = parseETDateTime(
-                      `${replayDate}T${String(svc.window_start).slice(0, 5)}`,
+                      `${replayDate}T${String(replaySlotStart).slice(0, 5)}`,
                     );
                     if (!emailEvidence && replayApptTime.getTime() > Date.now()) {
                       const AppointmentReminders = require('./appointment-reminders');
