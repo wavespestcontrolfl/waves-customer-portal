@@ -1595,7 +1595,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // scope must be exempt or a valid second-property apartment quote
       // would always red-lane (codex r13 P2) — the exact conflation this
       // lane exists to end: a unit tenant is a residential customer.
-      const quotedIsResidentialUnit = unitScope.serviceScope === 'residential_unit';
+      // The exemption needs POSITIVE residential evidence, not merely a
+      // subpremise-promoted scope: resolveUnitScopeModel labels any
+      // residential-intent address carrying a Unit/Suite token
+      // 'residential_unit', so a lookup-verified Office at "…, Suite 2"
+      // would otherwise suppress its own COMMERCIAL verdict (codex r15
+      // P1). propertyUse comes from the record/extraction type, so only a
+      // real condo/apartment classification exempts.
+      const quotedIsResidentialUnit = unitScope.serviceScope === 'residential_unit'
+        && ['condominium', 'multifamily_rental'].includes(unitScope.propertyUse);
       // The LOOKUP's own verdict on the quoted property, applied on BOTH
       // paths (codex r14 P1: the primary path checked only the extraction,
       // so a county-typed office/warehouse with a residential-or-unknown
