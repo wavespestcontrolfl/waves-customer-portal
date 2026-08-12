@@ -14,6 +14,7 @@ const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { dateOnlyStamp, formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
+const { inspectionCreditMemoForVisit } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
@@ -76,7 +77,7 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf }) {
+function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '' }) {
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
   const dynamicContext = data?.dynamicContext || {};
@@ -108,6 +109,10 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     application_summary: countLabel(applications.length, 'application'),
     reentry_summary: reentryParts.join(' '),
     pressure_summary: dynamicContext.pressureTrend?.customerSummary || (pressureValue ? `Pressure index: ${pressureValue}` : ''),
+    // Empty string = the template block vanishes (renderBlocks drops
+    // blocks whose rendered content is empty) — non-credit visits read
+    // exactly as before.
+    inspection_credit_note: inspectionCreditNote || '',
     pdf_note: pdf
       ? 'Your PDF service report is attached.'
       : 'A downloadable PDF will be available shortly.',
@@ -296,7 +301,7 @@ async function sendLegacyServiceReportEmail({
   }
 }
 
-function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}) {
+function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspectionCreditNote = '' } = {}) {
   const serviceLine = serviceDisplayName(data);
   const serviceDate = formatDate(data?.serviceDate);
   const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
@@ -331,7 +336,8 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     `<p style="margin:16px 0 0 0;"><strong>${escapeHtml(heroSummary)}</strong></p>`,
     findingsHtml,
     '<p style="margin:16px 0 0 0;">The customer advisory below is the section to read before people or pets return to treated areas.</p>',
-  ].join('');
+    inspectionCreditNote ? `<p style="margin:16px 0 0 0;"><strong>${escapeHtml(inspectionCreditNote)}</strong></p>` : null,
+  ].filter(Boolean).join('');
 
   const lines = [
     ['Service', escapeHtml(serviceLine)],
@@ -374,6 +380,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     interiorReadyAt ? `Interior ready at: ${interiorReadyAt}` : (minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null),
     dynamicContext.pressureTrend?.customerSummary || null,
     pressureValue ? `Pressure index: ${pressureValue}` : null,
+    inspectionCreditNote || null,
     `Findings: ${countLabel(findings.length, 'finding')}`,
     '',
     topFindings.length ? `Top findings: ${topFindings.map((finding) => finding.title || 'Finding documented').join('; ')}` : 'No action-required findings were documented during this visit.',
@@ -485,6 +492,14 @@ async function sendServiceReportV1Email(recordId, {
     recordId,
     mode: 'static',
   });
+
+  // Credit terms ride the report email (owner ruling 2026-08-12): the
+  // report reaches every inspection customer — including comped and
+  // payer-billed visits that never see a receipt — so the written
+  // deadline always lands. The persisted offer row is the authority and
+  // the shared memo helper carries the FROZEN amount + expiry; it never
+  // throws, and an empty string drops the template block entirely.
+  const inspectionCreditNote = await inspectionCreditMemoForVisit(service.scheduled_service_id);
 
   let pdf = null;
   try {
@@ -606,6 +621,7 @@ async function sendServiceReportV1Email(recordId, {
           reportUrl: fullReportUrl,
           serviceLabel,
           pdf,
+          inspectionCreditNote,
         }),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
@@ -698,6 +714,7 @@ async function sendServiceReportV1Email(recordId, {
       data: { ...data, customerName: recipient.name || data.customerName, pdfUrl: fullPdfUrl },
       reportUrl: fullReportUrl,
       pdfAttached: !!pdf,
+      inspectionCreditNote,
     });
     return sendLegacyServiceReportEmail({
       recordId,

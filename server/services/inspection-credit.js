@@ -1624,6 +1624,35 @@ function inspectionCreditReceiptMemo({ amount, expiresAt } = {}) {
   return `You have a $${amt.toFixed(2)} service credit from your inspection — it applies to any service you book by ${date}.`;
 }
 
+/**
+ * The same promise, looked up by VISIT — for surfaces keyed to the
+ * completed service rather than an invoice. Owner ruling 2026-08-12: the
+ * credit terms ride the service-report email, because the report is the
+ * one write-up every inspection customer receives — a comped or
+ * payer-billed inspection produces no customer receipt, so without this
+ * the customer holds a promise they were never told about.
+ *
+ * Same authority contract as the receipt memo: the persisted OFFER row,
+ * never the live gate, and the FROZEN amount + expiry — a delayed send
+ * must state the same deadline, never a recomputed "N days left". Only an
+ * offer still open and unexpired is announced. Never throws; '' means
+ * "nothing to say" and callers drop the line entirely.
+ */
+async function inspectionCreditMemoForVisit(scheduledServiceId) {
+  try {
+    if (!scheduledServiceId) return '';
+    const offer = await db('inspection_credit_offers')
+      .where({ source_scheduled_service_id: scheduledServiceId, status: 'offered' })
+      .where('expires_at', '>=', new Date())
+      .first('amount', 'expires_at');
+    if (!offer) return '';
+    return inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '';
+  } catch (err) {
+    logger.warn(`[inspection-credit] visit memo lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return '';
+  }
+}
+
 module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
@@ -1637,6 +1666,7 @@ module.exports = {
   carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  inspectionCreditMemoForVisit,
   queueCreditReceiptResend,
   creditWindowDaysForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,

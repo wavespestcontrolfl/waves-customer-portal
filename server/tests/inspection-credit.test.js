@@ -99,6 +99,7 @@ const {
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  inspectionCreditMemoForVisit,
   etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
   configuredCreditAmountForServiceKey,
@@ -1312,5 +1313,60 @@ describe('window + receipt copy', () => {
     expect(inspectionCreditReceiptMemo({ amount: 0, expiresAt: '2026-09-02' })).toBeNull();
     expect(inspectionCreditReceiptMemo({ amount: 75 })).toBeNull();
     expect(inspectionCreditReceiptMemo({})).toBeNull();
+  });
+});
+
+describe('inspectionCreditMemoForVisit — the report-email channel (owner ruling 2026-08-12)', () => {
+  it('announces an open unexpired offer with the frozen terms', async () => {
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z' }];
+    const memo = await inspectionCreditMemoForVisit('svc-1');
+    expect(memo).toContain('$125.00 service credit');
+    expect(memo).toContain('August 25, 2026');
+    // Scoped to THIS visit's offer, never "the customer's earliest".
+    expect(mockChainCalls.some(({ m, args }) => m === 'where'
+      && args[0] && typeof args[0] === 'object'
+      && args[0].source_scheduled_service_id === 'svc-1'
+      && args[0].status === 'offered')).toBe(true);
+  });
+
+  it('says nothing without an open offer, a visit id, or parseable terms', async () => {
+    expect(await inspectionCreditMemoForVisit('svc-1')).toBe('');
+    expect(await inspectionCreditMemoForVisit(null)).toBe('');
+    mockOffers = [{ amount: '125.00', expires_at: 'not-a-date' }];
+    expect(await inspectionCreditMemoForVisit('svc-1')).toBe('');
+  });
+
+  it('works while the gate is dark — the persisted offer row is the authority', async () => {
+    mockGateOn = false;
+    mockOffers = [{ amount: '75.00', expires_at: '2026-08-26T04:00:00Z' }];
+    expect(await inspectionCreditMemoForVisit('svc-1')).toContain('service credit');
+  });
+
+  it('source contract: receipt and report email share this ONE lookup', () => {
+    const fs = require('fs');
+    const path = require('path');
+    // The receipt memo delegates — the two surfaces can never state
+    // different terms for the same visit.
+    const invoiceEmail = fs.readFileSync(path.join(__dirname, '../services/invoice-email.js'), 'utf8');
+    expect(invoiceEmail).toContain('inspectionCreditMemoForVisit(visitId)');
+    expect(invoiceEmail).not.toContain("db('inspection_credit_offers')");
+    // The report email computes the note off the loaded service row and
+    // feeds BOTH the template payload and the legacy fallback renderer.
+    const emailDelivery = fs.readFileSync(path.join(__dirname, '../services/service-report/email-delivery.js'), 'utf8');
+    expect(emailDelivery).toContain('inspectionCreditMemoForVisit(service.scheduled_service_id)');
+    expect(emailDelivery).toContain("inspection_credit_note: inspectionCreditNote || ''");
+    const legacyCallSite = emailDelivery.indexOf('buildServiceReportV1Email({');
+    expect(emailDelivery.indexOf('inspectionCreditNote,', legacyCallSite)).toBeGreaterThan(-1);
+  });
+
+  it('migration registers the optional template variable both-sided', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260812000000_service_report_inspection_credit_note.js'), 'utf8');
+    // Allowlist + body must move together — a referenced-but-not-allowed
+    // variable fails the send at validation.
+    expect(migration).toContain('allowed_variables');
+    expect(migration).toContain('optional_variables');
+    expect(migration).toContain("'service.report_ready'");
   });
 });
