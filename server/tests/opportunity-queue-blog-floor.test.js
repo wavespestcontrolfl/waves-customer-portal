@@ -17,6 +17,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { THRESHOLDS, minScoreToActFor } = require('../services/content/scoring-config');
 const queue = require('../services/content/opportunity-queue');
+const { routeIdentity } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 afterEach(() => {
   jest.clearAllMocks();
@@ -368,6 +369,36 @@ describe('miner persistAll action-aware gate', () => {
 
     const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
     expect(lock.notIn).toBe(null); // no live keys at all
+  });
+
+  test('a companion queued BEFORE seo_actions claimed its page is retired', async () => {
+    // The derivation-time fence only covers companions minted this run; a
+    // page can acquire an open legacy action afterwards, leaving both
+    // mechanisms independently claimable.
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: null, _in: null,
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        whereNotNull: jest.fn(() => q), whereNot: jest.fn(() => q),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
+        select: jest.fn(() => q),
+        then: (res, rej) => Promise.resolve([]).then(res, rej),
+        forUpdate: jest.fn(() => Promise.resolve([
+          { dedupe_key: 'lb::owned', page_url: 'https://x/owned/' },
+          { dedupe_key: 'lb::ours', page_url: 'https://x/ours/' },
+        ])),
+        update: jest.fn((u) => { updates.push({ in: q._in, updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+
+    await miner._retireLegacyOwnedCompanions(null, new Set([routeIdentity('https://x/owned/')]));
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].in).toEqual(['dedupe_key', ['lb::owned']]); // only the owned page
+    expect(updates[0].updates).toMatchObject({ status: 'expired', skip_reason: 'seo_actions_owns_page' });
   });
 
   test('rows on a domain WITHOUT fresh coverage are never swept', async () => {

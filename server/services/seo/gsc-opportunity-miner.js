@@ -1432,6 +1432,10 @@ class GscOpportunityMiner {
     // expiring them would let a sync outage drain the lane one domain at
     // a time. Same shape and purpose as familyExemptions above.
     const sweepExemptQueries = { ctr_rewrite: new Set(), no_content_yet: new Set() };
+    // Pages the older seo_actions queue owns for internal-link work.
+    // Captured here so the persist transaction can retire companions that
+    // were queued BEFORE that queue claimed the page.
+    let legacyOwnedLinkPages = null;
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1600,6 +1604,7 @@ class GscOpportunityMiner {
       // schemes (audit P1). Fails CLOSED: an unavailable lookup derives
       // no companions this run rather than risking duplicates.
       const linkOwned = await this._pagesOwnedByOpenSeoActions(['add_internal_links']);
+      legacyOwnedLinkPages = linkOwned;
       if (linkOwned === null) {
         logger.warn('[gsc-opp-miner] link_boost: seo_actions fence unavailable — no companions derived this run');
         buckets.link_boost = [];
@@ -1665,6 +1670,12 @@ class GscOpportunityMiner {
         // page that is now performing fine. Guarded on a successful bucket
         // run: with an error, an empty/short bucket means "didn't run", not
         // "no signal", and sweeping would retire valid queued work.
+        // Filtering newly-derived companions stops FUTURE duplicates, but a
+        // companion queued before seo_actions claimed the page stays
+        // independently claimable until expiry — two mechanisms doing the
+        // same internal-link work (AGENTS.md single-mechanism rule).
+        // Ownership is window-independent, so this runs on every mine.
+        await this._retireLegacyOwnedCompanions(trx, legacyOwnedLinkPages);
         // periodDays gate mirrors the family sweep: a manual 7-day mine
         // sees far fewer qualifying queries, and treating everything
         // absent from that shorter window as "recovered" would expire
@@ -3772,6 +3783,38 @@ class GscOpportunityMiner {
     } catch (err) {
       logger.warn(`[gsc-opp-miner] companion protection lookup failed (${err.message}) — companion retirement suppressed this run`);
       return null;
+    }
+  }
+
+  /**
+   * Expire pending link_boost rows whose page the older seo_actions queue
+   * has since claimed for internal-link work. The derivation-time fence
+   * only covers companions minted THIS run; a page can acquire an open
+   * legacy action after ours was queued, and then both are independently
+   * claimable. Pending only — claimed/in-review work is in flight —
+   * locked before update, and revivable ('expired') if the legacy action
+   * completes and the page becomes ours again.
+   */
+  async _retireLegacyOwnedCompanions(trx, ownedPages) {
+    if (!(ownedPages instanceof Set) || !ownedPages.size) return;
+    const runner = trx || db;
+    try {
+      const locked = await runner('opportunity_queue')
+        .where({ bucket: 'link_boost', status: 'pending' })
+        .whereNotNull('page_url')
+        .select('dedupe_key', 'page_url')
+        .forUpdate();
+      const stale = locked.filter((r) => ownedPages.has(routeIdentity(r.page_url)));
+      if (!stale.length) return;
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+        .update({
+          status: 'expired', skip_reason: 'seo_actions_owns_page', updated_at: new Date(),
+        });
+      logger.info(`[gsc-opp-miner] link_boost: ${stale.length} companion(s) yielded to seo_actions`);
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] legacy companion retirement failed: ${err.message}`);
+      throw err;
     }
   }
 
