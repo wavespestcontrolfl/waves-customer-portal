@@ -5,14 +5,17 @@
  * link, or emits a token.
  *
  * SENT-PRICE DOCTRINE (owner ruling): a sent estimate is quoted at the price
- * it was SENT at. This module therefore reads ONLY persisted values — the
- * estimates row's own saved totals (monthly_total / annual_total /
- * onetime_total, written by the admin save/send flow) and the frozen
- * estimate_data.sendSnapshot.pricingBundle the send flow stamps
- * (routes/admin-estimates.js buildEstimateSendSnapshot) — and NEVER calls the
- * pricing engine or any re-derivation path. buildPricingBundle,
- * generateEstimate and friends are deliberately absent from this file; a test
- * asserts the engine is never invoked.
+ * it was SENT at — and `buildPricingBundle` (routes/estimate-public.js) is what
+ * IMPLEMENTS that ruling, so that is what this module calls. It is the same
+ * function the customer's own /estimate/:token page renders from, and it
+ * deliberately REJECTS the frozen sendSnapshot and re-derives in six cases
+ * (lawn-policy floor, retired quarterly cadence, stale termite row, missing
+ * setup fee, un-netted manual discount, totals mismatch). Reading
+ * `sendSnapshot.pricingBundle` raw would therefore speak a price the customer's
+ * own estimate page refuses to show — the one number they can check us against.
+ * Totals still come from the estimates row's persisted monthly_total /
+ * annual_total / onetime_total, and generateEstimate (the LIVE quote engine) is
+ * still never called here: a test asserts it.
  *
  * TOKENS NEVER LEAVE THEIR CHANNEL (house rule): estimates.token and
  * invoices.token are permanent bearer credentials behind /estimate/:token,
@@ -49,32 +52,66 @@ function parseJson(value) {
 // ── get_open_estimates ─────────────────────────────────────────────────────
 
 /**
- * Line labels + their SENT prices, read verbatim from the frozen send
- * snapshot. No arithmetic beyond currency formatting, no engine call, no
- * live re-pricing: an outstanding quote is honoured at the number the
- * customer was actually sent.
+ * The quoted lines for ONE open estimate, from THE sent-price mechanism.
+ *
+ * ⚠️ WHAT THIS USED TO DO, AND WHY IT NEVER FIRED: it read
+ * `sendSnapshot.pricingBundle.lineItems`. There is no `lineItems` key on a
+ * pricing bundle. The real bundle is keyed on `frequencies` — which is exactly
+ * what estimate-public.js's own snapshot fast-path gates on
+ * (`Array.isArray(snapshotBundle.frequencies)`). So the quoted-lines output was
+ * dead against real data, and the test fixture that "proved" it worked invented
+ * the shape.
+ *
+ * ⚠️ AND WHY READING THE RAW SNAPSHOT WAS WRONG EVEN WITH THE RIGHT KEY: the
+ * house ruling is that a sent estimate replays at the SENT price, and
+ * `buildPricingBundle` is what IMPLEMENTS that ruling — including the six cases
+ * where it deliberately REJECTS the frozen snapshot and re-derives (lawn-policy
+ * floor, retired quarterly cadence, stale termite row, missing setup fee,
+ * un-netted manual discount, totals mismatch). Reading the raw JSON therefore
+ * speaks a price the customer's OWN `/estimate/:token` page refuses to show —
+ * the one number the caller can check against.
+ *
+ * So this calls buildPricingBundle(estimateRow) and reads its `frequencies`.
+ * That is not "re-pricing": it is asking the same function the customer's
+ * estimate page asks what this estimate is worth right now, which is the only
+ * definition of the sent price that both surfaces agree on.
+ *
+ * Still true: no engine numbers are invented here, no token is ever selected,
+ * and a failure degrades to the row's persisted totals rather than guessing.
  */
-function snapshotLines(estimateData) {
-  const { fmtMoney, promptSafe } = require('./relay-context');
-  const bundle = estimateData && estimateData.sendSnapshot && estimateData.sendSnapshot.pricingBundle;
-  const raw = (bundle && Array.isArray(bundle.lineItems) && bundle.lineItems)
-    || (Array.isArray(estimateData && estimateData.lineItems) && estimateData.lineItems)
-    || [];
-  return raw
+async function quotedLines(estimateRow) {
+  const { fmtMoney, promptSafeUntrusted } = require('./relay-context');
+  const { buildPricingBundle } = require('../../routes/estimate-public');
+  const bundle = await buildPricingBundle(estimateRow);
+  const frequencies = (bundle && Array.isArray(bundle.frequencies)) ? bundle.frequencies : [];
+  if (!frequencies.length) return [];
+
+  // WHICH cadence was sent: the one whose totals match the estimate row's own
+  // persisted monthly/annual — the same correspondence
+  // pricingBundleMatchesEstimateTotals uses to decide a snapshot is still
+  // honest. No match (a one-time-only estimate, say) ⇒ the first entry.
+  const monthlyTotal = Number(estimateRow.monthly_total);
+  const annualTotal = Number(estimateRow.annual_total);
+  const matches = (f) => (Number.isFinite(monthlyTotal) && monthlyTotal > 0 && Math.abs(Number(f.monthly) - monthlyTotal) < 0.01)
+    || (Number.isFinite(annualTotal) && annualTotal > 0 && Math.abs(Number(f.annual) - annualTotal) < 0.01);
+  const chosen = frequencies.find(matches) || frequencies[0];
+
+  const lines = (Array.isArray(chosen.perServiceTreatments) ? chosen.perServiceTreatments : [])
     .slice(0, 6)
     .map((item) => {
       if (!item || typeof item !== 'object') return null;
-      const label = promptSafe(item.description || item.label || item.service || item.name, 60);
+      const label = promptSafeUntrusted(item.label || item.service, 60);
       if (!label) return null;
-      // Only fields that EXIST on the snapshot are spoken — never a computed
-      // or back-filled number.
-      const price = fmtMoney(item.monthly ?? item.unitPrice ?? item.amount ?? item.price);
-      if (!price) return label;
+      const monthly = fmtMoney(item.monthly);
       // Owner rule: recurring pricing is "per application", never "per visit".
-      const unit = item.monthly != null ? ' per month' : '';
-      return `${label} at ${price}${unit}`;
+      const perApp = fmtMoney(item.perTreatment);
+      const bits = [];
+      if (monthly) bits.push(`${monthly} per month`);
+      if (perApp) bits.push(`${perApp} per application`);
+      return bits.length ? `${label} at ${bits.join(', ')}` : label;
     })
     .filter(Boolean);
+  return lines;
 }
 
 /**
@@ -110,14 +147,20 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
       + 'estimate in their portal, or the office can go over it with them directly.';
   }
 
-  const rendered = rows.map((row) => {
-    const estimateData = parseJson(row.estimate_data);
+  const rendered = await Promise.all(rows.map(async (row) => {
     const when = speakDate(row.sent_at || row.created_at);
     const expires = speakDate(row.expires_at);
     const bits = [];
     const service = promptSafe(row.service_type, 60);
     bits.push(`Estimate sent ${when || 'recently'}${service ? ` for ${service}` : ''}`);
-    const lines = snapshotLines(estimateData);
+    // THE sent-price mechanism. A failure degrades to the row's persisted
+    // totals below — never to a guessed or engine-invented number.
+    let lines = [];
+    try {
+      lines = await quotedLines(row);
+    } catch (err) {
+      require('../logger').warn(`[voice-relay-money] pricing bundle unavailable for estimate ${row.id}: ${err.message}`);
+    }
     if (lines.length) bits.push(`quoted lines: ${lines.join('; ')}`);
     const monthly = fmtMoney(row.monthly_total);
     const oneTime = fmtMoney(row.onetime_total);
@@ -129,7 +172,7 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     if (totals.length) bits.push(`estimate total ${totals.join(', ')}`);
     if (expires) bits.push(`good through ${expires}`);
     return bits.join('; ');
-  });
+  }));
 
   return `Open estimates on this account: ${rendered.join(' || ')}. `
     + 'These are the prices the estimate was SENT at — quote them exactly as written, never re-price, '
@@ -220,7 +263,7 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
 module.exports = {
   openEstimatesText,
   invoiceHistoryText,
-  snapshotLines,
+  quotedLines,
   OPEN_ESTIMATE_STATUSES,
   INVOICE_HISTORY_LIMIT,
   ESTIMATE_LIMIT,

@@ -3,8 +3,11 @@
  * get_services_catalog.
  *
  * What these lock down:
- *   - SENT-PRICE DOCTRINE: open estimates are read from the persisted totals +
- *     the frozen sendSnapshot, and the pricing engine is NEVER called
+ *   - SENT-PRICE DOCTRINE: quoted lines come from buildPricingBundle (THE
+ *     mechanism the customer's own /estimate/:token page renders from — it
+ *     rejects the frozen snapshot and re-derives in six cases), totals come from
+ *     the estimate row's persisted columns, and the LIVE quote engine
+ *     (generateEstimate) is NEVER called
  *   - estimates tier split: amounts only for the ANI-matched caller; a
  *     looked-up ref gets existence + date, no numbers
  *   - invoices are ANI-matched-caller only
@@ -27,11 +30,17 @@ jest.mock('../services/call-booking-source-actions', () => ({ DISPATCH_OWNED_PEN
 jest.mock('../services/project-types', () => ({ customerSafeServiceNotes: jest.fn((n) => n || null) }));
 // The pricing engine must NEVER be reached from the estimate path.
 jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }));
+// buildPricingBundle IS the sent-price mechanism (it is what the customer's own
+// /estimate/:token page renders from, and it deliberately rejects the frozen
+// snapshot and re-derives in six cases). The voice agent must call IT, not read
+// sendSnapshot JSON by hand.
+jest.mock('../routes/estimate-public', () => ({ buildPricingBundle: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 jest.mock('../services/call-booking-catalog', () => ({ loadBookableCallServices: jest.fn() }));
 
 const db = require('../models/db');
 const { generateEstimate } = require('../services/pricing-engine');
+const { buildPricingBundle } = require('../routes/estimate-public');
 const { openBalanceSummary } = require('../services/open-balance');
 const { loadBookableCallServices } = require('../services/call-booking-catalog');
 
@@ -88,6 +97,7 @@ beforeEach(() => {
   primeDb();
   openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
   loadBookableCallServices.mockResolvedValue([]);
+  buildPricingBundle.mockResolvedValue(REAL_BUNDLE);
 });
 
 // A sent estimate whose snapshot carries the SENT prices, and whose token
@@ -103,17 +113,40 @@ const SENT_ESTIMATE = {
   annual_total: 498,
   onetime_total: 99,
   token: 'abcd1234abcd1234abcd1234abcd',
-  estimate_data: JSON.stringify({
-    sendSnapshot: {
-      renderedAt: '2026-07-21T12:00:00Z',
-      pricingBundle: {
-        lineItems: [
-          { description: 'Quarterly pest control', monthly: 41.5 },
-          { description: 'Initial service setup', amount: 99 },
-        ],
-      },
+  estimate_data: JSON.stringify({ sendSnapshot: { renderedAt: '2026-07-21T12:00:00Z' } }),
+};
+
+// ⭐ THE REAL BUNDLE SHAPE. The old fixture invented a `lineItems` key that does
+// not exist on a pricing bundle — which is exactly why the dead code path
+// passed its test. A bundle is keyed on `frequencies`, each entry carrying
+// `perServiceTreatments` (estimate-public.js shapeFrequencyEntry /
+// shapeFromV1), and estimate-public's own snapshot fast-path gates on
+// `Array.isArray(snapshotBundle.frequencies)`.
+const REAL_BUNDLE = {
+  source: 'send_snapshot',
+  snapshotHit: true,
+  frequencies: [
+    {
+      key: 'quarterly',
+      label: 'Quarterly',
+      monthly: 41.5,
+      annual: 498,
+      perVisit: 124.5,
+      oneTimeTotal: 99,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Quarterly pest control', monthly: 41.5, perTreatment: 124.5, visitsPerYear: 4 },
+      ],
     },
-  }),
+    {
+      key: 'bimonthly',
+      label: 'Bi-Monthly',
+      monthly: 58,
+      annual: 696,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Bi-monthly pest control', monthly: 58, perTreatment: 116 },
+      ],
+    },
+  ],
 };
 
 describe('get_open_estimates — SENT-price doctrine', () => {
@@ -125,19 +158,48 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('matched caller → snapshot line items + persisted totals, and NO pricing-engine call', async () => {
+  test('matched caller → lines from buildPricingBundle().frequencies + persisted totals', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
-    // The whole point: sent prices are READ, never recomputed.
+    // THE mechanism is consulted, with the estimate ROW.
+    expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
+    // The LIVE quote engine still is not.
     expect(generateEstimate).not.toHaveBeenCalled();
-    expect(out).toContain('Quarterly pest control at $41.50 per month');
-    expect(out).toContain('Initial service setup at $99');
+    // Owner rule: "per application", never "per visit".
+    expect(out).toContain('Quarterly pest control at $41.50 per month, $124.50 per application');
+    expect(out).not.toMatch(/per visit/i);
     expect(out).toContain('$41.50 per month');
     expect(out).toContain('$498 per year');
     expect(out).toContain('$99 one-time');
     expect(out).toMatch(/prices the estimate was SENT at/);
     expect(out).toMatch(/never re-price/i);
     assertNoWrites();
+  });
+
+  // The bundle offers a cadence LADDER; the sent estimate is one rung of it.
+  test('the cadence spoken is the one matching the estimate row\'s own totals', async () => {
+    primeDb({ estimates: [{ ...SENT_ESTIMATE, monthly_total: 58, annual_total: 696 }] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toContain('Bi-monthly pest control at $58 per month');
+    expect(out).not.toContain('Quarterly pest control at');
+  });
+
+  // buildPricingBundle does a live DB read and can throw; a caller is on the
+  // line, and the persisted totals are still honest.
+  test('a failing bundle degrades to the persisted totals — never a guessed number', async () => {
+    buildPricingBundle.mockRejectedValue(new Error('pool exhausted'));
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toMatch(/quoted lines/);
+    expect(out).toContain('$41.50 per month'); // the row's own persisted total
+    expect(out).toMatch(/prices the estimate was SENT at/);
+  });
+
+  test('a bundle with no frequencies at all yields no invented lines', async () => {
+    buildPricingBundle.mockResolvedValue({ frequencies: [] });
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toMatch(/quoted lines/);
   });
 
   test('only sent/viewed estimates count as open, newest first', async () => {
@@ -177,9 +239,11 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
-  test('a snapshot line with no price is named without inventing one', () => {
-    const lines = relayMoney.snapshotLines({ sendSnapshot: { pricingBundle: { lineItems: [{ description: 'Custom termite work' }] } } });
-    expect(lines).toEqual(['Custom termite work']);
+  test('a bundle line with no price is named without inventing one', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [{ key: 'quarterly', monthly: 41.5, perServiceTreatments: [{ service: 'termite', label: 'Custom termite work' }] }],
+    });
+    expect(await relayMoney.quotedLines(SENT_ESTIMATE)).toEqual(['Custom termite work']);
   });
 });
 
