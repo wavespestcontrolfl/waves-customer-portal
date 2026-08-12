@@ -189,6 +189,11 @@ async function findVisitWindowConflict(conn, {
   const blocking = rows.filter((row) => !(
     String(row.customer_id) === String(customerId)
     && serviceMatchesCoverage(row, serviceType)
+    // The exemption must be exactly as narrow as ADOPTION (codex r21
+    // pre-push P1): a row the coverage refused to adopt (wrong identity,
+    // other term) is real occupancy — the timed insert must not overlap
+    // it.
+    && (typeof adoptableFor?.isAdoptable !== 'function' || adoptableFor.isAdoptable(row))
     && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
   ));
   return blocking.length ? blocking[0] : null;
@@ -406,6 +411,62 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   return dates;
 }
 
+// A scheduled row COMMITTED to a term: linked by id, prepaid-stamped, or
+// sharing the term's source estimate (codex r18 pre-push P0 — a
+// payment-pending term's reserved/sold first visit carries only
+// source_estimate_id; excluding it would seed replacement visits and
+// leave the sold visit separately billable).
+function rowLinkedToAnotherTerm(term, row) {
+  return row.annual_prepay_term_id != null
+    && term?.id != null
+    && String(row.annual_prepay_term_id) !== String(term.id);
+}
+
+function rowCommittedToTerm(term, row) {
+  // Direct evidence (term link or prepaid stamp) always commits. Estimate
+  // provenance commits ONLY rows that READ recurring (is_recurring /
+  // recurring_pattern / recurring_parent_id, stamped at seeding) — for
+  // EVERY family (codex r21 pre-push P0): an estimate's extra one-time
+  // appointment matching the coverage text must never join the committed
+  // set, displace an already-stamped visit in the slice, or absorb a
+  // prepaid stamp of its own.
+  // A row EXPLICITLY linked to a different term belongs to that term
+  // (codex r21 pre-push P0, fourth pass): its prepaid stamp or shared
+  // estimate must not let a neighboring/boundary term consume it, or the
+  // newly paid term seeds short while the other term's visit double-counts.
+  if (rowLinkedToAnotherTerm(term, row)) return false;
+  const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  if (directCommitment) return true;
+  const readsRecurring = row.is_recurring === true
+    || !!row.recurring_pattern
+    || !!row.recurring_parent_id;
+  return readsRecurring
+    && term?.source_estimate_id != null && row.source_estimate_id != null
+    && String(row.source_estimate_id) === String(term.source_estimate_id);
+}
+
+// Palm coverage family detection, shared by coverage matching and the
+// seeding identity guard (codex r18 pre-push P0/P1): word-boundary
+// fallback keeps 'Palmetto…' service types out when the resolver errors.
+function coverageFamilyIsPalm(coverageServiceType) {
+  // INJECTION-scoped (codex r20 pre-push P0): the broad family resolver
+  // also captures the distinct legacy palm_treatment nutritional program,
+  // whose quarterly prepay terms must keep gap-filling untouched.
+  try {
+    const { isPalmInjectionFamily } = require('./estimate-converter');
+    return isPalmInjectionFamily({ name: coverageServiceType, service_type: coverageServiceType });
+  } catch (familyErr) {
+    logger.warn(`[annual-prepay] palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
+    // Injection-scoped like the resolver (codex r21 pre-push P1): bare
+    // historical 'Palm'/'Palm Treatment' labels are the nutritional lane.
+    const label = String(coverageServiceType || '');
+    return /\bpalm\b/i.test(label)
+      && /injection/i.test(label)
+      && !/nutritional|fertil/i.test(label);
+  }
+}
+
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -425,7 +486,52 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? rows
     : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  const matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
+  let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // PALM coverage candidates require identity or provenance (codex r18
+  // pre-push P0): matching is by service-type TEXT, and Waves sells
+  // genuine one-time palm injections — a name-matched one-time
+  // appointment inside the term window must never be adopted into
+  // prepaid coverage (attach + stamping both read this set, and the
+  // stamp would suppress its separate completion invoice). A palm row
+  // qualifies only when it CARRIES the recurring identity (id or
+  // snapshot) or already belongs to this term; ambiguous rows are
+  // excluded and the seeder creates a correctly-identified visit
+  // instead (fail closed).
+  if (coverageFamilyIsPalm(coverageServiceType)) {
+    // A FAILED identity lookup PROPAGATES (codex r21 P0): swallowing it
+    // to null would exclude valid id-carrying palm rows from coverage and
+    // seed duplicate visits beside them — the originals then bill at
+    // completion. A MISSING row (clean undefined) still resolves null:
+    // that is the catalog-missing environment, where the seeding resolve
+    // defers before anything is created.
+    const semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
+    const oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
+    const carriesRecurringPalmIdentity = (row) =>
+      (semiannualPalmId && row.service_id === semiannualPalmId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
+    // Provenance/commitment fallback is only for rows the backfill can
+    // OWN (codex r26 pre-push P0): identity-less (name-only) or the KNOWN
+    // stale one-time palm identity. A row carrying any FOREIGN explicit
+    // id/snapshot is another service's visit — counting it as coverage
+    // would suppress its separate billing and seed the palm term short.
+    const carriesForeignIdentity = (row) =>
+      (row.service_id && row.service_id !== semiannualPalmId
+        && (!oneTimePalmId || row.service_id !== oneTimePalmId))
+      || (row.service_key_snapshot
+        && String(row.service_key_snapshot) !== 'palm_injection_semiannual'
+        && String(row.service_key_snapshot) !== 'palm_injection');
+    // A row linked to ANOTHER term never counts (codex r21 pre-push P0,
+    // fifth pass): even carrying the recurring identity, it belongs to
+    // that term's coverage — counting it here seeds this term short while
+    // attach/stamping refuse to move it.
+    matching = matching.filter((row) => {
+      if (rowLinkedToAnotherTerm(term, row)) return false;
+      if (carriesRecurringPalmIdentity(row)) return true;
+      if (carriesForeignIdentity(row)) return false;
+      return rowCommittedToTerm(term, row);
+    });
+  }
   if (matching.length <= coverageVisitCount) return matching;
 
   // More matching candidates than sold visits: keep the visits already committed
@@ -435,9 +541,6 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // leaving more than coverageVisitCount visits prepaid and skipping completion
   // billing on the extra work. Fill any remaining slots with the earliest
   // uncommitted matches, then return the selection in date order.
-  const isCommittedToTerm = (row) =>
-    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
-    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   const selectedIds = new Set(
     [...matching.filter(isCommittedToTerm), ...matching.filter((row) => !isCommittedToTerm(row))]
       .slice(0, coverageVisitCount)
@@ -628,6 +731,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   }
 
   const createdRows = [];
+  // Rows adopted under the occupancy lock (concurrently-created same-day
+  // visits) — collected so the palm identity backfill below can reach
+  // them; they are never in existingRows.
+  const adoptedConcurrentRows = [];
   // Owner directive (2026-07-03): every service call defaults to 60 minutes.
   const baseDuration = 60;
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
@@ -674,6 +781,168 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     firstVisitWindowStart = null;
   }
 
+  // Payment-seeded PALM visits must carry the recurring catalog identity
+  // (codex #3349 r14 P1): a bare service_type 'Palm Injection' misfiles at
+  // completion — the exact-name lookup misses and the unique short-name
+  // match is the ONE-TIME palm_injection row, so every paid recurring
+  // visit would get one-time billing and the token-only portal posture.
+  // Mirror the converter/admin identity link (seedingFamilyKey handles the
+  // Palmetto substring trap); IDENTITY ONLY — duration stays the 60-minute
+  // slot default, never the catalog row's. Runs BEFORE the term-end slide
+  // persists (codex r17 pre-push P1): a deferred run must not extend the
+  // coverage window — repeated deferrals would otherwise re-apply the
+  // payment lag on every refresh and postpone renewal indefinitely.
+  let coverageCatalogServiceId = null;
+  let coverageCatalogKey = null;
+  let staleOneTimePalmId = null;
+  // Palm detection runs INDEPENDENTLY of the coverage cadence (codex r18
+  // pre-push P1): nesting it under `=== 'semiannual'` let an admin-created
+  // palm term with an explicit monthly/quarterly cadence bypass the
+  // identity guard entirely and seed name-only visits at the wrong
+  // cadence. Detection uncertainty counts as palm when the type names
+  // palm (word-boundary — 'Palmetto…' never trips it).
+  const coverageIsPalm = coverageFamilyIsPalm(coverageServiceType);
+  if (coverageIsPalm) {
+    // Palm coverage is semiannual-only (owner ruling 2026-08-11): any
+    // other recorded cadence is invalid term data — seeding it would
+    // create the wrong series AND misfile completions to the one-time
+    // profile. Defer with a durable exception; nothing is created.
+    if (coverageCadence !== 'semiannual') {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage records cadence '${coverageCadence}' — palm is semiannual-only, deferring (fail closed)`);
+      await fileCoverageException(term, 'palm_coverage_cadence_invalid',
+        `This palm term records a '${coverageCadence}' coverage cadence, but the palm program is semiannual-only — correct the term's coverage cadence, then re-save to seed its visits.`);
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        effectiveTermEnd: termEnd,
+        reason: 'palm_coverage_cadence_invalid',
+      };
+    }
+    try {
+      const catalogRow = await conn('services')
+        .where({ service_key: 'palm_injection_semiannual' })
+        .first('id', 'service_key');
+      if (catalogRow?.id) {
+        coverageCatalogServiceId = catalogRow.id;
+        coverageCatalogKey = catalogRow.service_key;
+        // The one-time palm row's id (codex r16 P1): an adopted legacy
+        // visit booked before the recurring row existed can carry it
+        // (estimate-public preserves ids on adoption), and completion
+        // trusts the id first. In this definitively semiannual coverage
+        // context that KNOWN id is stale — the backfill below retargets
+        // it, mirroring the converter's reserved-parent relink.
+        const oneTimeRow = await conn('services')
+          .where({ service_key: 'palm_injection' })
+          .first('id');
+        staleOneTimePalmId = oneTimeRow?.id || null;
+      } else {
+        // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
+        // visits would knowingly hand them the one-time completion/
+        // billing posture. Defer — ensureCoverageRowsForTerm is
+        // idempotent and re-runs on every term refresh, and the deduped
+        // coverage exception keeps it office-visible until then. Runs
+        // BEFORE the term-end slide persists (codex r17 pre-push P1) so
+        // repeated deferrals never extend the coverage window.
+        logger.error(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row missing — deferring palm coverage seeding (fail closed)`);
+        await fileCoverageException(term, 'palm_catalog_missing',
+          'The recurring palm catalog row (palm_injection_semiannual) is missing, so this term\'s prepaid palm visits were NOT created. Restore the catalog row (migration 20260811000010); the next term refresh seeds them automatically.');
+        return {
+          createdCount: 0,
+          targetDates,
+          existingCount: existingRows.length,
+          createdRows: [],
+          // The ORIGINAL term end: this deferral runs before the
+          // late-payment slide persists, and the caller trusts any
+          // returned effectiveTermEnd for downstream window math.
+          effectiveTermEnd: termEnd,
+          reason: 'palm_catalog_missing',
+        };
+      }
+    } catch (err) {
+      // Unknown identity state = fail closed for palm too.
+      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link failed (${err.message}) — deferring`);
+      await fileCoverageException(term, 'palm_catalog_missing',
+        'The recurring palm catalog identity could not be verified while seeding this term\'s prepaid visits — seeding deferred; the next term refresh retries automatically.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — same rule as the deferral above.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_catalog_missing',
+      };
+    }
+  }
+
+  // Shared palm identity backfill (codex r15/r16/r17/r18 rounds): rows
+  // the seeder matched or adopted still resolve the ONE-TIME catalog row
+  // at completion when they are name-only (NULL service_id, no foreign
+  // snapshot) or carry the KNOWN stale one-time palm id/snapshot — both
+  // retarget to the recurring identity, mirroring the converter's
+  // reserved-parent relink. A row whose id/snapshot records a DIFFERENT
+  // durable identity was a deliberate booking and stays untouched.
+  const backfillPalmIdentity = async (rows, label) => {
+    try {
+      const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
+      // Retargeting a row that CARRIES the one-time identity requires
+      // PROVENANCE (codex r18 pre-push P0): Waves sells genuine one-time
+      // palm injections, and coverage matching is by service-type text —
+      // an unrelated one-time appointment inside the term window must not
+      // be converted to recurring and have its separate billing
+      // suppressed. Only a row already attached to THIS term retargets;
+      // rows with no identity evidence at all (name-only) remain the
+      // original r15 case.
+      const committedToTerm = (row) => rowCommittedToTerm(term, row);
+      const retargetable = (row) => row && row.id
+        && (
+          (!row.service_id && !row.service_key_snapshot)
+          || (!row.service_id && oneTimePalmSnapshot(row) && committedToTerm(row))
+          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId && committedToTerm(row))
+        );
+      const backfillIds = rows.filter(retargetable).map((row) => row.id);
+      if (backfillIds.length) {
+        const patch = { service_id: coverageCatalogServiceId };
+        if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
+        await conn('scheduled_services')
+          .whereIn('id', backfillIds)
+          .where(function retargetScope() {
+            this.whereNull('service_id');
+            if (staleOneTimePalmId) this.orWhere('service_id', staleOneTimePalmId);
+          })
+          .update(patch);
+      }
+      return true;
+    } catch (err) {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage identity backfill (${label}) FAILED: ${err.message}`);
+      return false;
+    }
+  };
+
+  // Phase-1 identity backfill — matched/adopted EXISTING rows, BEFORE any
+  // seeding or slide persistence (codex r18 pre-push P0): deferring here
+  // creates nothing, so the refresh hard-stop leaves no correctly-seeded
+  // visit unstamped. Failure files the durable exception and defers; the
+  // next idempotent term refresh retries the whole sequence.
+  if (coverageCatalogServiceId && cols.service_id) {
+    const existingOk = await backfillPalmIdentity(existingRows, 'matched-existing');
+    if (!existingOk) {
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'Adopted palm coverage visits could not be linked to the recurring catalog identity — until the next term refresh succeeds, their completions would bill as one-time work. Re-save the term to retry, or link the visits to Semiannual Palm Injection manually.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — the slide has not persisted yet.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_identity_backfill_failed',
+      };
+    }
+  }
+
   // Persist the slid coverage window BEFORE seeding, so the seeded tail is
   // in-window for every downstream consumer (attachScheduledServices,
   // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
@@ -712,6 +981,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
+    if (cols.service_id && coverageCatalogServiceId) insertData.service_id = coverageCatalogServiceId;
+    if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
@@ -758,6 +1029,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     return true;
   };
 
+  // Concurrent-adoption filter (codex r18 pre-push P0): same rule as
+  // coverageRowsForTerm — a palm row adopted under the occupancy lock
+  // must carry the recurring identity or already belong to this term,
+  // or a genuine one-time palm appointment on the same day would be
+  // swallowed into prepaid coverage.
+  const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+    && !rowLinkedToAnotherTerm(term, row)
+    && (!coverageIsPalm
+      || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
+      || rowCommittedToTerm(term, row));
+
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
@@ -787,13 +1070,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
         if (concurrentAdoptable) return;
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate,
           windowStart,
           durationMinutes: baseDuration,
-          adoptableFor: { customerId: term.customer_id, coverageServiceType },
+          adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
         });
         if (conflict) {
           logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
@@ -816,13 +1099,14 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
       } catch (recheckErr) {
         logger.warn(`[annual-prepay] term ${term.id} post-failure adoption recheck failed (${recheckErr.message})`);
       }
     }
     if (concurrentAdoptable) {
       logger.warn(`[annual-prepay] term ${term.id} found concurrently-created visit ${concurrentAdoptable.id} on ${scheduledDate} under the occupancy lock — adopting it instead of inserting a duplicate`);
+      adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
     if (!windowStart && firstVisitWindowStart) {
@@ -1016,6 +1300,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       } catch (err) {
         logger.warn(`[annual-prepay] seeded-visit reminder registration skipped for ${created.id}: ${err.message}`);
       }
+    }
+  }
+
+  // Phase-2 identity backfill — CONCURRENT adoptions only (codex r18
+  // pre-push P0): rows adopted under the occupancy lock mid-loop are not
+  // known before seeding. A failure here must NOT hard-stop the refresh —
+  // the newly inserted visits carry the correct identity and must still
+  // be prepaid-stamped, or completion would invoice a prepaid customer.
+  // The unresolved adopted row is quarantined operationally via the
+  // durable coverage exception instead.
+  if (coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
+    const concurrentOk = await backfillPalmIdentity(adoptedConcurrentRows, 'concurrent-adoption');
+    if (!concurrentOk) {
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'A concurrently-adopted palm visit could not be linked to the recurring catalog identity — its completion would bill as one-time work. Link the visit to Semiannual Palm Injection manually, or re-save the term to retry.');
+      return {
+        createdCount: createdRows.length,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows,
+        effectiveTermEnd,
+        reason: 'palm_concurrent_backfill_failed',
+      };
     }
   }
 
@@ -2069,6 +2376,15 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+    // Attach + prepaid stamping run even on a palm-identity DEFERRAL
+    // (codex r18 pre-push P0, superseding the earlier hard-stop): the
+    // prepaid stamp is the anti-double-bill mechanism — an already-booked
+    // palm visit left unstamped would invoice at completion after the
+    // annual prepay was collected. The MONEY layer therefore always runs;
+    // the identity problem (wrong completion profile posture) remains
+    // quarantined by the deferral's durable coverage exception until the
+    // next refresh restores the catalog identity and re-runs this
+    // sequence idempotently.
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     // Callers sync customers.waveguard_renewal_date from the PRE-slide end

@@ -179,7 +179,9 @@ function patternFromVisitsPerYear(value) {
 
 function serviceKeyFor(value = {}) {
   const raw = String(
-    value.service || value.service_key || value.key || value.kind
+    // serviceKey (camel) joined the vocabulary with service_key (codex r22
+    // pre-push P1) — the admin/estimate line spelling.
+    value.service || value.serviceKey || value.service_key || value.key || value.kind
     || value.name || value.label || value.displayName || value.service_type || ''
   ).toLowerCase();
   // Multi-service composite bookings ('mosquito+pest_control' keys or
@@ -544,6 +546,25 @@ async function existingSeriesDates(conn, parent, columns) {
 // (booking.js) pass it so the fresh row can never match itself.
 // Returns [] when nothing matches; matches carry next_upcoming_date (ET
 // date string) when the series has a future visit.
+// The duplicate-guard FAMILY classifier — used by BOTH the matcher and
+// the advisory-lock keys (codex r22 pre-push P0: deriving them
+// differently let an alias-labeled creator and a canonical creator take
+// different family locks and both seed). Palm-first with injection vs
+// nutritional as distinct identities; every other family is exactly
+// serviceKeyFor. Lazy converter require — it loads this module at boot.
+function duplicateGuardFamilyKey(label) {
+  try {
+    const { seedingFamilyKey, isPalmInjectionFamily } = require('./estimate-converter');
+    const fam = seedingFamilyKey({}, { service_type: label });
+    if (fam === 'palm_injection') {
+      return isPalmInjectionFamily({}, { service_type: label }) ? 'palm_injection' : 'palm_nutritional';
+    }
+    return fam;
+  } catch {
+    return serviceKeyFor({ service_type: label });
+  }
+}
+
 async function findActiveRecurringSeries(conn, {
   customerId,
   serviceId = null,
@@ -579,13 +600,17 @@ async function findActiveRecurringSeries(conn, {
   if (columns.recurring_ongoing) query.select('recurring_ongoing');
   if (excludeParentId) query.whereNot('id', excludeParentId);
   const parents = await query;
-  const targetKey = serviceType ? serviceKeyFor({ service_type: serviceType }) : null;
+  // Palm-first family classification for BOTH sides (codex r21 pre-push
+  // P0), shared with the advisory-lock keys via duplicateGuardFamilyKey
+  // (codex r22 pre-push P0).
+  const familyKeyOf = (label) => duplicateGuardFamilyKey(label);
+  const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
   for (const parent of parents || []) {
     const idMatch = serviceId != null && parent.service_id != null
       && String(parent.service_id) === String(serviceId);
     const keyMatch = targetKey != null && parent.service_type
-      && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
+      && familyKeyOf(parent.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
       const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
@@ -679,7 +704,7 @@ async function checkActiveSeriesLocked(trx, opts = {}) {
 function seriesCreateLockKeys({ customerId, serviceId = null, serviceType = null } = {}) {
   const keys = [];
   if (serviceType) {
-    keys.push(`${customerId}:family:${serviceKeyFor({ service_type: serviceType })}`);
+    keys.push(`${customerId}:family:${duplicateGuardFamilyKey(serviceType)}`);
   }
   if (serviceId != null) {
     keys.push(`${customerId}:svc:${serviceId}`);

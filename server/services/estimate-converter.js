@@ -186,7 +186,10 @@ function determineTier(serviceCount, hasRecurringServices = false) {
 }
 
 function recurringServiceKey(svc = {}) {
-  const raw = String(svc.service || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
+  // serviceKey/service_key joined the vocabulary (codex r22 pre-push P1):
+  // a persisted { service_key: 'palm_injection' } line otherwise resolved
+  // through its LABEL alone and could misclassify.
+  const raw = String(svc.service || svc.serviceKey || svc.service_key || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
   const words = raw.replace(/[_-]+/g, ' ');
   if (
     raw.includes('palm_injection')
@@ -322,13 +325,164 @@ const STANDALONE_SUPPLEMENT_ROUTES = {
 // "pest defaults to quarterly" must not bypass the cadence gate for a
 // legacy monthly program (Codex P2), and the accept-level billing fallback
 // must not override an explicit 4x/6x line (pre-push P1).
+// The FIELD-level cadence only — no visits/name inference. The palm forced
+// rule needs exactly this distinction: a builder 2-visit palm line with no
+// frequency field must still force semiannual, while a line whose FIELD
+// contradicts (monthly/quarterly + 2 visits) must fall through to normal
+// validation and decline (codex #3349 r4 P1).
+// The ONE cadence-field vocabulary (mirrors recurringServiceCadenceKey
+// minus its visit-count fallbacks) — explicitCadenceFieldForService and
+// explicitlyOneTimeCadence read the SAME list so a spelling can never
+// count for one and not the other (r8/r15 shared-vocabulary lesson).
+function cadenceFieldRawValues(svc = {}) {
+  return [
+    svc.frequency, svc.freq, svc.frequencyKey, svc.frequency_key,
+    svc.recurringPattern, svc.recurring_pattern,
+    svc.cadence, svc.cadenceKey, svc.cadence_key,
+    svc.planFrequency, svc.plan_frequency,
+  ]
+    // `freq` joined the list for the admin-prefill lines that carry it
+    // (codex r19 P1): validation reading this vocabulary while the
+    // prefill reader gave `freq` precedence let
+    // { serviceKey: 'palm_injection', freq: 'monthly' } pass the
+    // one-time identity check and book a monthly series on it.
+    // Numeric ZERO is a populated (malformed) cadence, not an absent one
+    // (codex r26 pre-push P1): `value || ''` would erase it and the
+    // forced branches would seed from the visit count — preserved here, it
+    // reaches the unrecognized-cadence sentinel and declines.
+    .map((value) => (value == null ? '' : String(value)).trim())
+    .filter(Boolean);
+}
+
+// Recognized one-time spellings — deliberately NOT in
+// normalizeRecurringPattern's vocabulary (a one-time value must never
+// resolve as a recurring cadence, so inside the converter these fields
+// surface the unrecognized sentinel and decline recurring paths, which is
+// correct). Consumers that need "is this line EXPLICITLY one-time?"
+// (admin catalog matching — codex r17 P2) ask here instead.
+const ONE_TIME_CADENCE_RE = /^(one[\s_-]?time|onetime|once|single)$/i;
+function explicitlyOneTimeCadence(svc = {}) {
+  const values = cadenceFieldRawValues(svc);
+  return values.length > 0 && values.every((value) => ONE_TIME_CADENCE_RE.test(value));
+}
+
+function explicitCadenceFieldForService(svc = {}) {
+  // Every cadence-bearing FIELD spelling persisted on accepted lines —
+  // including `cadence`/`planFrequency`, which estimate-public and the
+  // per-application reader persist but inferRecurringPattern does not
+  // read (codex r7 P1: a palm row { cadence: 'monthly', visitsPerYear: 2 }
+  // must count as cadence-bearing so the forced rule stands down and the
+  // contradictory data declines through normal validation).
+  // Field vocabulary mirrors recurringServiceCadenceKey below (codex r8
+  // P1: plan_frequency snake_case included) minus its visit-count
+  // fallbacks — visit counts are exactly what this reader must NOT infer
+  // from.
+  const rawValues = cadenceFieldRawValues(svc);
+  const normalized = rawValues.map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value));
+  // A POPULATED cadence field the normalizer can't read (e.g.
+  // 'every_4_months') is still cadence-bearing (pre-push r12 P1): treated
+  // as absent, the forced palm/lawn branches would seed from the visit
+  // count and override a cadence we couldn't even parse. Same sentinel
+  // mechanics as the conflict below — forces stand down, gates and the
+  // prepay mirrors decline the row to office scheduling.
+  if (normalized.some((value) => !value)) return 'unrecognized_cadence_field';
+  const unique = [...new Set(normalized)];
+  if (unique.length === 0) return null;
+  if (unique.length === 1) return unique[0];
+  // Conflicting cadence fields — e.g. frequency 'semiannual' left beside a
+  // corrected cadence 'monthly' (codex r10 P1). Behavior must not depend on
+  // field precedence: surface a value no real cadence equals, so the
+  // forced-palm branch stands down AND the gate's ≠-semiannual check (and
+  // the prepay mirror) decline the contradictory row to office scheduling.
+  return 'conflicting_cadence_fields';
+}
+
+// Conflicting visit-count aliases (mirror of the cadence-field conflict
+// rule): { visitsPerYear: 2, visits: 4 } must decline, not seed whichever
+// alias firstPositiveNumber happens to read first.
+// The ONE alias list every visit-count consumer reads (codex r15 pre-push
+// P0: the reader and the conflict check must never disagree on vocabulary,
+// and persisted lines carry snake_case spellings too — same lesson as the
+// r8 plan_frequency cadence fix). Camel-before-snake preserves the
+// pre-existing precedence for camelCase rows.
+function visitCountAliasValues(svc = {}) {
+  return [
+    svc.visitsPerYear, svc.visits_per_year,
+    svc.appsPerYear, svc.apps_per_year,
+    svc.visits, svc.apps,
+    svc.treatmentsPerYear, svc.treatments_per_year,
+  ];
+}
+
+function visitCountFieldsConflict(svc = {}) {
+  const values = visitCountAliasValues(svc)
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return new Set(values).size > 1;
+}
+
+// A POPULATED count alias that is not a positive number (0, negative,
+// non-numeric text) is malformed data, not an absent count (codex r18 P1):
+// the readers above discard it, so a { visitsPerYear: 0 } palm row would
+// otherwise read as a legacy count-less line and pass the `visits == null`
+// compatibility cases. Blank/undefined aliases stay "absent".
+function visitCountFieldsInvalid(svc = {}) {
+  return visitCountAliasValues(svc).some((value) => {
+    if (value === null || value === undefined) return false;
+    const raw = String(value).trim();
+    if (!raw) return false;
+    const num = Number(raw);
+    return !(Number.isFinite(num) && num > 0);
+  });
+}
+
+// The two invalid-cadence sentinels explicitCadenceFieldForService can
+// surface. They are deliberately truthy (forces stand down, ≠-checks
+// decline) but NEVER a schedulable cadence — any consumer that compares
+// two resolved cadences for EQUALITY must reject them first (codex r14
+// P1: sentinel === sentinel reads as "cadences agree").
+const CADENCE_FIELD_SENTINELS = new Set(['conflicting_cadence_fields', 'unrecognized_cadence_field']);
+
+// Lawn-scoped cadence-field reader (codex r24 P1): the Enhanced lawn
+// tier persists a NUMERIC cadence field (service-pricing emits
+// frequency: 9), which normalizeRecurringPattern buckets to 'bimonthly'
+// via the generic 6-11 visit rule — deliberately, so legacy 9-visit
+// mosquito rows never reclassify. For LAWN, nine IS the every-6-weeks
+// tier: when every populated cadence field is numeric nine, read
+// every_6_weeks instead of the generic bucket.
+function lawnCadenceFieldForService(svc = {}) {
+  const field = explicitCadenceFieldForService(svc);
+  if (field !== 'bimonthly') return field;
+  const raws = cadenceFieldRawValues(svc);
+  const allNumericNine = raws.length > 0 && raws.every((value) => Number(value) === 9);
+  return allNumericNine ? 'every_6_weeks' : field;
+}
+
 function explicitServiceCadence(svc = {}) {
-  const fromFields = [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
-    .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
-    .find(Boolean);
+  // Lawn-scoped numeric-nine normalization applies in combine routing too
+  // (codex r26 P1): Enhanced lawn + 9x T&S lines can both carry numeric
+  // frequency: 9, which the generic bucket reads as bimonthly — the
+  // combined row then fails the exact-cadence seeding gates. Lawn reads
+  // through lawnCadenceFieldForService / LAWN_VISITS_PATTERNS; a
+  // tree_shrub-family line whose fields are ALL numeric nine (the
+  // engine-backed Enhanced shape) reads every_6_weeks the same way.
+  // Mosquito and every other family keep the generic buckets.
+  const fam = seedingFamilyKey(svc);
+  const isLawn = fam === 'lawn_care';
+  const isTreeShrub = fam === 'tree_shrub';
+  const allNumericNineFields = (() => {
+    const raws = cadenceFieldRawValues(svc);
+    return raws.length > 0 && raws.every((value) => Number(value) === 9);
+  })();
+  const fromFields = isLawn
+    ? lawnCadenceFieldForService(svc)
+    : (isTreeShrub && allNumericNineFields ? 'every_6_weeks' : explicitCadenceFieldForService(svc));
   if (fromFields) return fromFields;
   const visits = visitsPerYearForRecurringService(svc);
-  if (visits) return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
+  if (visits) {
+    if (isLawn && LAWN_VISITS_PATTERNS[visits]) return LAWN_VISITS_PATTERNS[visits];
+    return RecurringAppointmentSeeder.patternFromVisitsPerYear(visits);
+  }
   return [svc.label, svc.name, svc.displayName, svc.service_type]
     .map((value) => RecurringAppointmentSeeder.normalizeRecurringPattern(value))
     .find(Boolean) || null;
@@ -369,6 +523,25 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const primary = remaining[primaryIdx];
     const companion = companionIdx !== -1 ? remaining[companionIdx] : companionFromSupplement;
     if (!companion) continue;
+    // Conflicted source counts decline the combine on LINE-RESOLVED routes
+    // (codex r15 P1): nulling the count below (r12) is enough for the lawn
+    // route (requireVisitsMatch refuses), but the bait+bond route combines
+    // on cadence alone and its synthetic row then carries NO count — the
+    // termite seeding gate requires exactly 4 visits, so a sold quarterly
+    // series would silently degrade to a parent-only appointment. Declined,
+    // the rows schedule standalone with their pre-existing per-line
+    // semantics. Accept-frequency pest routes keep combining: the accepted
+    // plan cadence is the truth there (stale-debris doctrine) and the pest
+    // seeding gate tolerates the missing count.
+    const acceptResolvedPrimary = route.primaryUsesAcceptFrequency && acceptPattern;
+    // The COMPANION validates independently on every route (codex r18
+    // pre-push P1): only the PRIMARY cadence is accept-resolved, so a
+    // conflicted/invalid companion count must decline even when the
+    // accepted plan cadence carries the primary. Populated-but-invalid
+    // aliases (0/text) are malformed like conflicts.
+    if (visitCountFieldsConflict(companion) || visitCountFieldsInvalid(companion)) continue;
+    if (!acceptResolvedPrimary
+      && (visitCountFieldsConflict(primary) || visitCountFieldsInvalid(primary))) continue;
     // Cadence resolution is role-aware:
     //  - PEST PRIMARY (primaryUsesAcceptFrequency): the ACCEPTED plan
     //    selection wins — it is the customer's FINAL visit-cadence choice,
@@ -386,20 +559,44 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       ? acceptPattern
       : explicitServiceCadence(primary);
     const companionPattern = explicitServiceCadence(companion) || route.companionDefaultPattern || null;
+    // Sentinels never satisfy route matching (codex r14 P1): with BOTH
+    // sides conflicted/unrecognized, the two sentinels compare EQUAL and
+    // the route would combine — discarding the contradictory source
+    // fields. Declined, the rows stay standalone for the per-line gates.
+    // (A sentinel is truthy on purpose so a conflicted companion never
+    // falls back to the route's program default either.)
+    if (CADENCE_FIELD_SENTINELS.has(primaryPattern) || CADENCE_FIELD_SENTINELS.has(companionPattern)) continue;
     if (!primaryPattern || !companionPattern || primaryPattern !== companionPattern) continue;
     // Visits-per-year guards (pre-push P1): patternFromVisitsPerYear buckets
     // are coarse, so explicit visit counts are the cadence truth when known.
     // A count that CONTRADICTS the line's resolved cadence is stale quote
     // debris — it neither blocks nor rides (an accepted quarterly plan with
     // a stale 12-visit pest line must still combine — pre-push P1).
-    const primaryVisitsRaw = visitsPerYearForRecurringService(primary);
-    const companionVisitsRaw = visitsPerYearForRecurringService(companion);
-    const primaryVisits = primaryVisitsRaw
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(primaryVisitsRaw) === primaryPattern
+    // CONFLICTING visit-count aliases are unresolvable, not debris (codex
+    // r12 P1): the readers below select the first alias, and the synthetic
+    // combo row discards the source fields — so the per-line conflict
+    // declines could never see the contradiction again. Treated as "no
+    // explicit count", the lawn route's requireVisitsMatch declines the
+    // combine and the untouched row falls to the per-line gates (which
+    // decline it to office scheduling); on accept-frequency routes the
+    // combine stands but the contested count never rides.
+    const primaryVisitsRaw = visitCountFieldsConflict(primary)
+      ? null
+      : visitsPerYearForRecurringService(primary);
+    const companionVisitsRaw = visitCountFieldsConflict(companion)
+      ? null
+      : visitsPerYearForRecurringService(companion);
+    // Nine visits AGREE with every_6_weeks (codex r26 P1): the generic
+    // 6-11 bucket reads nine as bimonthly, so the Enhanced lawn/T&S pair
+    // (day-gap cadence, not month-based) would never satisfy the
+    // visits-match requirement.
+    const visitsAgreeWithPattern = (visits, pattern) => !!visits
+      && (RecurringAppointmentSeeder.patternFromVisitsPerYear(visits) === pattern
+        || (pattern === 'every_6_weeks' && visits === 9));
+    const primaryVisits = visitsAgreeWithPattern(primaryVisitsRaw, primaryPattern)
       ? primaryVisitsRaw
       : null;
-    const companionVisits = companionVisitsRaw
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(companionVisitsRaw) === companionPattern
+    const companionVisits = visitsAgreeWithPattern(companionVisitsRaw, companionPattern)
       ? companionVisitsRaw
       : null;
     if (primaryVisits && companionVisits && primaryVisits !== companionVisits) continue;
@@ -413,8 +610,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     // over-seed follow-ups (12 visits at quarterly spacing — pre-push P1).
     // Omitted, the seeder uses the pattern's own visit default.
     const candidateVisits = firstPositiveNumber(primaryVisits, companionVisits);
-    const consistentVisits = candidateVisits
-      && RecurringAppointmentSeeder.patternFromVisitsPerYear(candidateVisits) === primaryPattern
+    const consistentVisits = visitsAgreeWithPattern(candidateVisits, primaryPattern)
       ? candidateVisits
       : null;
     combos.push({
@@ -447,6 +643,13 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const key = recurringServiceKey(line);
     const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute) continue;
+    // Sentinel cadences never become a schedulable standalone program
+    // (codex r18 pre-push P1): persisted as `frequency`, downstream
+    // inference ignores the token and derives quarterly from the rewritten
+    // catalog name — a contradictory/unreadable source line would silently
+    // seed a quarterly series. The line stays in `remaining` for the
+    // normal per-line path instead.
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(line))) continue;
     remaining.splice(i, 1);
     // A recurring LINE covering this program also consumes any duplicate
     // supplement below — legacy payloads can carry rodent bait in BOTH
@@ -465,6 +668,9 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const key = recurringServiceKey(supplement);
     const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute || consumedSupplementKeys.has(key)) continue;
+    // Same sentinel guard as the line branch above (supplements carry no
+    // cadence fields today, but the rewrite must never persist one).
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(supplement))) continue;
     consumedSupplementKeys.add(key);
     standalone.push({
       catalogServiceKey: standaloneRoute.catalogServiceKey,
@@ -2171,13 +2377,9 @@ function firstPositiveNumber(...values) {
 }
 
 function visitsPerYearForRecurringService(svc = {}) {
-  return firstPositiveNumber(
-    svc.visitsPerYear,
-    svc.appsPerYear,
-    svc.visits,
-    svc.apps,
-    svc.treatmentsPerYear,
-  );
+  // Vocabulary lives in visitCountAliasValues — the conflict check reads
+  // the SAME list, so a spelling can never count for one and not the other.
+  return firstPositiveNumber(...visitCountAliasValues(svc));
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
@@ -2194,6 +2396,15 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   // same value estimate-slot-availability uses), so seeded follow-ups match
   // what a self-booked T&S slot would reserve.
   if (key === 'tree_shrub') return 60;
+  // Lawn and palm book flat 60-minute slots too (the estimate-slot
+  // authority for lawn; the semiannual palm catalog row's own default) —
+  // seeded parents and children match what a reserved slot books on every
+  // path. The catalog identity links are deliberately duration-silent
+  // (IDENTITY_ONLY_CATALOG_KEYS — the lawn rows' 45-minute default
+  // contradicts the slot authority), so the family default lives HERE,
+  // exactly like tree_shrub's (codex #3349 duration rounds, both
+  // directions: no 45-minute clobber, no null drift).
+  if (key === 'lawn_care' || key === 'palm_injection') return 60;
   return null;
 }
 
@@ -2204,6 +2415,38 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // rows had no service_id and rode an exact name-string match). Other lines
 // keep name-based resolution until their keys are verified against the
 // catalog — an absent key would only add lookup-warn noise.
+// Sold lawn cadence → catalog service key. Quarterly lawn is FULLY RETIRED
+// (owner directive 2026-08-04, extending the 2026-07-09 no-quarterly ruling;
+// public accepts 409 it as retired_lawn_cadence_selection) so it has no
+// entry. Shared by identity linking, the reserved promotion, and the lock
+// pre-pass so the three can never disagree.
+const LAWN_CADENCE_CATALOG_KEYS = {
+  bimonthly: 'lawn_care_recurring',
+  every_6_weeks: 'lawn_care_6week',
+  monthly: 'lawn_care_monthly',
+};
+
+// Each sold lawn visit count maps to exactly one cadence (quarterly/4 is
+// retired) — the forced-lawn resolution and its prepay mirror share this.
+const LAWN_VISITS_PATTERNS = { 6: 'bimonthly', 9: 'every_6_weeks', 12: 'monthly' };
+
+// Distinct from a null (underivable) coverage cadence: validation REFUSED
+// this line (contradictory cadence/visit data or a commercial program). The
+// term-creation guard fails closed on exactly this value with its own 422,
+// while underivable lines keep the older COVERAGE_UNDERIVABLE path.
+const PREPAY_COVERAGE_INVALID = 'prepay_coverage_invalid';
+
+// The lawn/palm links added 2026-08-11 are IDENTITY-ONLY (codex #3349 P1):
+// the catalog lookups below also copy default_duration_minutes onto the
+// visit, and the lawn rows carry 45 while the estimate-slot system books
+// lawn at 60 — copying would make auto-scheduled accepts shorter than
+// reserved ones (path-dependent capacity, overlapping dispatch). These keys
+// link the id and change nothing else; duration keeps today's derivation.
+const IDENTITY_ONLY_CATALOG_KEYS = new Set([
+  ...Object.values(LAWN_CADENCE_CATALOG_KEYS),
+  'palm_injection_semiannual',
+]);
+
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
   if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
@@ -2214,6 +2457,38 @@ function remainingUnitCatalogKey(svc = {}) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // Recurring palm (owner ruling 2026-08-11): the semiannual program row
+  // ships in the same PR (20260811000010). Estimator palm lines carry the
+  // label 'Palm Injection', which the completion resolver's short-name
+  // fallback uniquely matches to the ONE-TIME palm_injection row and its
+  // token_only profile — the id link routes the recurring program to its
+  // own typed recurring profile instead (codex #3349 P1). Gated on the
+  // SEEDING pattern, not the bare family (codex r2 P1): the builder's
+  // supported one-application palm option also rides recurring services
+  // (visitsPerYear 1), and that treatment's correct identity is the
+  // one-time lane's name-resolved row — linking it here would give a 1x
+  // treatment the recurring billing/portal posture.
+  if (seedingFamilyKey(svc) === 'palm_injection') {
+    // INJECTION-scoped (codex r21 pre-push P0): a legacy nutritional line
+    // must never link the injection identity.
+    if (!isPalmInjectionFamily(svc)) return null;
+    const svcName = svc.name || svc.serviceName || svc.service_name || 'Palm Injection';
+    return converterFollowUpSeedingPattern(svc, { service_type: svcName }, undefined) === 'semiannual'
+      ? 'palm_injection_semiannual'
+      : null;
+  }
+  // Recurring lawn (codex r2 P1): link each sold cadence to its catalog
+  // row so parents and seeded follow-ups carry a rename-durable identity
+  // and the catalog duration. Prod row names match the accepted labels
+  // exactly today (verified read-only 2026-08-11), so name-resolution
+  // works — the id link is durability, same rationale as the service_id
+  // note below (codex 2026-08-08 r5). Pattern-gated: a legacy line that
+  // resolves no sold cadence keeps the name-only path unchanged.
+  if (seedingFamilyKey(svc) === 'lawn_care') {
+    const svcName = svc.name || svc.serviceName || svc.service_name || 'Lawn Care';
+    const lawnPattern = converterFollowUpSeedingPattern(svc, { service_type: svcName }, undefined);
+    return LAWN_CADENCE_CATALOG_KEYS[lawnPattern] || null;
+  }
   // NOTE (2026-08-09): trap_only_retainer deliberately has NO branch
   // here. The v1 mapper persists retainers under oneTime.specItems (not
   // RECURRING_SERVICES) and the pricer rows carry no `annual`, so this
@@ -2224,9 +2499,31 @@ function remainingUnitCatalogKey(svc = {}) {
   return null;
 }
 
+// The duplicate-series guard classifies its serviceType through the
+// SEEDER's tree-first matcher (findActiveRecurringSeries) — pass a
+// canonical palm label whenever the converter's palm-first resolver
+// disagrees with the seeder on a palm row, or an adopted 'Palm Tree
+// Injections' parent would family-match an unrelated ACTIVE Tree & Shrub
+// series and the guard would skip the palm series as a "duplicate",
+// resurrecting the billed-but-unscheduled defect this PR exists to close
+// (codex r10 P1). Non-palm labels pass through untouched.
+function guardServiceTypeFor(rawLabel) {
+  if (!rawLabel) return rawLabel;
+  const row = { service_type: rawLabel };
+  if (seedingFamilyKey({}, row) === 'palm_injection'
+    && RecurringAppointmentSeeder.serviceKeyFor(row) !== 'palm_injection') {
+    return 'Palm Injection';
+  }
+  return rawLabel;
+}
+
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
-  const rowKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: scheduledRow.service_type });
-  return recurringServices.find((svc) => RecurringAppointmentSeeder.serviceKeyFor(svc) === rowKey)
+  // Palm-first family matching (codex r9 P1): an adopted reserved row
+  // labeled 'Palm Tree Injections' beside a Tree & Shrub line would
+  // otherwise match the T&S line through the tree-first seeder resolver
+  // and seed the WRONG cadence onto the palm parent.
+  const rowKey = seedingFamilyKey({}, scheduledRow);
+  return recurringServices.find((svc) => seedingFamilyKey(svc) === rowKey)
     || recurringServices.find((svc) => recurringServiceKey(svc) === 'pest_control')
     || recurringServices[0]
     || { service_type: scheduledRow.service_type };
@@ -2315,10 +2612,54 @@ function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0
   return visitsPerYearForRecurringService(nonRider[0]);
 }
 
-function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+// A recurring line (or its parent row) that reads as COMMERCIAL — the
+// seeder's serviceKeyFor collapses any /lawn/ or /palm/ text to the
+// residential family, but commercial recurring programs are intentionally
+// office-scheduled (the accept fires the commercial-schedule bell), so the
+// residential lawn/palm seeding paths must reject them (codex #3349 r6 P1).
+// Text-based, mirroring recurringServiceKey's own commercial detection.
+function isCommercialRecurringLine(svc = {}, parentRow = {}) {
+  return [svc.service, svc.serviceKey, svc.service_key, svc.name, svc.label, svc.displayName, svc.serviceName, svc.service_name, parentRow?.service_type]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes('commercial');
+}
+
+// Family resolution with palm-first correction (codex r8 P1): the seeder's
+// serviceKeyFor checks tree tokens before palm, so persisted aliases like
+// 'Palm Tree Injections' — which estimate-public explicitly supports during
+// adoption — misfile as tree_shrub and would never seed, promote, or link.
+// The converter's recurringServiceKey puts palm first; prefer its palm
+// verdict whenever the seeder says tree_shrub. Every seeding surface (the
+// gate, the forced rules, the promotion, the lock pre-pass, the identity
+// link) resolves through THIS helper so they can never disagree.
+function seedingFamilyKey(svc = {}, parentRow = {}) {
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
-  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
-  const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
+  const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow?.service_type });
+  const fromLine = serviceKey && serviceKey !== 'service';
+  let key = fromLine ? serviceKey : parentKey;
+  const palmFirst = fromLine
+    ? recurringServiceKey(svc)
+    : recurringServiceKey({ name: parentRow?.service_type || '' });
+  if (key === 'tree_shrub' && palmFirst === 'palm_injection') {
+    key = 'palm_injection';
+  } else if (key === 'palm_injection' && palmFirst !== 'palm_injection') {
+    // Reverse guard (codex r8 P1): the seeder's bare /palm/ substring also
+    // matches 'Palmetto' (pest_initial_palmetto_knockdown), while the
+    // converter's word-boundary detection (\bpalm(s)?\b / palm injection /
+    // palm tree) does not. A substring-only palm hit is NOT palm — return
+    // a sentinel no family branch matches, preserving the pre-existing
+    // decline outcome on every seeding surface (never remap to the
+    // converter's guess: 'pest_initial_…' text-resolves pest_control and
+    // would suddenly seed a quarterly pest series).
+    key = 'palm_substring_mismatch';
+  }
+  return key;
+}
+
+function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+  const key = seedingFamilyKey(svc, parentRow);
   if (key === 'pest_control') return pattern === 'quarterly';
   // Recurring foam is offered on all three cadences (quarterly/bimonthly/
   // monthly), so seed follow-ups for whichever pattern the customer accepted —
@@ -2356,6 +2697,78 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'quarterly') return visits == null || visits === 4;
     return false;
   }
+  // Lawn Care programs (owner GO 2026-08-10 — the last recurring family with
+  // the sold-a-series-got-one-visit defect the T&S audit and the mosquito fix
+  // below each closed for their own families; found live via two accepted
+  // lawn plans whose reserved first visit stayed unstamped and seeded
+  // nothing, leaving the customers invisible to every recurring-lawn
+  // surface). The three SOLD tiers (pricing-engine LAWN_TIERS — quarterly
+  // lawn is fully retired per the owner's 2026-08-04 directive and public
+  // accepts 409 it, so it deliberately has no branch): standard/bi-monthly
+  // 6 · enhanced/every-6-weeks 9 · premium/monthly 12 — each gated on its
+  // explicit visit count, so LEGACY lawn rows without explicit visits keep
+  // office scheduling exactly as before (same shape as tree_shrub above).
+  if (key === 'lawn_care') {
+    // Commercial lawn never collapses into the residential allowlist
+    // (codex r6 P1): custom commercial proposals can carry 6/9/12 visit
+    // counts, but their scheduling stays office-managed via the
+    // commercial-schedule bell — rejecting here also keeps the catalog
+    // identity link and the reserved promotion from treating them as
+    // residential (both gate on this pattern resolving).
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
+    if (visitCountFieldsConflict(svc)) return false;
+    // Populated-but-invalid aliases fail closed too (codex r18 P1):
+    // { visitsPerYear: 6, visits: 0 } must not pass the exact-count check
+    // off its first valid alias.
+    if (visitCountFieldsInvalid(svc)) return false;
+    // A cadence FIELD that disagrees with the resolved pattern declines
+    // (pre-push r12 P1, mirroring the palm gate): the conflict and
+    // unrecognized-field sentinels never equal a real pattern, and a
+    // cadence-only spelling inference can't read (r7's `cadence`/
+    // `planFrequency`) must not lose to a first-read alias — with a null
+    // plan fallback, inference seeds straight from the visit count.
+    const lawnCadenceField = lawnCadenceFieldForService(svc);
+    if (lawnCadenceField && lawnCadenceField !== pattern) return false;
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'bimonthly') return visits === 6;
+    if (pattern === 'every_6_weeks') return visits === 9;
+    if (pattern === 'monthly') return visits === 12;
+    return false;
+  }
+  // Palm Injection (owner ruling 2026-08-11): sold as a semiannual recurring
+  // program — 2 visits/year — or as a one-time (one-time lines never reach
+  // recurring seeding). Semiannual is unambiguous by definition (unlike the
+  // lawn monthly-billing trap above), so a quote-based line without an
+  // explicit visit count may still seed; any other cadence on the row is a
+  // stray and declines to office scheduling. Palm stays excluded from
+  // WaveGuard tier counting (see determineTier) — that is a separate rule.
+  if (key === 'palm_injection') {
+    // INJECTION identity required (codex r21 pre-push P0): the seeder's
+    // family collapse also captures the legacy nutritional program — its
+    // rows keep office scheduling, never the injection series.
+    if (!isPalmInjectionFamily(svc, parentRow)) return false;
+    // Same commercial rejection as lawn above (codex r6 P1) — a
+    // commercial-property palm program stays office-scheduled.
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
+    // A cadence FIELD that disagrees with semiannual is contradictory
+    // data and declines HERE (codex r7 P1): inferRecurringPattern never
+    // reads `cadence`/`planFrequency`, so a { cadence: 'monthly',
+    // visitsPerYear: 2 } line still reaches this gate as 'semiannual'
+    // via visit-count inference — the gate is the only place the
+    // disagreement is visible.
+    const cadenceField = explicitCadenceFieldForService(svc);
+    if (cadenceField && cadenceField !== 'semiannual') return false;
+    if (visitCountFieldsConflict(svc)) return false;
+    // Same populated-invalid rule as the lawn gate (codex r18 P1):
+    // { visitsPerYear: 2, visits: 0 } is malformed, not a valid 2-visit.
+    if (visitCountFieldsInvalid(svc)) return false;
+    const visits = visitsPerYearForRecurringService(svc);
+    // The count-less compatibility case is for genuinely ABSENT counts
+    // (quote-based lines) — a populated-but-invalid count (0, text) is
+    // malformed data and declines (codex r18 P1).
+    if (pattern === 'semiannual') return (visits == null && !visitCountFieldsInvalid(svc)) || visits === 2;
+    return false;
+  }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
   // plan booked its FIRST visit and never created the rest — the customer was
   // billed monthly for a series they did not get. Same failure the T&S audit
@@ -2373,6 +2786,124 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     return false;
   }
   return false;
+}
+
+// FAIL-CLOSED palm scheduling requirement (codex #3349 r15 pre-push P0):
+// the semiannual palm program bills per-application against the RECURRING
+// catalog row. A palm series scheduled by bare name resolves the ONE-TIME
+// palm_injection row at completion (unique short-name match), whose typed
+// completion invoices work the plan already billed — a money bug. When
+// palm_injection_semiannual is absent (rolled-back migration, broken env)
+// the series must NOT be created; the unit routes to manual scheduling
+// with an admin bell. Fire-and-forget, never blocks the accept.
+// The reserved-slot path ABORTS the acceptance instead (codex r17 pre-push
+// P0): there a palm parent row already exists — skip+bell would leave a
+// completable visit whose (possibly stale one-time) identity invoices
+// against the billed recurring plan. Same operational-422 shape as the
+// ANNUAL_PREPAY_* refusals; the caller's transaction rolls the whole
+// acceptance back.
+// Recurring EVIDENCE on a palm line (codex r18 pre-push P0; mirrors the
+// admin-customers matching rule): a palm line whose data says "recurring"
+// but which resolved NO valid semiannual program must never proceed as a
+// name-only 'Palm Injection' row — that label completion-resolves the
+// ONE-TIME profile and bills recurring-plan work with one-time posture.
+// Definitively one-time lines (1 visit, cadence-less+count-less, explicit
+// one-time spellings) carry no evidence and keep their one-time lane.
+// COMMERCIAL palm is deliberately excluded: commercial recurring keeps
+// its owner-designed office lane (r6 bell), like every commercial family.
+// The palm FAMILY resolver deliberately captures every palm-worded label
+// (alias durability), but the legacy `palm_treatment` service — "Palm
+// Tree Nutritional Treatment", the archived quarterly nutritional-fert
+// program — is a DISTINCT identity the injection doctrine must not touch
+// (codex r20 pre-push P0): its lines keep their prior office-scheduled
+// path, its admin matching keeps the palm_treatment row, and its prepay
+// terms keep gap-filling. Every INJECTION-specific gate asks here instead
+// of the raw family resolver.
+const PALM_NUTRITIONAL_RE = /nutritional|fertil/i;
+// 'Semiannual Palm' is the recurring catalog row's SHORT NAME (codex r26
+// P1) — positive injection evidence even without the injection token.
+const PALM_INJECTION_TOKEN_RE = /injection|semiannual\s*palm/i;
+function isPalmInjectionFamily(svc = {}, parentRow = {}) {
+  if (seedingFamilyKey(svc, parentRow) !== 'palm_injection') return false;
+  const labels = [
+    svc.service, svc.serviceKey, svc.service_key, svc.key,
+    svc.name, svc.serviceName, svc.service_name, svc.displayName, svc.label,
+    parentRow?.service_type,
+  ].map((value) => String(value || ''));
+  // An explicit palm_treatment identity (or any nutritional spelling)
+  // outranks injection-looking labels on the same line (codex r22
+  // pre-push P1).
+  if (labels.some((value) => value === 'palm_treatment' || PALM_NUTRITIONAL_RE.test(value))) return false;
+  // POSITIVE injection evidence required (codex r21 P0): legacy prepay
+  // terms and service rows store the bare historical labels 'Palm' /
+  // 'Palm Treatment' (the service-library migration maps them to
+  // palm_treatment) with neither the underscored key nor a nutritional
+  // keyword — a palm-family label WITHOUT the injection token is the
+  // nutritional lane, never the injection program.
+  return labels.some((value) => value === 'palm_injection'
+    || value === 'palm_injection_semiannual'
+    || PALM_INJECTION_TOKEN_RE.test(value));
+}
+
+function palmRecurringEvidence(svc = {}, parentRow = {}) {
+  if (isCommercialRecurringLine(svc, parentRow)) return false;
+  const visits = visitsPerYearForRecurringService(svc);
+  return visitCountFieldsConflict(svc)
+    || visitCountFieldsInvalid(svc)
+    || (visits != null && visits > 1)
+    || (!!explicitCadenceFieldForService(svc) && !explicitlyOneTimeCadence(svc));
+}
+
+// Reserved-path refusal for the same case (same contract as the
+// off-season and catalog-missing refusals): the reserved parent already
+// exists, so skip+bell would leave a completable one-time-posture visit.
+function palmRecurringLineInvalidError() {
+  const err = new Error(
+    'This palm line carries contradictory recurring data (cadence and visit count disagree), so it cannot be scheduled or billed correctly — correct the estimate line and retry, or convert manually.'
+  );
+  err.code = 'PALM_RECURRING_LINE_INVALID';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  return err;
+}
+
+function palmCatalogMissingError() {
+  const err = new Error(
+    'The recurring palm catalog row (palm_injection_semiannual) is unavailable, so this palm program cannot be scheduled or billed correctly — restore the catalog row (migration 20260811000010) and retry, or convert manually.'
+  );
+  err.code = 'PALM_RECURRING_CATALOG_MISSING';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  return err;
+}
+
+// HH:MM window-end arithmetic for promoted rows (codex r20 P1). Returns
+// null (caller keeps the copied end) when the start is unparseable or the
+// block would cross midnight.
+function windowEndFromStart(windowStart, durationMinutes) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
+  if (!m) return null;
+  const total = (Number(m[1]) * 60) + Number(m[2]) + Number(durationMinutes);
+  if (!Number.isFinite(total) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function notifyPalmCatalogMissing(estimateId, customerId, context, bodyOverride) {
+  logger.error(`[estimate-converter] palm scheduling failed closed — ${context} for estimate ${estimateId} routed to manual scheduling`);
+  try {
+    const NotificationService = require('./notification-service');
+    void NotificationService.notifyAdmin(
+      'estimate_converted',
+      'Palm program needs manual scheduling',
+      bodyOverride
+        || `Accepted estimate #${estimateId} sold a semiannual palm program, but the recurring palm catalog row (palm_injection_semiannual) is unavailable — no palm series was auto-scheduled. Restore the catalog row (migration 20260811000010), then schedule the program manually.`,
+      { icon: '\u{1F334}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
+    ).catch((err) => logger.warn(`[estimate-converter] palm catalog-missing notify failed: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[estimate-converter] palm catalog-missing notify setup failed: ${err.message}`);
+  }
 }
 
 function scheduledDateOnly(value) {
@@ -2438,6 +2969,45 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
+  // Palm Injection (owner ruling 2026-08-11): the estimate builder's palm
+  // supplement carries visitsPerYear 2 but NO frequency field
+  // (estimate-public upsertSupplement 'palm_injection'), so generic
+  // inference would resolve the accepted PLAN's fallback frequency
+  // (quarterly/monthly/…) and the semiannual gate would reject it —
+  // seeding nothing (codex #3349 P1). Force semiannual ONLY when the line
+  // carries no cadence field of its own (codex r4 P1): an explicit
+  // frequency — semiannual included — takes the normal inference +
+  // validation path, so contradictory data (monthly + 2 visits) declines
+  // to office scheduling instead of being overridden.
+  if (isPalmInjectionFamily(svc, parentRow)
+    && visitsPerYearForRecurringService(svc) === 2
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)
+    && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
+    && !isCommercialRecurringLine(svc, parentRow)) {
+    // Cadence-less OR semiannual-agreeing field both force (codex r9 P1):
+    // a line whose cadence lives only in `cadence`/`planFrequency` —
+    // spellings inferRecurringPattern never reads — would otherwise
+    // resolve the plan fallback and the gate would decline a VALID
+    // semiannual palm line. A disagreeing field still falls through and
+    // declines via the gate's contradiction check.
+    return 'semiannual';
+  }
+  // Lawn visit-count-only lines (codex r11 P1): a supported legacy lawn
+  // row carrying only visitsPerYear beside a pest plan resolves the PEST
+  // fallback cadence (inference checks fallbackFrequency before the visit
+  // count) and the gate declines it. Each sold count maps to exactly one
+  // cadence — force it when the line has no cadence field, or when its
+  // field AGREES (spellings inference can't read); a disagreeing count
+  // still declines through the gate's exact-visits check.
+  if (seedingFamilyKey(svc, parentRow) === 'lawn_care'
+    && !isCommercialRecurringLine(svc, parentRow)
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)) {
+    const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
+    const lawnField = lawnCadenceFieldForService(svc);
+    if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
@@ -2461,10 +3031,71 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
-  return RecurringAppointmentSeeder.inferRecurringPattern({
+  // Same forced-palm rule as converterFollowUpSeedingPattern above (owner
+  // ruling 2026-08-11): a builder palm line has no frequency field, so raw
+  // inference would record the plan's fallback cadence on the prepay term
+  // while the actual series seeds semiannual — the payment-time coverage
+  // refresh would then seed mismatched visits over the real series. Same
+  // cadence-field restriction as the seeding rule (codex r4 P1).
+  if (isPalmInjectionFamily(svc)
+    && visitsPerYearForRecurringService(svc) === 2
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)
+    && [null, 'semiannual'].includes(explicitCadenceFieldForService(svc))
+    && !isCommercialRecurringLine(svc)) {
+    return 'semiannual';
+  }
+  // Forced-lawn mirror (codex r11 P1): the prepay term must record the
+  // cadence the series will actually seed, not the plan fallback a
+  // visit-count-only lawn row would otherwise inherit.
+  if (seedingFamilyKey(svc) === 'lawn_care'
+    && !isCommercialRecurringLine(svc)
+    && !visitCountFieldsConflict(svc)
+    && !visitCountFieldsInvalid(svc)) {
+    const mapped = LAWN_VISITS_PATTERNS[visitsPerYearForRecurringService(svc)];
+    const lawnField = lawnCadenceFieldForService(svc);
+    if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
+  }
+  const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
     fallbackFrequency,
   }) || null;
+  // Palm validation mirror (pre-push P1): the seeding gate refuses any
+  // non-semiannual palm cadence, contradictory visit counts, and
+  // commercial lines — the prepay term must not record a cadence the
+  // converter refused (e.g. monthly + 2 visits), or the payment-time
+  // coverage refresh would seed monthly-spaced visits over a program the
+  // office schedules. Fail closed to no coverage cadence instead.
+  if (isPalmInjectionFamily(svc)) {
+    const visits = visitsPerYearForRecurringService(svc);
+    const cadenceField = explicitCadenceFieldForService(svc);
+    if (inferred !== 'semiannual'
+      || !((visits == null && !visitCountFieldsInvalid(svc)) || visits === 2)
+      || visitCountFieldsInvalid(svc)
+      || visitCountFieldsConflict(svc)
+      || (cadenceField && cadenceField !== 'semiannual')
+      || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;
+  }
+  // Lawn contradiction mirror (codex r11 P1): { frequency: 'monthly',
+  // visitsPerYear: 6 } seeds no series but would record 'monthly'
+  // coverage, and payment-time coverage would create six monthly visits.
+  // Reject CONTRADICTORY or commercial shapes only — a legacy row without
+  // explicit visits keeps its inferred cadence (pre-existing behavior,
+  // office scheduling unaffected).
+  if (seedingFamilyKey(svc) === 'lawn_care') {
+    const visits = visitsPerYearForRecurringService(svc);
+    const cadenceField = lawnCadenceFieldForService(svc);
+    if (isCommercialRecurringLine(svc)
+      || visitCountFieldsConflict(svc)
+      // Populated-but-invalid counts are malformed data, not legacy
+      // count-less rows (codex r18 pre-push P1, matching the palm guard):
+      // { frequency: 'bi_monthly', visitsPerYear: 0 } seeds no series but
+      // would record bimonthly coverage and payment-time seeds 6 visits.
+      || visitCountFieldsInvalid(svc)
+      || (visits != null && LAWN_VISITS_PATTERNS[visits] !== inferred)
+      || (cadenceField && cadenceField !== inferred)) return PREPAY_COVERAGE_INVALID;
+  }
+  return inferred;
 }
 
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
@@ -3275,7 +3906,14 @@ const EstimateConverter = {
           const addUnit = async (serviceType, catalogServiceKey, knownServiceId = null) => {
             const serviceId = knownServiceId != null ? knownServiceId : await catalogIdFor(catalogServiceKey);
             if (!serviceType && serviceId == null) return;
-            lockUnits.push({ customerId, serviceType: serviceType || null, serviceId });
+            // Canonicalize palm-alias labels AT THE DEFINITION so every
+            // pre-pass entry locks the same family bucket the actual
+            // guards lock (they all pass guardServiceTypeFor now) — a raw
+            // 'Palm Tree Injections' here would pre-acquire the tree
+            // bucket while the guard later takes palm, reopening the
+            // cross-conversion deadlock the sorted pre-pass exists to
+            // prevent (codex r11 P1).
+            lockUnits.push({ customerId, serviceType: guardServiceTypeFor(serviceType) || null, serviceId });
           };
           const { remaining, combos, standalone } = combinedScheduling;
           if (reservationRowsExist) {
@@ -3313,6 +3951,25 @@ const EstimateConverter = {
                     mosquitoPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT
                       ? 'mosquito_seasonal'
                       : 'mosquito_monthly',
+                  );
+                }
+                continue;
+              }
+              // Promoted lawn/palm units (owner rulings 2026-08-10/11) join
+              // the same sorted pre-pass — same inversion risk as the
+              // termite/mosquito promotions above. Mirrors the promotion's
+              // own name/pattern/key derivations exactly.
+              const fam = seedingFamilyKey(svc);
+              if (fam === 'lawn_care' || fam === 'palm_injection') {
+                const svcName = svc.name || svc.serviceName || svc.service_name
+                  || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+                const pattern = converterFollowUpSeedingPattern(
+                  svc, { service_type: svcName }, inferredFrequencyKey,
+                );
+                if (pattern) {
+                  await addUnit(
+                    svcName,
+                    (fam === 'palm_injection' && isPalmInjectionFamily(svc)) ? 'palm_injection_semiannual' : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
                   );
                 }
               }
@@ -3362,6 +4019,17 @@ const EstimateConverter = {
       // the rewritten row span two lines. Aligning multi-service reserved
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
+      // A separately-sold ONE-TIME palm injection item claims a
+      // one-time-keyed reserved row (codex r23 P1): with BOTH palm
+      // programs sold, the reserved one-time visit keeps its own
+      // schedule/billing and the recurring program promotes its own
+      // parent — the accepted-line association disambiguates. Shared by
+      // the promotion recognition and the reserved binding below.
+      let estimateHasOneTimePalmItem = false;
+      try {
+        estimateHasOneTimePalmItem = estimateOneTimeItemsFromData(estimateData)
+          .some((item) => isPalmInjectionFamily(item));
+      } catch { estimateHasOneTimePalmItem = false; }
       try {
         const { combos, standalone: reservedStandalone, remaining } = combinedScheduling;
         // Standalone units (sold rodent bait) must schedule in reserved
@@ -3435,11 +4103,103 @@ const EstimateConverter = {
               noteKind: 'mosquito program',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits]) {
+        // Lawn/palm promotion (codex #3349 P1, owner rulings 2026-08-10/11):
+        // with lawn and palm now in the seeding allowlist, a lawn or palm
+        // line beside a non-combining reserved plan (e.g. quarterly pest +
+        // 9-visit lawn) sits in `remaining` and — per the adjudicated
+        // 2026-06-12 semantic — was never scheduled on the reservation
+        // path, even though the accept bills the program. Same remedy
+        // shape as the termite/bond and mosquito promotions above: a
+        // billed program must schedule. The pattern gate reuses the
+        // allowlist end-to-end, so a legacy line that would not seed does
+        // not promote either (office scheduling keeps its semantics).
+        const promotedLawnPalmUnits = (remaining || [])
+          .filter((line) => {
+            const fam = seedingFamilyKey(line);
+            if (fam !== 'lawn_care' && fam !== 'palm_injection') return false;
+            const lineName = line.name || line.serviceName || line.service_name
+              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+          })
+          .map((line) => {
+            const fam = seedingFamilyKey(line);
+            const lineName = line.name || line.serviceName || line.service_name
+              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return {
+              // Normalized name ON the unit (same rule as the mosquito
+              // promotion): the insert below reads only unit.service.name.
+              // The computed pattern rides frequency too (codex r3 P2): a
+              // builder palm line has none, and the note builder below
+              // would fall back to "Frequency: recurring" on every child
+              // while the series actually seeds semiannual.
+              service: { ...line, name: lineName, frequency: line.frequency || pattern },
+              catalogServiceKey: (fam === 'palm_injection' && isPalmInjectionFamily(line))
+                ? 'palm_injection_semiannual'
+                : (fam === 'palm_injection' ? null : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null)),
+              noteKind: fam === 'palm_injection' ? 'palm injection program' : 'lawn program',
+            };
+          });
+        // Catalog identities of the reserved rows (codex r20 P1): an
+        // adopted appointment can carry a STALE label with the CORRECT
+        // catalog id — estimate-public classifies adoption catalog-first —
+        // so a label-only alreadyReserved check would promote a duplicate
+        // parent + series beside it. Fail-soft: a failed lookup leaves the
+        // map empty and the label check still applies.
+        const reservedServiceKeyById = new Map();
+        try {
+          const reservedIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+          if (reservedIds.length) {
+            const idRows = await database('services').whereIn('id', reservedIds).select('id', 'service_key');
+            for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+          }
+        } catch (idErr) {
+          logger.warn(`[estimate-converter] reserved catalog-key prefetch failed (label matching only): ${idErr.message}`);
+        }
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
           if (!reservedStart?.scheduled_date) break;
-          // A reserved row already covering this program means nothing to add.
+          // A reserved row already covering this program means nothing to
+          // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
+          // or snapshot), codex r20 P1.
           const unitKey = recurringServiceKey({ name: unit.service.name });
-          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey);
+          // For PALM units the label clause is unsafe (codex r21 pre-push
+          // P0): recurringServiceKey collapses one-time injection,
+          // nutritional, and semiannual labels into one key, so a reserved
+          // one-time/nutritional palm visit would suppress the sold
+          // recurring series (billed but unscheduled). Palm promotions
+          // match by CATALOG IDENTITY only; every other family keeps
+          // label-or-identity.
+          const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';
+          const alreadyReserved = reservedRows.some((row) => {
+            const reservedKey = reservedServiceKeyById.get(row.service_id)
+              || String(row.service_key_snapshot || '')
+              || null;
+            const identityMatch = !!unit.catalogServiceKey && reservedKey === unit.catalogServiceKey;
+            if (unitIsPalmInjection) {
+              // The reserved PROGRAM row can still carry the ONE-TIME palm
+              // identity — commitReservation resolves engine keys to the
+              // one-time catalog row (the semiannual row has no engine_keys
+              // entry) and adoption preserves stale ids — or a bare
+              // injection label pre-relink (codex r22 P1). The reserved
+              // seeding branch relinks it to the semiannual identity, so it
+              // IS the program's first visit; promoting beside it would put
+              // two first visits in the same slot. Nutritional labels stay
+              // excluded (isPalmInjectionFamily). EXCEPT: with a
+              // separately-sold one-time palm item (codex r23 P1), a
+              // one-time-keyed reserved row is THAT item's visit — only the
+              // exact semiannual identity suppresses the promotion then.
+              // With a one-time item sold, ANY non-semiannual palm shape
+              // (one-time key OR name-only label — legacy adoptions can
+              // carry neither id nor snapshot, codex r24 P0) may be that
+              // item's visit: only the exact semiannual identity
+              // suppresses the promotion.
+              if (estimateHasOneTimePalmItem) return identityMatch;
+              return identityMatch
+                || reservedKey === 'palm_injection'
+                || isPalmInjectionFamily({}, { service_type: row.service_type });
+            }
+            return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
+          });
           if (alreadyReserved) continue;
           try {
             // Copy the customer's picked slot onto the added row (Codex r2):
@@ -3475,10 +4235,46 @@ const EstimateConverter = {
                 .first('id', 'default_duration_minutes');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
-                if (catalogRow.default_duration_minutes) standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
+                  standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                }
               }
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+              // Same abort as the auto-schedule path (codex r21 pre-push
+              // P1): an errored palm lookup is unknown state, not a
+              // knowable missing-row env.
+              if (unit.catalogServiceKey === 'palm_injection_semiannual') {
+                throw palmCatalogMissingError();
+              }
+            }
+            // A MISSING catalog row aborts here too (codex r22 pre-push
+            // P0) — same contract as the auto-schedule path above; the
+            // promotion catch rethrows the code.
+            if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {
+              throw palmCatalogMissingError();
+            }
+            // Promoted lawn/palm parents get the converter FAMILY duration
+            // (codex r7 P2): the identity-only skip above correctly refuses
+            // the lawn catalog's contradictory 45-minute default, but a
+            // null parent duration makes scheduling/dispatch readers
+            // disagree (30/45/window-span) while the seeded children get 60
+            // via seedRecurringFollowUpsForParent. Fill-only — an explicit
+            // duration already on the row wins.
+            if (!standaloneRow.estimated_duration_minutes) {
+              const familyDuration = durationMinutesForRecurringService(
+                unit.service, null, { service_type: standaloneRow.service_type },
+              );
+              if (familyDuration) standaloneRow.estimated_duration_minutes = familyDuration;
+            }
+            // The promoted row's window reflects ITS OWN duration (codex
+            // r20 P1): window_end was copied from the reserved visit, so a
+            // 90-minute reserved block would read as 90 minutes of this
+            // 60-minute job to overlap/dispatch consumers. Only overwrite
+            // when the recompute parses — otherwise the copied end stands.
+            if (standaloneRow.window_start && standaloneRow.window_end && standaloneRow.estimated_duration_minutes) {
+              const recomputedEnd = windowEndFromStart(standaloneRow.window_start, standaloneRow.estimated_duration_minutes);
+              if (recomputedEnd) standaloneRow.window_end = recomputedEnd;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
@@ -3490,7 +4286,7 @@ const EstimateConverter = {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: standaloneRow.service_id || null,
-                serviceType: standaloneRow.service_type,
+                serviceType: guardServiceTypeFor(standaloneRow.service_type),
                 serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
@@ -3556,6 +4352,12 @@ const EstimateConverter = {
             }
             logger.info(`[estimate-converter] standalone "${unit.service.name}" scheduled alongside reserved accept for estimate ${estimateId}`);
           } catch (standaloneErr) {
+            // The palm identity abort must surface (codex r22 pre-push P0)
+            // — swallowing it would complete acceptance/billing without
+            // scheduling the sold palm program, exactly what the throw
+            // exists to prevent (same contract as the follow-up catch).
+            if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'
+              || standaloneErr.code === 'PALM_RECURRING_LINE_INVALID') throw standaloneErr;
             logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
           }
         }
@@ -3601,6 +4403,11 @@ const EstimateConverter = {
           logger.info(`[estimate-converter] reserved row ${row.id} combined → "${combo.route.name}" (picked slot preserved)`);
         }
       } catch (comboErr) {
+        // Palm identity aborts must reach the caller (codex r24 pre-push
+        // P0): this fail-soft catch would otherwise complete
+        // acceptance/billing without the sold palm series.
+        if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
+          || comboErr.code === 'PALM_RECURRING_LINE_INVALID') throw comboErr;
         logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
       }
 
@@ -3617,8 +4424,27 @@ const EstimateConverter = {
         // catch is deliberately fail-soft (log and keep the acceptance),
         // which would swallow this refusal and complete the accept anyway
         // (pre-push P0 r9).
-        const reservedGuardSvc = reservedSeedSvc
+        let reservedGuardSvc = reservedSeedSvc
           || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+        // With a separately-sold one-time palm item, a one-time-keyed
+        // reserved row is the ONE-TIME item's visit (codex r23 P1) — the
+        // recurring palm line must not bind to it (no relink, no seeding
+        // onto it); the promotion above creates the program's own parent.
+        // Fail-soft: an errored lookup keeps the binding (prior behavior).
+        if (estimateHasOneTimePalmItem
+          && reservedGuardSvc && isPalmInjectionFamily(reservedGuardSvc, reservedStart)) {
+          try {
+            const reservedRowKey = reservedStart.service_id
+              ? (await database('services').where({ id: reservedStart.service_id }).first('service_key'))?.service_key
+              : (String(reservedStart.service_key_snapshot || '') || null);
+            // Name-only rows (no id, no snapshot — legacy adoption) are
+            // just as ambiguous as one-time-keyed rows (codex r24 P0):
+            // only the exact semiannual identity keeps the binding.
+            if (reservedRowKey !== 'palm_injection_semiannual') reservedGuardSvc = null;
+          } catch (bindErr) {
+            logger.warn(`[estimate-converter] reserved palm binding check failed (binding kept): ${bindErr.message}`);
+          }
+        }
         const reservedSeedingPattern = converterFollowUpSeedingPattern(
           reservedGuardSvc || {}, reservedStart, inferredFrequencyKey,
         );
@@ -3632,6 +4458,19 @@ const EstimateConverter = {
             err.statusCode = 409;
             throw err;
           }
+        }
+        // A reserved PALM accept whose line carries recurring EVIDENCE but
+        // resolved NO seeding pattern (contradictory/conflicting/invalid
+        // data — declined by design) must not complete (codex r18 pre-push
+        // P0): the `if (reservedSeedingPattern)` block below would be
+        // skipped entirely, leaving the reserved parent name-only or on a
+        // stale one-time id to complete with one-time billing posture.
+        // Same refusal contract as the off-season check above — OUTSIDE
+        // the fail-soft seeding try, so the acceptance rolls back.
+        if (!reservedSeedingPattern
+          && isPalmInjectionFamily(reservedGuardSvc || {}, reservedStart)
+          && palmRecurringEvidence(reservedGuardSvc || {}, reservedStart)) {
+          throw palmRecurringLineInvalidError();
         }
         try {
           const seedSvc = reservedGuardSvc;
@@ -3648,10 +4487,78 @@ const EstimateConverter = {
           // (runSeedingStep) so concurrent creators serialize.
           if (reservedSeedingPattern) {
             const outcome = await runSeedingStep(async (trx) => {
+              // Reserved lawn/palm parents carry no service_id (the
+              // reservation resolver stamps only engine-keyed ONE-TIME
+              // rows) — or a STALE one: an ADOPTED existing appointment
+              // can already carry the one-time palm_injection id, which
+              // estimate-public intentionally preserves on adoption, and
+              // every seeded child copies the parent's id (pre-push P0).
+              // Relink to the cadence-specific catalog row BEFORE seeding
+              // whenever the parent's id differs from it — for palm this
+              // is what routes completion to the recurring typed profile
+              // instead of the one-time posture (codex #3349 r2 P1).
+              // Fail-open: an absent row (env not yet migrated) keeps
+              // today's behavior, id included.
+              {
+                // Family from the ACCEPTED LINE first, row label as
+                // fallback (codex r18 pre-push P0): the seeding pattern is
+                // derived from the line, so a slot reserved under a
+                // generic/other label with a semiannual palm line accepted
+                // must still relink — deriving from the row alone resolved
+                // no palm key and seeded children from the stale/null
+                // parent identity. seedingFamilyKey keeps the r8 palm
+                // corrections (tree-first alias, Palmetto substring) in
+                // both directions.
+                const reservedFam = seedingFamilyKey(seedSvc || {}, reservedStart);
+                const reservedCatalogKey = reservedFam === 'palm_injection'
+                  ? ((reservedSeedingPattern === 'semiannual' && isPalmInjectionFamily(seedSvc || {}, reservedStart)) ? 'palm_injection_semiannual' : null)
+                  : reservedFam === 'lawn_care'
+                    ? (LAWN_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
+                    : null;
+                if (reservedCatalogKey) {
+                  try {
+                    const catalogRow = await trx('services')
+                      .where({ service_key: reservedCatalogKey })
+                      .first('id', 'service_key');
+                    if (catalogRow && reservedStart.service_id !== catalogRow.id) {
+                      // Snapshot rides along (durable identity — completion
+                      // trusts id, then snapshot). service_type is NEVER
+                      // relabeled (standing doctrine): id + snapshot alone
+                      // route completion to the right profile.
+                      const relinkPatch = { service_id: catalogRow.id };
+                      if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+                        relinkPatch.service_key_snapshot = catalogRow.service_key;
+                      }
+                      await trx('scheduled_services').where({ id: reservedStart.id }).update(relinkPatch);
+                      reservedStart.service_id = catalogRow.id;
+                    }
+                    // Palm follow-ups never seed without the recurring
+                    // identity (codex r15 pre-push P0), and skipping the
+                    // series is NOT enough here (codex r17 pre-push P0):
+                    // the reserved parent already exists — possibly
+                    // carrying the stale one-time palm_injection id an
+                    // adoption preserved — and completing it would invoice
+                    // one-time work against the billed recurring plan.
+                    // ABORT the acceptance (operational 422): the whole
+                    // conversion rolls back with the caller's transaction,
+                    // so no completable palm visit is left behind.
+                    if (!catalogRow && reservedCatalogKey === 'palm_injection_semiannual') {
+                      throw palmCatalogMissingError();
+                    }
+                  } catch (relinkErr) {
+                    // Unknown identity state = fail closed for palm too.
+                    if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;
+                    logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
+                    if (reservedCatalogKey === 'palm_injection_semiannual') {
+                      throw palmCatalogMissingError();
+                    }
+                  }
+                }
+              }
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: reservedStart.service_id || null,
-                serviceType: reservedStart.service_type || null,
+                serviceType: guardServiceTypeFor(reservedStart.service_type) || null,
                 excludeParentId: reservedStart.id,
                 serviceAddressScope: seriesAddressScope,
               });
@@ -3686,6 +4593,10 @@ const EstimateConverter = {
             }
           }
         } catch (seedErr) {
+          // The palm identity abort must surface — swallowing it would
+          // complete the acceptance around the very rollback it exists to
+          // force (codex r17 pre-push P0).
+          if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;
           logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
         }
       }
@@ -3739,7 +4650,7 @@ const EstimateConverter = {
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
-              if (catalogRow.default_duration_minutes) {
+              if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
             } else {
@@ -3747,9 +4658,40 @@ const EstimateConverter = {
             }
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+            // A lookup ERROR on the palm identity ABORTS the conversion
+            // (codex r21 pre-push P1): skip+bell would let billing
+            // complete without the sold appointment on a fire-and-forget
+            // notification — a MISSING row is a knowable env state, but an
+            // errored lookup is unknown and must fail closed.
+            if (unit.catalogServiceKey === 'palm_injection_semiannual') {
+              throw palmCatalogMissingError();
+            }
+          }
+          // Palm never schedules by name, and a MISSING catalog row now
+          // ABORTS like the errored-lookup and reserved paths (codex r22
+          // pre-push P0): skip+bell completed billing without the sold
+          // program on a best-effort notification. Lawn keeps the name
+          // fallback — lawn line names equal their catalog names exactly,
+          // so name resolution cannot misfile them.
+          if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {
+            throw palmCatalogMissingError();
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
+        // A palm unit with recurring EVIDENCE that did NOT resolve the
+        // semiannual catalog identity (contradictory/conflicting/invalid
+        // data declines seeding by design, leaving catalogServiceKey null)
+        // must not insert a name-only parent (codex r18 pre-push P0) —
+        // skip to manual scheduling with the bell. Definitively one-time
+        // palm lines carry no evidence and proceed as before; commercial
+        // keeps its own bell lane (see palmRecurringEvidence).
+        if (unit.catalogServiceKey !== 'palm_injection_semiannual'
+          && isPalmInjectionFamily(svc)
+          && palmRecurringEvidence(svc)) {
+          notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit (invalid recurring data)',
+            `Accepted estimate #${estimateId} has a palm line with contradictory recurring data (cadence and visit count disagree), so it was not auto-scheduled — review the line and schedule the palm program manually.`);
+          continue;
+        }
         const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
           service: svc,
           // Same explicit-visits override as the seeding path: a termite row
@@ -3768,7 +4710,14 @@ const EstimateConverter = {
         const seasonalUnit = seedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
         // Row notes are customer-visible — say "seasonal (Feb–Oct)", not the
         // raw every_6_weeks the quote row carries or the internal token.
-        const frequency = seasonalUnit ? 'seasonal (Feb–Oct)' : (svc.frequency || pattern || 'monthly');
+        // When a series will actually seed, the SEEDING pattern is the truth
+        // (codex #3349 r2 P2): a builder palm line has no frequency field,
+        // so raw inference echoes the accepted plan's cadence
+        // (quarterly/monthly) while the forced rule seeds semiannual — the
+        // note must agree with recurring_pattern and the real dates.
+        const frequency = seasonalUnit
+          ? 'seasonal (Feb–Oct)'
+          : (seedingPattern || svc.frequency || pattern || 'monthly');
         // recurringUnitCount, not raw line count (Codex P1): with a
         // standalone bait unit beside one pest line, stamping the whole
         // plan amount on BOTH rows would double-charge at completion.
@@ -3819,11 +4768,31 @@ const EstimateConverter = {
           // concurrent accepts serialize per customer + service family and
           // the loser skips instead of minting a second series.
           const outcome = await runSeedingStep(async (trx) => {
-            if (pattern) {
+            // The guard runs whenever a series would seed (seedingPattern)
+            // OR the unit still reads as recurring (raw pattern) — with
+            // exactly ONE bypass: the builder's one-application palm line
+            // (visitsPerYear 1, inferring 'annual'/the plan fallback while
+            // seedingPattern is null). Family-matching that against an
+            // existing semiannual palm series would swallow a legitimate
+            // one-time appointment (codex #3349 P1). The bypass must NOT
+            // widen to every non-seeding recurring unit (codex r4 P1): a
+            // commercial-lawn line (8 visits) also resolves no seeding
+            // pattern, and skipping its duplicate check would insert a
+            // second appointment beside an active commercial-lawn series
+            // the previous raw-pattern gate correctly caught.
+            // ...and the bypass requires NON-CONFLICTING visit fields
+            // (codex r13 P1): { visitsPerYear: 1, visits: 2 } first-alias
+            // reads as 1, but an ambiguous row is not DEFINITIVELY
+            // one-time — it stands down to the guard like any other
+            // recurring-reading unit.
+            const oneApplicationPalm = isPalmInjectionFamily(svc)
+              && !visitCountFieldsConflict(svc)
+              && visitsPerYearForRecurringService(svc) === 1;
+            if (seedingPattern || (pattern && !oneApplicationPalm)) {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: combinedServiceId,
-                serviceType: serviceName,
+                serviceType: guardServiceTypeFor(serviceName),
                 serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
@@ -4121,6 +5090,7 @@ const EstimateConverter = {
           let coverageVisitCount;
           let coverageCadence;
           let seasonalPrepayCoverageUnsupported = false;
+          let recurringPrepayCoverageInvalid = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
             // created the coverage series with the BOOKED service_type/cadence
@@ -4146,6 +5116,15 @@ const EstimateConverter = {
               // raw inferred cadence here would diverge from the real series.
               // Fail closed via the guard in the term-creation try below.
               seasonalPrepayCoverageUnsupported = true;
+            } else if (cadence === PREPAY_COVERAGE_INVALID) {
+              // Palm validation refused the cadence (contradictory visit
+              // count or a commercial line). Falling through would set
+              // coverageVisitCount with an undefined cadence, and
+              // annual-prepay-renewals' inferCoverageCadence would turn the
+              // 2-visit count back into semiannual — seeding the very
+              // series the validation rejected (codex #3349 r7 P1). Fail
+              // closed like the seasonal case.
+              recurringPrepayCoverageInvalid = true;
             } else {
               // Visits/year: prefer the line's explicit count (the series' own
               // source); else map from cadence. Values mirror inferCoverageCadence
@@ -4213,6 +5192,16 @@ const EstimateConverter = {
                 `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
               );
               err.code = 'ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED';
+              err.isOperational = true;
+              err.status = 422;
+              err.statusCode = 422;
+              throw err;
+            }
+            if (recurringPrepayCoverageInvalid) {
+              const err = new Error(
+                'Annual prepay can\'t be created for this recurring program — its cadence and visit data disagree (or it is a commercial line), so the converter refused to seed it. Fix the line\'s cadence or bill the prepay manually.'
+              );
+              err.code = 'ANNUAL_PREPAY_COVERAGE_CADENCE_INVALID';
               err.isOperational = true;
               err.status = 422;
               err.statusCode = 422;
@@ -4836,6 +5825,11 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.seedingFamilyKey = seedingFamilyKey;
+module.exports.isPalmInjectionFamily = isPalmInjectionFamily;
+module.exports.guardServiceTypeFor = guardServiceTypeFor;
+module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;
+module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
@@ -4895,6 +5889,10 @@ module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
+module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
+module.exports.visitCountFieldsInvalid = visitCountFieldsInvalid;
+module.exports.explicitCadenceFieldForService = explicitCadenceFieldForService;
+module.exports.explicitlyOneTimeCadence = explicitlyOneTimeCadence;
 module.exports.estimateOneTimeItemsFromData = estimateOneTimeItemsFromData;
 module.exports.recurringLineAnnualAmount = recurringLineAnnualAmount;
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
