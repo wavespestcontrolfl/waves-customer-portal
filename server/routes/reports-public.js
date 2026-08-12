@@ -212,12 +212,18 @@ const reportEventLimiter = rateLimit({
 // work at the 120/min analytics rate. Keyed per token: the token is the
 // capability under abuse, and per-token capping bounds each leaked link
 // regardless of the caller's IP pool.
+// Mounted as REAL route middleware, never awaited inside the handler: the
+// default 429 responder ends the response without calling next(), so a
+// promise-wrapped limiter would leave the async handler suspended forever
+// (pre-push P1). skip() keeps every other event on the analytics limiter
+// alone — the body is already parsed when this runs.
 const crossSellActionLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => `xsell:${req.params.token || 'anon'}`,
+  skip: (req) => req.body?.eventName !== 'cross_sell_requested',
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -986,7 +992,7 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
 });
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
-router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
+router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -1065,10 +1071,9 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     // repeat tap resolves to the existing open request. Creation failure is
     // a 503 so the card can only confirm a durably recorded request.
     if (eventName === 'cross_sell_requested') {
-      // Dedicated limiter runs BEFORE any recompute/DB work; it sends its
-      // own 429 when tripped.
-      await new Promise((resolve, reject) => crossSellActionLimiter(req, res, (err) => (err ? reject(err) : resolve())));
-      if (res.headersSent) return undefined;
+      // The dedicated 5/min per-token limiter already ran as route
+      // middleware — ahead of this handler and therefore ahead of any
+      // recompute or DB work.
       try {
         const joined = await db('service_records as sr')
           .leftJoin('customers as c', 'sr.customer_id', 'c.id')
