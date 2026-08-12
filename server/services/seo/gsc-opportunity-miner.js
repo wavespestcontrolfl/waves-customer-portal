@@ -798,6 +798,14 @@ function routeIdentity(url) {
   return `${host}::${path}`;
 }
 
+// seo_actions stores URLs scheme-less ("wavespestcontrol.com/path"), so
+// they need a scheme before routeIdentity can split host from path.
+function seoActionRouteIdentity(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return null;
+  return routeIdentity(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`);
+}
+
 // SQL twin of routeIdentity() for matching STORED page_url values by route
 // identity (the sweep's page exemption) — keep the two in lockstep. chr(63)
 // is '?' for the same knex bind-placeholder reason as CANON_URL_SQL; the
@@ -1790,6 +1798,27 @@ class GscOpportunityMiner {
     return map;
   }
 
+  // Route identities of pages with an OPEN rewrite_title_meta action in
+  // seo_actions — the older mechanism's claim on a page. null on failure
+  // so the caller can fail CLOSED: without this evidence we cannot rule
+  // out duplicate rewrite work.
+  async _pagesOwnedByOpenSeoActions() {
+    try {
+      const rows = await db('seo_actions')
+        .where({ action_type: 'rewrite_title_meta', status: 'open' })
+        .select('url');
+      const out = new Set();
+      for (const r of rows) {
+        const id = seoActionRouteIdentity(r.url);
+        if (id) out.add(id);
+      }
+      return out;
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] seo_actions ownership lookup failed: ${err.message}`);
+      return null;
+    }
+  }
+
   // The mapped page a low-CTR query actually ranks with, per query — see
   // pickCtrRewriteTargetPage for the selection rule. Rows from domains
   // without FRESH map coverage are excluded: syncQueryPageMap swallows
@@ -2001,16 +2030,35 @@ class GscOpportunityMiner {
     const rankingPages = await this._rankingPageByQuery(
       filtered.map((r) => r.query), since, covered
     );
+    // CROSS-QUEUE FENCE. url-intelligence diagnoses ctr_problem and
+    // seo-action-generator queues rewrite_title_meta into seo_actions —
+    // a second, older mechanism for this exact job. Activating this
+    // bucket without arbitration would let one page collect concurrent
+    // duplicate rewrite work (AGENTS.md: extend the existing mechanism,
+    // never run a parallel one). The existing queue is the AUTHORITY: any
+    // page with an open action there is off-limits here. Verified live,
+    // not theoretical — that pipeline is dormant (last run 2026-05-24)
+    // but still holds 42 open unapproved rewrites, one of which matches a
+    // current target.
+    const ownedBySeoActions = await this._pagesOwnedByOpenSeoActions();
+    if (ownedBySeoActions === null) {
+      logger.warn('[gsc-opp-miner] ctr_rewrite: seo_actions fence unavailable — bucket skipped this run');
+      return [];
+    }
 
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
       const mapped = rankingPages.get(r.query);
-      const pageUrl = (queryDomainsCovered(r.domains, covered)
+      const resolved = (queryDomainsCovered(r.domains, covered)
         && mapped
         && queryDomainsCovered(r.domains, mapped.domains))
         ? ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains))
         : null;
+      // The older seo_actions queue owns this page — yield to it.
+      const pageUrl = (resolved && ownedBySeoActions.has(routeIdentity(resolved)))
+        ? null
+        : resolved;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
@@ -3658,6 +3706,8 @@ module.exports._internals = {
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
   pagesForCandidateDomains,
+  seoActionRouteIdentity,
+  routeIdentity,
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,

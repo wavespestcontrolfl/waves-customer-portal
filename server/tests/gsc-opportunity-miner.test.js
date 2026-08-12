@@ -42,6 +42,8 @@ const {
   pickCtrRewriteTargetPage,
   ctrRewriteTargetFor,
   pagesForCandidateDomains,
+  seoActionRouteIdentity,
+  routeIdentity,
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
@@ -441,6 +443,26 @@ describe('pickCtrRewriteTargetPage', () => {
     expect(pickCtrRewriteTargetPage([])).toBe(null);
     expect(pickCtrRewriteTargetPage()).toBe(null);
     expect(pickCtrRewriteTargetPage([{ page_url: null, impressions: '500' }])).toBe(null);
+  });
+});
+
+describe('seoActionRouteIdentity (cross-queue fence key)', () => {
+  test('scheme-less seo_actions urls normalize to the same identity as page urls', () => {
+    // seo_actions stores "wavespestcontrol.com/path"; gsc_query_page_map
+    // stores "https://www.wavespestcontrol.com/path/". Both must key the
+    // same or the fence silently never matches.
+    expect(seoActionRouteIdentity('wavespestcontrol.com/fire-ant-control-palmetto-fl'))
+      .toBe(routeIdentity('https://www.wavespestcontrol.com/fire-ant-control-palmetto-fl/'));
+    expect(seoActionRouteIdentity('https://wavespestcontrol.com/x/'))
+      .toBe(routeIdentity('https://www.wavespestcontrol.com/x'));
+  });
+  test('spoke domains stay distinct from the hub', () => {
+    expect(seoActionRouteIdentity('bradentonflpestcontrol.com/services/x'))
+      .not.toBe(seoActionRouteIdentity('wavespestcontrol.com/services/x'));
+  });
+  test('empty input -> null', () => {
+    expect(seoActionRouteIdentity('')).toBe(null);
+    expect(seoActionRouteIdentity(null)).toBe(null);
   });
 });
 
