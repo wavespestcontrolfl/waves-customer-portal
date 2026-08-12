@@ -117,14 +117,20 @@ function hasUnitSignal({ tenant, address, extraction, enhanced = false }) {
 // warehouse tenant can lease an entire freestanding property (codex r38/r39
 // P1). Shared by the unit-scope lane and the V2 scope inference so both
 // paths agree.
-function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType }) {
+function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType, landUseDescription }) {
   // 'condo' counts: a commercial CONDOMINIUM is by definition one unit of a
   // larger building even when the address carries no Unit/Suite suffix —
   // without it the model called such a tenant a whole-building lease and V2
   // overwrote their stated unit size with the county building area (codex
   // r43 P1).
+  // The county's own land-use text is often the ONLY multi-unit evidence —
+  // "Multiple Unit Stores" normalizes to a bare 'Commercial' propertyType,
+  // so a suite tenant there read as a whole-building lease and V2 could
+  // overwrite their stated size with the county building area (codex r44 P1).
+  const MULTI_UNIT_TEXT = /multiple\s*unit|multi.?tenant|suite|condo|strip\s*(?:mall|center)|plaza|shopping\s*(?:center|centre)|office\s*(?:park|building)/i;
   return subpremiseSignal === true || aggregated === true
-    || /multiple\s*unit|multi.?tenant|suite|condo|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || ''));
+    || MULTI_UNIT_TEXT.test(String(propertyType || ''))
+    || MULTI_UNIT_TEXT.test(String(landUseDescription || ''));
 }
 
 function inferServiceScope({
@@ -463,6 +469,7 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
     });
     const partBuilding = hasPartBuildingEvidence({
       subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
+      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
     });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,

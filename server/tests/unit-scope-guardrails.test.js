@@ -961,6 +961,27 @@ describe('lead webhook readiness guardrails', () => {
     });
   });
 
+  test('gate ON: structured commercial form flags block automation (r44)', () => {
+    withGate('true', () => {
+      const base2 = {
+        ...base,
+        intake: {
+          ...base.intake,
+          normalizedAddress: { line1: '4801 Industrial Way', fullAddress: '4801 Industrial Way, Parrish FL', city: 'Parrish', zip: '34221' },
+        },
+      };
+      // A form that says so outright, with a generic label and no prose.
+      for (const flag of [{ isCommercial: true }, { category: 'COMMERCIAL' }, { commercialSubtype: 'warehouse_light' }]) {
+        const readiness = evaluateLeadEstimateAutomationReadiness({ ...base2, body: flag });
+        expect(readiness.missing).toContain('commercial_category_conflict');
+      }
+      // A residential body with none of those stays clean.
+      expect(evaluateLeadEstimateAutomationReadiness({
+        ...base2, body: { isCommercial: false, category: 'RESIDENTIAL', commercialSubtype: '' },
+      }).missing).not.toContain('commercial_category_conflict');
+    });
+  });
+
   test('gate ON: a normal residential lead is unaffected', () => {
     withGate('true', () => {
       const readiness = evaluateLeadEstimateAutomationReadiness({

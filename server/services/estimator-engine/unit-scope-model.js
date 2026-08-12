@@ -296,6 +296,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // commercial tenant keeps building scope on BOTH.
   const partBuildingEvidence = shadowPrivate.hasPartBuildingEvidence({
     subpremiseSignal, aggregated, propertyType,
+    landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
   });
   // This module IS the unit-scope lane, so owner-unit suites are always on
   // for the model it composes (its pricing-affecting apply is separately

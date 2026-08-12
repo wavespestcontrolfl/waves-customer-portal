@@ -466,9 +466,22 @@ function normalizeAddressPieces({ intake = {}, customer = {} } = {}) {
   return { line1, fullAddress, city, state, zip };
 }
 
+// STRUCTURED commercial signals on the submission itself — a form can say
+// so outright (isCommercial / category / commercial subtype) while its
+// service label and prose stay generic, and buildLeadEngineInput hardcodes
+// isCommercial:false, so the draft stayed generated and auto-sendable at
+// residential pricing (codex r44 P1).
+function structuredCommercialSignal(source = {}) {
+  if (source.isCommercial === true || String(source.isCommercial || '').toLowerCase() === 'yes') return true;
+  if (String(source.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
+  const subtype = String(source.commercialSubtype || source.commercial_subtype || '').trim().toLowerCase();
+  return !!subtype && subtype !== 'none' && subtype !== 'null';
+}
+
 function evaluateLeadEstimateAutomationReadiness({
   intake = {},
   customer = {},
+  body = {},
   phone,
   serviceInterest,
   minimumConfidence = MIN_AUTOMATION_CONFIDENCE,
@@ -506,7 +519,12 @@ function evaluateLeadEstimateAutomationReadiness({
     // which deliberately doesn't match bare service labels (codex r2 P1).
     const prose = [intake.message, intake.notes, resolvedServiceInterest]
       .filter(Boolean).join(' ');
-    if (commercialTextSignal(prose) || /\bcommercial\b/i.test(resolvedServiceInterest || '')) {
+    if (commercialTextSignal(prose)
+      || /\bcommercial\b/i.test(resolvedServiceInterest || '')
+      // A form that states it outright — checked on the raw body AND the
+      // intake, since callers pass one or the other (codex r44 P1).
+      || structuredCommercialSignal(body)
+      || structuredCommercialSignal(intake)) {
       missing.push('commercial_category_conflict');
       review.push('commercial_signal_on_residential_intake');
     }

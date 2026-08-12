@@ -445,6 +445,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     estimateAutomationReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({
       intake,
       customer,
+      // Raw submission: carries structured commercial flags the intake
+      // shape doesn't model (codex r44 P1).
+      body,
       phone: phoneFormatted,
       serviceInterest,
     }));
