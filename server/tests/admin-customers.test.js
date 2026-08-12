@@ -598,6 +598,12 @@ describe('admin customers route helpers', () => {
     // exact match.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // Snake-case explicit keys hit the same guards (codex r22 pre-push
+    // P0): service_key is the persisted spelling.
+    expect(serviceCatalogMatch({ service_key: 'palm_injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service_key: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ service_key: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service_key: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
     // The symmetric contradiction: an explicit SEMIANNUAL key whose line
     // data does not resolve a valid semiannual program stays unmatched
     // (codex r18 pre-push P0) — the modal would pair the semiannual id

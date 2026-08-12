@@ -335,7 +335,10 @@ function serviceCatalogMatch(line, serviceIndex) {
   // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
   // into a service-wins fallback made the exact seasonal row unreachable —
   // the fuzzy matcher then returned mosquito_monthly.
-  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.key || '');
+  // service_key (snake) joined the explicit vocabulary (codex r22
+  // pre-push P0) — persisted lines carry it, and missing it bypassed the
+  // fail-closed palm contradiction guards.
+  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.service_key || line?.key || '');
   const rawKey = normalizeServiceKey(line?.service || '');
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [

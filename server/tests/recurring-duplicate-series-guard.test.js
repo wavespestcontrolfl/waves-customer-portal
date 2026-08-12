@@ -299,6 +299,25 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect(result.matches[0].id).toBe(9);
   });
 
+  test('alias and canonical palm creators take the SAME family lock (codex r22 pre-push P0)', async () => {
+    const { db, rawCalls } = makeLockEnv({ parents: [] });
+    await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Tree Injections',
+    }));
+    const { db: db2, rawCalls: rawCalls2 } = makeLockEnv({ parents: [] });
+    await db2.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(lockKeysFrom(rawCalls)).toEqual(lockKeysFrom(rawCalls2));
+    expect(lockKeysFrom(rawCalls)).toEqual(['5:family:palm_injection']);
+    // …and nutritional creators lock their OWN family.
+    const { db: db3, rawCalls: rawCalls3 } = makeLockEnv({ parents: [] });
+    await db3.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Tree Nutritional Treatment',
+    }));
+    expect(lockKeysFrom(rawCalls3)).toEqual(['5:family:palm_nutritional']);
+  });
+
   test('a NUTRITIONAL palm series never suppresses an injection target — distinct guard identities (codex r21 pre-push P0)', async () => {
     const { db } = makeLockEnv({
       parents: [{ id: 11, service_id: null, service_type: 'Palm Tree Nutritional Treatment', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],

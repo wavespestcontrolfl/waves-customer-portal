@@ -546,6 +546,25 @@ async function existingSeriesDates(conn, parent, columns) {
 // (booking.js) pass it so the fresh row can never match itself.
 // Returns [] when nothing matches; matches carry next_upcoming_date (ET
 // date string) when the series has a future visit.
+// The duplicate-guard FAMILY classifier — used by BOTH the matcher and
+// the advisory-lock keys (codex r22 pre-push P0: deriving them
+// differently let an alias-labeled creator and a canonical creator take
+// different family locks and both seed). Palm-first with injection vs
+// nutritional as distinct identities; every other family is exactly
+// serviceKeyFor. Lazy converter require — it loads this module at boot.
+function duplicateGuardFamilyKey(label) {
+  try {
+    const { seedingFamilyKey, isPalmInjectionFamily } = require('./estimate-converter');
+    const fam = seedingFamilyKey({}, { service_type: label });
+    if (fam === 'palm_injection') {
+      return isPalmInjectionFamily({}, { service_type: label }) ? 'palm_injection' : 'palm_nutritional';
+    }
+    return fam;
+  } catch {
+    return serviceKeyFor({ service_type: label });
+  }
+}
+
 async function findActiveRecurringSeries(conn, {
   customerId,
   serviceId = null,
@@ -582,29 +601,9 @@ async function findActiveRecurringSeries(conn, {
   if (excludeParentId) query.whereNot('id', excludeParentId);
   const parents = await query;
   // Palm-first family classification for BOTH sides (codex r21 pre-push
-  // P0): serviceKeyFor checks tree tokens before palm, so a legacy parent
-  // labeled 'Palm Tree Injections' with a null/stale service_id
-  // classified tree_shrub while the canonicalized TARGET reads
-  // palm_injection — the guard missed it and minted a duplicate
-  // per-application palm series. seedingFamilyKey corrects the alias in
-  // both directions ('Palmetto…' stays non-palm); for every other family
-  // it returns exactly serviceKeyFor. Lazy require — the converter
-  // requires this module at load time, so a top-level import would cycle.
-  let familyKeyOf = (label) => serviceKeyFor({ service_type: label });
-  try {
-    const { seedingFamilyKey, isPalmInjectionFamily } = require('./estimate-converter');
-    familyKeyOf = (label) => {
-      const fam = seedingFamilyKey({}, { service_type: label });
-      // Injection vs nutritional are DISTINCT guard identities (codex r21
-      // pre-push P0, second pass): an active nutritional series must never
-      // suppress a paid injection series (or vice versa) just because the
-      // broad family collapses both to palm_injection.
-      if (fam === 'palm_injection') {
-        return isPalmInjectionFamily({}, { service_type: label }) ? 'palm_injection' : 'palm_nutritional';
-      }
-      return fam;
-    };
-  } catch { /* seeder-local resolver stands */ }
+  // P0), shared with the advisory-lock keys via duplicateGuardFamilyKey
+  // (codex r22 pre-push P0).
+  const familyKeyOf = (label) => duplicateGuardFamilyKey(label);
   const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
   for (const parent of parents || []) {
@@ -705,7 +704,7 @@ async function checkActiveSeriesLocked(trx, opts = {}) {
 function seriesCreateLockKeys({ customerId, serviceId = null, serviceType = null } = {}) {
   const keys = [];
   if (serviceType) {
-    keys.push(`${customerId}:family:${serviceKeyFor({ service_type: serviceType })}`);
+    keys.push(`${customerId}:family:${duplicateGuardFamilyKey(serviceType)}`);
   }
   if (serviceId != null) {
     keys.push(`${customerId}:svc:${serviceId}`);
