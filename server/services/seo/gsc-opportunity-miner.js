@@ -1804,8 +1804,16 @@ class GscOpportunityMiner {
   // out duplicate rewrite work.
   async _pagesOwnedByOpenSeoActions() {
     try {
+      // status stays 'open' after execution — completion is recorded in
+      // execution_status ('done' / 'failed' / 'manual_required'), so
+      // filtering on status alone would exclude a page FOREVER once it had
+      // ever been rewritten, even after its CTR regressed (audit P1). Only
+      // UNFINISHED work owns a page. 'failed' and 'manual_required' are
+      // finished for this purpose too: nothing is in flight, and the page
+      // needs someone to act, which is exactly what this bucket does.
       const rows = await db('seo_actions')
         .where({ action_type: 'rewrite_title_meta', status: 'open' })
+        .whereNotIn('execution_status', ['done', 'failed', 'manual_required'])
         .select('url');
       const out = new Set();
       for (const r of rows) {
