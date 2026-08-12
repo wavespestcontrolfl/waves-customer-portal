@@ -205,12 +205,11 @@ async function revokeRegistrationForDeniedPermission() {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
-    // Zero rows deactivated = the token row sits under a DIFFERENT profile
-    // (a fire-and-forget property re-point that failed leaves it there).
-    // Keep the memory in that case: a later login's re-point supersedes the
-    // row server-side and the next launch retries this release under the
-    // profile that owns it. Clearing here would orphan an active row that
-    // can silently swallow SMS forever.
+    // The release is account-scoped server-side, so zero rows now means
+    // the token is not held by ANY profile this session may touch (already
+    // released, or a cross-account edge). Keep the memory so a later
+    // re-point can supersede the row; clearing on an unconfirmed release
+    // could orphan an active row.
     if (Number(res?.deactivated) > 0) {
       pendingToken = null;
       lastToken = null;

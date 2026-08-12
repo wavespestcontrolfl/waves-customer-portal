@@ -76,6 +76,7 @@ const PUSH_ROUTING_POLICY = {
   // original_message_type with these — the generic payment_failure entry
   // never matches the live sends).
   ach_retry_notice: 'push_and_sms',
+  ach_card_fallback: 'push_and_sms',
   ach_suspended: 'push_and_sms',
   bank_verification_incomplete: 'push_and_sms',
   bank_verification_failed: 'push_and_sms',
@@ -102,6 +103,7 @@ const PRESENTATION = {
   autopay_retry_failed: PAYMENT_ISSUE,
   autopay_retry_final_failed: PAYMENT_ISSUE,
   ach_retry_notice: PAYMENT_ISSUE,
+  ach_card_fallback: PAYMENT_ISSUE,
   ach_suspended: PAYMENT_ISSUE,
   bank_verification_incomplete: PAYMENT_ISSUE,
   bank_verification_failed: PAYMENT_ISSUE,
@@ -177,6 +179,7 @@ const PREF_CHANNEL_COLUMN = {
   autopay_retry_failed: 'billing_channel',
   autopay_retry_final_failed: 'billing_channel',
   ach_retry_notice: 'billing_channel',
+  ach_card_fallback: 'billing_channel',
   ach_suspended: 'billing_channel',
   bank_verification_incomplete: 'billing_channel',
   bank_verification_failed: 'billing_channel',
