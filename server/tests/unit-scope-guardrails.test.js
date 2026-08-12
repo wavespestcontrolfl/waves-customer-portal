@@ -622,6 +622,26 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     expect(condoFacts.home.value).toBe(1240);
   });
 
+  test('a whole-building commercial TENANT keeps its area and lot (r38)', () => {
+    // A restaurant/warehouse tenant can lease an entire freestanding
+    // property — tenancy alone is not part-building evidence.
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Restaurant' },
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      intent: { is_commercial: true, address: '4801 Cortez Rd W, Bradenton, FL 34210' },
+      propertyFacts: { tenant: true, home: { value: 4200, source: 'county_assessed' } },
+      address: '4801 Cortez Rd W, Bradenton, FL 34210',
+    });
+    expect(model.partBuildingEvidence).toBe(false);
+    const facts = {
+      home: { value: 4200, source: 'county_assessed', confidence: 'high' },
+      lot: { value: 22000, source: 'county_assessed', confidence: 'high' },
+    };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBe(4200);
+    expect(facts.lot.value).toBe(22000);
+  });
+
   test('commercial tenant classifies as a suite', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,

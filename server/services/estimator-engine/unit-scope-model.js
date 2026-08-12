@@ -347,6 +347,14 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     })(),
     unitSignal,
     subpremiseSignal,
+    // Positive evidence the customer occupies PART of a building: an
+    // explicit subpremise, a stacked association aggregate, or a
+    // multi-tenant record type. Tenancy alone is NOT part-building
+    // evidence — a restaurant or warehouse tenant can lease an entire
+    // freestanding property, and clearing its county area/parcel lot would
+    // strip a valid whole-building quote's pricing inputs (codex r38 P1).
+    partBuildingEvidence: subpremiseSignal || aggregated
+      || /multiple\s*unit|multi.?tenant|suite|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || '')),
     // Stacked ASSOCIATION aggregate: even a condo's figures describe the
     // whole building here, so the per-unit-folio exception must not apply.
     aggregated,
@@ -415,8 +423,10 @@ function lookupCategoryConflict({
  */
 function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   if (!propertyFacts || !model) return propertyFacts;
+  // Same rule for the LOT: a whole-building commercial tenant occupies the
+  // real parcel, so only a part-building suite loses it (codex r38 P1).
   const unitScoped = model.serviceScope === 'residential_unit'
-    || model.serviceScope === 'commercial_suite';
+    || (model.serviceScope === 'commercial_suite' && model.partBuildingEvidence === true);
   // A tenant classifies as leased_land BEFORE the condo/apartment subtype
   // check (inferOwnershipType ordering) — in a UNIT scope that is still a
   // no-individual-lot property: the only lot that could resolve is the
@@ -446,7 +456,12 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   // whose GIS returned the stacked ASSOCIATION aggregate, describes the
   // whole structure.
   const perUnitCountyRecord = model.propertyUse === 'condominium' && model.aggregated !== true;
-  const buildingAreaIncompatible = model.serviceScope === 'commercial_suite'
+  // A commercial SUITE reached by tenancy alone may be a whole-building
+  // lease — only positive part-building evidence justifies discarding its
+  // measurements (codex r38 P1).
+  const suiteIsPartOfBuilding = model.serviceScope === 'commercial_suite'
+    && model.partBuildingEvidence === true;
+  const buildingAreaIncompatible = suiteIsPartOfBuilding
     || (model.serviceScope === 'residential_unit' && !perUnitCountyRecord);
   if (buildingAreaIncompatible
     && Number(propertyFacts?.home?.value) > 0
