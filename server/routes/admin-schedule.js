@@ -5950,7 +5950,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   track_state: child.track_state ?? null,
                 })
                 .update(childUpdates);
-              if (childUpdated === 0) continue;
+              if (childUpdated === 0) {
+                // All-or-none, matching the rebooker's series CAS: leaving
+                // one occurrence behind while the parent and the rest move
+                // to the new cadence would silently fork the series.
+                throw Object.assign(
+                  new Error('A visit in this plan changed concurrently while the cadence rewrite was pending — re-check and retry'),
+                  { status: 409 },
+                );
+              }
               if (childRewound) rewoundSeriesRows.push(child);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -6013,7 +6021,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     track_state: booster.track_state ?? null,
                   })
                   .update(boosterUpdates);
-                if (boosterUpdated === 0) continue;
+                if (boosterUpdated === 0) {
+                  // All-or-none — same contract as the child rewrite above.
+                  throw Object.assign(
+                    new Error('A visit in this plan changed concurrently while the cadence rewrite was pending — re-check and retry'),
+                    { status: 409 },
+                  );
+                }
                 if (boosterRewound) rewoundSeriesRows.push(booster);
                 if (boosterDateChanged) {
                   await resetAppointmentReminderForScheduleRewrite(
