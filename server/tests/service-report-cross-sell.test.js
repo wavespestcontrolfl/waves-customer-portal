@@ -237,6 +237,13 @@ describe('buildReportCrossSell', () => {
 
     const clean = await buildReportCrossSell(SERVICE(), dbFor(args({})), { propertyLookup: missLookup });
     expect(clean.mode).toBe('priced');
+    // A CLEAN line item must not be mistaken for a marker.
+    const cleanLines = await buildReportCrossSell(
+      SERVICE(),
+      dbFor(args({ result: { fieldVerify: [], lineItems: [{ service: 'tree_shrub', pricingConfidence: 'high' }] } })),
+      { propertyLookup: missLookup },
+    );
+    expect(cleanLines.mode).toBe('priced');
 
     // Each marker shape the stored blob has carried demotes.
     for (const marker of [
@@ -245,6 +252,13 @@ describe('buildReportCrossSell', () => {
       { estimate: { fieldVerifyFlags: [{ field: 'lotSize' }] } },
       { result: { requiresManualReview: true } },
       { result: { pricingConfidence: 'low' } },
+      // Per-service markers live on the LINE ITEMS — a normal engine-backed
+      // estimate records its review posture there, under an empty
+      // top-level fieldVerify (PR r14 P1).
+      { result: { fieldVerify: [], lineItems: [{ service: 'tree_shrub', pricingConfidence: 'low' }] } },
+      { engineResult: { lineItems: [{ service: 'lawn', turfConfidence: 'LOW' }] } },
+      { result: { lineItems: [{ service: 'pest', requiresManualReview: true }] } },
+      { result: { lineItems: [{ service: 'pest', customQuoteFlag: true }] } },
     ]) {
       const flagged = await buildReportCrossSell(SERVICE(), dbFor(args(marker)), { propertyLookup: missLookup });
       expect(flagged).not.toBeNull();

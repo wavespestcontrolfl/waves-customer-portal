@@ -333,6 +333,44 @@ describe('customer pricing AI helpers', () => {
     expect(price(observedWithSeed)).toBe(price(synthesizedBare));
   });
 
+  test('a dimension the lookup REJECTED is not a gap the seed may fill (PR r14 P1)', async () => {
+    // A fieldVerifyFlags entry means the lookup refused its own read and
+    // said to verify that measurement first. Filling the hole from an older
+    // accepted estimate would grade the new price solely on the seeded
+    // number and publish it as exact, with the caveat stripped off.
+    const run = ({ flags = [], seed }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        // No homeSqFt/lotSqFt of its own: the profile columns are cleared
+        // below, so the seed is the only other source.
+        enriched: { stories: 1, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-rejected', property_sqft: null, lot_sqft: null }),
+      propertySeed: seed,
+    });
+    const seed = { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' };
+
+    // Unflagged: the seed fills the gap and the offer prices.
+    const filled = await run({ seed });
+    expect(filled.property?.homeSqFt).toBe(2400);
+
+    // Flagged square footage: the seed must NOT fill it.
+    const rejected = await run({ flags: [{ field: 'squareFootage', priority: 'high' }], seed });
+    expect(rejected.property?.homeSqFt).not.toBe(2400);
+
+    // The global address flag rejects every dimension — the lookup may
+    // describe a different premises entirely.
+    const wrongPremises = await run({ flags: [{ field: 'address', priority: 'high' }], seed });
+    expect(wrongPremises.property?.homeSqFt).not.toBe(2400);
+    expect(wrongPremises.property?.lotSqFt).not.toBe(8000);
+
+    // A flag on ONE dimension leaves the others fillable.
+    const partial = await run({ flags: [{ field: 'squareFootage', priority: 'high' }], seed });
+    expect(partial.property?.lotSqFt).toBe(8000);
+  });
+
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
     // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
     // adoption rule maps only 'YES' to true. So an observed-but-undecided

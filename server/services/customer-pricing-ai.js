@@ -349,7 +349,8 @@ function lookupEnabled() {
 const {
   lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
-  lookupTurfEstimateIsTrustworthy, lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
+  lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
   structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
@@ -422,6 +423,17 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // would price-lock for a home whose accepted estimate carried the
   // modifiers).
   const lookupFeatureKeys = new Set();
+  // Dimensions the LOOKUP explicitly REFUSED (codex #3367 PR r14). A field
+  // carrying its own fieldVerifyFlags entry — or every field, when the
+  // global address flag says the lookup may describe a different premises —
+  // is not adopted below because the lookup itself said to verify it first.
+  // That is a rejection, not a gap, and the accepted-estimate seed fill must
+  // not quietly launder an older number into the hole it left: the price is
+  // graded solely on the inputs it ends up with, so a measurement the lookup
+  // flagged would publish as an exact per-application figure anyway. Only
+  // the seed path consults this — a rejected dimension with no seed already
+  // fails closed to the pricer's own missing-property handling.
+  const lookupRejectedFields = new Set();
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -448,6 +460,25 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // and features. Adopt none of it; the profile's own values stand and a
       // missing home size fails closed to PROPERTY_DETAILS_NEEDED.
       const lookupDescribesThisProperty = !hasGlobalVerifyFlag(p);
+      if (!lookupDescribesThisProperty) {
+        // The premises itself is unverified — every dimension is rejected,
+        // so none of them may be back-filled from an older estimate either.
+        for (const field of ['homeSqFt', 'lotSqFt', 'lawnSqFt', 'bedArea', 'stories']) {
+          lookupRejectedFields.add(field);
+        }
+      } else {
+        // FLAG-based rejections only. The bed-area and turf-ESTIMATE
+        // predicates also return false when the lookup simply carried no
+        // value, which is an ordinary gap the seed exists to fill — reading
+        // those as rejections would strip the seed from nearly every offer.
+        // lookupTurfReadIsTrustworthy is the value-agnostic one: it fires
+        // on a turf/lawn verify flag or inadequate confidence, both of
+        // which are the lookup refusing its own read.
+        if (!lookupDimensionIsTrustworthy(p, 'homeSqFt')) lookupRejectedFields.add('homeSqFt');
+        if (!lookupDimensionIsTrustworthy(p, 'lotSqFt')) lookupRejectedFields.add('lotSqFt');
+        if (!lookupDimensionIsTrustworthy(p, 'stories')) lookupRejectedFields.add('stories');
+        if (!lookupTurfReadIsTrustworthy(p)) lookupRejectedFields.add('lawnSqFt');
+      }
       if (lookupDescribesThisProperty) {
       // Weak or conflicting core dimensions arrive with their own
       // fieldVerifyFlags (the flag builder marks squareFootage / lotSize /
@@ -682,16 +713,25 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // for estimates that guessed).
   let storiesFromSeed = false;
   if (propertySeed) {
-    if (!homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
-    if (!lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
-    if (!lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) lawnSqFt = propertySeed.lawnSqFt;
-    if (!bedArea && propertySeed.bedArea > 0) {
+    // A field the lookup REJECTED is not a gap the seed may fill (codex
+    // #3367 PR r14) — the lookup said to verify that measurement (or the
+    // premises itself) before pricing, and the resulting price is graded on
+    // whatever inputs it ends up with, so a seeded replacement publishes as
+    // an exact figure with the caveat stripped off. Left unfilled, the
+    // pricer's own missing-property handling applies and the offer demotes.
+    const seedMayFill = (field) => !lookupRejectedFields.has(field);
+    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
+    if (seedMayFill('lotSqFt') && !lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
+    if (seedMayFill('lawnSqFt') && !lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) {
+      lawnSqFt = propertySeed.lawnSqFt;
+    }
+    if (seedMayFill('bedArea') && !bedArea && propertySeed.bedArea > 0) {
       bedArea = propertySeed.bedArea;
       // An operator-measured bed area stays explicit; anything else prices
       // as an estimate (the T&S pricer's density factor is measured-only).
       bedAreaSource = propertySeed.bedAreaSource === 'explicit' ? 'explicit' : 'estimated';
     }
-    if (!stories && propertySeed.stories > 0) {
+    if (seedMayFill('stories') && !stories && propertySeed.stories > 0) {
       stories = propertySeed.stories;
       storiesFromSeed = true;
     }

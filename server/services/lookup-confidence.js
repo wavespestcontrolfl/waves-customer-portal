@@ -288,6 +288,10 @@ module.exports = {
   lookupDimensionIsTrustworthy,
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
+  // Value-agnostic turf trust: a consumer distinguishing "the lookup
+  // REFUSED this read" from "the lookup carried no value" needs this one,
+  // since the estimate predicate folds both into a single false.
+  lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved,
   lookupTreeCountIsTrustworthy,
   lookupPalmCountIsTrustworthy,

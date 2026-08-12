@@ -240,13 +240,24 @@ function positiveOrNull(value) {
 // like a verification flag demotes the offer to the quote CTA.
 function estimateRequiresFieldVerification(estData) {
   if (!estData || typeof estData !== 'object') return false;
-  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
-  return containers.some((c) => {
+  const markedForReview = (c) => {
     if (!c || typeof c !== 'object') return false;
     if (Array.isArray(c.fieldVerify) && c.fieldVerify.length) return true;
     if (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length) return true;
     if (c.requiresManualReview === true || c.customQuoteFlag === true) return true;
-    return String(c.pricingConfidence || '').toLowerCase() === 'low';
+    if (String(c.pricingConfidence || '').toLowerCase() === 'low') return true;
+    return String(c.turfConfidence || '').toLowerCase() === 'low';
+  };
+  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
+  return containers.some((c) => {
+    if (!c || typeof c !== 'object') return false;
+    if (markedForReview(c)) return true;
+    // PER-SERVICE markers live on the line items (codex #3367 PR r14): a
+    // normal engine-backed estimate records its review posture there, so a
+    // Tree & Shrub line at pricingConfidence 'low' sits under an empty
+    // top-level fieldVerify and read as clean. The engine's own quote
+    // grader reads the line first for exactly this reason.
+    return Array.isArray(c.lineItems) && c.lineItems.some(markedForReview);
   });
 }
 
