@@ -165,6 +165,17 @@ function isTimeoutFailure(err, timeout) {
 // public-property-lookup.js can run the same AI search + satellite + trio
 // AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
+// Attempt stamps are OBSERVABILITY ONLY and fail open by contract: several
+// suites mock the lookup-cache module without this export, and a stamp must
+// never break (or mask) a lookup (codex r37 P1 — the unguarded call threw
+// 'markLookupAttempt is not a function' inside the error path).
+async function stampLookupAttempt(address, status, reason = null) {
+  if (typeof markLookupAttempt !== 'function') return;
+  try {
+    await markLookupAttempt(address, status, reason);
+  } catch { /* fail-open */ }
+}
+
 // Thin wrapper: an uncaught throw anywhere after the 'pending' attempt
 // stamp would otherwise leave the row pending forever — indistinguishable
 // from a running lookup, silently undercounting the failure segments
@@ -175,8 +186,7 @@ async function performPropertyLookup(address, options = {}) {
     return await performPropertyLookupCore(address, options);
   } catch (err) {
     if (options.persist !== false) {
-      await markLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200))
-        .catch(() => {});
+      await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200));
     }
     throw err;
   }
@@ -262,6 +272,10 @@ async function performPropertyLookupCore(address, options = {}) {
           if (persist) await attachAddressAuditToCachedLookup(address, marker);
         }
       }
+      // A cache hit is an ATTEMPT — the lifecycle contract is "every
+      // attempt stamps the row", and counting only live lookups
+      // undercounts served traffic (codex r36 P1). Respects persist:false.
+      if (persist) await stampLookupAttempt(address, 'cache_hit');
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
@@ -269,7 +283,7 @@ async function performPropertyLookupCore(address, options = {}) {
   // Attempt stamp BEFORE geocoding (owner ruling 2026-08-11): a lookup that
   // dies before saveLookup must still leave a countable row. Fail-open
   // inside markLookupAttempt; skipped in write-nothing mode.
-  if (persist) await markLookupAttempt(address, 'pending');
+  if (persist) await stampLookupAttempt(address, 'pending');
 
   const result = {
     address: String(address).trim(),
@@ -746,7 +760,7 @@ async function performPropertyLookupCore(address, options = {}) {
     } else {
       reason = result.errors.map((e) => e.source).join(',') || null;
     }
-    await markLookupAttempt(address, status, reason);
+    await stampLookupAttempt(address, status, reason);
   }
 
   return result;

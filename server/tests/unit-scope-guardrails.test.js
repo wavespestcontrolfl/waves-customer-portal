@@ -177,6 +177,26 @@ describe('commercialCategoryConflict', () => {
       intent: { is_commercial: false },
     })).toBeNull();
   });
+  test('a whole-complex OWNER conflicts; an owner of one unit does not (r36)', () => {
+    // Adam's ruling: commercial applies when the client is the association,
+    // complex owner, or property manager.
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'owner' },
+        property: { property_type: 'multi_family' },
+      },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Venice, FL 34285' },
+    })).toBe('owner:multi_family');
+    // …but an owner WITH unit-occupancy evidence is a unit customer.
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'owner' },
+        property: { property_type: 'multi_family' },
+      },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Unit 12, Venice, FL 34285' },
+    })).toBeNull();
+  });
+
   test('a property manager on a multifamily property conflicts; a tenant does not', () => {
     // The module's own contract: commercial applies when the client is the
     // association, complex owner, or property manager — the residential
@@ -349,9 +369,13 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
       address: '900 Bayview Ter, Unit 12, Venice, FL 34285',
     });
     expect(model.serviceScope).toBe('residential_unit');
+    // The applicability follows the FINAL scope — never the contradictory
+    // 'private_parcel' that fee_simple ownership would imply (codex r36 P1).
+    expect(model.lotApplicability).toBe('no_individual_lot');
     const facts = { lot: { value: 120000, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.lot.value).toBeNull();
+    expect(facts.lot.source).toBe('not_applicable:no_individual_lot');
   });
   test('a street NAMED Florida keeps its suite suffix (r30)', () => {
     const model = resolveUnitScopeModel({

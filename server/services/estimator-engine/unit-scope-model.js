@@ -196,9 +196,20 @@ function commercialCategoryConflict({ extraction, intent }) {
   // swallow a manager whose composed intent stayed residential (codex r2
   // P1; condo added in r5 — a condo manager matched neither the HOA nor
   // the commercial families).
-  if (/apartment|multi.?family|condo/.test(type)
-    && resolveCustomerRelationship(extraction) === 'property_manager') {
+  const relationship = resolveCustomerRelationship(extraction);
+  if (/apartment|multi.?family|condo/.test(type) && relationship === 'property_manager') {
     return `property_manager:${type}`;
+  }
+  // A complex OWNER is commercial by the same ruling — unless they occupy
+  // one unit (positive unit-occupancy evidence), in which case they are a
+  // residential unit customer (codex r36 P1). Condo owners are unit owners
+  // by default, so only apartment/multifamily counts here.
+  if (/apartment|multi.?family/.test(type) && relationship === 'owner'
+    && !shadowPrivate.hasSubpremiseSignal({
+      address: intent?.address,
+      extraction,
+    })) {
+    return `owner:${type}`;
   }
   // Commercial families take PRECEDENCE over residential ones: a mixed
   // type ('single tenant office', 'office villa') carries a positive
@@ -314,7 +325,17 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     // arbitration vocabulary, never a synthesized value (owner ruling:
     // bedroom bands must never masquerade as property sqft).
     sizeBasis: propertyFacts?.home?.source || 'unresolved',
-    lotApplicability: lotApplicabilityFor({ propertySubtype: propertyType, ownershipType }),
+    // Derived from the FINAL scope: a subpremise-promoted unit keeps
+    // ownershipType fee_simple (⇒ private_parcel), which contradicted the
+    // lot the apply then cleared and persisted the nonsense source
+    // 'not_applicable:private_parcel' (codex r36 P1).
+    lotApplicability: (() => {
+      const applicability = lotApplicabilityFor({ propertySubtype: propertyType, ownershipType });
+      const unitScoped = serviceScope === 'residential_unit' || serviceScope === 'commercial_suite';
+      return (unitScoped && applicability === 'private_parcel')
+        ? 'no_individual_lot'
+        : applicability;
+    })(),
     unitSignal,
     subpremiseSignal,
     // Stacked ASSOCIATION aggregate: even a condo's figures describe the

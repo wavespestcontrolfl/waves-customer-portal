@@ -348,6 +348,10 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
 const LOOKUP_ATTEMPT_STATUSES = new Set([
   'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
   'incomplete_address', 'vacant_or_unassessed', 'provider_timeout',
+  // A cache HIT is an attempt too — the contract is "every attempt stamps
+  // the row", and counting only live lookups undercounts served traffic
+  // (codex r36 P1).
+  'cache_hit',
   // Terminal stamp for a lookup that THREW after the pending stamp — a
   // pending row must mean "running", never "died mid-pipeline".
   'error',
@@ -375,8 +379,9 @@ async function markLookupAttempt(address, status, reason = null) {
       .merge({
         ...stamp,
         // Only the attempt START increments the counter; the finalize stamp
-        // for the same attempt re-uses it.
-        ...(status === 'pending'
+        // for the same attempt re-uses it. A cache hit is a complete
+        // attempt in one write, so it increments too.
+        ...(status === 'pending' || status === 'cache_hit'
           ? { attempt_count: db.raw('COALESCE(property_lookups.attempt_count, 0) + 1') }
           : {}),
       });
