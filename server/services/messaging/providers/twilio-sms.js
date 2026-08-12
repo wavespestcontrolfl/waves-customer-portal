@@ -9,6 +9,7 @@
  */
 
 const TwilioService = require('../../twilio');
+const { maybeRouteViaPush } = require('../push-channel-routing');
 
 function sanitizeProviderError(value) {
   if (!value) return '';
@@ -105,6 +106,22 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
   const messageType =
     (input.metadata && input.metadata.original_message_type) ||
     mapPurposeToMessageType(input.purpose);
+  // Push channel routing (GATE_PUSH_CHANNEL_ROUTING, default OFF): sits at
+  // the provider seam so every pipeline validator above — consent,
+  // suppression, send-window — has already passed, and quiet hours apply
+  // to push exactly as to SMS. handled:true means either a push was PROVEN
+  // delivered on a push_first template (SMS skipped) or the send-window
+  // boundary check blocked (same deferral contract the SMS path returns).
+  // Everything else — push_and_sms, no device, push failure — falls
+  // through to Twilio unchanged.
+  const pushRouting = await maybeRouteViaPush(input, messageType, preSendCheck);
+  if (pushRouting.handled) {
+    const pr = pushRouting.providerResult;
+    if (pr.blocked) {
+      return { ...pr, provider: 'twilio' };
+    }
+    return pr;
+  }
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,
