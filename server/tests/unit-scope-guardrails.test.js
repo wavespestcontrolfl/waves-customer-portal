@@ -66,6 +66,9 @@ describe('commercialTextSignal', () => {
     )).toBe(true);
     expect(commercialTextSignal('ants in our restaurant kitchen')).toBe(true);
     expect(commercialTextSignal('we lease suite 240 at the plaza')).toBe(true);
+    // Suite identifiers are alphabetic as often as numeric (codex r21 P1).
+    expect(commercialTextSignal('Need pest control for Suite A')).toBe(true);
+    expect(commercialTextSignal('roaches in suite B-2')).toBe(true);
   });
   test('stays quiet on residential prose that mentions work', () => {
     expect(commercialTextSignal('ants in my home office and the kitchen')).toBe(false);

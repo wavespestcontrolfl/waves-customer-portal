@@ -1550,7 +1550,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // new building's county measurement as "suite evidence".
       extraction: crossPropertyRegather ? null : context.extraction,
       intent,
-      propertyFacts,
+      // Tenancy is inherited too: resolvePropertyFacts already copied the
+      // PRIMARY extraction's tenant flag onto propertyFacts, and V2 reads
+      // it directly — nulling only `extraction` still classified a newly
+      // gathered whole building as a suite and rejected its county area as
+      // wrong-scope (codex r21 P1; same clearing the unit-scope call does).
+      propertyFacts: crossPropertyRegather ? { ...propertyFacts, tenant: false } : propertyFacts,
       address: intent.address || result.addressUsed || address,
     });
     result.propertyFactsV2 = propertyFactsV2;
