@@ -42,7 +42,29 @@ function extractTemplatePlaceholders(body) {
   return [...placeholders];
 }
 
+// Placeholders a specific template's FLOW depends on — the render path
+// refuses a body without them (getTemplate opts.requiredVars), so accepting
+// such an edit at write time would take the feature offline while its
+// options endpoint still advertises it (codex #3363 r8). Single source:
+// rain-out.js reads this same map for its render calls.
+const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
+  // Custom Quick Move: the dispatcher's message, the new time, and the
+  // link/reply clause are the three promises the flow makes.
+  rain_out_moved_custom_v1: Object.freeze(['custom_message', 'new_option', 'link_clause']),
+});
+
 function validateTemplateBody(body, variables, templateKey = null) {
+  const required = REQUIRED_TEMPLATE_PLACEHOLDERS[templateKey] || [];
+  if (required.length) {
+    const present = new Set(extractTemplatePlaceholders(body));
+    const missing = required.filter((name) => !present.has(name));
+    if (missing.length) {
+      return {
+        error: `This template must keep {${required.join('}, {')}} — the Quick Move flow refuses to send without them`,
+        missing_placeholders: missing,
+      };
+    }
+  }
   // Double-brace tokens are the email/newsletter syntax — in an SMS body the
   // renderer substitutes the INNER {token} and the leftover braces then read
   // as an unresolved placeholder, silently suppressing every send of this
@@ -465,5 +487,11 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
 // sides through this same function is the only way that comparison stays true
 // as SCHEMELESS_SMS_HOSTS changes.
 router.stripPortalUrlScheme = stripPortalUrlScheme;
+
+// Single source for flow-required placeholders — the write validator above
+// and rain-out's render calls (getTemplate opts.requiredVars) read the SAME
+// map, so save-time and render-time can never disagree about what a
+// template must keep.
+router.REQUIRED_TEMPLATE_PLACEHOLDERS = REQUIRED_TEMPLATE_PLACEHOLDERS;
 
 module.exports = router;

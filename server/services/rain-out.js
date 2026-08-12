@@ -102,9 +102,11 @@ function customLinkClause(rescheduleUrl) {
 //     must fail the render (→ custom_message_unavailable pre-move), not
 //     send a body with the promised content silently gone — enforced on
 //     the template body pre-substitution, so a note that happens to match
-//     static template text can't mask the loss (codex r3 P2).
-const CUSTOM_REQUIRED_VARS = ['custom_message', 'new_option', 'link_clause'];
+//     static template text can't mask the loss (codex r3 P2). The list is
+//     the SHARED map the template write validator enforces at save time
+//     (codex r8 P1) — one source, so save and render can never disagree.
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
+  const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
     custom_message: customMessage,
@@ -117,7 +119,7 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
     entity_id: serviceId,
   }, {
     noVariants: true,
-    requiredVars: CUSTOM_REQUIRED_VARS,
+    requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[CUSTOM_TEMPLATE_KEY],
   });
 }
 
