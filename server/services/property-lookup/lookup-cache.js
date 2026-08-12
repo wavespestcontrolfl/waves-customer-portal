@@ -190,28 +190,31 @@ function overridesNewerThanData(row) {
   });
 }
 
-// Was a cache miss caused by a verified override that POSTDATES the cached
-// data? getCachedLookup rejects such a row (the stored analysis was derived
-// from the pre-correction facts) and the caller sees an ordinary miss.
-// A cache-only consumer that would otherwise fall back to OLDER evidence —
-// the service-report cross-sell prices from an accepted estimate's
-// engineInputs — has to tell the two apart (codex #3367 PR r12): the
-// technician's correction supersedes that estimate too, so pricing from it
-// would publish an exact price on a fact staff already fixed. A normal miss
-// (no row, expired, no overrides) is not this and stays priceable.
-// Never throws: an unreadable cache is reported as "not override-invalidated"
-// and the consumer's own evidence rules still apply.
-async function cachedDataPredatesVerifiedOverride(address) {
-  if (isCacheDisabled()) return false;
-  try {
-    const { hash } = addressKey(address);
-    const row = await db('property_lookups').where({ address_hash: hash }).first();
-    if (!row) return false;
-    return overridesNewerThanData(row);
-  } catch (err) {
-    logger.warn(`[lookup-cache] override-invalidation probe failed: ${err.message}`);
-    return false;
-  }
+// Does this address carry ANY verified override — a technician's correction
+// to a pricing fact (square footage, hasPool)?
+//
+// A cache-only consumer that falls back to OLDER evidence on a miss needs
+// this (codex #3367 PR r12 + the pre-push P0 on its first form): the
+// service-report cross-sell prices from an accepted estimate's engineInputs
+// when the lookup misses, and a correction supersedes that estimate too, so
+// pricing from it publishes an exact price on a fact staff already fixed.
+//
+// Deliberately NOT "does the correction postdate the cached data" — that was
+// the first attempt and it fails open three ways: the corrected row can
+// expire, the cache kill switch makes every read a miss, and neither says
+// anything about whether the SEED predates the correction. Presence alone is
+// the honest question, and it self-heals: a live lookup folds the correction
+// in and re-saves, hits resume, and there is no miss left to demote.
+//
+// Not gated on isCacheDisabled: overrides are staff corrections stored
+// alongside the cache, not cache data, and the kill switch must not make
+// them invisible. THROWS on a read failure — a consumer that publishes a
+// price must fail closed, and "the probe broke" must never read as "no
+// corrections exist".
+async function hasVerifiedOverrides(address) {
+  const { hash } = addressKey(address);
+  const row = await db('property_lookups').where({ address_hash: hash }).first('verified_overrides');
+  return Object.keys(row?.verified_overrides || {}).length > 0;
 }
 
 // Cached lookup data — null when the cache is disabled, the row is missing,
@@ -520,8 +523,8 @@ function applyVerifiedOverrides(record, overrides) {
 module.exports = {
   addressKey,
   applyVerifiedOverrides,
-  cachedDataPredatesVerifiedOverride,
   getCachedLookup,
+  hasVerifiedOverrides,
   getVerifiedOverrides,
   isCacheDisabled,
   attachFloodZoneToCachedLookup,

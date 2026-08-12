@@ -3,11 +3,11 @@
 // Nothing else in this suite loads the cache module (the property lookup is
 // injected), so a single-export stub is enough.
 jest.mock('../services/property-lookup/lookup-cache', () => ({
-  cachedDataPredatesVerifiedOverride: jest.fn(async () => false),
+  hasVerifiedOverrides: jest.fn(async () => false),
 }));
 
 const { buildReportCrossSell, _private } = require('../services/service-report/cross-sell');
-const { cachedDataPredatesVerifiedOverride } = require('../services/property-lookup/lookup-cache');
+const { hasVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
 
 // Recurring rows must be UPCOMING to count as live obligations (the ownership
 // loader applies the lifecycle evidence unconditionally) — compute the date so
@@ -155,27 +155,38 @@ describe('buildReportCrossSell', () => {
     expect(result.currentServices).toBeUndefined();
   });
 
-  test('a cache miss caused by a newer verified override demotes to the CTA (PR r12 P1)', async () => {
-    // getCachedLookup rejects a row whose data predates a technician's
-    // correction, and the caller sees an ordinary miss. Pricing on through
-    // the accepted-estimate seed would publish an exact per-application
-    // price built on the fact staff already fixed — the seed is older than
-    // the correction too. The offer stays, unpriced, until a live lookup
-    // folds the correction in.
-    const args = {
+  describe('a verified correction on file never prices through the seed (PR r12 P1)', () => {
+    // On a cache miss the price falls back to the accepted-estimate seed,
+    // but a technician's correction supersedes that estimate too (the seed
+    // is older still) — pricing through it publishes an exact price on a
+    // fact staff already fixed.
+    const args = () => ({
       serviceTypes: ['Pest Control'],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
-    };
-    cachedDataPredatesVerifiedOverride.mockResolvedValueOnce(true);
-    const demoted = await buildReportCrossSell(SERVICE(), dbFor(args), { propertyLookup: missLookup });
-    expect(demoted).not.toBeNull();
-    expect(demoted.serviceKey).toBe('lawn_care');
-    expect(demoted.mode).toBe('quote_cta');
-    expect(demoted.option).toBeNull();
+    });
 
-    // An ORDINARY miss (no row, expired, no overrides) still prices.
-    const priced = await buildReportCrossSell(SERVICE(), dbFor(args), { propertyLookup: missLookup });
-    expect(priced.mode).toBe('priced');
+    test('a correction demotes the offer to the unpriced CTA', async () => {
+      hasVerifiedOverrides.mockResolvedValueOnce(true);
+      const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      expect(demoted).not.toBeNull();
+      expect(demoted.serviceKey).toBe('lawn_care');
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.option).toBeNull();
+    });
+
+    test('an unreadable probe FAILS CLOSED — it is not evidence of no corrections', async () => {
+      hasVerifiedOverrides.mockRejectedValueOnce(new Error('property_lookups unreadable'));
+      const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      expect(demoted).not.toBeNull();
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.option).toBeNull();
+    });
+
+    test('no corrections on file still prices', async () => {
+      const priced = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      expect(priced.mode).toBe('priced');
+      expect(priced.option.perVisit).toBeGreaterThan(0);
+    });
   });
 
   test('the offer fingerprint covers every rendered field', () => {

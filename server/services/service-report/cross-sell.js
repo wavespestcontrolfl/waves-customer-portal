@@ -561,25 +561,26 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
     }
 
-    // A cache MISS has two meanings and they price differently (codex #3367
-    // PR r12). An ordinary miss (no row, expired) just means we price from
-    // the stored profile and the seed. But getCachedLookup also rejects a
-    // row whose data PREDATES a verified override — a technician corrected
-    // a pricing fact (square footage, hasPool) after the row was written,
-    // and that correction supersedes the accepted-estimate seed too, since
-    // the seed is older still. Filling the gap from the seed there publishes
-    // an exact per-application price on a fact staff already fixed, so the
-    // offer demotes to the unpriced CTA until a live lookup folds the
-    // correction in. Probed only on a miss, and never fatal.
-    let overrideInvalidatedMiss = false;
+    // On a cache MISS the price falls back to the accepted-estimate seed —
+    // but a technician's verified correction (square footage, hasPool)
+    // supersedes that estimate too, since the seed is older still. Pricing
+    // through it would publish an exact per-application price on a fact
+    // staff already fixed, so any correction on file demotes the offer to
+    // the unpriced CTA (codex #3367 PR r12, tightened by the pre-push P0 on
+    // its first form). Self-healing: a live lookup folds the correction in
+    // and re-saves, cache hits resume, and there is no miss left to demote.
+    // Probed only on a miss, and FAIL CLOSED — an unreadable probe is not
+    // evidence that no corrections exist.
+    let correctionsUnapplied = false;
     const trackedPropertyLookup = async (address) => {
       const found = await propertyLookup(address);
       if (!found) {
         try {
-          const { cachedDataPredatesVerifiedOverride } = require('../property-lookup/lookup-cache');
-          if (await cachedDataPredatesVerifiedOverride(address)) overrideInvalidatedMiss = true;
+          const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
+          if (await hasVerifiedOverrides(address)) correctionsUnapplied = true;
         } catch (err) {
-          logger.warn(`[report-cross-sell] override-invalidation probe skipped (${err.message})`);
+          correctionsUnapplied = true;
+          logger.warn(`[report-cross-sell] verified-override probe failed, demoting to CTA (${err.message})`);
         }
       }
       return found;
@@ -628,7 +629,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // contradict, or a synthetic zero the replay would price at nothing.
     const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence
-      && !overrideInvalidatedMiss;
+      && !correctionsUnapplied;
 
     const payload = {
       serviceKey: targetKey,
