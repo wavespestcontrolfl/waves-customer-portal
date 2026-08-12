@@ -38,6 +38,8 @@ const {
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   noContentYetMapServed,
+  queryDomainsCovered,
+  repQueryMapCheckable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -342,6 +344,39 @@ describe('noContentYetMapServed', () => {
     expect(noContentYetMapServed(null)).toBe(false);
     expect(noContentYetMapServed(undefined)).toBe(false);
     expect(noContentYetMapServed(NaN)).toBe(false);
+  });
+});
+
+// ── per-domain map coverage (pre-push audit P1, 2026-08-12) ─────────
+//
+// Map syncs fail independently per domain; a candidate's absent mapping is
+// evidence only when every contributing domain has in-window map rows.
+
+describe('queryDomainsCovered / repQueryMapCheckable', () => {
+  const covered = new Set(['wavespestcontrol.com', 'parrishpestcontrol.com']);
+  test('all contributing domains covered → checkable', () => {
+    expect(queryDomainsCovered(['wavespestcontrol.com'], covered)).toBe(true);
+    expect(queryDomainsCovered(['Wavespestcontrol.com', 'parrishpestcontrol.com'], covered)).toBe(true);
+  });
+  test('any uncovered domain → fail closed (sync hole, not content gap)', () => {
+    expect(queryDomainsCovered(['wavespestcontrol.com', 'palmettoflpestcontrol.com'], covered)).toBe(false);
+  });
+  test('missing/empty/null domain provenance → fail closed', () => {
+    expect(queryDomainsCovered([], covered)).toBe(false);
+    expect(queryDomainsCovered(null, covered)).toBe(false);
+    expect(queryDomainsCovered([null], covered)).toBe(false);
+  });
+  test('rep twin unions domains across tuples and applies the same rule', () => {
+    const tuples = [
+      { domains: ['wavespestcontrol.com'] },
+      { domains: ['parrishpestcontrol.com'] },
+    ];
+    expect(repQueryMapCheckable(tuples, covered)).toBe(true);
+    expect(repQueryMapCheckable(tuples.concat([{ domains: ['palmettoflpestcontrol.com'] }]), covered)).toBe(false);
+    // Tuples without provenance (fallback variant tuples) → fail closed.
+    expect(repQueryMapCheckable([{ impressions: 60, plainPosition: 20 }], covered)).toBe(false);
+    expect(repQueryMapCheckable([], covered)).toBe(false);
+    expect(repQueryMapCheckable(undefined, covered)).toBe(false);
   });
 });
 

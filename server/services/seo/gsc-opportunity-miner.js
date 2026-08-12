@@ -858,6 +858,34 @@ function noContentYetMapServed(bestMappedPosition, thresholds = THRESHOLDS) {
     && bestMappedPosition <= thresholds.answerGapPositionMax;
 }
 
+// Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
+// possibly a sync hole? Map syncs run and fail independently per domain
+// (and stale rows linger), while candidates aggregate gsc_queries across
+// every domain — so a global "the map has rows" sentinel would read one
+// domain's failed sync as a genuine content gap whenever any other domain
+// synced. A candidate is checkable only when EVERY domain contributing its
+// impressions has in-window map rows; unknown/empty domain lists fail
+// closed (pre-push audit P1, 2026-08-12).
+function queryDomainsCovered(domains, coveredDomains) {
+  const list = Array.isArray(domains) ? domains : [];
+  if (!list.length) return false;
+  return list.every((d) => d && coveredDomains.has(String(d).toLowerCase()));
+}
+
+// The reachability-side twin: a representative's map evidence is
+// trustworthy only when every domain across its cross-domain tuples is
+// covered. Tuples without domain provenance (older callers, fallback
+// variant tuples) fail closed — the rep reads unreachable via
+// no_content_yet and the family keeps the demand, which is exactly what
+// mineNoContentYet does with an uncovered candidate.
+function repQueryMapCheckable(tuples, coveredDomains) {
+  const domains = [];
+  for (const t of tuples || []) {
+    for (const d of (Array.isArray(t.domains) ? t.domains : [])) domains.push(d);
+  }
+  return queryDomainsCovered(domains, coveredDomains);
+}
+
 function dedupeKey({ bucket, service, city, query, page_url }) {
   const parts = [
     bucket,
@@ -1436,15 +1464,19 @@ class GscOpportunityMiner {
     return map;
   }
 
-  // Any query→page rows at all for the window? Drives the no_content_yet
-  // fail-closed guard (and its reachability mirror): an empty map means the
-  // sync didn't run, not that nothing is served.
-  async _queryPageMapAvailable(since) {
-    const row = await db('gsc_query_page_map')
+  // Domains with in-window query→page rows — the coverage evidence behind
+  // queryDomainsCovered (no_content_yet and its reachability mirror). An
+  // empty set means the sync didn't run at all; a partial set means some
+  // domains' absences are sync holes, not content gaps.
+  async _queryPageMapCoveredDomains(since) {
+    const rows = await db('gsc_query_page_map')
       .where('date_from', '>=', since)
-      .select('query')
-      .first();
-    return !!row;
+      .distinct('domain');
+    const covered = new Set();
+    for (const r of rows) {
+      if (r.domain) covered.add(String(r.domain).toLowerCase());
+    }
+    return covered;
   }
 
   // Best (lowest) owned-page position per query from TRUE query→page rows,
@@ -1486,6 +1518,10 @@ class GscOpportunityMiner {
       .where('is_branded', false)
       .whereIn('query', queries)
       .select('query', 'service_category', 'city_target', 'intent_type')
+      // Contributing domains per tuple — the no_content_yet mirror needs
+      // them to judge map coverage the way mineNoContentYet does
+      // (queryDomainsCovered).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('impressions as impressions')
       .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type');
@@ -1497,6 +1533,7 @@ class GscOpportunityMiner {
         plainPosition: Number(r.plain_avg_position) || 0,
         service_category: r.service_category || null,
         city_target: r.city_target || null,
+        domains: Array.isArray(r.domains) ? r.domains : [],
       });
       map.set(r.query, list);
     }
@@ -2182,16 +2219,17 @@ class GscOpportunityMiner {
     // competing-rows bug from the representative's angle (Codex r17).
     const reachQueries = Array.from(new Set(allFams
       .flatMap((f) => f.variants.map((v) => v.query))));
-    const [crossTuples, seasonalEmittable, reachMapAvailable] = reachQueries.length
+    const [crossTuples, seasonalEmittable, reachCoveredDomains] = reachQueries.length
       ? await Promise.all([
         this._crossDomainRepTuples(reachQueries, since),
         this._seasonalEmittableQueries(reachQueries, periodDays),
-        this._queryPageMapAvailable(since),
+        this._queryPageMapCoveredDomains(since),
       ])
-      : [new Map(), new Set(), false];
+      : [new Map(), new Set(), new Set()];
     // Served-ness inputs for the no_content_yet mirror inside reachability
-    // — same map, same aggregation mineNoContentYet uses.
-    const reachBestMapped = reachMapAvailable && reachQueries.length
+    // — same map, same aggregation, same per-domain coverage rule
+    // mineNoContentYet uses.
+    const reachBestMapped = reachCoveredDomains.size && reachQueries.length
       ? await this._bestMappedPositionByQuery(reachQueries, since)
       : new Map();
     const fams = allFams.filter((f) => {
@@ -2202,7 +2240,7 @@ class GscOpportunityMiner {
         {
           seasonalEmittable: seasonalEmittable.has(v.query),
           mappedBestPos: reachBestMapped.get(v.query) ?? null,
-          queryPageMapAvailable: reachMapAvailable,
+          queryPageMapAvailable: repQueryMapCheckable(crossTuples.get(v.query), reachCoveredDomains),
         }
       ));
       return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket: anyVariantReachable });
@@ -2865,6 +2903,9 @@ class GscOpportunityMiner {
       .where('date', '>=', since)
       .where('is_branded', false)
       .select('query', 'service_category', 'city_target', 'intent_type')
+      // Contributing domains ride along so the served-check can require
+      // map coverage from each of them (queryDomainsCovered).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('impressions as impressions')
       .avg('position as avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type')
@@ -2880,11 +2921,14 @@ class GscOpportunityMiner {
     }
     if (!candidates.length) return [];
 
-    // Fail CLOSED on a missing/empty query→page map for the window (sync
-    // outage): "empty means the check didn't run, not that nothing is
-    // served" — emitting the whole candidate set unchecked would flood the
-    // queue with rows for already-served topics.
-    if (!(await this._queryPageMapAvailable(since))) {
+    // Fail CLOSED on missing map coverage: "empty means the check didn't
+    // run, not that nothing is served" — emitting unchecked candidates
+    // would flood the queue with rows for already-served topics. Coverage
+    // is judged PER CONTRIBUTING DOMAIN (queryDomainsCovered): map syncs
+    // fail independently per domain, so one domain's rows must not vouch
+    // for another domain's absences.
+    const covered = await this._queryPageMapCoveredDomains(since);
+    if (!covered.size) {
       logger.warn('[gsc-opp-miner] no_content_yet: gsc_query_page_map empty for window — bucket skipped this run');
       return [];
     }
@@ -2892,8 +2936,10 @@ class GscOpportunityMiner {
       candidates.map((c) => c.q.query), since
     );
 
+    let uncovered = 0;
     const out = [];
     for (const { q, service, city } of candidates) {
+      if (!queryDomainsCovered(q.domains, covered)) { uncovered += 1; continue; }
       if (noContentYetMapServed(bestMapped.get(q.query))) continue;
 
       const opp = {
@@ -2917,6 +2963,9 @@ class GscOpportunityMiner {
       opp.action_type = actionForOpportunity(opp);
       opp.dedupe_key = dedupeKey(opp);
       out.push(opp);
+    }
+    if (uncovered) {
+      logger.warn(`[gsc-opp-miner] no_content_yet: ${uncovered} candidate(s) skipped — a contributing domain has no in-window query→page map rows`);
     }
     return out;
   }
@@ -3131,6 +3180,8 @@ module.exports._internals = {
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   noContentYetMapServed,
+  queryDomainsCovered,
+  repQueryMapCheckable,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
   // producer's in-flight check covers the same actions (r34 follow-up).
