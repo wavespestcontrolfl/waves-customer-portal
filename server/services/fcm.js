@@ -17,6 +17,8 @@ const https = require('https');
 const logger = require('./logger');
 
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+// Bounded requests — see APNS_REQUEST_TIMEOUT_MS in apns.js for rationale.
+const FCM_REQUEST_TIMEOUT_MS = 8000;
 
 function readConfig() {
   const raw = (process.env.FCM_SERVICE_ACCOUNT || '').trim();
@@ -49,7 +51,7 @@ if (configured) {
 let jwtClient = null;
 function getJwtClient() {
   if (!jwtClient) {
-    // eslint-disable-next-line global-require
+     
     const { google } = require('googleapis');
     jwtClient = new google.auth.JWT({
       email: cfg.clientEmail,
@@ -164,6 +166,9 @@ function send(deviceToken, notification) {
             },
           );
           req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+          req.setTimeout(FCM_REQUEST_TIMEOUT_MS, () => {
+            req.destroy(new Error('fcm_timeout'));
+          });
           req.end(body);
         } catch (err) {
           finish({ ok: false, failed: true, reason: err.message });

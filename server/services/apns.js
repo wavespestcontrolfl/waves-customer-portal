@@ -18,6 +18,10 @@ const http2 = require('http2');
 const jwt = require('jsonwebtoken');
 const logger = require('./logger');
 
+// Bounded requests: a hung APNs connection must fail the send promptly —
+// and destroying the stream also prevents a LATE delivery after a caller
+// (push-channel-routing) has already taken its SMS fallback.
+const APNS_REQUEST_TIMEOUT_MS = 8000;
 const HOST_PROD = 'https://api.push.apple.com';
 const HOST_SANDBOX = 'https://api.sandbox.push.apple.com';
 
@@ -153,6 +157,10 @@ function send(deviceToken, notification) {
       req.setEncoding('utf8');
       req.on('data', (chunk) => { data += chunk; });
       req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+      req.setTimeout(APNS_REQUEST_TIMEOUT_MS, () => {
+        try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* noop */ }
+        finish({ ok: false, failed: true, reason: 'apns_timeout' });
+      });
       req.on('end', () => {
         let reason = null;
         if (data) { try { reason = JSON.parse(data).reason; } catch { /* non-JSON body */ } }

@@ -559,6 +559,9 @@ const TwilioService = {
           body,
           messageType: options.messageType,
           fromNumber,
+          // Proof-of-send linkage for the scheduled-SMS recovery sweep —
+          // without it a crash window makes the sweep resend the message.
+          scheduledSmsLogId: options.scheduledSmsLogId,
         });
         if (pushed.delivered) {
           logger.info(

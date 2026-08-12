@@ -49,9 +49,13 @@ const { gateEnvValue } = require('../../config/feature-gates');
 // (conversational, reply-able), 'review_request' + 'payment_link' +
 // 'invoice' (their tap-through tokenized/external links are the whole
 // point), 'internal_alert' (owner path), and anything unknown.
+// Keys are the CONCRETE messageType values live senders use (billing/
+// autopay callers override original_message_type with specific types —
+// the generic purpose-mapped names alone would never match them).
 const PUSH_ROUTING_POLICY = {
   tech_en_route: 'push_first',
   receipt: 'push_first',
+  deposit_receipt: 'push_first',
   appointment_reminder: 'push_and_sms',
   reminder_72h: 'push_and_sms',
   // appointment_confirmation / appointment_cancelled are deliberately
@@ -61,20 +65,35 @@ const PUSH_ROUTING_POLICY = {
   // shared helpers thread the marker.
   billing_reminder: 'push_and_sms',
   payment_failure: 'push_and_sms',
+  late_payment: 'push_and_sms',
+  payment_expiry: 'push_and_sms',
   autopay: 'push_and_sms',
+  autopay_pre_charge: 'push_and_sms',
+  autopay_charge_failed: 'push_and_sms',
+  autopay_retry_failed: 'push_and_sms',
+  autopay_retry_final_failed: 'push_and_sms',
 };
 
 // Lock-screen presentation per message family. Titles are plain Waves
 // voice — no emoji. Links are portal routes the native handler opens on
 // tap (deep link beats a pasted URL: the notification IS the link).
+const BILLING_UPDATE = { title: 'Billing update', link: '/?tab=billing', category: 'billing' };
+const PAYMENT_ISSUE = { title: 'Payment issue', link: '/?tab=billing', category: 'billing' };
 const PRESENTATION = {
   tech_en_route: { title: 'Your technician is on the way', link: '/?tab=visits', category: 'service' },
   receipt: { title: 'Payment receipt', link: '/?tab=billing', category: 'billing' },
+  deposit_receipt: { title: 'Payment receipt', link: '/?tab=billing', category: 'billing' },
   appointment_reminder: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
   reminder_72h: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
-  billing_reminder: { title: 'Billing update', link: '/?tab=billing', category: 'billing' },
-  payment_failure: { title: 'Payment issue', link: '/?tab=billing', category: 'billing' },
-  autopay: { title: 'Billing update', link: '/?tab=billing', category: 'billing' },
+  billing_reminder: BILLING_UPDATE,
+  payment_failure: PAYMENT_ISSUE,
+  late_payment: PAYMENT_ISSUE,
+  payment_expiry: BILLING_UPDATE,
+  autopay: BILLING_UPDATE,
+  autopay_pre_charge: BILLING_UPDATE,
+  autopay_charge_failed: PAYMENT_ISSUE,
+  autopay_retry_failed: PAYMENT_ISSUE,
+  autopay_retry_final_failed: PAYMENT_ISSUE,
 };
 
 function pushPresentation(messageType) {
@@ -109,11 +128,18 @@ async function hasActivePushDevice(customerId, knex = db) {
 const PREF_CHANNEL_COLUMN = {
   tech_en_route: 'en_route_channel',
   receipt: 'payment_receipt_channel',
+  deposit_receipt: 'payment_receipt_channel',
   appointment_reminder: 'service_reminder_24h_channel',
   reminder_72h: 'service_reminder_72h_channel',
   billing_reminder: 'billing_channel',
   payment_failure: 'billing_channel',
+  late_payment: 'billing_channel',
+  payment_expiry: 'billing_channel',
   autopay: 'billing_channel',
+  autopay_pre_charge: 'billing_channel',
+  autopay_charge_failed: 'billing_channel',
+  autopay_retry_failed: 'billing_channel',
+  autopay_retry_final_failed: 'billing_channel',
 };
 
 function normalizeDigits(phone) {
@@ -173,11 +199,12 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
   return true;
 }
 
-// Hard ceiling on the whole push fan-out: the APNs/FCM senders carry no
-// request timeout and sendToCustomer walks devices sequentially, so a hung
-// provider connection would otherwise pin a push_first message forever
-// instead of taking the promised SMS fallback.
-const PUSH_ATTEMPT_TIMEOUT_MS = 10000;
+// Backstop ceiling on the whole fan-out. The PRIMARY bound lives in the
+// transports: apns.js/fcm.js destroy a request after 8s, which both fails
+// the send promptly AND prevents a late delivery after the SMS fallback.
+// This outer race only fires on pathological multi-device stalls; there a
+// rare duplicate is the accepted lesser evil vs a message stuck forever.
+const PUSH_ATTEMPT_TIMEOUT_MS = 30000;
 
 async function sendPush(customerId, messageType, body) {
   const { title, link, category } = pushPresentation(messageType);
