@@ -1596,11 +1596,21 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // would always red-lane (codex r13 P2) — the exact conflation this
       // lane exists to end: a unit tenant is a residential customer.
       const quotedIsResidentialUnit = unitScope.serviceScope === 'residential_unit';
+      // The LOOKUP's own verdict on the quoted property, applied on BOTH
+      // paths (codex r14 P1: the primary path checked only the extraction,
+      // so a county-typed office/warehouse with a residential-or-unknown
+      // extraction slipped through). A whole-structure multifamily owner
+      // can land here too — deliberately conservative: the operator
+      // decides whether a complex owner is a commercial client.
+      const lookupCategoryConflict = (intent.is_commercial !== true && effectiveParcelOk
+        && !quotedIsResidentialUnit
+        && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
+        ? 'lookup_category:commercial'
+        : null;
       propertyFacts.categoryConflict = crossPropertyRegather
-        ? ((intent.is_commercial !== true && effectiveParcelOk && !quotedIsResidentialUnit
-          && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
-          ? 'lookup_category:commercial' : null)
-        : commercialCategoryConflict({ extraction: context.extraction, intent });
+        ? lookupCategoryConflict
+        : (commercialCategoryConflict({ extraction: context.extraction, intent })
+          || lookupCategoryConflict);
       // The lot-clearing mutation runs on BOTH paths: the cross-property
       // fence already lives at the model's INPUT (extraction nulled,
       // tenancy suppressed above), so any unit scope the model still
