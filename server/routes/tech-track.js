@@ -565,7 +565,8 @@ router.post('/:id/rain-out', async (req, res, next) => {
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
-        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later'].includes(result.reason) ? 400
+        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

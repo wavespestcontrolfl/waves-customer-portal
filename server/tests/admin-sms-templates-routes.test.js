@@ -166,6 +166,43 @@ describe('admin SMS template routes', () => {
     });
   });
 
+  test('rejects a rain_out_moved_custom_v1 edit that drops a flow-required placeholder (codex #3363 r8)', async () => {
+    // The render path refuses a body without {custom_message}/{new_option}/
+    // {link_clause} (getTemplate requiredVars), so accepting this edit
+    // would take the custom Quick Move offline while getOptions still
+    // advertises it — reject at save time from the SAME shared map.
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-3',
+            template_key: 'rain_out_moved_custom_v1',
+            category: 'service',
+            variables: JSON.stringify(['first_name', 'custom_message', 'service_type', 'new_option', 'link_clause']),
+          },
+        }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-3`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: "Hi {first_name} - we've moved your {service_type} to {new_option}.{link_clause}" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.missing_placeholders).toEqual(['custom_message']);
+      expect(updateQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('rejects a hardcoded WaveGuard brand in autopay_pre_charge — {autopay_label} is per-customer (2026-07-30)', async () => {
     const updateQuery = chain();
     setDbQueues({

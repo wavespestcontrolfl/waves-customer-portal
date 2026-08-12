@@ -289,6 +289,12 @@ async function loadByToken(token) {
 const WEATHER_REASON_CODES = new Set([
   'weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat',
   'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow',
+  // Custom Quick Move (GATE_QUICKMOVE_CUSTOM_REASON): the SMS's link
+  // promises "New time & other options", so the page must banner the
+  // was/now context like every other Quick Move; the client heading map
+  // carries a generic non-weather lead ('custom_series' is normalized
+  // below like the rest).
+  'custom',
 ]);
 // Waves-initiated actors only: a customer answering an earlier reply-based
 // rain-out SMS logs initiated_by='customer_sms' with the original weather_*
