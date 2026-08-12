@@ -3558,15 +3558,15 @@ class GscOpportunityMiner {
       const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
       if (!stale.length) return;
 
-      await runner('opportunity_queue')
-        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
-        .update({
-          status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
-        });
-
-      // Protection must see the COMPLETE batch: a live decay_refresh
-      // parent targeting the stale rewrite's page shares its companion
-      // key, and the ctr-only list cannot see it (audit P1).
+      // Parents and companions are locked BEFORE either is expired.
+      // Expiring parents first left a window where claimNext (FOR UPDATE
+      // SKIP LOCKED) could claim a companion whose parent was already
+      // gone: the status='pending' filter then skipped it and obsolete
+      // link work proceeded against a retired parent (audit P1).
+      //
+      // Protection must see the COMPLETE batch — a live decay_refresh
+      // parent targeting a stale rewrite's page shares its companion key,
+      // and the single-bucket list cannot see it.
       const protectedKeys = await this._companionProtection(
         runner, fullBatch || bucketOpportunities, new Set(stale.map((r) => r.dedupe_key))
       );
@@ -3576,10 +3576,22 @@ class GscOpportunityMiner {
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
         }))
         .filter((k) => !protectedKeys.has(k));
-      if (companionKeys.length) {
-        await runner('opportunity_queue')
+      const lockedCompanions = companionKeys.length
+        ? await runner('opportunity_queue')
           .where({ bucket: 'link_boost', status: 'pending' })
           .whereIn('dedupe_key', companionKeys)
+          .select('dedupe_key')
+          .forUpdate()
+        : [];
+
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+        .update({
+          status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
+        });
+      if (lockedCompanions.length) {
+        await runner('opportunity_queue')
+          .whereIn('dedupe_key', lockedCompanions.map((r) => r.dedupe_key))
           .update({
             status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
           });

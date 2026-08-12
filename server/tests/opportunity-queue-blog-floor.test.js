@@ -381,6 +381,43 @@ describe('miner persistAll action-aware gate', () => {
     expect(updates.some((u) => u.updates.skip_reason === 'no_content_yet_signal_recovered')).toBe(true);
   });
 
+  test('companions are LOCKED before any parent is expired (no claim slips into the window)', async () => {
+    // claimNext uses FOR UPDATE SKIP LOCKED, so a companion claimed after
+    // its parent was expired but before the companion update would keep
+    // doing link work for a retired parent.
+    const order = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: null, _in: null, _notIn: null,
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        whereNot: jest.fn(() => q), whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+        select: jest.fn(() => q),
+        then: (res, rej) => Promise.resolve([]).then(res, rej),
+        forUpdate: jest.fn(() => {
+          order.push(`lock:${q._filters?.bucket}`);
+          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite'
+            ? [staleRow]
+            : [{ dedupe_key: 'link_boost::pest::_::https://x/old-page/' }]);
+        }),
+        update: jest.fn(() => {
+          order.push(`expire:${q._in?.[1]?.[0]?.startsWith('link_boost') ? 'link_boost' : 'ctr_rewrite'}`);
+          return Promise.resolve(1);
+        }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', []);
+
+    // Both locks precede both expiries.
+    expect(order).toEqual([
+      'lock:ctr_rewrite', 'lock:link_boost', 'expire:ctr_rewrite', 'expire:link_boost',
+    ]);
+  });
+
   test('a companion is protected by a LIVE QUEUE parent absent from this batch (errored/dipped bucket)', async () => {
     // decay_refresh errors this run, or its signal dips: its refresh row
     // is not in the batch, but it is still in the queue and still needs
