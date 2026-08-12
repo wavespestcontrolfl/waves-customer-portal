@@ -108,12 +108,15 @@ function positiveOrNull(value) {
 //   - ACCEPTED estimates only — a draft/sent/expired estimate was never
 //     agreed to as money, and an engine auto-draft's fallback dimensions
 //     must not launder into a customer-facing price.
-//   - When the customer has a primary street, the estimate must RESOLVE to
-//     the same street — an addressless or unparsable estimate never seeds
-//     (a moved or multi-property customer's legacy estimate could otherwise
-//     price the wrong premises).
+//   - The estimate must RESOLVE to the property being reported on
+//     (scopeStreet = the customer's primary street, or the report's stamped
+//     street when the mirror is blank). No scope street, or an addressless/
+//     unparsable estimate → NO seed (codex #3367 r5: a moved or
+//     multi-property customer's legacy estimate could otherwise price the
+//     wrong premises).
 // Fill-only semantics are enforced downstream in resolvePropertyContext.
-async function loadEstimateSeed(database, customerId, primaryStreet) {
+async function loadEstimateSeed(database, customerId, scopeStreet) {
+  if (!scopeStreet) return null;
   const rows = await database('estimates')
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
@@ -126,10 +129,8 @@ async function loadEstimateSeed(database, customerId, primaryStreet) {
     const estData = parseJsonColumn(row.estimate_data);
     const inputs = estData?.engineInputs || estData?.inputs;
     if (!inputs || typeof inputs !== 'object') continue;
-    if (primaryStreet) {
-      const street = linkage.normalizedEstimateStreet(row.address);
-      if (!street || !linkage.sameScopeKey(street, primaryStreet)) continue;
-    }
+    const street = linkage.normalizedEstimateStreet(row.address);
+    if (!street || !linkage.sameScopeKey(street, scopeStreet)) continue;
     candidates.push({ row, inputs });
   }
   // Rows arrive newest-first, so the first surviving candidate is the most
@@ -218,10 +219,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     if (!targetKey) return null;
 
     // Best-effort seed — a failed estimate read must not kill the card, it
-    // just prices without the seed (and likely degrades to the CTA).
+    // just prices without the seed (and likely degrades to the CTA). Scope
+    // falls back to the report's stamped street when the customer mirror
+    // has no primary street; with neither, no seed at all.
     let propertySeed = null;
     try {
-      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
+      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet || reportStreet || null);
     } catch (err) {
       logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
     }

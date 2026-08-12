@@ -260,19 +260,27 @@ function hashPublicIp(value) {
   return crypto.createHmac('sha256', secret).update(ip).digest('hex');
 }
 
+// Returns true only when the event row durably persisted. Analytics callers
+// ignore the return (fire-and-forget as ever); the cross-sell request path
+// MUST check it — its UI contract is "confirmed means recorded" (codex
+// #3367 r5).
 async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}) {
-  if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return;
-  await db('service_report_events').insert({
-    service_record_id: service.id,
-    customer_id: service.customer_id || null,
-    event_name: eventName,
-    channel,
-    metadata: JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
-    user_agent: String(req.get('user-agent') || '').slice(0, 1000) || null,
-    ip_hash: hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress),
-  }).catch((err) => {
+  if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return false;
+  try {
+    await db('service_report_events').insert({
+      service_record_id: service.id,
+      customer_id: service.customer_id || null,
+      event_name: eventName,
+      channel,
+      metadata: JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+      user_agent: String(req.get('user-agent') || '').slice(0, 1000) || null,
+      ip_hash: hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress),
+    });
+    return true;
+  } catch (err) {
     logger.warn(`[reports-public] service_report_event insert failed: ${err.message}`);
-  });
+    return false;
+  }
 }
 
 async function buildServiceReportV1ResponseData(service, token, {
@@ -508,15 +516,26 @@ async function buildServiceReportV1ResponseData(service, token, {
   // gate direction. Best-effort by contract: the builder returns null on any
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
+  let referralCard = false;
   if (mode === 'live') {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
+      // The referral card rides the SAME gate + payload (codex #3367 r5:
+      // client-only rendering would break the "byte-identical while dark"
+      // contract and its click event would 400 against the gated endpoint).
+      referralCard = true;
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
       crossSell = await buildReportCrossSell(service, db);
     }
   }
 
-  return { ...data, dynamicContext, ...(crossSell ? { crossSell } : {}), ...(staffViewer ? { staffViewer: true } : {}) };
+  return {
+    ...data,
+    dynamicContext,
+    ...(crossSell ? { crossSell } : {}),
+    ...(referralCard ? { referralCard: true } : {}),
+    ...(staffViewer ? { staffViewer: true } : {}),
+  };
 }
 
 async function findProjectByReportSegment(segment) {
@@ -970,7 +989,14 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Event metadata too large' });
     }
 
-    await recordServiceReportEvent(service, eventName, channel, req, metadata);
+    const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata);
+    // The cross-sell CTA's confirmation copy promises a recorded request —
+    // a failed insert must surface as failure so the card offers a retry
+    // (codex #3367 r5). Every other event keeps its fire-and-forget
+    // analytics contract.
+    if (eventName === 'cross_sell_requested' && !recorded) {
+      return res.status(503).json({ error: 'Could not record the request — please try again' });
+    }
 
     // Cross-sell CTA → office bell (owner sends all customer comms, so the
     // card's button only records the request; this bell is how it reaches

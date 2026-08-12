@@ -3008,11 +3008,13 @@ function CrossSellCard({ data, token, mode }) {
   );
 }
 
-// Referral card (owner-approved 2026-08-11): every live report, below the
-// offer. Links to the authenticated portal's existing referral program —
-// no referral mechanics live on this public bearer-token surface.
-function ReferralCard({ token, mode }) {
-  if (mode !== 'live') return null;
+// Referral card (owner-approved 2026-08-11): rides the gated server payload
+// (data.referralCard — same GATE_REPORT_CROSS_SELL as the offer, so a dark
+// gate keeps reports byte-identical). Links to the authenticated portal's
+// existing referral program — no referral mechanics live on this public
+// bearer-token surface.
+function ReferralCard({ data, token, mode }) {
+  if (mode !== 'live' || !data?.referralCard) return null;
   return (
     <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
       <div className="section-eyebrow">Share the protection</div>
@@ -8678,7 +8680,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Referral — second interwoven slot, after the treatment record.
             The two AppliedProductsSection mounts are mutually exclusive on
             isV2LeadLayout, so exactly one ReferralCard renders per report. */}
-        {isV2LeadLayout && <ReferralCard token={token} mode={mode} />}
+        {isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
 
         {/* V2 lead layouts (lawn/tree-shrub reportV2) skip the lower coverage
             mount entirely, so a technician-traced map gets its own mount here —
@@ -8851,7 +8853,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* Referral — standard-layout mount of the same interwoven slot (see
             the isV2LeadLayout mount above; mutually exclusive). */}
-        {!isV2LeadLayout && <ReferralCard token={token} mode={mode} />}
+        {!isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
 
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
