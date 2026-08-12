@@ -69,15 +69,16 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], failCatalogJoin = false } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], catalogRows = [], failCatalogJoin = false } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
     scheduled_services: scheduled,
     // Catalog join returns the same rows: service_key/service_name stay
     // undefined, so classification falls to service_type text — the plain-row
-    // legacy path the classifier documents.
-    'scheduled_services as s': scheduled,
+    // legacy path the classifier documents. catalogRows adds rows visible to
+    // the catalog join only (e.g. the report's completed visit).
+    'scheduled_services as s': [...scheduled, ...catalogRows],
     customer_turf_profiles: turfProfile ? [turfProfile] : [],
     estimates,
     customer_plan_rates: planRates,
@@ -243,6 +244,44 @@ describe('buildReportCrossSell', () => {
     const service = SERVICE({ address_line1: '9 Rental Way', city: 'Venice', zip: '34285' });
     const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
     expect(result).toBeNull();
+  });
+
+  test('the report row classifies from its catalog identity, not stale service_type text', async () => {
+    // A rodent-monitoring visit completed under a stale generic
+    // 'Pest Control' label: the informative catalog identity owns no
+    // ladder family, so the report identity must not claim pest — the
+    // ladder still offers the pest plan (stale text would have advanced
+    // it to lawn care).
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      catalogRows: [{ id: 'done-1', service_key: 'rodent_monitoring', service_name: 'Rodent Monitoring' }],
+    });
+    const service = SERVICE({ service_type: 'Pest Control', scheduled_service_id: 'done-1' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+  });
+
+  test('a street-only estimate address (no city/zip) never seeds — wildcard locality is ambiguous', async () => {
+    // sameScopeKey treats missing locality as a wildcard, so a legacy
+    // street-only key would match every same-street property; the seed is
+    // refused instead of pricing an unproven premises.
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '123 Gulf Dr',
+        status: 'accepted',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.mode).toBe('quote_cta');
+    expect(result.option).toBeNull();
   });
 
   test('report-family guard: a pest report with zero upcoming rows never offers pest', async () => {

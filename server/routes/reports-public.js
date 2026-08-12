@@ -1108,6 +1108,11 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
           const priceText = Number.isFinite(perApplication) && perApplication > 0
             ? `(shown $${perApplication.toFixed(2)} per application on report)`
             : '(quote requested from report)';
+          // One server-computed subject for insert AND dedupe refresh
+          // (codex #3367 PR r3): if ownership changed since the original
+          // request (start → add) while the ladder target held, the reused
+          // row's subject must match the newly validated snapshot too.
+          const requestSubject = `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`;
           const outcome = await db.transaction(async (trx) => {
             // Serialize per customer: the row lock makes check-then-insert
             // idempotent (the estimate flow's partial-unique index only
@@ -1132,6 +1137,7 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               // row that has since become priced) must not stand as the
               // recorded quote while the card confirms the new one.
               await trx('service_requests').where({ id: existing.id }).update({
+                subject: requestSubject,
                 description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
                 pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
               });
@@ -1143,7 +1149,7 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               requested_service: requestedService,
               source: 'service_report',
               category: 'add_service',
-              subject: `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`,
+              subject: requestSubject,
               description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
               urgency: 'routine',
               status: 'new',
@@ -1163,6 +1169,9 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               customerId: joined.customer_id,
               customerName: `${joined.first_name || ''} ${joined.last_name || ''}`.trim() || null,
               suggestedService: [crossSell.label, priceText].join(' '),
+              // Start-vs-add rides to the bell too (codex #3367 PR r3): the
+              // builder's add-to-plan copy contradicts a start-plan request.
+              relationship: crossSell.relationship,
             }).catch((err) => {
               logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
             });

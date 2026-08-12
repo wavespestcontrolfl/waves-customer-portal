@@ -388,6 +388,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   let stories = null;
   let storiesEvidence = null;
   let propertyType = customer.property_type || 'single_family';
+  // Whether the lookup/record actually SUPPLIED the type — 'single_family'
+  // is also the resolver default, so the value alone can't prove provenance
+  // (codex #3367 PR r3: a stale seeded 'condo'/'townhome' must not replace
+  // a trusted lookup classification that happens to equal the default).
+  let propertyTypeFromLookup = false;
   let yearBuilt = null;
   let constructionMaterial = null;
   let foundationType = null;
@@ -516,9 +521,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // the record in place (rc.propertyType, _propertyTypeSource:
       // 'satellite'), so a bare record read would hand the rejected
       // satellite type straight back.
-      propertyType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
-        || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null)
-        || propertyType;
+      const adoptedLookupType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
+        || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null);
+      if (adoptedLookupType) {
+        propertyType = adoptedLookupType;
+        propertyTypeFromLookup = true;
+      }
       // Year built drives the pest/WDO age modifiers — same evidence gate
       // as the structural facts below (the enriched value is a mirror of
       // the same record merge, so one evidence bit covers both legs).
@@ -670,7 +678,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         features[key] = value;
       }
     }
-    if (!customer.property_type && propertyType === 'single_family'
+    // Seed type fills only a true gap: no stored type AND no adopted
+    // lookup/record classification (codex #3367 PR r3) — a trusted
+    // single_family read is indistinguishable from the default by value,
+    // so provenance is tracked explicitly above.
+    if (!customer.property_type && !propertyTypeFromLookup && propertyType === 'single_family'
       && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
       propertyType = propertySeed.propertyType;
     }

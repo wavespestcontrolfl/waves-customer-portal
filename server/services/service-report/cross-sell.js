@@ -133,6 +133,14 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     if (!inputs || typeof inputs !== 'object') continue;
     const street = linkage.normalizedEstimateStreet(row.address);
     if (!street || !linkage.sameScopeKey(street, scopeStreet)) continue;
+    // A street-only key (no city, no zip) wildcard-matches EVERY
+    // same-street property under sameScopeKey's lenient locality rule
+    // (codex #3367 PR r3): a multi-property customer with the same street
+    // name in two cities could seed the wrong premises. The scope
+    // machinery marks these ambiguous legacy keys explicitly — no
+    // disambiguation, no seed (an older fully-qualified estimate may still
+    // seed instead).
+    if (linkage.scopeKeyLacksLocality(street)) continue;
     candidates.push({ row, inputs });
   }
   // Rows arrive newest-first, so the first surviving candidate is the most
@@ -224,7 +232,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // FAIL CLOSED on ownership: a thrown catalog join means we cannot know
     // what the customer already buys, so no recommendation may render (same
     // doctrine as customer-pricing-ai's PRICING_UNAVAILABLE).
-    const { loadOwnedRecurringServiceKeys, ownershipKeysForRow } = require('../waveguard-existing-services');
+    const { loadOwnedRecurringServiceKeys, ownershipKeysForRow, loadCatalogFieldsByRowId } = require('../waveguard-existing-services');
     const streetScope = primaryStreet
       ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
       : null;
@@ -237,7 +245,20 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // ownershipFamiliesFromText already refuses one-time and specialty
     // wording, so a cockroach cleanout still resolves no family and keeps
     // its offer-a-plan branch.
-    const reportFamilies = ownershipKeysForRow({ service_type: service.service_type });
+    // Catalog identity is the truth for the report's OWN row too (codex
+    // #3367 PR r3): completion copies the scheduled row's TEXT label into
+    // service_records.service_type, so a rodent-monitoring visit completed
+    // under a stale generic 'Pest Control' label would otherwise classify
+    // as owned pest and advance the ladder. Same catalog authority + FAIL
+    // CLOSED posture as the ownership loader: an unreadable catalog map
+    // suppresses the card rather than classifying on text alone.
+    let reportIdentity = { service_type: service.service_type };
+    if (service.scheduled_service_id) {
+      const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+      if (!catalogById) throw new Error('report catalog identity join failed');
+      reportIdentity = { ...reportIdentity, ...(catalogById.get(service.scheduled_service_id) || {}) };
+    }
+    const reportFamilies = ownershipKeysForRow(reportIdentity);
 
     // Plan-rate ledger evidence (codex #3367 PR r1, reworked PR r2): a
     // family carrying a live monthly rate blocks offering that family even

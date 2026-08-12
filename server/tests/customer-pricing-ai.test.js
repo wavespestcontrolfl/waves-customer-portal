@@ -219,6 +219,29 @@ describe('customer pricing AI helpers', () => {
     expect(bareSeed.options.length).toBeGreaterThan(0);
     expect(withSeededCage.options[0].perVisit).toBeGreaterThan(bareSeed.options[0].perVisit);
   });
+
+  test('a trusted lookup classification survives the seed even when it equals the default (PR r3 P1)', async () => {
+    // 'single_family' is also the resolver default, so provenance must be
+    // tracked explicitly: an adopted lookup single_family beats a stale
+    // seeded 'condo'; only a silent lookup lets the seed fill the gap.
+    const run = (lookupType) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          ...(lookupType ? { propertyType: lookupType } : {}),
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-type-prov', property_type: null }),
+      propertySeed: { propertyType: 'condo' },
+    });
+    const trusted = await run('single_family');
+    expect(trusted.property.propertyType).toBe('single_family');
+    const silent = await run(null);
+    expect(silent.property.propertyType).toBe('condo');
+  });
 });
 
 describe('count-based WaveGuard tier truth', () => {
