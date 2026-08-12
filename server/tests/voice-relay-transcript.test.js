@@ -190,7 +190,11 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(update).toHaveBeenCalledTimes(1); // one statement, not two
   });
 
-  test('HANGUP with no capture_lead → transcript still written, fallback summary, floor lead still runs', async () => {
+  // ⭐ THE FLOOR RUNS BEFORE THE STAMP. The transcript records `lead_captured`
+  // and composes its summary from it, so stamping first left the audit trail
+  // saying "no lead captured on the call" about a call whose floor lead landed
+  // a moment later — the record permanently contradicting the lead it produced.
+  test('HANGUP with no capture_lead → the floor lead runs FIRST and the transcript records it', async () => {
     const { update } = primeCallLog();
     const convo = conversationWithTurns('CA-hangup-1');
     // leadCaptured stays false — the caller hung up mid-call.
@@ -198,10 +202,24 @@ describe('end() persists the transcript on the SAME call_log row', () => {
 
     const row = update.mock.calls[0][0];
     expect(row.transcription).toContain('Caller: 12 Shore Drive, Bradenton');
-    expect(row.call_summary).toMatch(/no lead captured/i);
-    expect(JSON.parse(row.transcription_metadata)).toMatchObject({ end_reason: 'ws_close', lead_captured: false });
-    // The pre-existing capture floor is unchanged.
+    expect(row.call_summary).not.toMatch(/no lead captured/i); // the floor DID capture one
+    expect(JSON.parse(row.transcription_metadata)).toMatchObject({ end_reason: 'ws_close', lead_captured: true });
     expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
+    expect(createLeadFromExtraction.mock.invocationCallOrder[0])
+      .toBeLessThan(update.mock.invocationCallOrder[0]);
+  });
+
+  test('a FAILED floor write leaves the transcript honestly saying no lead was captured', async () => {
+    const { update } = primeCallLog();
+    createLeadFromExtraction.mockRejectedValueOnce(new Error('leads table down'));
+    const convo = conversationWithTurns('CA-hangup-2');
+    await convo.end('ws_close');
+
+    const row = update.mock.calls[0][0];
+    expect(row.call_summary).toMatch(/no lead captured/i);
+    expect(JSON.parse(row.transcription_metadata)).toMatchObject({ lead_captured: false });
+    // …and the failure never took the transcript down with it.
+    expect(row.transcription).toContain('Caller: 12 Shore Drive, Bradenton');
   });
 
   test('a re-service call is recorded as such, not as a lead-less call', async () => {

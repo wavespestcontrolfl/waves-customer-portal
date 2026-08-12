@@ -850,6 +850,15 @@ class RelayConversation {
       );
     }
 
+    // THE CAPTURE FLOOR RUNS BEFORE THE REPORTING STAMP. The transcript update
+    // below records `lead_captured` and composes its summary from it, so
+    // stamping first meant a call whose floor lead then landed carried a
+    // call_log row saying no lead was captured — the audit trail permanently
+    // contradicting the lead it produced. Bounded so a slow lead write cannot
+    // hold the finalization (a late write still lands; only the flag is
+    // conservative), and never throws — the floor is best-effort by contract.
+    await this._runCaptureFloor(reason);
+
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
     // leave the row at a non-final status ('ringing' / 'no-answer') with a
@@ -918,6 +927,16 @@ class RelayConversation {
       }
     }
 
+  }
+
+  /**
+   * Capture floor: if the model never managed to call capture_lead but we have
+   * a real caller number, write a minimal lead so this call still produces a
+   * follow-up. Runs BEFORE the call_log reporting stamp so the transcript's
+   * `lead_captured` can tell the truth, sets the session flag on success, and
+   * is bounded + non-throwing so it can never hold up (or fail) the close.
+   */
+  async _runCaptureFloor(reason) {
     // Normalize to E.164 and persist the normalized value (the voice-agent lead
     // contract requires a valid E.164 — isLikelyE164 alone accepts bare digits),
     // matching capture_lead in relay-tools.
@@ -933,19 +952,33 @@ class RelayConversation {
       logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — capture_lead is still in flight past the drain bound (never race a second lead write)`);
       return;
     }
-    try {
-      await createLeadFromExtraction(
-        {
-          call_summary:
-            'Inbound voice call (auto-captured on hangup). ' +
-            (this._userTurns.length ? `Caller said: ${this._userTurns.join(' | ').slice(0, 600)}` : 'No transcript captured.'),
-          requested_service: null,
-        },
-        { phone: callerPhone, toPhone: this.to, callSid: this.callSid, language: this.language }
-      );
-      logger.info(`[voice-relay] capture-floor lead written callSid=${this.callSid} reason=${reason || 'end'}`);
-    } catch (err) {
-      logger.error(`[voice-relay] capture-floor failed callSid=${this.callSid}: ${err.message}`);
+    const write = createLeadFromExtraction(
+      {
+        call_summary:
+          'Inbound voice call (auto-captured on hangup). ' +
+          (this._userTurns.length ? `Caller said: ${this._userTurns.join(' | ').slice(0, 600)}` : 'No transcript captured.'),
+        requested_service: null,
+      },
+      { phone: callerPhone, toPhone: this.to, callSid: this.callSid, language: this.language }
+    ).then(
+      () => {
+        // The flag the transcript stamp reads — set here, on the write itself.
+        this.leadCaptured = true;
+        logger.info(`[voice-relay] capture-floor lead written callSid=${this.callSid} reason=${reason || 'end'}`);
+        return true;
+      },
+      (err) => {
+        logger.error(`[voice-relay] capture-floor failed callSid=${this.callSid}: ${err.message}`);
+        return false;
+      },
+    );
+    // Bounded: a slow lead write must not hold the close open now that it runs
+    // FIRST. A late write still lands (and still sets the flag) — only this
+    // call's transcript flag stays conservatively false, which is the same
+    // answer the old ordering always gave.
+    const landed = await withTimeout(write, WRITE_DRAIN_TIMEOUT_MS, null);
+    if (landed === null) {
+      logger.warn(`[voice-relay] capture-floor still writing past ${WRITE_DRAIN_TIMEOUT_MS}ms callSid=${this.callSid} — finalizing the call_log without waiting`);
     }
   }
 }
