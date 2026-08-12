@@ -906,9 +906,22 @@ async function pricingText(input = {}) {
   }
 
   const monthly = fmtMoney(line.monthlyAfterDiscount ?? line.monthly);
-  const annual = fmtMoney(line.annualAfterDiscount ?? line.annual);
   const perApp = fmtMoney(line.perApp);
+  const visitsPerYear = line.visitsPerYear || line.visits || null;
   const bits = [];
+  // ⭐ THE UNIT IS "PER APPLICATION", AND NO COMBINED PLAN TOTAL IS EVER
+  // SPOKEN. AGENTS.md ("Per application" price copy, owner rule re-affirmed
+  // 2026-07-23) plus the copy rules public-ranges.js enforces on this SAME
+  // engine output: "unit is 'per application', never 'per visit' — the only
+  // per-month units are services that genuinely bill monthly" and "no combined
+  // per-month or per-year program totals". This function used to append BOTH a
+  // combined "$X per month" and a combined "$X per year" to every non-termite
+  // quote, on the most customer-facing surface Waves has.
+  //
+  // Whether a line is genuinely monthly-billed is not guessed here: an engine
+  // line with no explicit per-application signal IS the monthly-billed case —
+  // the same design signal routes/public-quote.js perApplicationForLine reads
+  // ("that absence is the design signal, not a data gap").
   if (service === 'pest_control') {
     // Owner rule: "per application", never "per visit".
     if (perApp) bits.push(`${perApp} per application on the ${line.frequency} plan`);
@@ -925,20 +938,35 @@ async function pricingText(input = {}) {
   } else if (service === 'termite_bait') {
     const install = fmtMoney(line.install && line.install.price);
     if (install) bits.push(`${install} station installation`);
-    if (monthly) bits.push(`then ${monthly} per month monitoring`);
-  } else {
-    if (perApp) bits.push(`${perApp} per application`);
-    if (line.visitsPerYear || line.visits) bits.push(`${line.visitsPerYear || line.visits} applications per year`);
-  }
-  if (service !== 'termite_bait') {
-    if (monthly) bits.push(`billed monthly that is ${monthly} per month`);
-    if (annual) bits.push(`${annual} per year`);
+    // Residential termite bait monitoring is billed PER APPLICATION, not per
+    // month (owner 2026-07-20, recorded in routes/public-quote.js: residential
+    // termite bait is deliberately NOT in MONTHLY_BILLED_SERVICE_KEYS, and
+    // public-ranges.js publishes `termite_bait_monitoring` with
+    // `unit: 'per application'` / "Quarterly station-check applications").
+    // "$X per month monitoring" quoted a billing unit the customer never pays.
+    if (perApp) {
+      bits.push(`then ${perApp} per application for monitoring`);
+      if (visitsPerYear) bits.push(`${visitsPerYear} applications per year`);
+    } else if (monthly) {
+      bits.push(`then ${monthly} per month monitoring`);
+    }
+  } else if (perApp) {
+    bits.push(`${perApp} per application`);
+    if (visitsPerYear) bits.push(`${visitsPerYear} applications per year`);
+  } else if (monthly) {
+    // No per-application signal on the line ⇒ a genuinely monthly-billed
+    // program (tree & shrub publishes `unit: 'per month'` in public-ranges.js);
+    // the monthly IS its unit, and it is stated alone — never alongside an
+    // annual roll-up.
+    bits.push(`${monthly} per month`);
+    if (visitsPerYear) bits.push(`${visitsPerYear} applications per year`);
   }
   if (!bits.length) {
     return 'Pricing came back empty — do not state a price; a Waves team member will follow up with exact numbers.';
   }
   return `Standard ${service.replace(/_/g, ' ')} pricing for this property size: ${bits.join('; ')}. `
-    + 'Quote ONLY these numbers — never negotiate, discount, or estimate beyond them.';
+    + 'Quote ONLY these numbers — never negotiate, discount, or estimate beyond them. Recurring prices are '
+    + 'PER APPLICATION: say them in exactly that unit, and never add them up into a monthly or yearly plan total.';
 }
 
 // ── get_services_catalog — the admin catalog's customer-facing names ───────

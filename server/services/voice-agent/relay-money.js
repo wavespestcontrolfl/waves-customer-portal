@@ -13,9 +13,17 @@
  * setup fee, un-netted manual discount, totals mismatch). Reading
  * `sendSnapshot.pricingBundle` raw would therefore speak a price the customer's
  * own estimate page refuses to show — the one number they can check us against.
- * Totals still come from the estimates row's persisted monthly_total /
- * annual_total / onetime_total, and generateEstimate (the LIVE quote engine) is
- * still never called here: a test asserts it.
+ * generateEstimate (the LIVE quote engine) is still never called here: a test
+ * asserts it.
+ *
+ * PER-APPLICATION PRICE COPY (AGENTS.md, owner rule re-affirmed 2026-07-23):
+ * customer-facing price units read "per application", never "per visit", and NO
+ * combined plan total ("$X/mo" / "$X/yr") appears on any customer-facing
+ * estimate surface — the phone is one of them. The row's persisted
+ * monthly_total / annual_total are still read, but only to pick WHICH cadence
+ * the estimate was sent at; they are never spoken. onetime_total is: one-time
+ * work is a single real charge, the same carve-out EstimateProposalDocument
+ * makes.
  *
  * TOKENS NEVER LEAVE THEIR CHANNEL (house rule): estimates.token and
  * invoices.token are permanent bearer credentials behind /estimate/:token,
@@ -95,6 +103,13 @@ async function quotedLines(estimateRow) {
   const matches = (f) => (Number.isFinite(monthlyTotal) && monthlyTotal > 0 && Math.abs(Number(f.monthly) - monthlyTotal) < 0.01)
     || (Number.isFinite(annualTotal) && annualTotal > 0 && Math.abs(Number(f.annual) - annualTotal) < 0.01);
   const chosen = frequencies.find(matches) || frequencies[0];
+  // The frequency-level flag the customer's own estimate card reads
+  // (client/src/components/estimate/PriceCard.jsx `showBilledMonthlyNote`): a
+  // FLAGGED per-application row bills exactly its per-application headline and
+  // gets no monthly line at all; a legacy monthly-billed row (mosquito seasonal
+  // spreads, pre-flag termite monitoring) genuinely charges a flat monthly, and
+  // that surface states it as a note UNDER the per-application price.
+  const billedPerApplication = chosen.billedPerApplication === true;
 
   const lines = (Array.isArray(chosen.perServiceTreatments) ? chosen.perServiceTreatments : [])
     .slice(0, 6)
@@ -103,11 +118,20 @@ async function quotedLines(estimateRow) {
       const label = promptSafeUntrusted(item.label || item.service, 60);
       if (!label) return null;
       const monthly = fmtMoney(item.monthly);
-      // Owner rule: recurring pricing is "per application", never "per visit".
+      // Owner rule: recurring pricing is "per application", never "per visit" —
+      // and the per-application price LEADS, exactly as the customer's estimate
+      // card does. Leading with (or standing on) a monthly figure presents the
+      // service as a flat monthly spread, which AGENTS.md forbids.
       const perApp = fmtMoney(item.perTreatment);
       const bits = [];
-      if (monthly) bits.push(`${monthly} per month`);
-      if (perApp) bits.push(`${perApp} per application`);
+      if (perApp) {
+        bits.push(`${perApp} per application`);
+        if (monthly && !billedPerApplication) bits.push(`billed ${monthly} per month`);
+      } else if (monthly) {
+        // No per-application price on the row at all ⇒ a genuinely
+        // monthly-billed line; the monthly IS its unit.
+        bits.push(`${monthly} per month`);
+      }
       return bits.length ? `${label} at ${bits.join(', ')}` : label;
     })
     .filter(Boolean);
@@ -153,31 +177,44 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     const bits = [];
     const service = promptSafe(row.service_type, 60);
     bits.push(`Estimate sent ${when || 'recently'}${service ? ` for ${service}` : ''}`);
-    // THE sent-price mechanism. A failure degrades to the row's persisted
-    // totals below — never to a guessed or engine-invented number.
+    // THE sent-price mechanism. The per-application lines ARE the price — there
+    // is no combined-total fallback behind them (see below), so a bundle
+    // failure degrades to "don't state a price", never to a guessed or
+    // engine-invented number.
     let lines = [];
     try {
       lines = await quotedLines(row);
     } catch (err) {
       require('../logger').warn(`[voice-relay-money] pricing bundle unavailable for estimate ${row.id}: ${err.message}`);
     }
-    if (lines.length) bits.push(`quoted lines: ${lines.join('; ')}`);
-    const monthly = fmtMoney(row.monthly_total);
+    if (lines.length) {
+      bits.push(`quoted lines: ${lines.join('; ')}`);
+    } else {
+      bits.push('the per-application lines could not be read back, so do NOT state a price for this one — '
+        + 'the account holder can see it in their portal, or a team member can go over it');
+    }
+    // ⭐ NO COMBINED PLAN TOTALS. AGENTS.md ("Per application" price copy,
+    // owner rule re-affirmed 2026-07-23): customer-facing price units read
+    // "per application" and no combined "$X/mo" / "$X/yr" plan total appears on
+    // ANY customer-facing estimate surface — the phone is one. The estimate
+    // surfaces enforce it themselves (EstimateViewPage.jsx's plan-total card
+    // returns null on a creditless plan; PriceCard.jsx's cadence line is a
+    // COUNT with "no combined annual dollar total"; EstimateProposalDocument
+    // .jsx's `suppressPlanTotals`; public-ranges.js's header rule "no combined
+    // per-month or per-year program totals"), and this used to speak both of
+    // them out loud. One-time work is a single real charge and still prints —
+    // the same carve-out EstimateProposalDocument makes.
     const oneTime = fmtMoney(row.onetime_total);
-    const annual = fmtMoney(row.annual_total);
-    const totals = [];
-    if (monthly) totals.push(`${monthly} per month`);
-    if (annual) totals.push(`${annual} per year`);
-    if (oneTime) totals.push(`${oneTime} one-time`);
-    if (totals.length) bits.push(`estimate total ${totals.join(', ')}`);
+    if (oneTime) bits.push(`one-time work totalling ${oneTime}`);
     if (expires) bits.push(`good through ${expires}`);
     return bits.join('; ');
   }));
 
   return `Open estimates on this account: ${rendered.join(' || ')}. `
     + 'These are the prices the estimate was SENT at — quote them exactly as written, never re-price, '
-    + 'discount, or update them. Do not read out a link; the estimate is in their portal, or a team '
-    + 'member can resend it.';
+    + 'discount, or update them. Recurring prices are PER APPLICATION: say them in exactly that unit, and '
+    + 'never add them up into a combined monthly or yearly plan total. Do not read out a link; the estimate '
+    + 'is in their portal, or a team member can resend it.';
 }
 
 // ── get_invoice_history ────────────────────────────────────────────────────

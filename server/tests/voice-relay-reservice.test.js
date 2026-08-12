@@ -106,7 +106,13 @@ beforeEach(() => {
 });
 
 const GOOD = { lane: 'pest', issue: 'ants are back in the kitchen along the baseboard' };
-const CTX = { customerId: CUSTOMER_ID, callSid: 'CA-res-1', markCaptured: jest.fn(), markReserviceFiled: jest.fn() };
+// customerTier 'full' = the ANI IS the account's own `customers.phone`. A match
+// on one of the `service_contact*_phone` slots caps at 'redacted' (relay-tools
+// matchedCallerTier); absent ⇒ redacted, fail closed.
+const CTX = {
+  customerId: CUSTOMER_ID, customerTier: 'full', from: CALLER, callSid: 'CA-res-1',
+  markCaptured: jest.fn(), markReserviceFiled: jest.fn(),
+};
 
 describe('GATE OFF — dark', () => {
   test('refuses, zero DB touch, no comms', async () => {
@@ -172,6 +178,63 @@ describe('GATE ON', () => {
     expect(out).toMatch(/use capture_lead/i);
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
     assertNoComms();
+  });
+
+  // ⭐ THE P0 THIS LANE SHIPPED WITH. A caller matched on one of the
+  // `service_contact*_phone` slots (spouse, tenant, PRIOR OCCUPANT) arrives
+  // with ctx.customerId SET and tier 'redacted'. The write gate checked only
+  // ctx.customerId, so such a caller filed a `service_requests` row on someone
+  // else's account AND paged the owner with nothing saying who was on the line.
+  // The filing stays allowed; every surface it lands on is stamped.
+  test('a REDACTED-tier contact-slot caller files on the matched account but is stamped UNVERIFIED everywhere', async () => {
+    const ctx = { ...CTX, customerTier: 'redacted' };
+    const out = await executeTool('request_reservice', GOOD, ctx);
+
+    const row = builders.service_requests.insert.mock.calls[0][0];
+    expect(row.customer_id).toBe(CUSTOMER_ID);
+    expect(row.status).toBe('new'); // still office-reviewed, nothing scheduled
+    // The stamp LEADS both columns so it survives every admin truncation.
+    expect(row.subject).toMatch(/^⚠️ UNVERIFIED REQUESTER — /);
+    expect(row.description).toMatch(/^⚠️ UNVERIFIED third-party requester — verify identity before confirming\./);
+    expect(row.description).toMatch(/secondary contact number/i);
+    expect(row.description).toContain('***0142'); // masked, never the full number
+    expect(row.description).not.toContain('9415550142');
+    expect(row.description).toContain('ants are back');
+
+    // The internal admin notification carries it in the title AND the body.
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/UNVERIFIED REQUESTER/);
+    expect(body).toMatch(/^⚠️ UNVERIFIED third-party requester/);
+    expect(opts.metadata.unverified_requester).toBe(true);
+
+    // …and so does the owner alert (the routing fix that reaches a human).
+    expect(relayAlert.alertOwnerReservice).toHaveBeenCalledWith(
+      expect.objectContaining({ unverifiedRequester: true, unverifiedNote: expect.stringMatching(/UNVERIFIED third-party requester/) }),
+      ctx,
+    );
+
+    // The model is told not to confirm account details back to that caller.
+    expect(out).toMatch(/secondary contact on this account/i);
+    expect(out).toMatch(/NOTHING IS SCHEDULED YET/);
+    assertNoComms();
+  });
+
+  test('a ctx with no customerTier at all is treated as UNVERIFIED (fail closed)', async () => {
+    const ctx = { ...CTX };
+    delete ctx.customerTier;
+    await executeTool('request_reservice', GOOD, ctx);
+    expect(builders.service_requests.insert.mock.calls[0][0].subject).toMatch(/UNVERIFIED REQUESTER/);
+    expect(relayAlert.alertOwnerReservice.mock.calls[0][0].unverifiedRequester).toBe(true);
+  });
+
+  test('a FULL-tier matched caller carries no unverified stamp anywhere', async () => {
+    await executeTool('request_reservice', GOOD, CTX);
+    const row = builders.service_requests.insert.mock.calls[0][0];
+    expect(row.subject).not.toMatch(/UNVERIFIED/);
+    expect(row.description).not.toMatch(/UNVERIFIED/);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).not.toMatch(/UNVERIFIED/);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).not.toMatch(/UNVERIFIED/);
+    expect(relayAlert.alertOwnerReservice.mock.calls[0][0].unverifiedRequester).toBe(false);
   });
 
   test('a looked-up customer_ref is refused — this writes to an unverified account', async () => {

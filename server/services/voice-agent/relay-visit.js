@@ -32,7 +32,14 @@
  *   - the typedReportDelivery suppression predicate (routes/services.js
  *     suppressesCustomerArtifacts) — anything but auto_send keeps findings,
  *     products and notes off customer surfaces, and the phone is one;
- *   - customerSafeServiceNotes (services/project-types.js) for the note text;
+ *   - the note text is PARSER-APPROVED COPY ONLY: technicianReportCustomerCopy
+ *     (services/service-report/technician-report-copy.js), the same reviewed
+ *     parse that feeds the written report's summary slot, with
+ *     customerSafeServiceNotes (services/project-types.js) applied on top.
+ *     Raw technician_notes never egress on a report path (AGENTS.md; owner
+ *     ruling 2026-07-16, report-data.js `legacy` block) — the field is internal
+ *     (access codes, billing notes), and anything that is not the reviewed
+ *     two-section draft parses to null and is simply not spoken;
  *   - service_findings + service_products, the SAME tables the customer
  *     report renders from (services/service-report/report-data.js), never raw
  *     internal notes and never field_flags (internal QA markers);
@@ -259,8 +266,25 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   const reentryApplications = Array.isArray(allProducts) ? allProducts : [];
   const products = reentryApplications.slice(0, SERVICE_REPORT_APPLICATION_LIMIT);
 
+  // ⭐ PARSER-APPROVED COPY ONLY — this is a REPORT path.
+  // AGENTS.md: "Raw `technician_notes` never egress on any report path
+  // (parser-approved copy only)", and the written report already obeys it —
+  // report-data.js's `legacy` block records the owner ruling (2026-07-16): the
+  // field is internal (access codes, billing notes) and "the only sanctioned
+  // path to customer copy is technicianReportCustomerCopy's reviewed parse,
+  // which already feeds the summary slot" (report-data.js ~4218).
+  // customerSafeServiceNotes alone is NOT that parse — it only scrubs the WDO
+  // inspection fee and returns an ordinary visit's notes verbatim, so speaking
+  // its output read the technician's internal note down the phone. The parse
+  // returns null for anything that is not the reviewed two-section draft, and
+  // nulls `body` when a banned-copy screen matches, so an unreviewed note now
+  // produces no spoken note at all. The WDO fee scrub still runs on top.
+  const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
   const { customerSafeServiceNotes } = require('../project-types');
-  const noteText = promptSafeUntrusted(customerSafeServiceNotes(record.technician_notes, structured), 240);
+  const reportCopy = technicianReportCustomerCopy(record.technician_notes);
+  const noteText = reportCopy && reportCopy.body
+    ? promptSafeUntrusted(customerSafeServiceNotes(reportCopy.body, structured), 240)
+    : null;
 
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`
     + `${record.service_type ? ` — ${promptSafeUntrusted(record.service_type, 60)}` : ''}.`];
@@ -294,7 +318,7 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
     }
   }
 
-  if (noteText) lines.push(`Technician's customer note: ${noteText}`);
+  if (noteText) lines.push(`The technician's reviewed report summary: ${noteText}`);
 
   // COMPLIANCE: the ONLY re-entry wording allowed is the shaping helper's own
   // customerSummary. Never composed, never paraphrased, never "safe".

@@ -234,6 +234,35 @@ describe('re-service owner alert (owner ruling)', () => {
     const body = relayAlert.buildReserviceAlert({ ...REQ, issue: 'x'.repeat(5000), subject: 'y'.repeat(5000) });
     expect(body.length).toBeLessThanOrEqual(relayAlert.MAX_ALERT_BODY);
   });
+
+  // ⭐ A REDACTED-TIER (contact-slot) requester pages the owner about someone
+  // ELSE's account. The warning is the SECOND line so neither the
+  // MAX_ALERT_BODY slice nor the bell/push render can truncate it away.
+  test('an unverified requester puts the warning on the alert\'s second line', async () => {
+    const note = 'UNVERIFIED third-party requester — verify identity before confirming. The caller on ***0142 '
+      + 'matched this account only on a secondary contact number (spouse, tenant, or a previous occupant), '
+      + 'NOT the account holder\'s own number.';
+    await relayAlert.alertOwnerReservice({ ...REQ, unverifiedRequester: true, unverifiedNote: note }, { callSid: 'CA-rs' });
+    const body = TwilioService.sendSMS.mock.calls[0][1];
+    expect(body.split('\n')[1]).toMatch(/^⚠️ UNVERIFIED third-party requester — verify identity before confirming\./);
+    expect(body).toContain('***0142');
+    expect(body).not.toContain('9415550142');
+  });
+
+  test('an unverified requester with no note still gets a warning line; a verified one gets none', () => {
+    const fallback = relayAlert.buildReserviceAlert({ ...REQ, unverifiedRequester: true });
+    expect(fallback.split('\n')[1]).toMatch(/UNVERIFIED third-party requester/);
+    expect(relayAlert.buildReserviceAlert(REQ)).not.toMatch(/UNVERIFIED/);
+  });
+
+  test('the body stays bounded even with a long unverified note', () => {
+    const body = relayAlert.buildReserviceAlert({
+      ...REQ, issue: 'x'.repeat(5000), subject: 'y'.repeat(5000),
+      unverifiedRequester: true, unverifiedNote: 'z'.repeat(5000),
+    });
+    expect(body.length).toBeLessThanOrEqual(relayAlert.MAX_ALERT_BODY);
+    expect(body).toMatch(/UNVERIFIED|⚠️/);
+  });
 });
 
 describe('capture_lead → alert wiring (the live path)', () => {

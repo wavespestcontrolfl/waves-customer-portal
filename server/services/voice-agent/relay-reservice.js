@@ -67,6 +67,30 @@ const REFUSE_NO_CUSTOMER =
   + 'Do NOT promise a free re-service.';
 
 /**
+ * ⭐ THE UNVERIFIED-REQUESTER STAMP.
+ *
+ * The ANI match only earns tier 'full' when the calling number IS the account's
+ * own `customers.phone`. A match on one of the `service_contact*_phone` slots —
+ * a lead-dedup column set that holds spouses, tenants and PRIOR OCCUPANTS —
+ * recognises the account and authenticates NOBODY (relay-context
+ * .findUniqueCustomerByAni, relay-tools.matchedCallerTier; every READ path
+ * already honours it). This write did not, so a redacted-tier caller filed a
+ * `service_requests` row on someone else's account AND paged the owner with no
+ * indication of who was actually on the line.
+ *
+ * The filing stays ALLOWED — a spouse calling because the ants are back is the
+ * common, legitimate case — but every surface it lands on says so, leading with
+ * the same words the booking lane stamps (relay-booking.js) so the office reads
+ * one phrase, not two.
+ */
+function unverifiedRequesterStamp(from) {
+  const { maskPhone } = require('./relay-protocol');
+  return 'UNVERIFIED third-party requester — verify identity before confirming. The caller on '
+    + `${maskPhone(from)} matched this account only on a secondary contact number `
+    + '(spouse, tenant, or a previous occupant), NOT the account holder\'s own number.';
+}
+
+/**
  * File a re-service request for the matched caller.
  *
  * ctx is the relay session tool context ({ customerId, callSid, markCaptured,
@@ -81,6 +105,12 @@ async function requestReserviceText(input = {}, ctx = {}) {
   if (String(input.customer_ref || '').trim()) return REFUSE_NO_CUSTOMER;
   const customerId = ctx.customerId || null;
   if (!customerId) return REFUSE_NO_CUSTOMER;
+  // Tier, not just identity: a contact-slot match hands back ctx.customerId
+  // exactly like the account holder's own number does (see the stamp above).
+  // Fail closed — an absent/unknown tier is 'redacted'.
+  const { matchedCallerTier } = require('./relay-tools');
+  const unverifiedRequester = matchedCallerTier(ctx) !== 'full';
+  const unverifiedNote = unverifiedRequester ? unverifiedRequesterStamp(ctx.from) : null;
 
   const lane = String(input.lane || '').trim().toLowerCase();
   if (!LANE_CATEGORY[lane]) {
@@ -153,13 +183,22 @@ async function requestReserviceText(input = {}, ctx = {}) {
   }
   const covered = coveredLanes.includes(lane);
 
-  const subject = promptSafe(`Re-service request (phone assistant): ${issue}`, MAX_SUBJECT);
+  // The stamp goes FIRST on both columns so it survives every truncation the
+  // admin surfaces apply (CustomerRequestsPanel, the unworked-comms digest,
+  // the notification feed) — an unmissable warning is the whole point.
+  const subject = promptSafe(
+    `${unverifiedRequester ? '⚠️ UNVERIFIED REQUESTER — ' : ''}Re-service request (phone assistant): ${issue}`,
+    MAX_SUBJECT,
+  );
+  const description = unverifiedRequester
+    ? `⚠️ ${unverifiedNote}\n\n${issue}`.slice(0, MAX_DESCRIPTION)
+    : issue;
   const [created] = await db('service_requests')
     .insert({
       customer_id: customerId,
       category,
       subject,
-      description: issue,
+      description,
       urgency,
       photos: JSON.stringify([]),
       status: 'new',
@@ -169,7 +208,8 @@ async function requestReserviceText(input = {}, ctx = {}) {
 
   logger.info(
     `[voice-relay-reservice] ${category} request ${created && created.id} filed for customer ${customerId} `
-    + `[${urgency}] (callSid=${ctx.callSid || 'n/a'})`
+    + `[${urgency}]${unverifiedRequester ? ' [UNVERIFIED third-party requester]' : ''} `
+    + `(callSid=${ctx.callSid || 'n/a'})`
   );
 
   // Suppress the hangup capture floor: this call produced a real service
@@ -185,8 +225,10 @@ async function requestReserviceText(input = {}, ctx = {}) {
     const NotificationService = require('../notification-service');
     notif = await NotificationService.notifyAdmin(
       'service',
-      `${urgency === 'urgent' ? '🚨 URGENT ' : ''}Phone assistant re-service request`,
-      `Category: ${category.replace(/_/g, ' ')}\nSubject: ${subject}\n\n"${issue}"`,
+      `${urgency === 'urgent' ? '🚨 URGENT ' : ''}${unverifiedRequester ? '⚠️ UNVERIFIED REQUESTER — ' : ''}`
+      + 'Phone assistant re-service request',
+      `${unverifiedRequester ? `⚠️ ${unverifiedNote}\n\n` : ''}`
+      + `Category: ${category.replace(/_/g, ' ')}\nSubject: ${subject}\n\n"${issue}"`,
       {
         icon: urgency === 'urgent' ? '🚨' : '🏠',
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
@@ -197,6 +239,8 @@ async function requestReserviceText(input = {}, ctx = {}) {
           urgency,
           source: VOICE_REQUEST_SOURCE,
           callSid: ctx.callSid || null,
+          unverified_requester: unverifiedRequester,
+          ...(unverifiedNote ? { unverified_requester_note: unverifiedNote } : {}),
         },
       }
     );
@@ -228,6 +272,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
     const { alertOwnerReservice } = require('./relay-alert');
     await alertOwnerReservice({
       lane, category, urgency, issue, subject, covered, requestId: created && created.id, customerId,
+      unverifiedRequester, unverifiedNote,
     }, ctx);
   } catch (err) {
     // Fail-open: the ticket is already written and the caller is on the line.
@@ -235,6 +280,11 @@ async function requestReserviceText(input = {}, ctx = {}) {
   }
 
   return `Re-service request filed for this account (${LANE_LABEL[lane]}${urgency === 'urgent' ? ', flagged urgent' : ''}). `
+    + (unverifiedRequester
+      ? 'The number this call is coming from is only a secondary contact on this account, so the request is '
+        + 'flagged for the office to verify who is asking. Do NOT read back or confirm any account details, '
+        + 'and do not tell the caller anything is approved. '
+      : '')
     + (covered
       ? 'This lane is covered by their plan, so the re-service itself is free — you may say that. '
       : 'Do NOT tell the caller whether it is free or chargeable; a team member will confirm coverage. ')

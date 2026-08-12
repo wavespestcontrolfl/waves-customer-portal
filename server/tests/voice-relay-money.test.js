@@ -158,40 +158,75 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('matched caller → lines from buildPricingBundle().frequencies + persisted totals', async () => {
+  test('matched caller → per-APPLICATION lines from buildPricingBundle().frequencies, and NO combined plan total', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     // THE mechanism is consulted, with the estimate ROW.
     expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
     // The LIVE quote engine still is not.
     expect(generateEstimate).not.toHaveBeenCalled();
-    // Owner rule: "per application", never "per visit".
-    expect(out).toContain('Quarterly pest control at $41.50 per month, $124.50 per application');
+    // Owner rule: "per application", never "per visit" — and the per-application
+    // price LEADS, exactly as the customer's own estimate card does. This
+    // fixture carries no `billedPerApplication` flag, so it is a legacy
+    // monthly-billed row and keeps PriceCard's "Billed $X/mo" note underneath.
+    expect(out).toContain('Quarterly pest control at $124.50 per application, billed $41.50 per month');
     expect(out).not.toMatch(/per visit/i);
-    expect(out).toContain('$41.50 per month');
-    expect(out).toContain('$498 per year');
-    expect(out).toContain('$99 one-time');
+    // ⭐ NO COMBINED PLAN TOTALS on a customer-facing estimate surface
+    // (AGENTS.md "Per application" price copy, owner 2026-07-23). The
+    // estimate's persisted monthly_total/annual_total are never spoken.
+    expect(out).not.toMatch(/estimate total/i);
+    expect(out).not.toContain('$498');
+    expect(out).not.toMatch(/per year/i);
+    // One-time work is a single real charge and still prints.
+    expect(out).toContain('one-time work totalling $99');
     expect(out).toMatch(/prices the estimate was SENT at/);
     expect(out).toMatch(/never re-price/i);
+    expect(out).toMatch(/never add them up into a combined monthly or yearly plan total/i);
     assertNoWrites();
+  });
+
+  // A FLAGGED per-application frequency bills exactly its headline, so the
+  // customer's estimate card shows no monthly note (PriceCard
+  // showBilledMonthlyNote) — neither may the phone.
+  test('a billedPerApplication frequency speaks the per-application price ALONE', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [{
+        key: 'quarterly',
+        monthly: 41.5,
+        annual: 498,
+        billedPerApplication: true,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Quarterly pest control', monthly: 41.5, perTreatment: 124.5, visitsPerYear: 4 },
+        ],
+      }],
+    });
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toContain('Quarterly pest control at $124.50 per application');
+    expect(out).not.toMatch(/per month/i);
+    expect(out).not.toMatch(/per year/i);
   });
 
   // The bundle offers a cadence LADDER; the sent estimate is one rung of it.
   test('the cadence spoken is the one matching the estimate row\'s own totals', async () => {
     primeDb({ estimates: [{ ...SENT_ESTIMATE, monthly_total: 58, annual_total: 696 }] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
-    expect(out).toContain('Bi-monthly pest control at $58 per month');
+    expect(out).toContain('Bi-monthly pest control at $116 per application');
     expect(out).not.toContain('Quarterly pest control at');
   });
 
   // buildPricingBundle does a live DB read and can throw; a caller is on the
-  // line, and the persisted totals are still honest.
-  test('a failing bundle degrades to the persisted totals — never a guessed number', async () => {
+  // line. The per-application lines ARE the price, so there is nothing honest
+  // left to say — and the persisted combined totals are exactly what may not be
+  // spoken.
+  test('a failing bundle refuses to state a price rather than fall back to the combined totals', async () => {
     buildPricingBundle.mockRejectedValue(new Error('pool exhausted'));
     primeDb({ estimates: [SENT_ESTIMATE] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).not.toMatch(/quoted lines/);
-    expect(out).toContain('$41.50 per month'); // the row's own persisted total
+    expect(out).toMatch(/do NOT state a price for this one/i);
+    expect(out).not.toContain('$41.50');
+    expect(out).not.toContain('$498');
     expect(out).toMatch(/prices the estimate was SENT at/);
   });
 

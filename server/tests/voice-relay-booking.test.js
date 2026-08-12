@@ -228,6 +228,12 @@ function slotCtx(extra = {}) {
   let booked = false;
   return {
     customerId: CUSTOMER.id,
+    // The disclosure tier the ANI match itself earned. 'full' ONLY when the
+    // calling number IS the account's own `customers.phone`; a match on one of
+    // the `service_contact*_phone` slots caps at 'redacted' (relay-tools
+    // matchedCallerTier). Absent ⇒ redacted (fail closed), which is why every
+    // ctx that means "the account holder called" must say so explicitly.
+    customerTier: 'full',
     callSid: 'CA-relay-1',
     from: '+19415550142',
     resolveSlotRef: (ref) => slots.get(String(ref || '').trim().toUpperCase()) || null,
@@ -412,6 +418,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   test('booking for a looked-up account via customer_ref works; invented ref refused', async () => {
     const ctx = slotCtx({
       customerId: null,
+      customerTier: 'redacted',
       callSid: 'CA-relay-2',
       resolveLookupRef: (ref) => (ref === 'C1' ? CUSTOMER.id : null),
     });
@@ -434,12 +441,56 @@ describe('BOTH GATES ON — request_booking behavior', () => {
 
     jest.clearAllMocks();
     primeDb();
-    const out = await executeTool('request_booking', { ...GOOD_INPUT, customer_ref: 'C9' }, slotCtx({ customerId: null, resolveLookupRef: () => null }));
+    const out = await executeTool('request_booking', { ...GOOD_INPUT, customer_ref: 'C9' }, slotCtx({ customerId: null, customerTier: 'redacted', resolveLookupRef: () => null }));
     expect(out).toMatch(/not from a lookup_customer result/i);
     assertNoCreateWrites();
   });
 
-  test('the caller\'s OWN account carries no unverified warning', async () => {
+  // ⭐ THE P0 THIS LANE SHIPPED WITH. A caller whose number matches one of the
+  // `service_contact*_phone` slots — a lead-dedup column set that holds
+  // spouses, tenants and PRIOR OCCUPANTS — arrives with ctx.customerId SET and
+  // tier 'redacted' (relay-context findUniqueCustomerByAni caps it). The old
+  // `customerId !== ctx.customerId` test therefore scored them as the account
+  // holder and stamped NOTHING, so a prior occupant could put a booking on the
+  // current customer's calendar with no warning at all — and #3361 removed the
+  // office-review dispatch/reschedule hold, so a dispatcher can move that row
+  // without an explicit confirm step. The write is still allowed (a spouse
+  // calling about the family account is the common case); it is MARKED.
+  test('a REDACTED-tier contact-slot caller books on the matched account but is stamped UNVERIFIED', async () => {
+    await executeTool('request_booking', GOOD_INPUT, slotCtx({ customerTier: 'redacted' }));
+    expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
+    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+    // Still a PENDING office-review row — never a confirmed appointment.
+    expect(row.status).toBe('pending');
+    expect(row.customer_confirmed).toBe(false);
+    expect(row.customer_id).toBe(CUSTOMER.id);
+    // The warning LEADS the dispatcher-facing note.
+    expect(row.internal_notes).toMatch(/^⚠️ UNVERIFIED third-party requester — verify identity before confirming\./);
+    expect(row.internal_notes).toMatch(/secondary contact number/i);
+    expect(row.internal_notes).toContain('***0142');
+    expect(row.internal_notes).not.toContain('9415550142');
+    // …and the office confirm queue's card carries it in BOTH the payload and
+    // the synopsis the card actually renders.
+    const card = trxBuilders.triage_items.insert.mock.calls[0][0];
+    const payload = JSON.parse(card.payload);
+    expect(payload.unverified_requester).toBe(true);
+    expect(payload.unverified_requester_note).toMatch(/UNVERIFIED third-party requester/);
+    const synopsis = require('../services/call-routing-gates').buildTriageItem.mock.calls[0][0].extraction.meta.call_summary;
+    expect(synopsis).toMatch(/UNVERIFIED third-party requester/);
+    assertNoComms();
+  });
+
+  // Fail closed: a ctx with NO tier at all is redacted, not full.
+  test('a ctx with no customerTier at all is treated as UNVERIFIED (fail closed)', async () => {
+    const ctx = slotCtx();
+    delete ctx.customerTier;
+    await executeTool('request_booking', GOOD_INPUT, ctx);
+    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+    expect(row.internal_notes).toMatch(/UNVERIFIED third-party requester/);
+    expect(JSON.parse(trxBuilders.triage_items.insert.mock.calls[0][0].payload).unverified_requester).toBe(true);
+  });
+
+  test('the caller\'s OWN account at FULL tier carries no unverified warning', async () => {
     await executeTool('request_booking', GOOD_INPUT, slotCtx());
     const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
     expect(row.internal_notes).not.toMatch(/UNVERIFIED/);

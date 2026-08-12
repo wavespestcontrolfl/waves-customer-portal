@@ -685,8 +685,19 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
       services: { pest: { frequency: 'quarterly' } },
     }));
     expect(out).toContain('$112 per application');
-    expect(out).toContain('$37.33');
-    expect(out).toContain('$448');
+    // ⭐ NO COMBINED PLAN TOTALS. AGENTS.md ("Per application" price copy,
+    // owner 2026-07-23) and public-ranges.js's own header rule on this SAME
+    // engine output ("no combined per-month or per-year program totals"). This
+    // reply used to append "billed monthly that is $37.33 per month; $448 per
+    // year" to every non-termite quote.
+    expect(out).not.toContain('$37.33');
+    expect(out).not.toContain('$448');
+    expect(out).not.toMatch(/per month/i);
+    // "4 applications per year" is a CADENCE COUNT, not a dollar total — the
+    // same thing PriceCard.jsx's cadence line renders ("Count only — no
+    // combined annual dollar total").
+    expect(out).toContain('4 applications per year');
+    expect(out).toMatch(/never add them up into a monthly or yearly plan total/i);
     // The fee is stated WITH its documented waiver (public-ranges.js: waived
     // when bundled with another recurring service or with annual prepay) —
     // stating it flat overquoted every caller about to bundle.
@@ -698,7 +709,7 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(out).not.toMatch(/per visit/i);
     // Every dollar figure in the reply came from the engine line.
     const dollars = out.match(/\$[\d.]+/g) || [];
-    expect(new Set(dollars)).toEqual(new Set(['$112', '$37.33', '$448', '$99']));
+    expect(new Set(dollars)).toEqual(new Set(['$112', '$99']));
   });
 
   test('termite_bait forces the trelona/basic program like public-quote and reports install + monitoring', async () => {
@@ -711,7 +722,36 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
       services: { termite: { system: 'trelona', monitoringTier: 'basic' } },
     }));
     expect(out).toContain('$610 station installation');
-    expect(out).toContain('$35 per month monitoring');
+    // ⭐ Residential termite bait monitoring is billed PER APPLICATION, not per
+    // month (owner 2026-07-20 — routes/public-quote.js deliberately keeps
+    // residential termite bait OUT of MONTHLY_BILLED_SERVICE_KEYS, and
+    // public-ranges.js publishes `termite_bait_monitoring` with
+    // `unit: 'per application'`). "$35 per month monitoring" quoted a billing
+    // unit the customer never pays.
+    expect(out).toContain('then $72 per application for monitoring');
+    expect(out).toContain('4 applications per year');
+    expect(out).not.toMatch(/per month/i);
+    expect(out).not.toContain('$420');
+  });
+
+  test('a genuinely monthly-billed line (no per-application signal) states the monthly ALONE, never an annual roll-up', async () => {
+    // No `perApp`/`perVisit` on the line: routes/public-quote.js's
+    // perApplicationForLine treats that absence as the design signal for a
+    // monthly-billed program (public-ranges.js publishes tree & shrub with
+    // `unit: 'per month'`).
+    generateEstimate.mockReturnValue({
+      lineItems: [{
+        service: 'tree_shrub', monthly: 88, annual: 1056,
+        monthlyAfterDiscount: 88, annualAfterDiscount: 1056,
+        visits: 6, requiresManualReview: false,
+      }],
+      summary: {},
+    });
+    const out = await executeTool('get_pricing', { service: 'tree_shrub', home_sqft: 2000, lot_sqft: 30000 }, { customerId: 'c-1111' });
+    expect(out).toContain('$88 per month');
+    expect(out).toContain('6 applications per year');
+    // The annual roll-up is never spoken — the monthly is the whole price.
+    expect(new Set(out.match(/\$[\d.]+/g) || [])).toEqual(new Set(['$88']));
   });
 
   test('manual-review line → refuses to state a price', async () => {

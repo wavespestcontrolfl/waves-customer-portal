@@ -374,14 +374,36 @@ async function requestBookingText(input = {}, ctx = {}) {
     customerId = ctx.customerId || null;
   }
   if (!customerId) return REFUSE_NO_CUSTOMER;
-  // ⭐ AN UNVERIFIED THIRD-PARTY REQUESTER. lookup_customer can hand back a ref
-  // for an account the caller's phone did NOT match, so a caller who knows a
-  // name and a street can put a pending booking on a stranger's account — and
-  // the office confirming it runs runOutboundReviewConfirmHook, which arms
-  // reminders and opens the card-on-file funnel toward that customer. The row
-  // and the review card both carry a loud, explicit warning so the human who
-  // confirms it knows to verify identity first.
-  thirdParty = customerId !== (ctx.customerId || null);
+  // ⭐ AN UNVERIFIED THIRD-PARTY REQUESTER — AND THERE ARE TWO WAYS TO BE ONE.
+  //
+  //  (a) A LOOKED-UP REF. lookup_customer can hand back a ref for an account
+  //      the caller's phone did NOT match, so a caller who knows a name and a
+  //      street can put a pending booking on a stranger's account.
+  //
+  //  (b) A REDACTED-TIER ANI MATCH — the hole this comparison used to have.
+  //      The ANI match only earns 'full' when the calling number IS the
+  //      account's own `customers.phone`; a match on one of the
+  //      `service_contact*_phone` slots (a lead-dedup column set that holds
+  //      spouses, tenants and PRIOR OCCUPANTS) recognises the account and
+  //      authenticates NOBODY (relay-context.findUniqueCustomerByAni,
+  //      relay-tools.matchedCallerTier — the same predicate every read path
+  //      already honours). Those callers arrive with ctx.customerId SET, so an
+  //      id-only comparison scored them as the account holder and stamped
+  //      nothing at all.
+  //
+  // The write stays ALLOWED in both cases — a spouse calling about the family
+  // account is the common, legitimate case — but it is marked UNVERIFIED. The
+  // office confirming this row runs runOutboundReviewConfirmHook, which arms
+  // reminders and opens the card-on-file funnel toward that customer, and
+  // #3361 removed the office-review dispatch/reschedule hold, so a pending
+  // voice booking can be MOVED by a dispatcher with no explicit confirm step.
+  // The written warning is therefore the primary signal a human gets: it lands
+  // on the row's internal_notes, the triage card's synopsis, and the card
+  // payload.
+  const { matchedCallerTier } = require('./relay-tools');
+  const unverifiedTier = matchedCallerTier(ctx) !== 'full';
+  const lookedUpAccount = customerId !== (ctx.customerId || null);
+  thirdParty = lookedUpAccount || unverifiedTier;
 
   // The OPAQUE SLOT REF the availability tools handed the model. Refs, not an
   // echoed 'YYYY-MM-DD' + '9:00 AM' pair: speakSlot says "Tuesday August 18 at
@@ -458,10 +480,18 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
 
   const { maskPhone } = require('./relay-protocol');
-  const unverifiedNote = thirdParty
-    ? `UNVERIFIED third-party requester — verify identity before confirming. Requested by the caller on `
-      + `${maskPhone(ctx.from)}, whose phone number does NOT match this account.`
-    : null;
+  // Same loud opener either way (the office queue and the dispatch JobDrawer
+  // both key on it); the second sentence says WHICH kind of unverified this is,
+  // because "matched a secondary contact slot" and "did not match at all" are
+  // different things to verify.
+  const unverifiedNote = !thirdParty
+    ? null
+    : (lookedUpAccount
+      ? 'UNVERIFIED third-party requester — verify identity before confirming. Requested by the caller on '
+        + `${maskPhone(ctx.from)}, whose phone number does NOT match this account.`
+      : 'UNVERIFIED third-party requester — verify identity before confirming. The caller on '
+        + `${maskPhone(ctx.from)} matched this account only on a secondary contact number `
+        + '(spouse, tenant, or a previous occupant), NOT the account holder\'s own number.');
   const requestedSummary = String(input.service || '').trim().slice(0, 160);
   const windowStart = slot.start_time || slot.startTime24;
   const insertData = {
@@ -487,8 +517,10 @@ async function requestBookingText(input = {}, ctx = {}) {
     notes: 'Requested via the Waves phone assistant. A team member will confirm the time.',
     // Dispatcher-only review cue (surfaced in the dispatch JobDrawer).
     internal_notes: [
+      // The UNVERIFIED stamp LEADS: the JobDrawer truncates, and #3361 removed
+      // the dispatch/reschedule hold, so this line must survive a glance.
+      unverifiedNote ? `⚠️ ${unverifiedNote}` : null,
       'Voice-agent booking request — CONFIRM with customer before dispatch (pending review).',
-      unverifiedNote,
       requestedSummary && requestedSummary.toLowerCase() !== String(catalogRow.name || '').toLowerCase()
         ? `Caller asked for: ${requestedSummary}.`
         : null,

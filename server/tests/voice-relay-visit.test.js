@@ -10,8 +10,10 @@
  *     terminal operational status outranks a stale track_state
  *   - looked-up refs get existence only (no window, no live tech position)
  *   - get_service_report is matched-caller only, honours the typedReportDelivery
- *     suppression predicate, uses customerSafeServiceNotes, and takes re-entry
- *     wording ONLY from the shaping helper (never composed, never "safe")
+ *     suppression predicate, speaks PARSER-APPROVED note copy only
+ *     (technicianReportCustomerCopy, then customerSafeServiceNotes), and takes
+ *     re-entry wording ONLY from the shaping helper (never composed, never
+ *     "safe")
  *   - "per application" never "per visit"
  */
 
@@ -249,10 +251,23 @@ describe('get_today_eta', () => {
   });
 });
 
+// Free-form INTERNAL notes — the realistic default. This is exactly what
+// AGENTS.md means by raw technician_notes ("access codes, billing notes"), and
+// technicianReportCustomerCopy parses it to null, so none of it is speakable.
 const RECORD = {
   id: 'sr-1', service_date: '2026-07-31', service_type: 'Pest Control',
   technician_notes: 'knocked down webs on the lanai', structured_notes: null, status: 'completed',
 };
+// The REVIEWED two-section draft the technician edits and approves at
+// completion — the one sanctioned source of customer note copy
+// (services/service-report/technician-report-copy.js, the same parse that feeds
+// the written report's summary slot).
+const REVIEWED_REPORT_NOTES = [
+  'WHAT WE DID',
+  'We treated the exterior perimeter and knocked down webs on the lanai.',
+  'WHAT WE FOUND',
+  'Light ant activity along the kitchen slab and no other concerns.',
+].join('\n');
 
 describe('get_service_report', () => {
   test('matched caller → findings, applications, customer-safe note; per APPLICATION wording', async () => {
@@ -267,13 +282,48 @@ describe('get_service_report', () => {
     expect(out).toContain('Keep the area dry for a week');
     expect(out).toContain('Termidor SC');
     expect(out).toContain('ants, spiders');
-    expect(out).toContain('SAFE:knocked down webs'); // the customer-facing scrub is the only notes path
+    // ⭐ RAW technician_notes NEVER EGRESS ON A REPORT PATH (AGENTS.md; owner
+    // ruling 2026-07-16 recorded in report-data.js's `legacy` block). This
+    // fixture's notes are free-form internal text, so the reviewed parse
+    // returns null and NOTHING of them is spoken. customerSafeServiceNotes
+    // alone is not that parse — it only scrubs the WDO inspection fee and
+    // returns an ordinary visit's notes verbatim.
+    expect(out).not.toContain('knocked down webs');
+    expect(out).not.toContain('SAFE:');
+    expect(out).not.toMatch(/report summary/i);
     // Owner rule + compliance:
     expect(out).toContain('Products used on this application');
     expect(out).not.toMatch(/per visit/i);
     expect(out).toMatch(/never tell a caller an area or product is "safe"/);
     expect(out).not.toMatch(TOKEN_LEAK_RE);
     assertNoWrites();
+  });
+
+  test('the REVIEWED two-section draft IS speakable, and still goes through the fee scrub', async () => {
+    primeDb({ service_records: [{ ...RECORD, technician_notes: REVIEWED_REPORT_NOTES }] });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    // The parse joins the two reviewed lines into one customer-ready body, and
+    // the WDO inspection-fee scrub still runs on top of it (SAFE: prefix).
+    expect(out).toContain('The technician\'s reviewed report summary: SAFE:We treated the exterior perimeter');
+    expect(out).toContain('Light ant activity along the kitchen slab');
+    // The section HEADERS are never spoken — the parse strips them.
+    expect(out).not.toContain('WHAT WE DID');
+    expect(customerSafeServiceNotes).toHaveBeenCalledWith(
+      expect.not.stringContaining('WHAT WE DID'), expect.anything(),
+    );
+  });
+
+  test('an internal note APPENDED to the reviewed draft rejects the whole parse — nothing is spoken', async () => {
+    primeDb({
+      service_records: [{
+        ...RECORD,
+        technician_notes: `${REVIEWED_REPORT_NOTES}\nGate code 4417, bill the office`,
+      }],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toContain('4417');
+    expect(out).not.toMatch(/report summary/i);
+    expect(out).not.toContain('We treated the exterior perimeter');
   });
 
   test('re-entry wording comes ONLY from the shaping helper, quoted verbatim', async () => {

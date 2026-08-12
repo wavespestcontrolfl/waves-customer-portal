@@ -141,12 +141,22 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
 /**
  * Build the owner-facing body for a voice-filed RE-SERVICE. Internal surface.
  */
-function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId }) {
+function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId, unverifiedRequester, unverifiedNote }) {
   const lines = [
     `${urgency === 'urgent' ? '🚨 URGENT ' : ''}Re-service filed by the phone assistant`,
+  ];
+  // ⭐ SECOND LINE, ALWAYS, when the caller only matched a secondary contact
+  // slot (spouse/tenant/prior occupant — relay-reservice's stamp). The body is
+  // sliced to MAX_ALERT_BODY and the bell/push render truncates again, so a
+  // warning further down could be cut off; this one cannot be.
+  if (unverifiedRequester) {
+    lines.push(`⚠️ ${alertSafe(unverifiedNote, 200)
+      || 'UNVERIFIED third-party requester — verify identity before confirming.'}`);
+  }
+  lines.push(
     `Lane: ${alertSafe(lane, 20)}`,
     alertSafe(subject || issue, 200),
-  ];
+  );
   if (covered) lines.push('Covered by their plan (free re-service).');
   if (requestId) lines.push(`Request ${alertSafe(requestId, 40)}`);
   // The ticket queue is a known black hole — this alert IS the routing fix.
