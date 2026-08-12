@@ -59,6 +59,53 @@ describe('decidePushRoute', () => {
   });
 });
 
+describe('pushEligibleRuntime', () => {
+  // Minimal chainable knex stub: knex(table).where(...).first(...) resolves
+  // the fixture (or throws when the fixture is an Error).
+  const stubKnex = (tables) => (name) => ({
+    where() { return this; },
+    async first() {
+      const v = tables[name];
+      if (v instanceof Error) throw v;
+      return v;
+    },
+  });
+  const T0 = '2026-08-01T12:00:00Z';
+
+  it('routes when the recipient is the account holder and prefs are seeded defaults', async () => {
+    const knex = stubKnex({
+      customers: { phone: '+1 (941) 555-0123' },
+      notification_prefs: { en_route_channel: 'sms', created_at: T0, updated_at: T0 },
+    });
+    await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(true);
+  });
+
+  it('routes when no prefs row exists at all', async () => {
+    const knex = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: undefined });
+    await expect(_test.pushEligibleRuntime('c-1', '+19415550123', 'tech_en_route', knex)).resolves.toBe(true);
+  });
+
+  it('vetoes when the customer actually saved preferences (updated_at moved)', async () => {
+    const knex = stubKnex({
+      customers: { phone: '9415550123' },
+      notification_prefs: { en_route_channel: 'sms', created_at: T0, updated_at: '2026-08-03T09:00:00Z' },
+    });
+    await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
+  });
+
+  it('vetoes secondary-contact recipients (to is not the account holder phone)', async () => {
+    const knex = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: undefined });
+    await expect(_test.pushEligibleRuntime('c-1', '9415559999', 'tech_en_route', knex)).resolves.toBe(false);
+  });
+
+  it('vetoes on customer or prefs lookup failure', async () => {
+    const bad = stubKnex({ customers: new Error('db down') });
+    await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', bad)).resolves.toBe(false);
+    const badPrefs = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: new Error('db down') });
+    await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', badPrefs)).resolves.toBe(false);
+  });
+});
+
 describe('policy table hygiene', () => {
   it('never lists conversational or tokenized-link templates', () => {
     for (const t of ['manual', 'ai_assistant', 'review_request', 'payment_link', 'internal_alert']) {

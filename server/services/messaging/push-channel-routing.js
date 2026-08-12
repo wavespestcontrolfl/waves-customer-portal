@@ -148,10 +148,24 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
     const ERR = Symbol('prefs-lookup-failed');
     const prefsRow = await knex('notification_prefs')
       .where({ customer_id: customerId })
-      .first(col)
+      .first(col, 'created_at', 'updated_at')
       .catch(() => ERR);
     if (prefsRow === ERR) return false; // unknown preference → SMS
-    if (prefsRow) return false; // saved explicit channel choice → SMS
+    // Provenance, not presence: existing customers were globally BACKFILLED
+    // with default rows, and creation paths seed them too — treating any
+    // row as a choice would veto nearly every customer and make the gate
+    // inert. The portal save handler stamps updated_at on every customer
+    // save, while seeded rows keep updated_at == created_at, so a
+    // meaningful gap = the customer actually saved preferences → honor
+    // their chosen channel and stay on SMS.
+    if (prefsRow) {
+      const created = new Date(prefsRow.created_at).getTime();
+      const updated = new Date(prefsRow.updated_at).getTime();
+      const customerTouched = !Number.isFinite(created) || !Number.isFinite(updated)
+        ? true // unparseable provenance → fail toward SMS
+        : (updated - created) > 2000;
+      if (customerTouched) return false;
+    }
   }
   return true;
 }
