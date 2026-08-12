@@ -132,6 +132,22 @@ describe('buildReportCrossSell', () => {
     expect(result.currentServices).toBeUndefined();
   });
 
+  test('the offer fingerprint covers every rendered field', () => {
+    const { offerFingerprint } = _private;
+    const base = {
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+      option: { id: 'lawn-basic', label: 'Lawn Care', cadence: '9 applications', perVisit: 74.5, waveguardTier: 'silver', confidence: 'high' },
+    };
+    expect(offerFingerprint(base)).toBe(offerFingerprint({ ...base }));
+    // Every visible field moves the digest — including the ones the old
+    // field-by-field check ignored (pre-push P1).
+    expect(offerFingerprint({ ...base, relationship: 'start' })).not.toBe(offerFingerprint(base));
+    expect(offerFingerprint({ ...base, label: 'Lawn Program' })).not.toBe(offerFingerprint(base));
+    expect(offerFingerprint({ ...base, option: { ...base.option, cadence: '6 applications' } })).not.toBe(offerFingerprint(base));
+    expect(offerFingerprint({ ...base, option: { ...base.option, waveguardTier: 'gold' } })).not.toBe(offerFingerprint(base));
+    expect(offerFingerprint({ ...base, option: { ...base.option, perVisit: 74.51 } })).not.toBe(offerFingerprint(base));
+  });
+
   test('customer with no recurring ownership at all gets the start-relationship copy stance', async () => {
     // One-time-treatment customer: no upcoming recurring rows, a report
     // identity that resolves no ownership family, no plan-rate rows. There

@@ -88,6 +88,20 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 
+// Stable digest of every field the card RENDERS. Key order is fixed by
+// construction, so the same visible offer always hashes identically.
+function offerFingerprint(payload = {}) {
+  const o = payload.option || {};
+  const canonical = [
+    payload.serviceKey || '', payload.label || '', payload.mode || '',
+    payload.relationship || '',
+    o.id || '', o.label || '', o.cadence || '',
+    o.perVisit == null ? '' : Number(o.perVisit).toFixed(2),
+    o.waveguardTier || '', o.confidence || '',
+  ].join('|');
+  return require('crypto').createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
 function optionIsPriceable(option) {
   if (!option) return false;
   if (option.manualReview) return false;
@@ -512,7 +526,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence;
 
-    return {
+    const payload = {
       serviceKey: targetKey,
       label: OFFER_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
@@ -539,6 +553,13 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         confidence: option.confidence || null,
       } : null,
     };
+    // Server-issued fingerprint over EVERY customer-visible field (pre-push
+    // P1): the click path compares this one value instead of enumerating
+    // fields, so a change to relationship, label, cadence, or tier under a
+    // stable option id + price can no longer persist a snapshot the
+    // customer never saw. Recomputed identically on the click path; any
+    // drift 409s and the card prompts a refresh.
+    return { ...payload, fingerprint: offerFingerprint(payload) };
   } catch (err) {
     logger.warn(`[report-cross-sell] suppressed (${err.message})`);
     return null;
@@ -548,5 +569,5 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
 module.exports = {
   buildReportCrossSell,
   // Test hooks: ladder + priceability are the card's two decisions.
-  _private: { pickOfferTarget, pickOption, optionIsPriceable, OFFER_LADDER },
+  _private: { pickOfferTarget, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER },
 };

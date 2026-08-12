@@ -1113,7 +1113,13 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
         // cent (codex #3367 r8: a quote-only card that became priced before
         // the click must not record "shown $X" the customer never saw; a
         // priced card whose price moved must re-render first).
+        // The server-issued fingerprint covers every RENDERED field
+        // (relationship, label, cadence, tier included — pre-push P1), so
+        // any drift between what the customer saw and what the server now
+        // computes rejects, not just key/mode/price/option drift.
+        const clickedPrint = String(metadata.fingerprint || '').trim();
         const offerMismatch = !crossSell
+          || !clickedPrint || clickedPrint !== crossSell.fingerprint
           || !clickedKey || clickedKey !== crossSell.serviceKey
           || !clickedMode || clickedMode !== crossSell.mode
           || (crossSell.mode === 'priced'

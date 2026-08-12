@@ -2961,6 +2961,9 @@ function CrossSellCard({ data, token, mode }) {
       optionId: option.id || null,
       perApplication: option.perVisit || null,
       offerMode: offer.mode,
+      // Server-issued digest of everything this card rendered — the click
+      // path rejects any drift from what the customer actually saw.
+      fingerprint: offer.fingerprint || null,
     });
     // 409 = the server-recomputed offer no longer matches this render —
     // retrying the same stale payload can never succeed, so prompt a
