@@ -311,7 +311,14 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
   // enrollment, no enrollment without its row). Fail toward skip
   // (retryable on the next trigger).
   try {
-    return await db.transaction(async (trx) => {
+    // The enrollment-confirmation email is handed back by
+    // enrollConsentedMethod in savepoint mode instead of being sent when
+    // the savepoint releases (Codex #3361 r27 P1): nothing customer-facing
+    // may fire until the transaction below actually COMMITS — a satisfied-
+    // row failure after the savepoint rolls the Auto Pay flags back, and an
+    // email announcing that rolled-back enrollment would be a lie.
+    let deferredEnrollmentEmail = null;
+    const secured = await db.transaction(async (trx) => {
       const live = await trx('scheduled_services')
         .where({ id: visit.id })
         .forUpdate()
@@ -331,6 +338,7 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         logger.warn(`[appt-card-request] auto-secure enrollment refused (${enrollment?.reason || 'unknown'}) for visit ${visit.id} — left retryable`);
         return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
       }
+      deferredEnrollmentEmail = enrollment.sendEnrollmentConfirmation || null;
       const inserted = await trx('appointment_card_requests')
         .insert({
           scheduled_service_id: visit.id,
@@ -377,6 +385,14 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       }
       return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
     });
+    // Post-COMMIT only: reaching here means the transaction resolved, and
+    // deferredEnrollmentEmail is only ever assigned on the path that
+    // commits the auto_secured result (a refused enrollment returned skip
+    // before the assignment; a throw skipped this block entirely).
+    if (secured?.action === 'auto_secured' && deferredEnrollmentEmail) {
+      try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
+    }
+    return secured;
   } catch (err) {
     logger.warn(`[appt-card-request] auto-secure enrollment failed for visit ${visit.id} — left retryable: ${err.message}`);
     return skip('enrollment_failed');

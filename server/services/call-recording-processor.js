@@ -11776,19 +11776,20 @@ const CallRecordingProcessor = {
                 // conversion; moved slot → guarded resync). Best-effort on
                 // this rail: a failed repair logs, and a re-delivered
                 // replay (or the visit's own next edit) re-runs it.
+                let replaySlotVerified = false;
                 try {
                   const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');
-                  const slotVerified = await verifyReminderSlotAfterRegistration(db, {
+                  replaySlotVerified = await verifyReminderSlotAfterRegistration(db, {
                     serviceId: svc.id,
                     slotDate: replaySlotDate,
                     slotStart: replaySlotStart,
                     routeTag: 'call-proc-replay',
                   });
-                  if (!slotVerified) {
-                    logger.warn(`[call-proc] replay slot verify left ${svc.id} unrepaired — a later replay or the visit's own edits resync it`);
+                  if (!replaySlotVerified) {
+                    logger.warn(`[call-proc] replay slot verify left ${svc.id} unrepaired — confirmation repairs skipped; a later replay or the visit's own edits resync it`);
                   }
                 } catch (slotVerifyErr) {
-                  logger.warn(`[call-proc] replay slot verify failed for ${svc.id}: ${slotVerifyErr.message}`);
+                  logger.warn(`[call-proc] replay slot verify failed for ${svc.id} — confirmation repairs skipped: ${slotVerifyErr.message}`);
                 }
                 // Confirmation repair, evidence-gated: the reused-row branch
                 // below never re-sends inline, and selfHealMissingReminderRows
@@ -11808,8 +11809,14 @@ const CallRecordingProcessor = {
                 // confirmation repairs outright: a windowless visit has no
                 // time to confirm — its registration above is the pre-closed
                 // placeholder, and any confirmation would render a time
-                // nobody chose (Codex #3361 r24 P1).
-                if (replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                // nobody chose (Codex #3361 r24 P1). A FAILED slot verify
+                // skips them too (Codex #3361 r27 P2): the repairs below are
+                // built on replaySlotStart, and with the verify unrepaired
+                // that slot may be stale — re-arming the sweep or emailing
+                // from it would send the customer an obsolete time. The
+                // retry rail is the same one the verify itself leans on: a
+                // later replay (or the visit's own next edit) re-runs both.
+                if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
                   try {
                     // ALL THREE delivery ledgers, not just messaging_audit_log
                     // (Codex #3361 r7 P2): appointment EMAILS audit into
@@ -11864,7 +11871,7 @@ const CallRecordingProcessor = {
                   } catch (confirmRepairErr) {
                     logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                   }
-                } else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {
+                } else if (replaySlotVerified && replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {
                   // Consent-blocked SMS with email still permitted: the
                   // inline r21 fallback emails the confirmation, but a crash
                   // between the committed insert and that send loses it — and
@@ -11897,6 +11904,12 @@ const CallRecordingProcessor = {
                         // confirmation opt-out, and the prefs-unavailable
                         // fail-closed rule before its email fallback runs.
                         smsAttempt: async () => false,
+                        // The reused-row liveness snapshot above is stale by
+                        // now — a cancellation committed since must win, so
+                        // the sender re-reads the status immediately before
+                        // its email leg (Codex #3361 r27 P2). Fail-closed;
+                        // the evidence-gated retry re-runs on a later replay.
+                        requireLiveVisitStatus: true,
                       });
                       if (reached) {
                         logger.info(`[call-proc] replay of ${svc.id}: consent-blocked SMS — confirmation email repaired`);

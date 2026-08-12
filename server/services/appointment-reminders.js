@@ -406,7 +406,28 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
 // sendCustomerMessage validator that suppresses their SMS. The email/both
 // branches ignore the flag: deliverAppointmentNotice already runs its own
 // email leg, and a second send here would double-deliver.
-async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false }) {
+//
+// `requireLiveVisitStatus`: repair/replay callers set this — their visit
+// snapshot can be arbitrarily stale by the time this send runs, and a
+// cancellation committed in that gap must win: a booking confirmation
+// after a cancellation reads as a re-booking (Codex #3361 r27 P2). The
+// status is re-read immediately before each delivery leg and the send is
+// skipped (false) unless the visit is still pre-visit live; a failed read
+// also skips — fail closed, the caller's repair rail retries. Booking-time
+// callers omit it: they just created/confirmed the row in-flow.
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false, requireLiveVisitStatus = false }) {
+  const visitStillLive = async () => {
+    if (!requireLiveVisitStatus || !scheduledServiceId) return true;
+    try {
+      const row = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('status');
+      return !!row && ['pending', 'confirmed', 'rescheduled'].includes(String(row.status || ''));
+    } catch (liveErr) {
+      logger.warn(`[appt-remind] confirmation live-status recheck failed for ${scheduledServiceId} — skipping send: ${liveErr.message}`);
+      return false;
+    }
+  };
   let channel = 'sms';
   let confirmationOn = true;
   // Fail-closed marker for the email fallback below: getReminderPrefs
@@ -431,6 +452,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // for opted-out customers) — and we must NOT email them, because the email
   // path bypasses that validator.
   if (channel === 'sms' || !confirmationOn) {
+    if (!(await visitStillLive())) return false;
     const smsOk = await smsAttempt();
     if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
     // Consent-blocked text on the default channel: reach them by email.
@@ -440,6 +462,9 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     if (!resolvedApptTime && scheduledServiceId) {
       resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
     }
+    // Re-checked HERE, immediately before the email leg — the apptTime
+    // resolution above widens the gap after the pre-SMS check.
+    if (!(await visitStillLive())) return false;
     return deliverAppointmentEmailFallback({
       kind: 'confirmation',
       customerId,
@@ -455,6 +480,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   if (!resolvedApptTime && scheduledServiceId) {
     resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
   }
+  if (!(await visitStillLive())) return false;
   return deliverAppointmentNotice({
     channel,
     kind: 'confirmation',

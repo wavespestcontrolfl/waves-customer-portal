@@ -18,6 +18,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -301,6 +302,26 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     try {
       const { requestCardForAppointment } = require('./appointment-card-request');
       let cardCallOpts = {};
+      if (!opts.suppressCardAskWithoutClearance) {
+        // OFFICE confirmation is a call-level clearance decision — the
+        // human just re-confirmed the appointment with the customer, the
+        // same trust point that releases this leg's send. Stamp it durably
+        // BEFORE the funnel call so the pre-visit sweep can re-admit this
+        // row later: the sweep no longer treats status='confirmed' as
+        // office confirmation, because a lazily-activated legacy row
+        // (silent reschedule) carries that status too (Codex #3361 r27
+        // P1). Never overwrites a processor stamp; recipient is left to
+        // the funnel's normal resolution. Warn-only — a failed stamp only
+        // costs the sweep re-admission, and this leg's own send still runs.
+        try {
+          await db('scheduled_services')
+            .where({ id: svc.id })
+            .whereNull('call_sms_cleared_at')
+            .update({ call_sms_cleared_at: new Date() });
+        } catch (stampErr) {
+          logger.warn(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id}: ${stampErr.message}`);
+        }
+      }
       if (opts.suppressCardAskWithoutClearance) {
         // Only a durable call-level clearance stamp lets the lazy path send;
         // otherwise non-messaging mode (auto-secure still runs, the
@@ -338,7 +359,46 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
     const postSlot = await dbh('scheduled_services')
       .where({ id: serviceId })
       .first('scheduled_date', 'window_start');
-    if (postSlot && !postSlot.window_start && slotStart) {
+    // The verification SUBJECT is the PERSISTED reminder row, not this
+    // registration's arguments (Codex #3361 r27 P2): an activation retry
+    // whose earlier attempt armed the row at stale slot A (and whose
+    // post-registration resync then failed) re-registers with current slot
+    // B — registerAppointment's dedupe returns the A row untouched, and an
+    // args-only comparison (B vs the service's still-current B) declares
+    // success while the reminder keeps quoting A. Compare what actually
+    // persists against the service's current slot; the registration args
+    // remain only the fallback when no row is readable.
+    let persisted = null;
+    if (postSlot) {
+      persisted = await dbh('appointment_reminders')
+        .where({ scheduled_service_id: serviceId, cancelled: false })
+        .first('id', 'appointment_time', 'windows_preclosed');
+    }
+    const registeredSlotMoved = !!postSlot
+      && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
+        || String(postSlot.window_start || '') !== String(slotStart || ''));
+    // Windowless service ⇒ the persisted row must be the pre-closed
+    // placeholder — an ARMED row (whatever slot it holds, including a stale
+    // A the args comparison could never see) converts below.
+    const needsWindowlessConversion = !!postSlot && !postSlot.window_start
+      && (persisted ? persisted.windows_preclosed !== true : !!slotStart);
+    // Windowed service ⇒ the persisted row must be ARMED at exactly the
+    // composed current slot instant (the same parseETDateTime composition
+    // registration and the DB sync trigger build appointment_time with). A
+    // preclosed placeholder under a real window, a stale armed time, or an
+    // uncomposable slot all resync below.
+    let persistedSlotStale = false;
+    if (postSlot && postSlot.window_start) {
+      if (persisted) {
+        const expected = parseETDateTime(`${dateOnly(postSlot.scheduled_date)}T${String(postSlot.window_start).slice(0, 8)}`);
+        persistedSlotStale = persisted.windows_preclosed === true
+          || Number.isNaN(expected.getTime())
+          || new Date(persisted.appointment_time).getTime() !== expected.getTime();
+      } else {
+        persistedSlotStale = registeredSlotMoved;
+      }
+    }
+    if (needsWindowlessConversion) {
       // The verified slot went WINDOWLESS (a concurrent edit cleared
       // the arrival time after our registration armed a start): never
       // resync to the fabricated 09:00 fallback — convert the armed
@@ -429,8 +489,7 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
       } else {
         logger.info(`[${routeTag}] reminder converted to windowless placeholder after concurrent windowless move for ${serviceId}`);
       }
-    } else if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
-      || String(postSlot.window_start || '') !== String(slotStart || ''))) {
+    } else if (persistedSlotStale) {
       // expectSchedule = the observed slot, enforced atomically inside
       // handleReschedule: a SECOND move (B) landing after the postSlot
       // read makes this stale resync miss instead of stomping B's own

@@ -237,7 +237,7 @@ describe('replay repair — windowless reused rows register the placeholder (Cod
     // Confirmation repairs (sweep re-arm AND the email leg) are scoped to
     // visits that still have an arrival time per the fresh read, with a
     // write-time windows_preclosed belt on the re-arm.
-    expect(callProc).toContain('if (replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
+    expect(callProc).toContain('if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
     expect(callProc).toContain('.where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })');
   });
 
@@ -268,7 +268,7 @@ describe('auto-secure — enrollment serialized with cancellation (Codex r26 P1)
     const card = fs.readFileSync(path.join(__dirname, '../services/appointment-card-request.js'), 'utf8');
     const fnAt = card.indexOf('async function autoSecureFromSavedMethod');
     const fnSlice = card.slice(fnAt, fnAt + 5000);
-    expect(fnSlice).toContain('return await db.transaction(async (trx) => {');
+    expect(fnSlice).toContain('const secured = await db.transaction(async (trx) => {');
     expect(fnSlice).toContain('.forUpdate()');
     expect(fnSlice).toContain('dbh: trx,');
     expect(fnSlice).toContain("await trx('appointment_card_requests')");
@@ -570,11 +570,11 @@ describe('same-key replay — consent-blocked email confirmation repair (Codex r
     // that still have an arrival time (a windowless visit has no time to
     // confirm — Codex r24 P1; the start comes from the FRESH slot re-read,
     // not the reuse-trx snapshot — Codex r25 P2).
-    expect(callProc).toContain('} else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
+    expect(callProc).toContain('} else if (replaySlotVerified && replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
     // Evidence gate on the email audit ledger before re-sending, and the
     // repair goes through the channel-aware helper (opt-out + prefs
     // fail-closed enforced there) with the SMS leg stubbed off.
-    const branchAt = callProc.indexOf('} else if (replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
+    const branchAt = callProc.indexOf('} else if (replaySlotVerified && replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {');
     const branchSlice = callProc.slice(branchAt, branchAt + 3000);
     expect(branchSlice).toContain("interaction_type: 'email_outbound'");
     expect(branchSlice).toContain('smsPermanentlyBlocked: true,');
@@ -596,5 +596,70 @@ describe('live-booking confirmation — TCPA-blocked SMS email fallback (Codex r
     // card instead.
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(callProc).toContain('smsPermanentlyBlocked: v2SmsBlocked && !v2EmailBlocked,');
+  });
+});
+
+describe('round 27 — clearance is stamped, side effects wait for commits, repairs verify their slot (Codex r27)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('office confirm stamps call_sms_cleared_at; lazy activation never does (P1)', () => {
+    // The pre-visit sweep admits an outbound-review row ONLY on the durable
+    // clearance stamp now — status 'confirmed' also arrives via lazy
+    // activation of a silently-rescheduled legacy row, which is not a
+    // customer trust point. The stamp is written on the office-confirm card
+    // leg (the !suppressCardAskWithoutClearance branch), never overwriting a
+    // processor stamp; the suppressed lazy path only READS the stamp.
+    const hook = read('../services/outbound-review-confirm.js');
+    expect(hook).toContain(".whereNull('call_sms_cleared_at')");
+    expect(hook).toContain('if (!opts.suppressCardAskWithoutClearance) {');
+    const sweep = read('../services/previsit-card-request-sweep.js');
+    expect(sweep).not.toContain("outboundConfirmed");
+    expect(sweep).toContain("orWhereNotNull('s.call_sms_cleared_at')");
+  });
+
+  test('the auto-secure enrollment email fires only after the OUTER commit (P1)', () => {
+    // enrollConsentedMethod in savepoint mode returns the send as a
+    // callback instead of firing it when the savepoint releases; the
+    // auto-secure caller invokes it only on the committed auto_secured
+    // path. Behavior coverage: autopay-enrollment.test.js (savepoint mode).
+    const enroll = read('../services/autopay-enrollment.js');
+    expect(enroll).toContain('const runningInCallerTrx = dbh.isTransaction === true;');
+    expect(enroll).toContain('required: true,');
+    const card = read('../services/appointment-card-request.js');
+    expect(card).toContain('let deferredEnrollmentEmail = null;');
+    expect(card).toContain("if (secured?.action === 'auto_secured' && deferredEnrollmentEmail) {");
+  });
+
+  test('a failed replay slot verify gates BOTH confirmation repairs (P2)', () => {
+    // Both repairs are built on replaySlotStart; with the verify unrepaired
+    // that slot may be stale, and re-arming the sweep (or emailing) from it
+    // would send the customer an obsolete time.
+    const callProc = read('../services/call-recording-processor.js');
+    expect(callProc).toContain('replaySlotVerified && replaySlotStart && !v2SmsBlocked');
+    expect(callProc).toContain('replaySlotVerified && replaySlotStart && v2SmsBlocked');
+  });
+
+  test('the replay email repair re-checks visit liveness inside the shared sender (P2)', () => {
+    // A cancellation committing after the reused-row snapshot must win —
+    // the sender re-reads the status immediately before each delivery leg
+    // and fails CLOSED on a read error.
+    const callProc = read('../services/call-recording-processor.js');
+    expect(callProc).toContain('requireLiveVisitStatus: true,');
+    const reminders = read('../services/appointment-reminders.js');
+    expect(reminders).toContain('requireLiveVisitStatus = false }');
+    expect(reminders).toContain('const visitStillLive = async () => {');
+  });
+
+  test('the shared slot verify checks the PERSISTED reminder row, not just the registration args (P2)', () => {
+    // An activation retry whose earlier attempt armed the row at stale slot
+    // A re-registers with current slot B and the dedupe returns the A row
+    // untouched — an args-only comparison declares success while the
+    // reminder keeps quoting A.
+    const hook = read('../services/outbound-review-confirm.js');
+    expect(hook).toContain("first('id', 'appointment_time', 'windows_preclosed')");
+    expect(hook).toContain('persistedSlotStale');
+    expect(hook).toContain('needsWindowlessConversion');
   });
 });
