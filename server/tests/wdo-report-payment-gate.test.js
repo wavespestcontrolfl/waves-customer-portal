@@ -400,6 +400,12 @@ function mockTables({
     if (table === 'technicians') return chain({ first: jest.fn(async () => null) });
     if (table === 'activity_log') return chain({ insert: jest.fn(async (row) => { activityRows.push(row); return [1]; }) });
     if (table === 'service_records') return chain();
+    // The non-WDO mint locks the visit row before building lines
+    // (mint-serialization, codex #3344 r2); chain() carries forUpdate and a
+    // truthy first() row for the lock read.
+    if (table === 'scheduled_services') {
+      return chain({ first: jest.fn(async () => ({ id: 'sched-55' })) });
+    }
     throw new Error(`Unexpected table query: ${table}`);
   });
   db.transaction.mockImplementation(async (cb) => cb(db));
@@ -587,9 +593,12 @@ describe('send-with-invoice hold_report_until_paid', () => {
     mockTables({
       project,
       invoice: createdInvoice,
-      // No reusable draft, no already-paid invoice, then the row created by
-      // InvoiceService.create. This mirrors the first completion attempt.
-      invoiceFirstResults: [null, null, createdInvoice],
+      // No reusable draft, no already-paid invoice (pre-lock pass), the
+      // same two misses again for the in-lock re-check (codex r5 round —
+      // the advisory/visit locks repeat both checks before creating), then
+      // the row created by InvoiceService.create. Mirrors the first
+      // completion attempt.
+      invoiceFirstResults: [null, null, null, null, createdInvoice],
     });
 
     await withServer(async (baseUrl) => {

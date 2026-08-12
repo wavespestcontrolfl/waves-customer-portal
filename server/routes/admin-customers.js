@@ -253,7 +253,21 @@ function normalizeServiceKey(value) {
 }
 
 function cadenceFromEstimateLine(line, fallback = 'one_time') {
-  const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
+  // The full shared cadence-field vocabulary (codex r18 pre-push P0):
+  // reading only frequency/freq/cadence let a valid
+  // { frequencyKey: 'semiannual' } palm line pass catalog validation but
+  // prefill the quarterly fallback — the modal would create a quarterly
+  // series on the two-application service. First non-blank wins, same
+  // precedence as the converter's readers; `freq` is this reader's own
+  // legacy alias.
+  const frequency = String(
+    line?.frequency || line?.freq || line?.cadence
+    || line?.frequencyKey || line?.frequency_key
+    || line?.recurringPattern || line?.recurring_pattern
+    || line?.cadenceKey || line?.cadence_key
+    || line?.planFrequency || line?.plan_frequency
+    || ''
+  ).toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
   // Seasonal mosquito (9 visits): its quote rows carry frequency
@@ -272,6 +286,21 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   // so a 6-week quote pre-filled the modal as quarterly and the prepay
   // cadence-match preflight downgraded the booking (codex P2). The caller
   // translates this to the scheduler's custom/42-day representation.
+  // Explicitly one-time spellings resolve 'one_time' — never the recurring
+  // fallback (codex r18 P1): a { frequency: 'one_time' } palm row in the
+  // recurring list kept its one-time catalog match (r17) but then
+  // prefilled cadence 'quarterly' here, and the modal trusts the server
+  // cadence ahead of billingType — saving would create a quarterly series
+  // linked to the one-time service. The SHARED vocabulary
+  // (explicitlyOneTimeCadence) covers every cadence-field spelling
+  // (frequencyKey, recurring_pattern, planFrequency, …); the local token
+  // check additionally covers this reader's own `freq` alias, which the
+  // converter vocabulary does not carry.
+  try {
+    const { explicitlyOneTimeCadence } = require('../services/estimate-converter');
+    if (explicitlyOneTimeCadence(line || {})) return 'one_time';
+  } catch { /* fall through to the local token check */ }
+  if (['onetime', 'once', 'single'].includes(frequencyKey)) return 'one_time';
   if (frequencyKey.includes('every6week')) return 'every_6_weeks';
   if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
   if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
@@ -306,7 +335,10 @@ function serviceCatalogMatch(line, serviceIndex) {
   // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
   // into a service-wins fallback made the exact seasonal row unreachable —
   // the fuzzy matcher then returned mosquito_monthly.
-  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.key || '');
+  // service_key (snake) joined the explicit vocabulary (codex r22
+  // pre-push P0) — persisted lines carry it, and missing it bypassed the
+  // fail-closed palm contradiction guards.
+  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.service_key || line?.key || '');
   const rawKey = normalizeServiceKey(line?.service || '');
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [
@@ -317,6 +349,159 @@ function serviceCatalogMatch(line, serviceIndex) {
     ...(SERVICE_KEY_ALIASES[rawKey] || []),
     ...(SERVICE_KEY_ALIASES[labelKey] || []),
   ].filter(Boolean);
+
+  // Recurring palm (owner ruling 2026-08-11, codex #3349 r3 P1): the
+  // estimator's two-application palm line carries service 'palm_injection',
+  // whose exact-key match is the active ONE-TIME row — an admin-booked
+  // semiannual palm plan would inherit its one-time billing and token_only
+  // completion posture. Gate on the converter's OWN seeding resolver (the
+  // same gate the converter paths use) so a semiannual line routes to the
+  // recurring row while 1x and cadence-less palm lines keep the one-time
+  // match. No explicitKey guard needed: an explicit serviceKey selection
+  // stays candidate #1 ahead of this, mirroring the seasonal-mosquito rule.
+  // An EXPLICIT one-time palm selection beside recurring evidence is a
+  // contradiction (codex r18 pre-push P0): the exact-key match would carry
+  // the one-time id while the prefilled cadence (inferred from the visit
+  // count) submits a RECURRING series on it — recurring-plan work
+  // completing with one-time billing/token-only posture. Reject to
+  // unmatched; the operator resolves which program was actually sold. An
+  // explicit one-time key on a genuinely one-time line (1 visit,
+  // count-less) keeps its exact match.
+  if (explicitKey === 'palm_injection') {
+    try {
+      const {
+        visitsPerYearForRecurringService, visitCountFieldsConflict,
+        visitCountFieldsInvalid, explicitCadenceFieldForService,
+        explicitlyOneTimeCadence,
+      } = require('../services/estimate-converter');
+      const visits = visitsPerYearForRecurringService(line || {});
+      const contradictsOneTime = visitCountFieldsConflict(line || {})
+        || visitCountFieldsInvalid(line || {})
+        || (visits != null && visits > 1)
+        || (!!explicitCadenceFieldForService(line || {}) && !explicitlyOneTimeCadence(line || {}));
+      if (contradictsOneTime) {
+        logger.warn('[admin-customers] explicit one-time palm key beside recurring evidence — leaving line unmatched (fail closed)');
+        return null;
+      }
+    } catch (resolveErr) {
+      logger.warn(`[admin-customers] explicit palm key validation failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+      return null;
+    }
+  }
+  // The symmetric contradiction (codex r18 pre-push P0): an explicit
+  // SEMIANNUAL palm key whose line data resolves anything other than a
+  // valid semiannual program ({ frequency: 'monthly', visitsPerYear: 2 })
+  // would pair the semiannual service id with a mismatched prefill
+  // cadence — the modal trusts the cadence and could create a 12-visit
+  // series on a two-application per-application program. Reject to
+  // unmatched when cadence DATA is present but invalid; a bare explicit
+  // selection (no line cadence data to contradict it) keeps the
+  // operator's choice.
+  // An explicit key that resolves NO catalog row is inert — computed here
+  // (hoisted, codex r24 P1) so BOTH palm validation branches treat an
+  // unresolved explicit alias ({ serviceKey: 'legacy_palm', … }) as
+  // absent, exactly as the fallback matching does.
+  const explicitKeyResolves = explicitKey
+    && !!(serviceIndex.byKey.get(explicitKey) || serviceIndex.byName.get(explicitKey));
+  // The raw `service` field carries the key too (codex r23 P1): a stored
+  // { service: 'palm_injection_semiannual', frequency: 'monthly' } line
+  // has no explicit key or name, but the candidate loop would match the
+  // semiannual row — same validation applies, including under an
+  // unresolved explicit alias (codex r24 P1).
+  if (explicitKey === 'palm_injection_semiannual'
+    || ((!explicitKey || !explicitKeyResolves) && rawKey === 'palm_injection_semiannual')) {
+    try {
+      const {
+        converterFollowUpSeedingPattern, visitsPerYearForRecurringService,
+        visitCountFieldsConflict, visitCountFieldsInvalid,
+        explicitCadenceFieldForService,
+      } = require('../services/estimate-converter');
+      const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
+      const hasCadenceData = !!explicitCadenceFieldForService(line || {})
+        || visitsPerYearForRecurringService(line || {}) != null
+        || visitCountFieldsConflict(line || {})
+        || visitCountFieldsInvalid(line || {});
+      if (hasCadenceData
+        && converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) !== 'semiannual') {
+        logger.warn('[admin-customers] explicit semiannual palm key with data that does not resolve a valid semiannual program — leaving line unmatched (fail closed)');
+        return null;
+      }
+    } catch (resolveErr) {
+      logger.warn(`[admin-customers] explicit semiannual palm key validation failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+      return null;
+    }
+  }
+  // An explicit key that resolves NO catalog row is inert — the fallback
+  // matching below governs the outcome, so palm validation must apply as
+  // if no explicit key existed (codex r18 pre-push P0: a legacy
+  // { serviceKey: 'palm' } spelling otherwise bypassed validation and the
+  // candidate loop matched the one-time row for a 2-visit line). Explicit
+  // keys that DO resolve are the operator's recognized choice: the two
+  // palm identities are validated above, and any other resolved key wins
+  // in the candidate loop as before.
+  if ((!explicitKey || !explicitKeyResolves) && (rawKey === 'palm_injection' || /palm/.test(labelKey))) {
+    try {
+      const {
+        converterFollowUpSeedingPattern, isPalmInjectionFamily,
+        visitsPerYearForRecurringService, visitCountFieldsConflict,
+        visitCountFieldsInvalid, explicitCadenceFieldForService,
+        explicitlyOneTimeCadence,
+      } = require('../services/estimate-converter');
+      const lineName = line?.name || line?.label || line?.displayName || 'Palm Injection';
+      if (converterFollowUpSeedingPattern(line || {}, { service_type: lineName }, undefined) === 'semiannual') {
+        // FAIL CLOSED (codex #3349 r15 pre-push P0): a detected semiannual
+        // palm line books the RECURRING row or nothing. Falling through to
+        // the one-time palm_injection candidate would give an admin-booked
+        // recurring program one-time billing and completion posture — with
+        // per-application pricing on the plan, that is a money bug. An
+        // unmatched line stays unmatched for the operator to resolve.
+        return serviceIndex.byKey.get(normalizeServiceKey('palm_injection_semiannual'))
+          || serviceIndex.byName.get(normalizeServiceKey('palm_injection_semiannual'))
+          || null;
+      }
+      // A REAL palm line with recurring EVIDENCE that did not resolve a
+      // valid semiannual program — contradictory ({ frequency: 'monthly',
+      // visitsPerYear: 2 }), conflicting, unrecognized, or commercial data
+      // — also fails closed (codex r16 pre-push P0): it is not
+      // definitively one-time, and the one-time completion profile would
+      // invoice work billed as a recurring plan. Only definitively
+      // one-application (1 visit) or cadence-less+count-less lines keep
+      // the one-time match. seedingFamilyKey gates this to real palm —
+      // 'Palmetto…' labels (here via the bare /palm/ substring) classify
+      // palm_substring_mismatch and keep their normal matching path.
+      if (isPalmInjectionFamily(line || {}, { service_type: lineName })) {
+        const visits = visitsPerYearForRecurringService(line || {});
+        // An EXPLICITLY one-time cadence ('one_time'/'once') is not
+        // recurring evidence (codex r17 P2) — the unrecognized-cadence
+        // sentinel would otherwise strip a genuine one-time palm booking
+        // of its catalog match (and its 60-minute catalog duration). A
+        // one-time spelling beside a >1 visit count still fails closed
+        // via the count check.
+        const recurringEvidence = visitCountFieldsConflict(line || {})
+          // Populated-but-invalid counts (0, negative, text) are malformed
+          // recurring data, not definitively one-time (codex r18 pre-push
+          // P1) — same reader the converter's gates use.
+          || visitCountFieldsInvalid(line || {})
+          || (visits != null && visits > 1)
+          || (!!explicitCadenceFieldForService(line || {}) && !explicitlyOneTimeCadence(line || {}));
+        if (recurringEvidence) {
+          logger.warn(`[admin-customers] palm line has recurring evidence but no valid semiannual resolution — leaving unmatched (fail closed)`);
+          return null;
+        }
+      }
+    } catch (resolveErr) {
+      // Resolver UNCERTAINTY also fails closed for REAL palm lines (codex
+      // r15 pre-push P0): falling through would book the one-time row for
+      // what may be a recurring plan. Word-boundary scope keeps
+      // 'Palmetto…' labels (which reach here via the bare /palm/ substring
+      // test above) on their normal matching path.
+      const labelText = String(line?.name || line?.label || line?.displayName || '');
+      if (rawKey === 'palm_injection' || /\bpalms?\b|palm\s*injection|palm\s*tree/i.test(labelText)) {
+        logger.warn(`[admin-customers] palm catalog resolution failed (${resolveErr.message}) — leaving palm line unmatched (fail closed)`);
+        return null;
+      }
+    }
+  }
 
   for (const key of candidates) {
     const exact = serviceIndex.byKey.get(normalizeServiceKey(key)) || serviceIndex.byName.get(normalizeServiceKey(key));
@@ -401,7 +586,16 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   if (kind !== 'recurring' && price == null) return null;
 
   const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
-  const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // The matched catalog row's own cadence beats the hardcoded quarterly
+  // fallback (codex r18 pre-push P0): a bare explicit semiannual palm
+  // selection carries no line cadence data, and a quarterly prefill on a
+  // two-application identity would book four visits. Preferring the
+  // identity's frequency keeps service id and cadence agreeing whenever
+  // the line itself is silent; lines WITH cadence data are untouched.
+  const catalogCadence = kind === 'recurring' && rawMatched?.frequency
+    ? cadenceFromEstimateLine({ frequency: rawMatched.frequency }, null)
+    : null;
+  const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, catalogCadence || 'quarterly') : 'one_time';
   // Never stamp the monthly catalog identity on a seasonal mosquito line
   // (codex r16 P2): the seasonal row is normally in the index (queried
   // explicitly despite is_active=false), but a fuzzy hit on mosquito_monthly

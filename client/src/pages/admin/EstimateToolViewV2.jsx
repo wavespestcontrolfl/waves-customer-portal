@@ -138,6 +138,40 @@ function matchHasActivePlan(match) {
   return !!(match.tier && match.tier !== "null");
 }
 
+// Where a customer's current per-application figure came from. The office
+// needs to know whether a number is a real payment or an inference — an
+// upgrade conversation built on a guess goes badly. Mirrors the spendSource
+// values loadCurrentServiceSpendContext emits.
+const SPEND_SOURCE_LABEL = {
+  last_paid_invoice: "last paid invoice",
+  scheduled_estimate: "scheduled price",
+  prepaid_allocation: "prepaid allocation",
+  per_application_fee: "billing stamp",
+  monthly_rate_derived: "derived from monthly rate",
+  mixed_basis: "mixed basis — see properties",
+};
+
+// A service active at more than one property is several contracts, each with
+// its own per-application price. currentPerVisit sums them — that is the
+// account's spend for the family, NOT one visit's charge — so rendering the
+// sum beside "per application" would quote two $100 contracts as $200.00 and
+// send staff into an upgrade conversation on a basis that doesn't exist.
+// Those keys itemize instead.
+function spendContractRows(service) {
+  const contracts = Array.isArray(service?.contracts) ? service.contracts : [];
+  return contracts.length > 1 ? contracts : [];
+}
+
+// Cadence + provenance detail, shared by the family row and each per-property
+// contract row (both carry the same three fields).
+function spendDetailParts(entry) {
+  return [
+    entry?.cadenceLabel,
+    entry?.visitsPerYear ? `${entry.visitsPerYear}/yr` : null,
+    SPEND_SOURCE_LABEL[entry?.spendSource] || null,
+  ].filter(Boolean);
+}
+
 function resolvePreSlabJobContextForForm(form) {
   if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
   const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
@@ -3068,6 +3102,49 @@ export default function EstimateToolViewV2({
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+  // What the linked customer already buys and pays PER APPLICATION today —
+  // the office prices an upgrade against this. Read-only context: it never
+  // feeds the quote, so a failed/absent load just renders no panel (the
+  // behavior before this existed) rather than blocking the builder.
+  const [customerSpend, setCustomerSpend] = useState(null);
+  useEffect(() => {
+    // Clear FIRST, on every relink. The chip above switches to the newly
+    // linked customer the instant staff clicks them, so carrying the
+    // previous customer's figures until this fetch resolves would caption
+    // one customer's per-application prices with another customer's name —
+    // and these are numbers the office reads out loud. The cancelled guard
+    // below stops a slow response for an earlier selection from landing on
+    // top of the current one; this stops the stale render before it.
+    setCustomerSpend(null);
+    // The EFFECTIVE linked customer, not just a search-and-click match
+    // (codex #3353 r3): opening the builder through the existing-customer
+    // deep link (?tab=new&customerId=…) seeds form.customerId but
+    // deliberately leaves existingCustomerMatch null, so keying only off the
+    // match left the panel absent on exactly the entry path where staff
+    // already told us which customer they mean.
+    const customerId = existingCustomerMatch?.id || form.customerId;
+    if (!customerId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/admin/estimates/customer-spend/${encodeURIComponent(customerId)}`,
+          { headers: authHeaders },
+        );
+        if (!r.ok) {
+          if (!cancelled) setCustomerSpend(null);
+          return;
+        }
+        const d = await r.json();
+        if (!cancelled) setCustomerSpend(d);
+      } catch {
+        if (!cancelled) setCustomerSpend(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [existingCustomerMatch?.id, form.customerId]);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   // "" | "saving" | "saved" | "error" — Save-verified action in the
@@ -5745,6 +5822,93 @@ export default function EstimateToolViewV2({
                     : ""}
                 </div>
               )}
+              {/* Gated on the DATA, not on existingCustomerMatch — the
+                  deep-link entry path links a customer without setting a
+                  match object, and the panel must render there too. */}
+              {customerSpend?.currentServices?.length > 0 && (
+                  <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">
+                    <div className="px-3 py-2 border-b border-zinc-200 bg-zinc-50 text-14 font-medium text-zinc-900">
+                      Currently pays per application
+                      {customerSpend.currentTierLabel ? (
+                        <span className="font-normal text-zinc-500">
+                          {" "}
+                          · {customerSpend.currentTierLabel}
+                          {Number(customerSpend.currentDiscountPct) > 0
+                            ? ` (${customerSpend.currentDiscountPct}% off)`
+                            : ""}
+                        </span>
+                      ) : null}
+                    </div>
+                    {customerSpend.currentServices.map((service) => {
+                      const perProperty = spendContractRows(service);
+                      return (
+                        <div
+                          key={service.key}
+                          className="px-3 py-2 border-b border-zinc-100 last:border-b-0"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <div className="text-14 text-zinc-900">
+                                {service.label}
+                              </div>
+                              <div className="text-14 text-zinc-500">
+                                {[
+                                  ...spendDetailParts(service),
+                                  service.qualifiesForWaveGuard === false
+                                    ? "not a tier service"
+                                    : null,
+                                  perProperty.length
+                                    ? `${perProperty.length} properties`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </div>
+                            </div>
+                            {/* ml-auto keeps the amount right-aligned on
+                                phones, where flex-wrap drops it onto its own
+                                line and justify-between would otherwise
+                                left-align it. */}
+                            {perProperty.length ? null : (
+                              <div className="text-right ml-auto">
+                                <div className="text-16 text-zinc-900 tabular-nums">
+                                  {service.currentPerVisit == null
+                                    ? "Not available"
+                                    : `$${Number(service.currentPerVisit).toFixed(2)}`}
+                                </div>
+                                <div className="text-14 text-zinc-500">
+                                  per application
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {perProperty.map((contract, i) => (
+                            <div
+                              key={contract.serviceAddress || i}
+                              className="flex flex-wrap items-baseline justify-between gap-2 mt-1.5 pl-3 border-l-hairline border-zinc-200"
+                            >
+                              <div className="text-14 text-zinc-500">
+                                {[
+                                  contract.serviceAddress || "Property not recorded",
+                                  ...spendDetailParts(contract),
+                                ].join(" · ")}
+                              </div>
+                              <div className="ml-auto text-14 text-zinc-900 tabular-nums">
+                                {contract.perVisit == null
+                                  ? "Not available"
+                                  : `$${Number(contract.perVisit).toFixed(2)}`}
+                                <span className="text-zinc-500">
+                                  {" "}
+                                  / application
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               {satelliteData &&
                 (satelliteData.imageUrl || satelliteData.closeUrl) && (
                   <div className="mb-3">

@@ -444,6 +444,23 @@ describe('admin customers route helpers', () => {
   });
 
   test('parses explicit recurring cadence before generic month and annual tokens', () => {
+    // Explicitly one-time spellings never fall to the recurring fallback
+    // (codex r18 P1): a one-time palm line prefilled 'quarterly' and the
+    // modal would create a quarterly series linked to the one-time row.
+    expect(cadenceFromEstimateLine({ frequency: 'one_time' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ frequency: 'One Time' }, 'quarterly')).toBe('one_time');
+    // Every shared cadence-field spelling counts (codex r18 P1 follow-up):
+    // { frequencyKey: 'one_time' } etc. must not fall to the quarterly
+    // fallback while the catalog match stays one-time.
+    expect(cadenceFromEstimateLine({ frequencyKey: 'one_time' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ recurring_pattern: 'once' }, 'quarterly')).toBe('one_time');
+    expect(cadenceFromEstimateLine({ freq: 'one-time' }, 'quarterly')).toBe('one_time');
+    // RECURRING aliases read the same shared vocabulary (codex r18
+    // pre-push P0): { frequencyKey: 'semiannual' } must not fall to the
+    // quarterly default while catalog validation passes the line.
+    expect(cadenceFromEstimateLine({ frequencyKey: 'semiannual' }, 'quarterly')).toBe('semiannual');
+    expect(cadenceFromEstimateLine({ recurring_pattern: 'bi_monthly' }, 'quarterly')).toBe('bimonthly');
+    expect(cadenceFromEstimateLine({ planFrequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
     expect(cadenceFromEstimateLine({ frequency: 'Bi-Monthly' }, 'quarterly')).toBe('bimonthly');
     expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
     expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
@@ -558,6 +575,115 @@ describe('admin customers route helpers', () => {
     // Bare "bait station" text no longer satisfies the termite pick — only
     // genuinely termite-worded lines do.
     expect(serviceCatalogMatch({ name: 'Termite bait stations' }, serviceIndex)?.service_key).toBe('termite_bait');
+  });
+
+  test('two-application palm lines route to the semiannual recurring row; 1x and cadence-less keep the one-time match (codex #3349 r3 P1)', () => {
+    const serviceIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 2, service_key: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Service', short_name: 'Semiannual Palm', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2 },
+    ]);
+
+    // The estimator's two-application palm supplement (no frequency field)
+    // must land the recurring row, not the exact-key one-time match.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // One-application and cadence-less palm lines keep the one-time lane.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // An EXPLICIT one-time palm key beside recurring evidence is a
+    // contradiction and stays UNMATCHED (codex r18 pre-push P0) — the
+    // prefilled semiannual cadence would submit a recurring series on the
+    // one-time id.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    // An explicit one-time key on a genuinely one-time line keeps its
+    // exact match.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // The raw `service` field carries the semiannual key too (codex r23
+    // P1): validation applies without an explicit key or name.
+    expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // An UNRESOLVED explicit alias is inert and must not block the raw-key
+    // validation (codex r24 P1).
+    expect(serviceCatalogMatch({ serviceKey: 'legacy_palm', service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ serviceKey: 'legacy_palm', service: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // Snake-case explicit keys hit the same guards (codex r22 pre-push
+    // P0): service_key is the persisted spelling.
+    expect(serviceCatalogMatch({ service_key: 'palm_injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service_key: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
+    expect(serviceCatalogMatch({ service_key: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service_key: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // The symmetric contradiction: an explicit SEMIANNUAL key whose line
+    // data does not resolve a valid semiannual program stays unmatched
+    // (codex r18 pre-push P0) — the modal would pair the semiannual id
+    // with a mismatched cadence.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 0 }, serviceIndex)).toBeFalsy();
+    // A bare explicit selection (no cadence data to contradict) and a
+    // valid semiannual line both keep the operator's choice.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual' }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection_semiannual', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    // The legacy `freq` alias is part of the shared vocabulary now
+    // (codex r19 P1): { serviceKey: 'palm_injection', freq: 'monthly' }
+    // is recurring evidence on an explicit one-time key — unmatched.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', freq: 'monthly' }, serviceIndex)).toBeFalsy();
+    // An explicitly one-time freq keeps the one-time match.
+    expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', freq: 'one_time' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // An UNKNOWN explicit key is inert and must not bypass palm
+    // validation (codex r18 pre-push P0): a legacy { serviceKey: 'palm' }
+    // 2-visit line routes to the recurring row, and a contradictory one
+    // stays unmatched.
+    expect(serviceCatalogMatch({ serviceKey: 'palm', service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)?.service_key).toBe('palm_injection_semiannual');
+    expect(serviceCatalogMatch({ serviceKey: 'palm', service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    // INVALID-but-recurring palm data fails closed to NO match (codex r16
+    // pre-push P0): contradictory cadence and conflicting counts are not
+    // definitively one-time — the one-time profile would invoice work
+    // billed as a recurring plan.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2, visits: 4 }, serviceIndex)).toBeFalsy();
+    // Populated-but-invalid counts are malformed recurring data, not
+    // definitively one-time (codex r18 pre-push P1).
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 0 }, serviceIndex)).toBeFalsy();
+    // EXPLICITLY one-time palm rows keep the one-time match (codex r17
+    // P2): 'one_time' trips the unrecognized-cadence sentinel but is not
+    // recurring evidence.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // …but a one-time spelling beside a >1 visit count still fails closed.
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', frequency: 'one_time', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    // The legacy NUTRITIONAL palm program is a distinct identity (codex
+    // r20 pre-push P0): its quarterly lines keep matching palm_treatment,
+    // never tripping the injection evidence gate.
+    const nutritionalIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 4, service_key: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', short_name: 'Palm Nutrition' },
+    ]);
+    expect(serviceCatalogMatch({ service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', frequency: 'quarterly', visitsPerYear: 4 }, nutritionalIndex)?.service_key).toBe('palm_treatment');
+    // 'Palmetto…' labels reach this branch via the bare /palm/ substring
+    // but are NOT palm — they keep their normal matching path.
+    const palmettoIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection', billing_type: 'one_time' },
+      { id: 3, service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)', short_name: 'Pest Quarterly' },
+    ]);
+    expect(serviceCatalogMatch({ name: 'Pest Initial Palmetto Knockdown', frequency: 'quarterly', visitsPerYear: 4 }, palmettoIndex)?.service_key).toBe('pest_general_quarterly');
+    // FAIL CLOSED when the semiannual row is missing (codex r15 pre-push
+    // P0): a detected 2x palm line stays UNMATCHED — never the one-time
+    // row, whose typed completion would invoice the already-billed
+    // recurring plan.
+    const legacyIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'palm_injection', name: 'Palm Injection Service', short_name: 'Palm Injection' },
+    ]);
+    expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, legacyIndex)).toBeFalsy();
+
+    // Resolver UNCERTAINTY also fails closed for real palm lines (codex
+    // r15 pre-push P0): an error must not fall through to the one-time
+    // candidate.
+    const EstimateConverter = require('../services/estimate-converter');
+    const spy = jest.spyOn(EstimateConverter, 'converterFollowUpSeedingPattern')
+      .mockImplementation(() => { throw new Error('resolver down'); });
+    try {
+      expect(serviceCatalogMatch({ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('rodent bait falls back to monthly monitoring when the catalog lacks the quarterly row', () => {

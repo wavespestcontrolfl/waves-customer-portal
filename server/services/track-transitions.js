@@ -65,6 +65,114 @@ async function loadService(serviceId) {
     .first();
 }
 
+// ---- Stale-attempt detection (shared with routes) --------------------------
+// A visit started on an EARLIER day, aborted, and moved to a later date can
+// carry the old attempt's tracker state and stamps. The proof of a
+// reschedule is a stamp predating the row's OWN scheduled_date — an attempt
+// started on the current scheduled day is that day's genuine attempt, even
+// when read after midnight (overdue completions are deliberately allowed).
+// Staleness is judged PER FIELD: one fresh timestamp must not validate a
+// week-old sibling (a stale actual_start_time would feed
+// buildCompletionLifecycleUpdates a multi-day duration), and fresh columns
+// are kept — so a same-day SMS guard survives and the customer is not
+// double-texted. Terminal rows never qualify: completion persists status
+// BEFORE its best-effort tracker flip, and a finished visit's stamps ARE
+// the service record.
+const STALE_CLEARABLE_COLUMNS = [
+  'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'track_sms_sent_at', 'arrival_sms_sent_at',
+];
+const LIFECYCLE_EVIDENCE_COLUMNS = ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time'];
+
+function scheduledDayOf(svc = {}) {
+  const day = String(
+    svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || ''
+  ).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+function staleLifecycleFieldClears(svc = {}) {
+  const day = scheduledDayOf(svc);
+  if (!day) return {};
+  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) return {};
+  const clears = {};
+  for (const col of STALE_CLEARABLE_COLUMNS) {
+    const value = svc[col];
+    if (!value) continue;
+    const ms = new Date(value).getTime();
+    if (Number.isFinite(ms) && etDateString(new Date(ms)) < day) clears[col] = null;
+  }
+  return clears;
+}
+
+// Split the row's lifecycle stamps into stale clears and a current-attempt
+// signal. hasCurrentLifecycle — any lifecycle stamp on/after the scheduled
+// day — proves a GENUINE current attempt: a partially reset legacy row can
+// hold a current-day en_route_at next to an old actual_start_time, and one
+// stale sibling must not be read as proof the whole attempt is old.
+function classifyLifecycleEvidence(svc = {}) {
+  const day = scheduledDayOf(svc);
+  const clears = staleLifecycleFieldClears(svc);
+  const hasStaleLifecycle = LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in clears);
+  const hasCurrentLifecycle = Boolean(day) && LIFECYCLE_EVIDENCE_COLUMNS.some((col) => {
+    const value = svc[col];
+    if (!value) return false;
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) && etDateString(new Date(ms)) >= day;
+  });
+  return { clears, hasStaleLifecycle, hasCurrentLifecycle };
+}
+
+// Executes the full rewind of an ENTIRELY-old attempt (shared by
+// markEnRoute and markOnProperty). Returns the healed row count (0 = CAS
+// loss); throws on a transaction/history failure. The CAS carries the FULL
+// observed snapshot (status, schedule day, and every lifecycle/SMS field —
+// ms-truncated) so a concurrent write of any kind makes it miss. Only a
+// stale 'on_site' operational status is rewound (to 'confirmed', with the
+// movers' history entry, atomically); 'en_route' is NEVER rewound — the
+// tech/admin routes legitimately transition status right before calling.
+async function rewindStaleAttempt(serviceId, svc, clears, { actorId = null } = {}) {
+  const liveOpStatus = String(svc.status) === 'on_site';
+  const { applyTrackLifecycleCas, applyLiveMoveHistory } = require('./rebooker');
+  const healWrite = (conn) => applyTrackLifecycleCas(
+    conn('scheduled_services')
+      .where({
+        id: serviceId,
+        status: svc.status,
+        scheduled_date: svc.scheduled_date ?? null,
+      }),
+    svc,
+  )
+    .update({
+      track_state: 'scheduled',
+      ...clears,
+      ...(liveOpStatus ? { status: 'confirmed' } : {}),
+      updated_at: new Date(),
+    });
+  if (!liveOpStatus) return healWrite(db);
+  // The status rewind is a REAL operational transition, so its
+  // job_status_history row must be atomic with it (AGENTS.md audit-trail
+  // rule) — a history-insert failure rolls the rewind back.
+  return db.transaction(async (trx) => {
+    const updated = await healWrite(trx);
+    if (updated > 0) {
+      await applyLiveMoveHistory(trx, svc, { actor: actorId });
+    }
+    return updated;
+  });
+}
+
+// Route-facing: does this row carry an ENTIRELY-old live attempt that
+// markEnRoute's self-heal will fully rewind? tech-track uses it to delegate
+// the legacy status='on_site' shape instead of 409ing before the heal can
+// run. Mixed evidence (any current-day stamp) is a genuine live attempt —
+// never delegated, never rewound.
+function isStaleLiveAttempt(svc = {}) {
+  if (!['en_route', 'on_property'].includes(String(svc.track_state))) return false;
+  const { hasStaleLifecycle, hasCurrentLifecycle } = classifyLifecycleEvidence(svc);
+  return hasStaleLifecycle && !hasCurrentLifecycle;
+}
+
 function customerRoom(customerId) {
   return `customer:${customerId}`;
 }
@@ -227,8 +335,122 @@ async function markEnRoute(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  // Terminal operational status rejects here, not just at the routes: the
+  // stale-heal below reloads and re-enters, and a completion can commit
+  // its status between the heal and that reload — the row then reads
+  // status='completed' with track_state='scheduled', and without this
+  // guard the re-entry would flip a finished visit to en_route and text
+  // the customer a track link. (track_state='complete' alone is already
+  // absorbed by the idempotent branch; this covers the status-first
+  // window completion creates.)
+  if (['completed', 'skipped', 'no_show'].includes(String(svc.status))) {
+    return { ok: false, reason: `terminal_status: ${svc.status}` };
+  }
+  if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
+  }
+
+  // Stale-attempt self-heal. A visit that was started on an EARLIER day,
+  // aborted, and moved to a later date can reach this tap still carrying
+  // the old attempt's track_state — every mover now rewinds this (rebooker
+  // needsLifecycleRewind), but rows moved before that fix, or by anything
+  // outside the movers, are already broken: the atomic guard below would
+  // treat the stale state as "already advanced" and silently skip the flip,
+  // the timestamp, AND the customer's track-link SMS, and the report would
+  // render the old attempt's times (live incident 2026-08-11). The proof of
+  // a reschedule is evidence predating the row's OWN scheduled_date — an
+  // attempt started on the visit's current scheduled day is that day's
+  // genuine attempt even when this tap lands after midnight (overdue
+  // visits are deliberately allowed above), so it stays on the idempotent
+  // path, as does same-day evidence. No-evidence advanced states are left
+  // alone — nothing proves them stale. Never heals complete/cancelled.
+  const scheduledDayStr = scheduledDayOf(svc) || '';
+  const {
+    clears: staleFieldClears,
+    hasStaleLifecycle,
+    hasCurrentLifecycle,
+  } = classifyLifecycleEvidence(svc);
+  // The FULL heal keys off an ENTIRELY-old attempt: stale lifecycle
+  // evidence with NO current-day stamp (a stale SMS guard alone is cleaned
+  // by the flip below but does not prove an aborted attempt, and any
+  // current-day stamp proves a genuine live attempt that must not be
+  // regressed). Mixed shapes get an in-place cleanup of just the stale
+  // fields further down, with the live state preserved.
+  const staleEvidence = hasStaleLifecycle && !hasCurrentLifecycle;
+  if (!opts._afterStaleHeal
+    && staleEvidence
+    && ['en_route', 'on_property'].includes(svc.track_state)) {
+    // Shared rewind (see rewindStaleAttempt): CAS on the full observed
+    // snapshot; a stale on_site status rewinds to confirmed atomically
+    // with its history row.
+    // A transaction/history error is a FAILURE, not a CAS loss: recursing
+    // with the heal disabled would let the idempotent branch report ok on
+    // the still-stale row — the tap would claim success while healing
+    // nothing. Surface it so the caller 409s and the tech can retry.
+    let healed;
+    try {
+      healed = await rewindStaleAttempt(serviceId, svc, staleFieldClears, { actorId: opts.actorId || null });
+    } catch (err) {
+      logger.error(`[track-transitions] stale-heal failed for ${serviceId}: ${err.message}`);
+      return { ok: false, reason: 'stale_heal_failed' };
+    }
+    if (healed > 0) {
+      logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
+      // Heal confirmed: re-enter on a fresh read with healing bypassed.
+      return markEnRoute(serviceId, { ...opts, _afterStaleHeal: true });
+    }
+    // CAS loss: the row changed under us, but it may STILL be stale (a
+    // concurrent write can touch one stamp and leave the stale attempt
+    // standing) — so healing must stay armed on the retry, bounded so two
+    // writers can't ping-pong forever. Exhausted retries surface a
+    // conflict rather than falling through to a phantom idempotent
+    // success on the stale snapshot.
+    const attempts = (opts._staleHealAttempts || 0) + 1;
+    if (attempts >= 3) {
+      logger.warn(`[track-transitions] stale-heal on ${serviceId} lost ${attempts} concurrent races; surfacing conflict`);
+      return { ok: false, reason: 'concurrent_update' };
+    }
+    logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; retrying on fresh state (attempt ${attempts})`);
+    return markEnRoute(serviceId, { ...opts, _staleHealAttempts: attempts });
+  }
+
+  // Mixed shape: a genuine current-day attempt carrying stale residue from
+  // an earlier aborted one (e.g. a current en_route_at next to a week-old
+  // actual_start_time a partial reset left behind). Clear ONLY the stale
+  // fields in place — no state or status change, no SMS side effects — so
+  // completion duration doesn't measure from the old attempt. A zero-row
+  // CAS result is NOT success: a concurrent lifecycle writer (e.g. the
+  // arrival-SMS claim stamping its guard) changes a CAS field without
+  // clearing the stale start, so re-read and retry (bounded), same as
+  // markOnProperty — falling through would report success while the old
+  // start survives into a multi-day completion duration.
+  if (!opts._afterStaleHeal
+    && hasStaleLifecycle && hasCurrentLifecycle
+    && Object.keys(staleFieldClears).length > 0
+    && ['en_route', 'on_property'].includes(svc.track_state)) {
+    const attempts = (opts._staleHealAttempts || 0) + 1;
+    if (attempts >= 3) {
+      logger.warn(`[track-transitions] mixed-evidence cleanup on ${serviceId} lost ${attempts} concurrent races; surfacing conflict`);
+      return { ok: false, reason: 'concurrent_update' };
+    }
+    let cleaned = 0;
+    try {
+      const { applyTrackLifecycleCas } = require('./rebooker');
+      cleaned = await applyTrackLifecycleCas(
+        db('scheduled_services')
+          .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null }),
+        svc,
+      ).update({ ...staleFieldClears, updated_at: new Date() });
+    } catch (err) {
+      logger.error(`[track-transitions] mixed-evidence stale-field cleanup failed for ${serviceId}: ${err.message}`);
+      return { ok: false, reason: 'stale_heal_failed' };
+    }
+    // Success re-enters too: the fresh read classifies clean and the
+    // idempotent branch answers from current state, not this stale snapshot.
+    return markEnRoute(serviceId, cleaned > 0
+      ? { ...opts, _afterStaleHeal: true }
+      : { ...opts, _staleHealAttempts: attempts });
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
@@ -264,15 +486,43 @@ async function markEnRoute(serviceId, opts = {}) {
     };
   }
 
-  // Atomic guard: only flip if still 'scheduled'.
+  // Atomic guard: only flip if still 'scheduled'. A partial reset can have
+  // put track_state back to 'scheduled' while leaving the old attempt's
+  // stamps and SMS guards behind — flipping over them would let completion
+  // book a days-long duration from the stale start and would suppress
+  // today's track SMS on the stale guard. When the evidence predates the
+  // row's own scheduled day, clear those columns in the SAME atomic write.
   const now = new Date();
+  // Per-field: only the columns whose values predate the scheduled day are
+  // cleared (en_route_at is being overwritten by this flip regardless).
+  const { en_route_at: _overwritten, ...staleFlipClears } = staleFieldClears;
+  // The CAS matches the status + schedule tuple this read observed, not
+  // just track_state: completion persists operational status BEFORE its
+  // best-effort tracker flip, so a completion (or a concurrent move)
+  // committing between this function's read and this write would otherwise
+  // still match `track_state='scheduled'` and flip a finished visit back to
+  // en_route — and the stale-clear variant would additionally erase its
+  // lifecycle columns. A tuple change makes the write miss; the race path
+  // below re-reads and reports whatever state won, with no side effects.
   const updated = await db('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
-    .update({ track_state: 'en_route', en_route_at: now, updated_at: now });
+    .where('status', svc.status)
+    .where('scheduled_date', svc.scheduled_date)
+    .update({
+      ...staleFlipClears, track_state: 'en_route', en_route_at: now, updated_at: now,
+    });
 
   if (updated === 0) {
-    // Someone else won the race. Re-read and return their state.
+    // Someone else won the race. Re-read and report THEIR state — not a
+    // blanket success: the status/date CAS can also miss when a concurrent
+    // reschedule or completion moved the tuple while track_state stayed
+    // 'scheduled'. In that shape nobody went en route and no SMS fired, so
+    // claiming ok would make the caller report a flip that never happened —
+    // surface a conflict instead and let the caller retry on fresh state.
     const fresh = await loadService(serviceId);
+    if (fresh?.track_state === 'scheduled') {
+      return { ok: false, reason: 'concurrent_update' };
+    }
     if (fresh?.technician_id && fresh.track_state === 'en_route') {
       try {
         await setTechJobStatus({
@@ -289,7 +539,7 @@ async function markEnRoute(serviceId, opts = {}) {
       state: fresh?.track_state || 'en_route',
       enRouteAt: fresh?.en_route_at || null,
       smsSent: false,
-      alreadyEnRoute: true,
+      alreadyEnRoute: fresh?.track_state === 'en_route' || !fresh,
     };
   }
 
@@ -316,8 +566,11 @@ async function markEnRoute(serviceId, opts = {}) {
 
   // SMS — guarded by track_sms_sent_at. A retap that won the UPDATE race
   // above still can't re-send because this check runs after the write.
+  // A stale guard from the aborted earlier attempt was cleared in the flip
+  // write above, so it must not suppress today's send. A same-day guard
+  // (SMS already sent for THIS attempt) still suppresses.
   let smsSent = false;
-  if (!svc.track_sms_sent_at) {
+  if (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears) {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
@@ -351,8 +604,20 @@ async function markEnRoute(serviceId, opts = {}) {
       // sendTechEnRoute can return undefined (opt-out path), falsy results,
       // or { success, sid }. Only mark sent on a positive signal.
       if (result && result.success) {
+        // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
+        // the schedule tuple), not just track_state — a same-day reschedule
+        // can rewind the row and a FRESH attempt can reach en_route while
+        // this Twilio call was in flight, and a state-only match would
+        // stamp the old attempt's guard onto the new attempt, suppressing
+        // its notification. The SMS did go out; if the guard write misses,
+        // the fresh attempt re-sending is the intended behavior.
         await db('scheduled_services')
-          .where({ id: serviceId })
+          .where({
+            id: serviceId,
+            track_state: 'en_route',
+            en_route_at: now,
+            scheduled_date: svc.scheduled_date ?? null,
+          })
           .update({ track_sms_sent_at: new Date() });
         smsSent = true;
       }
@@ -439,15 +704,38 @@ function classifyArrivalSend(result) {
  * not funnel a suppressed signal here — the flip leaves the guard NULL so a
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
-async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
+async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
   if (svc.arrival_sms_sent_at) return;
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
   // means "handled", so an arrival under a disabled gate is recorded, not sent.
-  const claimed = await db('scheduled_services')
-    .where({ id: serviceId })
-    .whereNull('arrival_sms_sent_at')
-    .update({ arrival_sms_sent_at: new Date() });
+  // The claim is ATTEMPT-scoped, not just state-scoped: it matches the
+  // effective arrival timestamp the caller observed/wrote plus the schedule
+  // tuple, so a delayed invocation from an old attempt cannot claim a
+  // rescheduled-and-re-arrived row (which would suppress the new attempt's
+  // real arrival text). The claim value is THIS invocation's stamp, so the
+  // retry release below can release exactly this claim and never a later
+  // attempt's.
+  const claimStamp = new Date();
+  const claimQuery = db('scheduled_services')
+    .where({
+      id: serviceId,
+      track_state: 'on_property',
+      scheduled_date: svc.scheduled_date ?? null,
+    })
+    .whereNull('arrival_sms_sent_at');
+  // ms-truncated on both sides: claimArrivedAt can be a row-read value
+  // (pg returns Dates at ms precision) compared against a column that
+  // may carry microseconds from a SQL now() write.
+  if (claimArrivedAt == null) {
+    claimQuery.whereNull('arrived_at');
+  } else {
+    claimQuery.whereRaw(
+      `date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`,
+      [new Date(claimArrivedAt)],
+    );
+  }
+  const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
   if (!claimed) return;
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
@@ -468,8 +756,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
   }
   if (outcome === 'retry') {
     try {
+      // Release ONLY the exact claim this invocation created — an id-only
+      // release could erase a later attempt's claim and double-send.
       await db('scheduled_services')
-        .where({ id: serviceId })
+        .where({ id: serviceId, arrival_sms_sent_at: claimStamp })
         .update({ arrival_sms_sent_at: null });
     } catch (err) {
       logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
@@ -485,6 +775,16 @@ async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  // Terminal operational status rejects on EVERY load (same guard as
+  // markEnRoute): the stale-attempt repair below reloads and re-enters,
+  // and a completion can commit its status between the heal and that
+  // reload — the row then reads status='completed' with
+  // track_state='scheduled', and without this guard the re-entry would
+  // flip a finished visit to on_property and could text an arrival.
+  if (['completed', 'skipped', 'no_show'].includes(String(svc.status))) {
+    return { ok: false, reason: `terminal_status: ${svc.status}` };
+  }
+  if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
@@ -498,12 +798,69 @@ async function markOnProperty(serviceId, opts = {}) {
     return { ok: false, reason: `bad_state: ${svc.track_state}` };
   }
 
+  // Stale-attempt repair — arrival can be the FIRST signal on a rescheduled
+  // row still stuck at the old attempt's advanced track_state, and the
+  // idempotent branch below would otherwise preserve prior-day timestamps,
+  // sync on_site, and later book a multi-day duration. Same doctrine as
+  // markEnRoute: an ENTIRELY-old attempt rewinds fully (shared
+  // rewindStaleAttempt); mixed evidence (any current-day stamp = genuine
+  // live attempt) gets only its stale fields cleared in place. Either way
+  // re-enter on a fresh read, bounded against concurrent-writer ping-pong.
+  {
+    const {
+      clears: opStaleClears,
+      hasStaleLifecycle: opHasStale,
+      hasCurrentLifecycle: opHasCurrent,
+    } = classifyLifecycleEvidence(svc);
+    if (!opts._afterStaleHeal
+      && opHasStale
+      && ['en_route', 'on_property'].includes(svc.track_state)
+      && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
+      const attempts = (opts._staleHealAttempts || 0) + 1;
+      if (attempts >= 3) {
+        logger.warn(`[track-transitions] on-property stale repair on ${serviceId} lost ${attempts} concurrent races; surfacing conflict`);
+        return { ok: false, reason: 'concurrent_update' };
+      }
+      if (!opHasCurrent) {
+        let healed;
+        try {
+          healed = await rewindStaleAttempt(serviceId, svc, opStaleClears, { actorId: opts.actingTechId || null });
+        } catch (err) {
+          logger.error(`[track-transitions] on-property stale-heal failed for ${serviceId}: ${err.message}`);
+          return { ok: false, reason: 'stale_heal_failed' };
+        }
+        if (healed > 0) {
+          logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} before arrival; proceeding with fresh on-property flip`);
+          return markOnProperty(serviceId, { ...opts, _afterStaleHeal: true });
+        }
+        return markOnProperty(serviceId, { ...opts, _staleHealAttempts: attempts });
+      }
+      if (Object.keys(opStaleClears).length > 0) {
+        try {
+          const { applyTrackLifecycleCas } = require('./rebooker');
+          await applyTrackLifecycleCas(
+            db('scheduled_services')
+              .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null }),
+            svc,
+          ).update({ ...opStaleClears, updated_at: new Date() });
+        } catch (err) {
+          logger.error(`[track-transitions] mixed-evidence stale-field cleanup failed for ${serviceId}: ${err.message}`);
+        }
+        return markOnProperty(serviceId, { ...opts, _staleHealAttempts: attempts });
+      }
+    }
+  }
+
   // The single row this invocation will fire the arrival SMS for. Set ONLY when
   // we observe the job on_property — whether we flip it here, find it already
   // there, or lose the flip to a concurrent winner. Every path then funnels
   // through the one maybeSendArrivalSms call at the tail, which self-serializes
   // via the arrival_sms_sent_at CAS so concurrent signals never double-send.
   let arrivalRow = null;
+  // The effective arrival timestamp of THIS attempt (the value the row
+  // carries after this invocation's writes) — scopes the SMS claim so a
+  // delayed old-attempt signal can never claim a re-arrived row.
+  let claimArrivedAt = null;
   let result;
 
   if (svc.track_state === 'on_property') {
@@ -534,15 +891,28 @@ async function markOnProperty(serviceId, opts = {}) {
     }
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     arrivalRow = svc;
+    claimArrivedAt = svc.arrived_at || lifecycleUpdates.arrived_at || null;
     result = { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   } else {
     const now = new Date();
-    const updated = await db('scheduled_services')
-      .where({ id: serviceId })
-      .whereIn('track_state', ['scheduled', 'en_route'])
+    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, now);
+    // The flip is bound to the observed status/date and full lifecycle
+    // snapshot: a reschedule committing after the read can reset the row
+    // onto a NEW date with track_state='scheduled', and an id+state match
+    // alone would advance the moved visit to on_property, restore old
+    // lifecycle values, and sync it on-site. Any change makes this miss;
+    // the re-read below distinguishes a genuine arrival race from a
+    // conflicting rewrite.
+    const { applyTrackLifecycleCas } = require('./rebooker');
+    const updated = await applyTrackLifecycleCas(
+      db('scheduled_services')
+        .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null })
+        .whereIn('track_state', ['scheduled', 'en_route']),
+      svc,
+    )
       .update({
         track_state: 'on_property',
-        ...buildOnSiteLifecycleUpdates(svc, now),
+        ...onSiteUpdates,
         updated_at: now,
       });
     if (updated === 0) {
@@ -551,8 +921,13 @@ async function markOnProperty(serviceId, opts = {}) {
       // the guard NULL with no guaranteed later trigger (the manual start-job
       // path that lost here won't re-fire). So a non-suppressed loser for an
       // already-on_property job must still funnel through the tail call; the CAS
-      // prevents a double-send if the winner already sent.
+      // prevents a double-send if the winner already sent. A miss where the
+      // fresh row is NOT on_property is a conflicting rewrite (reschedule /
+      // completion), not an arrival race — surface it instead of success.
       const fresh = await loadService(serviceId);
+      if (fresh?.track_state !== 'on_property') {
+        return { ok: false, reason: 'concurrent_update' };
+      }
       if (fresh?.technician_id && fresh.track_state === 'on_property') {
         try {
           await setTechJobStatus({
@@ -564,7 +939,10 @@ async function markOnProperty(serviceId, opts = {}) {
           logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
         }
       }
-      if (fresh?.track_state === 'on_property') arrivalRow = fresh;
+      if (fresh?.track_state === 'on_property') {
+        arrivalRow = fresh;
+        claimArrivedAt = fresh.arrived_at || null;
+      }
       result = { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
     } else {
       try {
@@ -585,6 +963,7 @@ async function markOnProperty(serviceId, opts = {}) {
       }
       emitCustomerTrackRefresh(svc, 'on_property', now);
       arrivalRow = svc;
+      claimArrivedAt = svc.arrived_at || onSiteUpdates.arrived_at || null;
       result = { ok: true, state: 'on_property', arrivedAt: now };
     }
   }
@@ -594,7 +973,7 @@ async function markOnProperty(serviceId, opts = {}) {
   // the flip leaves the guard NULL so a later real arrival still sends.
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
   if (arrivalRow && !opts.suppressArrivalSms) {
-    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId);
+    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
   }
   return result;
 }
@@ -950,6 +1329,7 @@ module.exports = {
   cancel,
   portalOrigin,
   isFutureScheduledDate,
+  isStaleLiveAttempt,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,

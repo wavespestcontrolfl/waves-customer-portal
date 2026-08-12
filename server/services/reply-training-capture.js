@@ -62,7 +62,11 @@ function classifyScenario({ inboundBody = '', outboundBody = '', metadata = {} }
 // use one list and cannot drift.
 const NON_HUMAN_REPLY_MESSAGE_TYPES = Object.freeze([
   'internal_alert', 'system_note',
-  'rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3',
+  // The custom rung carries dispatcher-typed words, but it is still a
+  // PROACTIVE move notice riding a template — not a reply to the
+  // customer's last inbound; capturing it would pair it with an unrelated
+  // message (codex #3363 r4).
+  'rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3', 'rain_out_moved_custom_v1',
 ]);
 
 function shouldCaptureReply({ channel, direction, authorType, adminUserId, messageType, body } = {}) {

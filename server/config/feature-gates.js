@@ -775,14 +775,15 @@ const gates = {
   // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
   // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
   callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
-  // Review-gated OUTBOUND-callback bookings: a confirmed booking taken on an
-  // outbound call (a return call to an inbound lead) creates the appointment
-  // PENDING/needs-review — customer_confirmed=false, NO auto-SMS, a distinct
-  // source_action so the customer can't self-confirm it, and an
-  // outbound_booking_review triage item — instead of being skipped as
-  // 'outbound_call'. The office confirms it in dispatch (which arms reminders).
-  // Requires a real catalog service (no generic-placeholder fallback for
-  // outbound). Off → outbound bookings stay manual (current behavior).
+  // OUTBOUND-callback auto-booking: a confirmed booking taken on an outbound
+  // call (a return call to an inbound lead) creates the appointment LIVE, the
+  // same as an inbound one — status confirmed, reminders armed, lead
+  // converted, confirmation + card-request through the normal TCPA-gated legs
+  // — instead of being skipped as 'outbound_call'. (The pending-office-review
+  // hold this gate originally shipped with was removed 2026-08-11 by owner
+  // directive, PR #3361 — enabling this is a fully customer-facing lane, not
+  // a staged rollout.) Requires a real catalog service (no generic-placeholder
+  // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered

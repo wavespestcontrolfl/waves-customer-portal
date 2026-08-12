@@ -3303,21 +3303,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
-    // A pending outbound-callback booking must be office-CONFIRMED before any
-    // day-of transition — advancing it straight to en_route texts the customer a
-    // tracking link, bypassing the review (and its reminder-arming confirm hook).
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
-
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state
@@ -3601,12 +3586,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
-      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -7322,15 +7301,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
         }
-        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-          // Completing a pending outbound-review booking is an expected block
-          // from the shared writer — record the failed attempt and conflict.
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
-          return res.status(409).json({
-            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-            code: 'outbound_review_unconfirmed',
-          });
-        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
           return res.status(409).json({
@@ -8911,6 +8881,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
+          // Live replay mints prove the row price hasn't moved since this
+          // completion derived its amount (codex #3344 r2) — a WaveGuard
+          // reprice landing mid-completion 409s and the retry bills fresh
+          // (for the required lane, via the release catch restamping the
+          // frozen cents from the 409's locked price — codex r5 P1).
+          // Frozen-money lanes bypass replay entirely and keep their
+          // provable frozen figure.
+          scheduledPriceBasis: svc.estimated_price,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
@@ -8993,7 +8971,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
-            svc,
+            // A REQUIRED resume mints the FROZEN amount — and PROVES it
+            // (codex r7 P0): the guard compares the caller snapshot to the
+            // locked row, so the resume passes the frozen cents AS the
+            // snapshot price. Frozen ≡ locked row is the typed lane's money
+            // identity (the freeze stamps estimated_price at commit and the
+            // r5 catch restamps it from every reprice refusal), so a match
+            // mints the provable frozen figure and ANY divergence — a
+            // reprice after the restamp, or a restamp write that failed —
+            // 409s back into the refresh→release loop instead of silently
+            // billing the stale freeze. primary_line_price is NULL on the
+            // synthetic snapshot (r9-round pre-push P0): invoice lines
+            // PREFER primary_line_price, so the frozen single line at
+            // estimated_price is provable money ONLY for a visit with no
+            // primary line — null makes the guard PROVE that absence, and
+            // a primary-carrying locked row 409s instead of silently
+            // billing the wrong single-line total. First runs keep the
+            // live snapshot: a mid-flight reprice 409s, the catch restamps
+            // the frozen cents from the locked price, and the resume bills
+            // the moved price.
+            svc: useReplayLines
+              ? svc
+              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
+            allowPriceMovement: false,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -9008,7 +9008,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           invoice = minted.invoice;
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
-          invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          try {
+            invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          } catch (mintErr) {
+            // Typed reprice refusal on a NON-required live lane (codex r6
+            // P1): these lanes' failure posture is non-blocking — the
+            // completion finalizes succeeded — so without an in-place retry
+            // the 409 that exists to make the retry bill fresh would
+            // instead finalize the visit with NO invoice at all (lost AR,
+            // strictly worse than the stale price it refused). Rebuild once
+            // from the price the refusal proved current (read under the
+            // mint's own row lock): amount AND basis move together, so the
+            // replay rebuilds from the moved price and a SECOND movement
+            // mid-retry 409s again and falls through to the non-blocking
+            // catch like any transient failure. Required lanes never enter
+            // this branch's 409 (backfill mints bypass replay; typed
+            // one-time mints go through the serialized helper above and
+            // release for resume on refusal).
+            if (mintErr?.code === 'SCHEDULED_PRICE_MOVED'
+              && Number.isInteger(mintErr.currentEstimatedPriceCents)
+              && mintErr.currentEstimatedPriceCents > 0) {
+              const movedPrice = mintErr.currentEstimatedPriceCents / 100;
+              logger.warn(`[dispatch] visit ${svc.id} repriced mid-mint — retrying the completion invoice at the moved price $${movedPrice.toFixed(2)}`);
+              invoice = await InvoiceService.createFromService(record.id, {
+                ...mintOptions,
+                amount: movedPrice,
+                scheduledPriceBasis: movedPrice,
+              });
+            } else {
+              throw mintErr;
+            }
+          }
+          // createFromService can ADOPT an invoice another mint committed
+          // first (codex r6 round) — fold that into the same
+          // adopted-concurrent handling as the serialized helper's
+          // `reused` flag: setup-fee claim restore, service-record
+          // back-link, and already-paid messaging all key off it.
+          if (invoice?.adopted_existing_invoice) adoptedConcurrentInvoice = true;
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on
@@ -9038,11 +9074,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // the exact negative marker). If this clear fails or the process
         // dies first, the orphaned-claim recovery above finds the minted
         // line on the next completion and heals without a second charge.
+        // Retire ONLY when the fee actually rides the invoice (codex r6
+        // round): createFromService can now ADOPT an invoice another mint
+        // committed first — the claimed fee did not ride that one, so the
+        // claim goes back positive (the recovery re-mints it on the next
+        // completion) instead of being silently retired unbilled.
         if (secureSetupFee) {
+          const feeRode = JSON.stringify(invoice?.line_items || '')
+            .toLowerCase().includes('one-time setup fee');
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
-              .update({ pending_setup_fee: null, updated_at: new Date() });
+              .update(feeRode
+                ? { pending_setup_fee: null, updated_at: new Date() }
+                : { pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+            if (!feeRode) {
+              logger.warn(`[dispatch] setup-fee claim RESTORED for series ${secureSetupFee.parentId} — the completion adopted an invoice the fee did not ride`);
+            }
           } catch (clearErr) {
             logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
           }
@@ -9130,6 +9178,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // recomputation from the by-now-mutable billing profile.
         if (backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
+          // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
+          // the resume this release promises mints the frozen cents with
+          // replay disabled — without this, the stale-price 409 the guard
+          // just raised would be replayed as the stale price itself. The
+          // required live lane's amount IS estimated_price (typed one-time
+          // requires hasVisitPrice, so completionInvoiceAmount returns it),
+          // and the attached cents were read under the mint's own row lock
+          // — the moved price is the new money truth, so restamp it as the
+          // frozen figure. A FAILED restamp is safe to release anyway
+          // (codex r7 P0): the live typed resume passes the frozen cents AS
+          // the guard's price snapshot, so a resume whose freeze disagrees
+          // with the locked row 409s right back into this refresh instead
+          // of minting the stale figure — the release IS the restamp's
+          // retry, never a stale-mint promise. Zero/absent cents never
+          // restamp — a frozen figure must stay a positive committed price.
+          if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents == null
+            && Number.isInteger(invErr.currentEstimatedPriceCents)
+            && invErr.currentEstimatedPriceCents > 0) {
+            try {
+              await mergeRecordNotesKeys(record.id, {
+                backfillMintAmountCents: invErr.currentEstimatedPriceCents,
+              });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentEstimatedPriceCents}c for ${svc.id} after mid-mint reprice — the resume bills the moved price`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen mint refresh FAILED for ${svc.id} — the resume will mint the pre-reprice freeze: ${refreshErr.message}`);
+            }
+          } else if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents != null) {
+            // Primary-carrying visit (r9-round pre-push P0): the locked row
+            // holds a primary_line_price, so estimated_price is NOT the
+            // whole bill and no single frozen figure can honestly cover it
+            // — never restamp a guess. The resume's null-primary proof
+            // 409s right back here, so the closeout stays unfinalized and
+            // parked for the operator instead of minting wrong money.
+            logger.error(`[dispatch] frozen mint NOT refreshed for ${svc.id} — the visit carries a primary line price, so a single-line freeze cannot honestly cover the bill; bill manually or clear primary_line_price, then retry the closeout`);
+          }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
             // The conditional flip found the attempt not in
@@ -12057,6 +12142,36 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
+// body: { message, target: { date, window } }
+//
+// Server-side segment counter for the Quick Move sheet's Custom mode:
+// renders the EXACT body commit() would send (same template row, link
+// selection, and renderer normalizations) and returns the 2-segment math —
+// the sheet keeps no client-side render mirrors (codex #3363 r9).
+// Advisory + read-only: never mints short codes, never moves anything;
+// commit() re-renders and enforces.
+router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+  try {
+    const { message, target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.previewCustomSms({
+      serviceId: req.params.serviceId,
+      customMessage: message,
+      target,
+    });
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : ['bad_reason', 'bad_target'].includes(result.reason) ? 400 : 409;
+      return res.status(code).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -12159,7 +12274,8 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
           'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked',
-          'note_compliance_blocked', 'note_invalid'].includes(result.reason) ? 400
+          'note_compliance_blocked', 'note_invalid',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
@@ -12195,23 +12311,6 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-
-    // A pending outbound-callback booking must be office-CONFIRMED before it can
-    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
-    // without the confirmation hook's reminder/lead/triage side effects. Confirm
-    // it first, then reschedule.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
-        .first('source_action', 'status', 'customer_confirmed');
-      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.

@@ -683,6 +683,24 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Legacy outbound-review activation backstop (PR #3361, Codex r5/r7 P1):
+  // drains the whole pre-hold-removal review population — worked rows whose
+  // post-commit activation was lost to a process exit, moved rows still
+  // carrying 'pending', and untouched pending holds alike (the hold was
+  // removed collectively; new bookings land live, so legacy ones activate
+  // to parity). Not gated: it is a correctness backstop for a removed lane,
+  // the query is tiny, and the legacy population only shrinks (runs become
+  // free no-ops once it drains).
+  cron.schedule('18 * * * *', async () => {
+    try {
+      await runExclusive('legacy-outbound-activation-sweep', async () => {
+        await require('./outbound-review-confirm').sweepStrandedLegacyOutboundActivations();
+      });
+    } catch (err) {
+      logger.error(`[legacy-activation-sweep] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {

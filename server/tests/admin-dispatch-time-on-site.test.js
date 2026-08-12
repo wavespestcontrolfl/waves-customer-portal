@@ -1401,10 +1401,12 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // it through mergeRecordNotesKeys instead.
     expect((source.match(/structured_notes: serializeJsonb\(/g) || []).length).toBe(5);
     // And the converted side-effect writers all go through the merge helper.
-    // (The send-window deferred-completion marker commits inside the queue
+    // (12th site: the #3344 r5 SCHEDULED_PRICE_MOVED catch restamps the
+    // frozen backfillMintAmountCents through the merge helper too. The
+    // send-window deferred-completion marker commits inside the queue
     // row's transaction with its own key-merge raw — same jsonb || shape,
     // not a whole-column write — so it does not appear in this count.)
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(11);
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(12);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {
@@ -1624,7 +1626,10 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // order deadlocks), and only a COMPLETED visit can own the record (an
     // open visit sharing the tuple must not steal a completed visit's
     // report).
-    expect(adminScheduleSource).toMatch(/const preTupleRow = await trx\('scheduled_services'\)\.where\(\{ id: req\.params\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    // The row is hoisted (`let preTupleRow`) since the stale-lifecycle
+    // rewind on date moves reuses the same locked read — the FOR UPDATE
+    // lock-order contract is unchanged.
+    expect(adminScheduleSource).toMatch(/preTupleRow = await trx\('scheduled_services'\)\.where\(\{ id: req\.params\.id \}\)\.forUpdate\(\)\.first\(\);/);
     expect(adminScheduleSource).toMatch(/if \(preTupleRow && preTupleRow\.status === 'completed' && srCols\.scheduled_service_id\) \{/);
   });
 

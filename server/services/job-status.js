@@ -317,35 +317,88 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   let cancelNoticeLateClaim = false;
   let cancelNoticeCallerClaim = false;
   let cancelNoticeOutboxTs = null;
+  // Set inside doWrites when this transition touches a legacy
+  // outbound-review row; read by the post-commit activation runner.
+  let legacyOutboundActivationNeeded = false;
+  // The completion instant frozen when the in-trx evidence write ran —
+  // threaded through the post-commit retry so a marker retry cannot shift
+  // the ordering evidence (Codex #3361 r16 P1).
+  let legacyCompletionEvidenceMoment = null;
 
   async function doWrites(t) {
-    // A pending outbound-callback booking (AI call pipeline, held for office
-    // review) must NOT advance to a day-of / operational status until the office
-    // confirms it — en_route fires the customer tracking SMS, completed mints an
-    // invoice, etc. Guarded HERE (the one shared status writer) so EVERY caller
-    // — dispatch, tech-track, admin-schedule — is covered, not just some routes.
-    // Only 'confirmed' / 'cancelled' / 'skipped' are allowed out of the pending
-    // review state — confirm approves it, cancel/skip reject it (the dispatch
-    // Skip action). Any other (en_route/on_site/completed/etc.) is blocked.
-    if (!['confirmed', 'cancelled', 'skipped'].includes(toStatus)) {
-      // Single shared classifier — same function the sanctioned confirmation
-      // points (tech-track dispatch-implies-confirm) key their bypass on, so
-      // guard and bypass can never drift.
-      const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
-      const guardRow = await t('scheduled_services')
+    // Legacy outbound-review rows (created PENDING before the 2026-08-11
+    // review-hold removal, PR #3361) activate lazily on their first live
+    // transition: the hold used to force an office confirm that armed
+    // reminders, converted the originating lead, and resolved the review
+    // card — with the guard gone, a straight pending → en_route/completed
+    // flip would silently skip all of it and strand the row half-armed
+    // (Codex #3361 P0). Detection keys on the ROW being an unconfirmed
+    // marker row, NOT on fromStatus === 'pending' (Codex #3361 r24 P1): a
+    // reschedule path commits the row 'confirmed' first and activates
+    // fail-soft afterwards, so a failed/crashed activation leaves a
+    // confirmed-but-unstamped row whose later confirmed → completed
+    // transition must still detect it here — otherwise completion billing
+    // runs with no in-trx credit evidence and no post-commit activation
+    // until the hourly sweep. The activation itself runs POST-COMMIT via
+    // the shared hook-first helper, which stamps customer_confirmed only
+    // after the core legs succeed — so a transient leg failure (or a
+    // crash after commit) leaves the row unstamped and the next touch
+    // retries (Codex #3361 r4 P1). The dispatch/schedule confirm routes
+    // stamp customer_confirmed themselves before calling this writer
+    // (same trx), so those paths skip here and keep their own hook call —
+    // no double run. Cancel/skip stay pure rejections, and a row read in
+    // a rejected state (cancelled/skipped) is left to the hourly sweep,
+    // whose post-commit read sees the transition's outcome.
+    if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
-        .first('source_action', 'status', 'customer_confirmed');
-      if (isPendingOutboundReviewBooking(guardRow)) {
-        // Typed operational conflict, not a plain Error: shared-writer callers
-        // (tech-track en-route/on-site, dispatch, admin-schedule) allow
-        // 'pending' as a source status, so this is an EXPECTED block for them
-        // — they translate the code to a 409, same as the 'not in state' race.
-        // A bare Error here bubbled to Express as a 500.
-        const guardErr = new Error(`transitionJobStatus: ${jobId} is a pending outbound-review booking awaiting office confirmation (cannot ${toStatus})`);
-        guardErr.code = 'OUTBOUND_REVIEW_UNCONFIRMED';
-        throw guardErr;
+        .first('source_action', 'status', 'customer_confirmed', 'customer_id');
+      legacyOutboundActivationNeeded = !!legacyRow
+        && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && !['cancelled', 'skipped'].includes(String(legacyRow.status || ''))
+        && !legacyRow.customer_confirmed;
+      // COMPLETION is the billing moment: the inspection-credit booking
+      // evidence commits WITH this transition (same #3178 r33 rule as the
+      // office-confirm branch below) — in-trx, on `t`, atomic with the
+      // completion, so a rollback can never leak an event for a completion
+      // that didn't happen (Codex #3361 r15 P1) and no second connection
+      // ever waits on this trx's row locks (the r14 pre-commit global
+      // redemption deadlocked exactly that way and was reverted; the
+      // redeemer's FOR UPDATE on this booking must only ever run after
+      // commit). The REDEMPTION stays post-commit in the activation hook —
+      // its fast-redeem fires from this committed event (marked === 0) —
+      // under the platform's documented fast-path + hourly-sweep contract;
+      // the residual ordering against the route's invoice auto-apply is the
+      // same posture every at-booking redemption surface carries.
+      // Best-effort: an evidence hiccup never blocks the completion; the
+      // hook's own idempotent marker call is the belt.
+      if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
+        // Frozen ONCE and threaded through the post-commit retry (Codex
+        // #3361 r16 P1): a failed marker queues its outbox with this same
+        // instant, and the hook's belt retry passes it too, so whichever
+        // write wins carries the true completion moment.
+        legacyCompletionEvidenceMoment = new Date();
+        try {
+          await require('./inspection-credit').markBookingForInspectionCredit(t, {
+            customerId: legacyRow.customer_id,
+            scheduledServiceId: jobId,
+            source: 'phone_call',
+            bookedAt: legacyCompletionEvidenceMoment,
+            // The service row PRE-EXISTS this transaction, so the marker's
+            // fast recovery leg cannot take visibility as commit proof — a
+            // rollback (lost status CAS, failed history insert) leaves the
+            // row visible as 'pending' and would leak completion evidence
+            // (Codex #3361 r22 P1). Require the committed transition's
+            // status; the in-trx outbox covers a committed one regardless.
+            recoveryStatusIn: ['completed'],
+          });
+        } catch (evidenceErr) {
+          logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
+        }
       }
     }
+
     // Atomic guard: only update if the row is currently in fromStatus.
     // 0-row update means a racing transition already advanced past it
     // (or fromStatus is wrong). Either way, we abort — the audit log
@@ -392,6 +445,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             customerId: confirmedRow.customer_id,
             scheduledServiceId: jobId,
             source: 'phone_call',
+            // Pre-existing row — same commit-proof rule as the completion
+            // site above (Codex #3361 r22 P1). The later statuses admit a
+            // confirm that legitimately advanced before the fast retry ran.
+            recoveryStatusIn: ['confirmed', 'en_route', 'on_site', 'completed'],
           });
         }
       } catch (evidenceErr) {
@@ -753,6 +810,26 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     })();
   }
 
+  function processLegacyOutboundActivation() {
+    // Post-commit, fire-and-forget: the transition already committed, and a
+    // failed side effect must never unwind the status flip. The shared
+    // helper is hook-first / stamp-on-success (Codex #3361 r4 P1): a crash
+    // or transient core-leg failure here leaves customer_confirmed unset,
+    // so ANY later touch of the row — another transition, a reschedule, a
+    // pipeline reuse — retries the idempotent legs until they complete.
+    if (!legacyOutboundActivationNeeded) return;
+    void (async () => {
+      try {
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, jobId, 'job-status-legacy-activation', {
+          evidenceBookedAt: legacyCompletionEvidenceMoment,
+        });
+      } catch (e) {
+        logger.warn(`[job-status] legacy outbound activation failed for ${jobId}: ${e.message}`);
+      }
+    })();
+  }
+
   function maybeReparkFollowupObligation() {
     // Cancelling/skipping/no-showing a completion-linked follow-up child
     // resurfaces the source visit's owed follow-up as a fresh dispatch
@@ -808,6 +885,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
           processCancelNoticeClaim();
+          processLegacyOutboundActivation();
         })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
@@ -832,6 +910,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
   processCancelNoticeClaim();
+  processLegacyOutboundActivation();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,

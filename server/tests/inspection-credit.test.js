@@ -744,15 +744,13 @@ describe('booking + redemption wiring — source contracts (routes too large to 
     expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
   });
 
-  it('outbound-review phone bookings earn evidence at CONFIRMATION, never at AI insert (pre-push P0)', () => {
-    // A pending outbound-review row is not a closed deal until the office
-    // confirms — evidence at insert would let the sweep mint $75 for an
-    // appointment the customer never confirmed.
+  it('phone bookings earn evidence at the AI insert, in the booking transaction', () => {
+    // The outbound office-review hold was removed (owner directive
+    // 2026-08-11): every auto-booked phone sale writes durable evidence in
+    // the same transaction as the insert. The confirm hook keeps its own
+    // marker call for legacy pending rows created before the removal.
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const guardAt = callProc.indexOf('if (!outboundReviewBooking) {');
-    const markerAt = callProc.indexOf("markBookingForInspectionCredit(trx, {");
-    expect(guardAt).toBeGreaterThan(-1);
-    expect(markerAt).toBeGreaterThan(guardAt); // marker sits inside the guard
+    expect(callProc).toContain("markBookingForInspectionCredit(trx, {");
     const confirmHook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
     expect(confirmHook).toContain("markBookingForInspectionCredit(db, {");
   });
@@ -905,14 +903,16 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).not.toContain('no-show invoice void sweep failed');
   });
 
-  it('booking evidence freezes its moment at call time, not at retry time (r26 P2)', () => {
+  it('booking evidence freezes its moment at call time, not at retry time (r26 P2, r16 carry-through)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // The post-commit retry reuses eventRow; a DB-default created_at would
     // stamp the RETRY time and shift the ordering evidence past a deadline
-    // the booking actually beat.
+    // the booking actually beat. PR #3361 r16 lets an explicit RETRY caller
+    // pass the ORIGINAL instant (bookedAt) — same invariant, one level up:
+    // the moment is frozen once and every write carries it.
     const fnAt = source.indexOf('async function markBookingForInspectionCredit');
     const rowAt = source.indexOf('const eventRow = {', fnAt);
-    const frozenAt = source.indexOf('created_at: new Date(),', rowAt);
+    const frozenAt = source.indexOf('created_at: bookedAt ? new Date(bookedAt) : new Date(),', rowAt);
     const tryAt = source.indexOf('try {', fnAt);
     expect(frozenAt).toBeGreaterThan(rowAt);
     expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt
@@ -1058,9 +1058,13 @@ describe('closeout route wiring — source contracts (the completion route is to
     // without an event the redeemer falls back to that placeholder
     // created_at — a row opened in-window but confirmed after expiry would
     // mint a credit the booking did not earn. The sweep (event-only)
-    // recovers once the post-commit retry lands the event.
+    // recovers once the post-commit retry lands the event. The gate accepts
+    // an ALREADY-PRESENT event too (marked === 0 — e.g. the completion
+    // transition committed it in-trx, PR #3361 r13): redeeming from an
+    // existing event uses the true moment; only a THROWN write (no event)
+    // defers to the retry + sweep.
     const markedAt = confirm.indexOf('const marked = await');
-    const gateAt = confirm.indexOf('if (marked === 1) {');
+    const gateAt = confirm.indexOf('if (marked === 1 || marked === 0) {');
     const redeemAt = confirm.indexOf("createdBy: 'system:inspection_credit_outbound_confirm'");
     expect(markedAt).toBeGreaterThan(-1);
     expect(gateAt).toBeGreaterThan(markedAt);

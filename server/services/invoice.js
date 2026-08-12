@@ -358,8 +358,14 @@ async function buildScheduledServiceInvoiceLines(
     fallbackAmount = 0,
     fallbackDescription = "Service visit",
     extraLineItems = [],
+    // Mint-serialization (WaveGuard #3338 fast-follow): a mint that holds
+    // FOR UPDATE on the visit row must build its lines on the SAME
+    // connection, or the price read here would come from a different
+    // connection's snapshot and the lock would be theater.
+    database = null,
   } = {},
 ) {
+  const conn = database || db;
   if (!scheduledServiceId) {
     return {
       lineItems:
@@ -378,7 +384,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const scheduled = await db("scheduled_services")
+  const scheduled = await conn("scheduled_services")
     .where({ id: scheduledServiceId })
     .first()
     .catch(() => null);
@@ -400,7 +406,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const addons = await db("scheduled_service_addons")
+  const addons = await conn("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy("created_at", "asc")
     .catch(() => []);
@@ -1582,6 +1588,14 @@ const InvoiceService = {
       // these — this method just carries them into the same mint so the fee
       // and the visit share one invoice.
       extraLineItems = [],
+      // The estimated_price the caller's `amount` was DERIVED from (codex
+      // #3344 r2): replay callers that pre-compute a price from the row
+      // (billing recovery, live completion) pass it so the locked rebuild
+      // can prove the row hasn't been repriced since — fallbackAmount
+      // outranks the row price in the line builder, so without this check
+      // a stale amount would silently win over the freshly locked value.
+      // Omitted = the amount is its own authority (operator-typed).
+      scheduledPriceBasis = undefined,
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -1593,49 +1607,105 @@ const InvoiceService = {
       // intact, individually sendable). Attachment happens only at create,
       // so a reviewer who wants it consolidated voids + re-creates it.
       skipAccrual = false,
+      // Caller's open transaction (codex r6 P1): a caller that already
+      // holds the schedule.invoice.mint advisory lock (billing recovery)
+      // MUST thread its transaction here — the replay mint otherwise opens
+      // a SEPARATE connection and requests the same lock, deadlocking on
+      // the caller until timeout (advisory locks are only re-entrant
+      // within one session). Threaded transactions run the mint under a
+      // SAVEPOINT, so deposit-machinery failures stay isolated from the
+      // caller's transaction, and the invoice commits atomically with the
+      // caller's own writes.
+      database = null,
     },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
       .first();
     if (!sr) throw new Error("Service record not found");
+    const runMintTransaction = (fn) => (
+      database && database.isTransaction ? database.transaction(fn) : db.transaction(fn)
+    );
 
     const hasExplicitAmount =
       amount !== undefined && amount !== null && Number(amount) > 0;
-    const scheduledInvoice =
-      (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
+    const replayFromScheduled =
+      (useScheduledReplay || !hasExplicitAmount) && !!sr.scheduled_service_id;
+    // Params are built PER MINT ATTEMPT, on the minting connection
+    // (mint-serialization, WaveGuard #3338 fast-follow): the replay path
+    // derives its price from the scheduled row, so that read happens under
+    // FOR UPDATE inside the same transaction the invoice mints in — a
+    // concurrent reprice (the tier-extension apply holds the same lock)
+    // either commits first and is billed, or waits for this mint. The
+    // explicit-amount path bills the operator's figure and needs no lock.
+    const buildParams = async (conn = null) => {
+      if (replayFromScheduled && conn) {
+        const {
+          acquireScheduledMintLockChain,
+          scheduledPriceMovedError,
+        } = require("./scheduled-invoice-mint");
+        // The shared lock chain (codex #3344 r9 P1 — this was the last
+        // hand-rolled copy of the key-share → visit-lock order): the
+        // advisory re-acquire inside the chain is a same-transaction no-op
+        // after adoptUnderMintLock, and the customer-before-visit order the
+        // extension accept path establishes is owned by the ONE module.
+        const lockedRow = await acquireScheduledMintLockChain(conn, {
+          scheduledServiceId: sr.scheduled_service_id,
+          customerId: sr.customer_id,
+          visitColumns: ["id", "estimated_price"],
+        });
+        // Stale-basis refusal (codex #3344 r2): when the caller's amount
+        // was derived from the row price, a locked price that no longer
+        // matches means a reprice (the WaveGuard extension) landed since —
+        // and fallbackAmount would outrank the fresh price in the line
+        // builder. Terminal 409, same contract as the shared mint helper:
+        // the retry re-reads and bills the current price.
+        if (
+          lockedRow &&
+          scheduledPriceBasis !== undefined &&
+          scheduledPriceBasis !== null
+        ) {
+          const cents = (v) =>
+            v === null || v === undefined ? null : Math.round(Number(v) * 100);
+          if (cents(lockedRow.estimated_price) !== cents(scheduledPriceBasis)) {
+            throw scheduledPriceMovedError(lockedRow);
+          }
+        }
+      }
+      const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
             fallbackAmount: amount,
             fallbackDescription: description || sr.service_type,
+            database: conn,
           })
         : null;
-    let lineItems = scheduledInvoice?.lineItems?.length
-      ? scheduledInvoice.lineItems
-      : [
-          {
-            description: description || sr.service_type,
-            quantity: 1,
-            unit_price: amount,
-            amount,
-            category: sr.service_type,
-          },
-        ];
-    if (Array.isArray(extraLineItems) && extraLineItems.length) {
-      lineItems = [...lineItems, ...extraLineItems];
-    }
-
-    const createParams = {
-      customerId: sr.customer_id,
-      serviceRecordId,
-      scheduledServiceId: sr.scheduled_service_id || undefined,
-      lineItems,
-      discountIds: scheduledInvoice?.discountIds || undefined,
-      taxRate,
-      dueDate,
-      trustedStoredDiscountSources: scheduledInvoice
-        ? ["scheduled_service"]
-        : [],
-      skipAccrual,
+      let lineItems = scheduledInvoice?.lineItems?.length
+        ? scheduledInvoice.lineItems
+        : [
+            {
+              description: description || sr.service_type,
+              quantity: 1,
+              unit_price: amount,
+              amount,
+              category: sr.service_type,
+            },
+          ];
+      if (Array.isArray(extraLineItems) && extraLineItems.length) {
+        lineItems = [...lineItems, ...extraLineItems];
+      }
+      return {
+        customerId: sr.customer_id,
+        serviceRecordId,
+        scheduledServiceId: sr.scheduled_service_id || undefined,
+        lineItems,
+        discountIds: scheduledInvoice?.discountIds || undefined,
+        taxRate,
+        dueDate,
+        trustedStoredDiscountSources: scheduledInvoice
+          ? ["scheduled_service"]
+          : [],
+        skipAccrual,
+      };
     };
 
     // Estimate-deposit roll-forward: when this service traces back to an
@@ -1659,6 +1729,24 @@ const InvoiceService = {
     // receipt or customer notification — but it moves deposit money and
     // reduces/zeroes the invoice, which is exactly the mutation the review
     // contract forbids.)
+    // The shared mint serialization, not a parallel one (pre-push P0,
+    // codex r6 round; consolidated into scheduled-invoice-mint in r8):
+    // every scheduled-service invoice writer serializes on the two-key
+    // ['schedule.invoice.mint', ssId] advisory lock with an in-lock replay
+    // re-check. The replay transactions below lock the visit ROW, but a
+    // Charge Now / completion mint that wins that lock and commits first
+    // would leave this transaction to wake and blindly create a SECOND
+    // collectible invoice for the same visit. Take the same advisory lock
+    // FIRST (same order as the helper: advisory → customer key-share →
+    // visit lock, the latter two inside buildParams), then adopt any
+    // non-terminal invoice that landed — the caller's reuse filters ran
+    // before this transaction and cannot have seen it.
+    const adoptUnderMintLock = async (trx) => {
+      if (!replayFromScheduled) return null;
+      const { adoptScheduledInvoiceUnderMintLock } = require("./scheduled-invoice-mint");
+      return adoptScheduledInvoiceUnderMintLock(trx, sr.scheduled_service_id);
+    };
+
     let sourceEstimateId = null;
     if (!skipDepositCredit && sr.scheduled_service_id) {
       try {
@@ -1687,13 +1775,18 @@ const InvoiceService = {
         const requested = depositCredit ? depositCredit.amount : 0;
         if (!(requested > 0)) break;
         try {
-          return await db.transaction(async (trx) => {
+          return await runMintTransaction(async (trx) => {
+            // An adopted invoice already ran its own deposit/credit flow —
+            // return it untouched; the roll-forward belongs to the mint
+            // that actually created the invoice.
+            const adopted = await adoptUnderMintLock(trx);
+            if (adopted) return adopted;
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...createParams,
+              ...(await buildParams(trx)),
               database: trx,
               depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
@@ -1714,6 +1807,10 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          // Stale-price/authorization refusals are terminal — retrying the
+          // same stale params can't fix them (mirrors the shared mint
+          // helper's contract).
+          if (err.status) throw err;
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
@@ -1733,7 +1830,17 @@ const InvoiceService = {
       }
     }
 
-    return this.create(createParams);
+    if (replayFromScheduled) {
+      return runMintTransaction(async (trx) => {
+        const adopted = await adoptUnderMintLock(trx);
+        if (adopted) return adopted;
+        return this.create({ ...(await buildParams(trx)), database: trx });
+      });
+    }
+    return this.create({
+      ...(await buildParams(null)),
+      ...(database ? { database } : {}),
+    });
   },
 
   /**

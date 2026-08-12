@@ -283,10 +283,12 @@ router.post('/:id/en-route', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      // The trailing columns feed the outbound-review auto-confirm below
-      // (detection + the confirm hook's reminder/lead/credit legs).
       .first(
         'id', 'technician_id', 'status', 'scheduled_date',
+        // Stale-attempt evidence for the on_site heal delegation below.
+        'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+        // The trailing columns feed the outbound-review auto-confirm below
+        // (detection + the confirm hook's reminder/lead/credit legs).
         'source_action', 'customer_confirmed', 'customer_id', 'window_start',
         'service_type', 'source_call_log_id', 'is_callback', 'estimated_price',
       );
@@ -325,10 +327,19 @@ router.post('/:id/en-route', async (req, res, next) => {
     //                                         it (avoids a noisy
     //                                         same-status row in
     //                                         job_status_history)
-    // Not allowed: on_site, completed, cancelled, skipped — all 409.
+    // Not allowed: on_site, completed, cancelled, skipped — all 409,
+    // with ONE exception: a STALE 'on_site' left behind by a legacy date
+    // move (lifecycle evidence predates the row's own scheduled day) is
+    // not today's real on-site — it is exactly the shape markEnRoute's
+    // self-heal rewinds, and rejecting it here would leave the visit
+    // permanently unable to go en route. Delegate it: skip this route's
+    // own status flip (the heal rewinds on_site→confirmed with its
+    // history row inside its own trx) and let markEnRoute run the fresh
+    // flip with the operational sync.
     const fromStatus = svc.status;
     const PRE_EN_ROUTE = new Set(['pending', 'confirmed', 'rescheduled']);
-    if (!PRE_EN_ROUTE.has(fromStatus) && fromStatus !== 'en_route') {
+    const staleOnSiteHeal = fromStatus === 'on_site' && trackTransitions.isStaleLiveAttempt(svc);
+    if (!PRE_EN_ROUTE.has(fromStatus) && fromStatus !== 'en_route' && !staleOnSiteHeal) {
       return res.status(409).json({
         error: `Cannot mark en-route from status '${fromStatus}'`,
       });
@@ -345,7 +356,7 @@ router.post('/:id/en-route', async (req, res, next) => {
     // Skipped on the en_route → en_route idempotent path so we don't
     // write a same-status job_status_history row + re-fire broadcasts
     // for a no-op tap.
-    if (fromStatus !== 'en_route') {
+    if (fromStatus !== 'en_route' && !staleOnSiteHeal) {
       try {
         if (autoConfirmReview) {
           await autoConfirmOutboundReviewBooking(req, svc);
@@ -375,11 +386,30 @@ router.post('/:id/en-route', async (req, res, next) => {
     const result = await trackTransitions.markEnRoute(svc.id, {
       actorType: 'tech',
       actorId: req.technicianId,
+      // Stale-heal delegation: this route skipped its own status flip, so
+      // the healed re-entry syncs the operational side (confirmed →
+      // en_route, with history) itself.
+      ...(staleOnSiteHeal ? { syncOperationalStatus: true } : {}),
     });
 
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
+    }
+
+    // Delegated stale heal: markEnRoute's operational sync is best-effort
+    // (it logs and continues), so verify the status actually landed before
+    // reporting success — a sync failure would leave status='confirmed'
+    // beside track_state='en_route'. A re-tap converges: confirmed is a
+    // valid en-route source, and the tracker side is idempotent.
+    if (staleOnSiteHeal) {
+      const after = await db('scheduled_services').where({ id: svc.id }).first('status');
+      if (after?.status !== 'en_route') {
+        return res.status(409).json({
+          error: 'The stale visit was reset but the status update did not complete — tap En Route again.',
+          code: 'stale_heal_status_sync_incomplete',
+        });
+      }
     }
 
     logger.info(
@@ -565,7 +595,8 @@ router.post('/:id/rain-out', async (req, res, next) => {
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
-        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later'].includes(result.reason) ? 400
+        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

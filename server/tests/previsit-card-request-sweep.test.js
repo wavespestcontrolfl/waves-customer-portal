@@ -14,7 +14,7 @@ describe('previsitCardInviteEligible', () => {
     status: 'confirmed',
     isCallback: false,
     reServiceLabel: false,
-    outboundReviewPending: false,
+    outboundReviewUncleared: false,
     cardLinkSentAt: null,
     customerEverInvited: false,
   };
@@ -37,9 +37,25 @@ describe('previsitCardInviteEligible', () => {
       .toEqual({ send: false, reason: 'callback_visit' });
   });
 
-  test('an outbound-review pending row waits for the office', () => {
-    expect(previsitCardInviteEligible({ ...base, outboundReviewPending: true }))
-      .toEqual({ send: false, reason: 'outbound_review_pending' });
+  test('an outbound-review row without the durable clearance stamp never texts — status is not clearance (Codex #3361 r27 P1)', () => {
+    // Covers BOTH the still-pending legacy row and the lazily-activated one
+    // (a silent reschedule lands on status 'confirmed' without any office
+    // decision): the caller derives this flag from call_sms_cleared_at
+    // alone, never from status.
+    expect(previsitCardInviteEligible({ ...base, outboundReviewUncleared: true }))
+      .toEqual({ send: false, reason: 'outbound_review_uncleared' });
+    expect(previsitCardInviteEligible({ ...base, status: 'pending', outboundReviewUncleared: true }))
+      .toEqual({ send: false, reason: 'outbound_review_uncleared' });
+  });
+
+  test('the uncleared flag is derived from the clearance stamp, not the row status', () => {
+    const sweep = require('fs').readFileSync(
+      require.resolve('../services/previsit-card-request-sweep'), 'utf8',
+    );
+    expect(sweep).toContain('outboundReviewUncleared: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && !visit.call_sms_cleared_at');
+    // The SQL admission mirrors it: no status-based re-admit branch remains.
+    expect(sweep).not.toContain("outboundConfirmed");
+    expect(sweep).toContain(".orWhereNotNull('s.call_sms_cleared_at'))");
   });
 
   test('a visit already texted never re-texts from the sweep', () => {

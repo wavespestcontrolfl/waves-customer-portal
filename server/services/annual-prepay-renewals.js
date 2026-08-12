@@ -189,6 +189,11 @@ async function findVisitWindowConflict(conn, {
   const blocking = rows.filter((row) => !(
     String(row.customer_id) === String(customerId)
     && serviceMatchesCoverage(row, serviceType)
+    // The exemption must be exactly as narrow as ADOPTION (codex r21
+    // pre-push P1): a row the coverage refused to adopt (wrong identity,
+    // other term) is real occupancy — the timed insert must not overlap
+    // it.
+    && (typeof adoptableFor?.isAdoptable !== 'function' || adoptableFor.isAdoptable(row))
     && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
   ));
   return blocking.length ? blocking[0] : null;
@@ -265,6 +270,28 @@ function coverageCadenceDays(value) {
   if (cadence === 'every_6_weeks') return 42;
   return null;
 }
+
+// Coverage cadence from a series' recurring_interval_days — the resolution
+// for patterns normalizeCoverageCadence can't name ('custom' carrying 42
+// days is really every-6-weeks). Lives HERE beside the other coverage-cadence
+// helpers rather than in a route file so its one definition serves every
+// consumer (moved from admin-invoices.js, which now imports it).
+function cadenceFromIntervalDays(days) {
+  const d = Number(days);
+  if (!Number.isFinite(d) || d <= 17) return null; // daily/weekly/biweekly: not coverage cadences
+  if (d >= 26 && d <= 35) return 'monthly';        // ~30
+  if (d >= 38 && d <= 48) return 'every_6_weeks';  // ~42
+  if (d >= 55 && d <= 66) return 'bimonthly';      // ~60
+  if (d >= 85 && d <= 96) return 'quarterly';      // ~90/91
+  if (d >= 115 && d <= 125) return 'triannual';    // ~120
+  if (d >= 170 && d <= 190) return 'semiannual';   // ~180
+  if (d >= 350 && d <= 380) return 'annual';       // ~365
+  return null;
+}
+
+// NOTE: cadence → visits-per-year lives in prepay-cadence.js
+// (visitsPerYearForCadence). A copy briefly existed here and was removed —
+// it silently disagreed with the shared one on seasonal_feb_oct.
 
 function coverageCadenceSchedule(value) {
   const cadence = normalizeCoverageCadence(value);
@@ -384,6 +411,62 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   return dates;
 }
 
+// A scheduled row COMMITTED to a term: linked by id, prepaid-stamped, or
+// sharing the term's source estimate (codex r18 pre-push P0 — a
+// payment-pending term's reserved/sold first visit carries only
+// source_estimate_id; excluding it would seed replacement visits and
+// leave the sold visit separately billable).
+function rowLinkedToAnotherTerm(term, row) {
+  return row.annual_prepay_term_id != null
+    && term?.id != null
+    && String(row.annual_prepay_term_id) !== String(term.id);
+}
+
+function rowCommittedToTerm(term, row) {
+  // Direct evidence (term link or prepaid stamp) always commits. Estimate
+  // provenance commits ONLY rows that READ recurring (is_recurring /
+  // recurring_pattern / recurring_parent_id, stamped at seeding) — for
+  // EVERY family (codex r21 pre-push P0): an estimate's extra one-time
+  // appointment matching the coverage text must never join the committed
+  // set, displace an already-stamped visit in the slice, or absorb a
+  // prepaid stamp of its own.
+  // A row EXPLICITLY linked to a different term belongs to that term
+  // (codex r21 pre-push P0, fourth pass): its prepaid stamp or shared
+  // estimate must not let a neighboring/boundary term consume it, or the
+  // newly paid term seeds short while the other term's visit double-counts.
+  if (rowLinkedToAnotherTerm(term, row)) return false;
+  const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  if (directCommitment) return true;
+  const readsRecurring = row.is_recurring === true
+    || !!row.recurring_pattern
+    || !!row.recurring_parent_id;
+  return readsRecurring
+    && term?.source_estimate_id != null && row.source_estimate_id != null
+    && String(row.source_estimate_id) === String(term.source_estimate_id);
+}
+
+// Palm coverage family detection, shared by coverage matching and the
+// seeding identity guard (codex r18 pre-push P0/P1): word-boundary
+// fallback keeps 'Palmetto…' service types out when the resolver errors.
+function coverageFamilyIsPalm(coverageServiceType) {
+  // INJECTION-scoped (codex r20 pre-push P0): the broad family resolver
+  // also captures the distinct legacy palm_treatment nutritional program,
+  // whose quarterly prepay terms must keep gap-filling untouched.
+  try {
+    const { isPalmInjectionFamily } = require('./estimate-converter');
+    return isPalmInjectionFamily({ name: coverageServiceType, service_type: coverageServiceType });
+  } catch (familyErr) {
+    logger.warn(`[annual-prepay] palm family detection failed (${familyErr.message}) — falling back to word-boundary test`);
+    // Injection-scoped like the resolver (codex r21 pre-push P1): bare
+    // historical 'Palm'/'Palm Treatment' labels are the nutritional lane.
+    const label = String(coverageServiceType || '');
+    return /\bpalm\b/i.test(label)
+      && /injection/i.test(label)
+      && !/nutritional|fertil/i.test(label);
+  }
+}
+
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -403,7 +486,52 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? rows
     : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  const matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
+  let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // PALM coverage candidates require identity or provenance (codex r18
+  // pre-push P0): matching is by service-type TEXT, and Waves sells
+  // genuine one-time palm injections — a name-matched one-time
+  // appointment inside the term window must never be adopted into
+  // prepaid coverage (attach + stamping both read this set, and the
+  // stamp would suppress its separate completion invoice). A palm row
+  // qualifies only when it CARRIES the recurring identity (id or
+  // snapshot) or already belongs to this term; ambiguous rows are
+  // excluded and the seeder creates a correctly-identified visit
+  // instead (fail closed).
+  if (coverageFamilyIsPalm(coverageServiceType)) {
+    // A FAILED identity lookup PROPAGATES (codex r21 P0): swallowing it
+    // to null would exclude valid id-carrying palm rows from coverage and
+    // seed duplicate visits beside them — the originals then bill at
+    // completion. A MISSING row (clean undefined) still resolves null:
+    // that is the catalog-missing environment, where the seeding resolve
+    // defers before anything is created.
+    const semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
+    const oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
+    const carriesRecurringPalmIdentity = (row) =>
+      (semiannualPalmId && row.service_id === semiannualPalmId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
+    // Provenance/commitment fallback is only for rows the backfill can
+    // OWN (codex r26 pre-push P0): identity-less (name-only) or the KNOWN
+    // stale one-time palm identity. A row carrying any FOREIGN explicit
+    // id/snapshot is another service's visit — counting it as coverage
+    // would suppress its separate billing and seed the palm term short.
+    const carriesForeignIdentity = (row) =>
+      (row.service_id && row.service_id !== semiannualPalmId
+        && (!oneTimePalmId || row.service_id !== oneTimePalmId))
+      || (row.service_key_snapshot
+        && String(row.service_key_snapshot) !== 'palm_injection_semiannual'
+        && String(row.service_key_snapshot) !== 'palm_injection');
+    // A row linked to ANOTHER term never counts (codex r21 pre-push P0,
+    // fifth pass): even carrying the recurring identity, it belongs to
+    // that term's coverage — counting it here seeds this term short while
+    // attach/stamping refuse to move it.
+    matching = matching.filter((row) => {
+      if (rowLinkedToAnotherTerm(term, row)) return false;
+      if (carriesRecurringPalmIdentity(row)) return true;
+      if (carriesForeignIdentity(row)) return false;
+      return rowCommittedToTerm(term, row);
+    });
+  }
   if (matching.length <= coverageVisitCount) return matching;
 
   // More matching candidates than sold visits: keep the visits already committed
@@ -413,9 +541,6 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // leaving more than coverageVisitCount visits prepaid and skipping completion
   // billing on the extra work. Fill any remaining slots with the earliest
   // uncommitted matches, then return the selection in date order.
-  const isCommittedToTerm = (row) =>
-    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
-    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   const selectedIds = new Set(
     [...matching.filter(isCommittedToTerm), ...matching.filter((row) => !isCommittedToTerm(row))]
       .slice(0, coverageVisitCount)
@@ -606,6 +731,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   }
 
   const createdRows = [];
+  // Rows adopted under the occupancy lock (concurrently-created same-day
+  // visits) — collected so the palm identity backfill below can reach
+  // them; they are never in existingRows.
+  const adoptedConcurrentRows = [];
   // Owner directive (2026-07-03): every service call defaults to 60 minutes.
   const baseDuration = 60;
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
@@ -652,6 +781,168 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     firstVisitWindowStart = null;
   }
 
+  // Payment-seeded PALM visits must carry the recurring catalog identity
+  // (codex #3349 r14 P1): a bare service_type 'Palm Injection' misfiles at
+  // completion — the exact-name lookup misses and the unique short-name
+  // match is the ONE-TIME palm_injection row, so every paid recurring
+  // visit would get one-time billing and the token-only portal posture.
+  // Mirror the converter/admin identity link (seedingFamilyKey handles the
+  // Palmetto substring trap); IDENTITY ONLY — duration stays the 60-minute
+  // slot default, never the catalog row's. Runs BEFORE the term-end slide
+  // persists (codex r17 pre-push P1): a deferred run must not extend the
+  // coverage window — repeated deferrals would otherwise re-apply the
+  // payment lag on every refresh and postpone renewal indefinitely.
+  let coverageCatalogServiceId = null;
+  let coverageCatalogKey = null;
+  let staleOneTimePalmId = null;
+  // Palm detection runs INDEPENDENTLY of the coverage cadence (codex r18
+  // pre-push P1): nesting it under `=== 'semiannual'` let an admin-created
+  // palm term with an explicit monthly/quarterly cadence bypass the
+  // identity guard entirely and seed name-only visits at the wrong
+  // cadence. Detection uncertainty counts as palm when the type names
+  // palm (word-boundary — 'Palmetto…' never trips it).
+  const coverageIsPalm = coverageFamilyIsPalm(coverageServiceType);
+  if (coverageIsPalm) {
+    // Palm coverage is semiannual-only (owner ruling 2026-08-11): any
+    // other recorded cadence is invalid term data — seeding it would
+    // create the wrong series AND misfile completions to the one-time
+    // profile. Defer with a durable exception; nothing is created.
+    if (coverageCadence !== 'semiannual') {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage records cadence '${coverageCadence}' — palm is semiannual-only, deferring (fail closed)`);
+      await fileCoverageException(term, 'palm_coverage_cadence_invalid',
+        `This palm term records a '${coverageCadence}' coverage cadence, but the palm program is semiannual-only — correct the term's coverage cadence, then re-save to seed its visits.`);
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        effectiveTermEnd: termEnd,
+        reason: 'palm_coverage_cadence_invalid',
+      };
+    }
+    try {
+      const catalogRow = await conn('services')
+        .where({ service_key: 'palm_injection_semiannual' })
+        .first('id', 'service_key');
+      if (catalogRow?.id) {
+        coverageCatalogServiceId = catalogRow.id;
+        coverageCatalogKey = catalogRow.service_key;
+        // The one-time palm row's id (codex r16 P1): an adopted legacy
+        // visit booked before the recurring row existed can carry it
+        // (estimate-public preserves ids on adoption), and completion
+        // trusts the id first. In this definitively semiannual coverage
+        // context that KNOWN id is stale — the backfill below retargets
+        // it, mirroring the converter's reserved-parent relink.
+        const oneTimeRow = await conn('services')
+          .where({ service_key: 'palm_injection' })
+          .first('id');
+        staleOneTimePalmId = oneTimeRow?.id || null;
+      } else {
+        // FAIL CLOSED (codex r15 pre-push P1): seeding name-only palm
+        // visits would knowingly hand them the one-time completion/
+        // billing posture. Defer — ensureCoverageRowsForTerm is
+        // idempotent and re-runs on every term refresh, and the deduped
+        // coverage exception keeps it office-visible until then. Runs
+        // BEFORE the term-end slide persists (codex r17 pre-push P1) so
+        // repeated deferrals never extend the coverage window.
+        logger.error(`[annual-prepay] term ${term.id}: palm_injection_semiannual catalog row missing — deferring palm coverage seeding (fail closed)`);
+        await fileCoverageException(term, 'palm_catalog_missing',
+          'The recurring palm catalog row (palm_injection_semiannual) is missing, so this term\'s prepaid palm visits were NOT created. Restore the catalog row (migration 20260811000010); the next term refresh seeds them automatically.');
+        return {
+          createdCount: 0,
+          targetDates,
+          existingCount: existingRows.length,
+          createdRows: [],
+          // The ORIGINAL term end: this deferral runs before the
+          // late-payment slide persists, and the caller trusts any
+          // returned effectiveTermEnd for downstream window math.
+          effectiveTermEnd: termEnd,
+          reason: 'palm_catalog_missing',
+        };
+      }
+    } catch (err) {
+      // Unknown identity state = fail closed for palm too.
+      logger.warn(`[annual-prepay] term ${term.id}: palm coverage identity link failed (${err.message}) — deferring`);
+      await fileCoverageException(term, 'palm_catalog_missing',
+        'The recurring palm catalog identity could not be verified while seeding this term\'s prepaid visits — seeding deferred; the next term refresh retries automatically.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — same rule as the deferral above.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_catalog_missing',
+      };
+    }
+  }
+
+  // Shared palm identity backfill (codex r15/r16/r17/r18 rounds): rows
+  // the seeder matched or adopted still resolve the ONE-TIME catalog row
+  // at completion when they are name-only (NULL service_id, no foreign
+  // snapshot) or carry the KNOWN stale one-time palm id/snapshot — both
+  // retarget to the recurring identity, mirroring the converter's
+  // reserved-parent relink. A row whose id/snapshot records a DIFFERENT
+  // durable identity was a deliberate booking and stays untouched.
+  const backfillPalmIdentity = async (rows, label) => {
+    try {
+      const oneTimePalmSnapshot = (row) => String(row.service_key_snapshot || '') === 'palm_injection';
+      // Retargeting a row that CARRIES the one-time identity requires
+      // PROVENANCE (codex r18 pre-push P0): Waves sells genuine one-time
+      // palm injections, and coverage matching is by service-type text —
+      // an unrelated one-time appointment inside the term window must not
+      // be converted to recurring and have its separate billing
+      // suppressed. Only a row already attached to THIS term retargets;
+      // rows with no identity evidence at all (name-only) remain the
+      // original r15 case.
+      const committedToTerm = (row) => rowCommittedToTerm(term, row);
+      const retargetable = (row) => row && row.id
+        && (
+          (!row.service_id && !row.service_key_snapshot)
+          || (!row.service_id && oneTimePalmSnapshot(row) && committedToTerm(row))
+          || (staleOneTimePalmId && row.service_id === staleOneTimePalmId && committedToTerm(row))
+        );
+      const backfillIds = rows.filter(retargetable).map((row) => row.id);
+      if (backfillIds.length) {
+        const patch = { service_id: coverageCatalogServiceId };
+        if (cols.service_key_snapshot && coverageCatalogKey) patch.service_key_snapshot = coverageCatalogKey;
+        await conn('scheduled_services')
+          .whereIn('id', backfillIds)
+          .where(function retargetScope() {
+            this.whereNull('service_id');
+            if (staleOneTimePalmId) this.orWhere('service_id', staleOneTimePalmId);
+          })
+          .update(patch);
+      }
+      return true;
+    } catch (err) {
+      logger.error(`[annual-prepay] term ${term.id}: palm coverage identity backfill (${label}) FAILED: ${err.message}`);
+      return false;
+    }
+  };
+
+  // Phase-1 identity backfill — matched/adopted EXISTING rows, BEFORE any
+  // seeding or slide persistence (codex r18 pre-push P0): deferring here
+  // creates nothing, so the refresh hard-stop leaves no correctly-seeded
+  // visit unstamped. Failure files the durable exception and defers; the
+  // next idempotent term refresh retries the whole sequence.
+  if (coverageCatalogServiceId && cols.service_id) {
+    const existingOk = await backfillPalmIdentity(existingRows, 'matched-existing');
+    if (!existingOk) {
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'Adopted palm coverage visits could not be linked to the recurring catalog identity — until the next term refresh succeeds, their completions would bill as one-time work. Re-save the term to retry, or link the visits to Semiannual Palm Injection manually.');
+      return {
+        createdCount: 0,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows: [],
+        // Original term end — the slide has not persisted yet.
+        effectiveTermEnd: termEnd,
+        reason: 'palm_identity_backfill_failed',
+      };
+    }
+  }
+
   // Persist the slid coverage window BEFORE seeding, so the seeded tail is
   // in-window for every downstream consumer (attachScheduledServices,
   // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
@@ -690,6 +981,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
+    if (cols.service_id && coverageCatalogServiceId) insertData.service_id = coverageCatalogServiceId;
+    if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
@@ -736,6 +1029,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     return true;
   };
 
+  // Concurrent-adoption filter (codex r18 pre-push P0): same rule as
+  // coverageRowsForTerm — a palm row adopted under the occupancy lock
+  // must carry the recurring identity or already belong to this term,
+  // or a genuine one-time palm appointment on the same day would be
+  // swallowed into prepaid coverage.
+  const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+    && !rowLinkedToAnotherTerm(term, row)
+    && (!coverageIsPalm
+      || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
+      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
+      || rowCommittedToTerm(term, row));
+
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
@@ -765,13 +1070,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
         if (concurrentAdoptable) return;
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate,
           windowStart,
           durationMinutes: baseDuration,
-          adoptableFor: { customerId: term.customer_id, coverageServiceType },
+          adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
         });
         if (conflict) {
           logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
@@ -794,13 +1099,14 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
           .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
           .select('*');
-        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        concurrentAdoptable = (sameDay || []).find((row) => adoptableCoverageRow(row)) || null;
       } catch (recheckErr) {
         logger.warn(`[annual-prepay] term ${term.id} post-failure adoption recheck failed (${recheckErr.message})`);
       }
     }
     if (concurrentAdoptable) {
       logger.warn(`[annual-prepay] term ${term.id} found concurrently-created visit ${concurrentAdoptable.id} on ${scheduledDate} under the occupancy lock — adopting it instead of inserting a duplicate`);
+      adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
     if (!windowStart && firstVisitWindowStart) {
@@ -994,6 +1300,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       } catch (err) {
         logger.warn(`[annual-prepay] seeded-visit reminder registration skipped for ${created.id}: ${err.message}`);
       }
+    }
+  }
+
+  // Phase-2 identity backfill — CONCURRENT adoptions only (codex r18
+  // pre-push P0): rows adopted under the occupancy lock mid-loop are not
+  // known before seeding. A failure here must NOT hard-stop the refresh —
+  // the newly inserted visits carry the correct identity and must still
+  // be prepaid-stamped, or completion would invoice a prepaid customer.
+  // The unresolved adopted row is quarantined operationally via the
+  // durable coverage exception instead.
+  if (coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
+    const concurrentOk = await backfillPalmIdentity(adoptedConcurrentRows, 'concurrent-adoption');
+    if (!concurrentOk) {
+      await fileCoverageException(term, 'palm_identity_backfill_failed',
+        'A concurrently-adopted palm visit could not be linked to the recurring catalog identity — its completion would bill as one-time work. Link the visit to Semiannual Palm Injection manually, or re-save the term to retry.');
+      return {
+        createdCount: createdRows.length,
+        targetDates,
+        existingCount: existingRows.length,
+        createdRows,
+        effectiveTermEnd,
+        reason: 'palm_concurrent_backfill_failed',
+      };
     }
   }
 
@@ -1493,6 +1822,240 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
   return reversedCount;
 }
 
+// WaveGuard tier-extension prepaid-difference credits (the extension apply
+// mints one grant PER TERM, marker "(term <id>, estimate <id>)", identity
+// shared via customer-credit.js). A refunded prepay term must claw its
+// grant back — the full-annual refund returns the money the discounted
+// allocation was carved from, so a kept credit would pay the tier savings
+// twice. Same discipline as the pending-completion reversal above:
+// customer row lock, marker-based dedupe (replay-safe against webhook
+// retries and admin re-records), balance-capped with a zero-delta dedupe
+// row when the credit was already spent. Term-level only by design: a
+// single covered VISIT refunding does not unwind the tier extension — the
+// term still stands, so there is no visitId narrowing here.
+// Per-marker event log: every ledger row of the three class identities that
+// carries the marker, oldest first. The LAST event decides what may run
+// next — grant/restore (positive) → clawable; reversal (negative or the
+// zero-delta exhausted row) → restorable — which keeps arbitrary
+// refund → claw → repay → restore → refund cycles correct where a simple
+// "reversal marker exists" dedupe would go one-shot.
+async function extensionMarkerEvents(t, customerId, marker) {
+  const {
+    WAVEGUARD_EXTENSION_CREDIT_BY,
+    WAVEGUARD_EXTENSION_REVERSAL_BY,
+    WAVEGUARD_EXTENSION_RESTORE_BY,
+  } = require('./customer-credit');
+  // Chronology comes from created_at — ledger ids are RANDOM UUIDs, so
+  // ordering by id would shuffle the event log. And because the column
+  // DEFAULT now() is transaction-START time (an early-started txn that
+  // commits late would stamp its event older than one it followed),
+  // every writer of these three classes insert-order-stamps created_at
+  // with clock_timestamp() taken while holding the customer row FOR
+  // UPDATE — lock-acquisition order IS event order. The id tie-break
+  // only makes a same-microsecond fluke deterministic.
+  const rows = await t('customer_credit_ledger')
+    .where({ customer_id: customerId })
+    .whereIn('created_by', [
+      WAVEGUARD_EXTENSION_CREDIT_BY,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+      WAVEGUARD_EXTENSION_RESTORE_BY,
+    ])
+    .where('note', 'like', `%${marker}%`)
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('*');
+  return rows;
+}
+
+async function reverseWaveguardExtensionCredits(term, conn = db) {
+  let reversedCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return reversedCount;
+    const {
+      postCreditMovement,
+      WAVEGUARD_EXTENSION_CREDIT_BY,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+    } = require('./customer-credit');
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id', 'account_credits');
+      if (!customer) return;
+      let balance = Number(customer.account_credits) || 0;
+      const credits = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .where('delta', '>', 0)
+        .select('*');
+      // Legacy-shape park (guards P0): the pre-guards writer minted ONE
+      // aggregate grant naming every term ("(estimate #…; terms: a, b)") —
+      // per-term clawback cannot honestly slice it, so it PARKS for the
+      // operator instead of being silently skipped. Prod carries zero rows
+      // of this class (gate never enabled — verified 2026-08-11), so this
+      // is belt-and-braces, deduped by its own marker row.
+      const legacyGrants = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+        .whereNot('note', 'like', '%(term %')
+        .where('note', 'like', `%${term.id}%`)
+        .where('delta', '>', 0)
+        .select('*');
+      for (const legacy of legacyGrants) {
+        const parkMarker = `(term ${term.id}, legacy ledger ${legacy.id})`;
+        const priorPark = await t('customer_credit_ledger')
+          .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+          .where('note', 'like', `%${parkMarker}%`)
+          .first('id');
+        if (priorPark) continue;
+        logger.warn(`[annual-prepay] legacy aggregate WaveGuard extension credit ${legacy.id} names refunded term ${term.id} — cannot auto-reverse per-term; operator review needed`);
+        await t('customer_credit_ledger').insert({
+          customer_id: term.customer_id,
+          delta: 0,
+          balance_after: balance,
+          source: 'adjustment',
+          invoice_id: legacy.invoice_id || null,
+          note: `Annual prepay refunded — a legacy aggregate WaveGuard extension credit names this term and cannot be auto-reversed per-term; operator review needed ${parkMarker}`,
+          created_by: WAVEGUARD_EXTENSION_REVERSAL_BY,
+          created_at: t.raw('clock_timestamp()'), // insert-order stamp — see extensionMarkerEvents
+        });
+      }
+      if (!credits.length) return;
+      for (const credit of credits) {
+        const markerMatch = String(credit.note || '').match(/\(term [^)]*\)/);
+        const marker = markerMatch ? markerMatch[0] : `(term ${term.id}, ledger ${credit.id})`;
+        const events = await extensionMarkerEvents(t, term.customer_id, marker);
+        const last = events[events.length - 1];
+        // Clawable only when the marker's last event is a GRANT or a
+        // RESTORE. A reversal-last marker (including the zero-delta
+        // exhausted row) is settled until a repayment restore re-opens it.
+        if (last && last.created_by === WAVEGUARD_EXTENSION_REVERSAL_BY) continue;
+        const outstanding = last ? Number(last.delta) || 0 : Number(credit.delta) || 0;
+        if (!(outstanding > 0)) continue;
+        const reverseAmount = Math.min(balance, outstanding);
+        if (!(reverseAmount > 0)) {
+          logger.warn(`[annual-prepay] WaveGuard extension credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
+          // Settlement row even when nothing reverses — the credit was
+          // already SPENT toward bills, so a replayed refund sync must not
+          // claw the slice out of unrelated later credit, and a repayment
+          // restore must not re-grant value the customer consumed.
+          // postCreditMovement rejects zero deltas, so write the audit row
+          // directly — same trx, customer row locked.
+          await t('customer_credit_ledger').insert({
+            customer_id: term.customer_id,
+            delta: 0,
+            balance_after: balance,
+            source: 'adjustment',
+            invoice_id: credit.invoice_id || null,
+            note: `Annual prepay refunded — the WaveGuard extension credit was already spent; nothing reversed, operator follow-up needed ${marker}`,
+            created_by: WAVEGUARD_EXTENSION_REVERSAL_BY,
+            created_at: t.raw('clock_timestamp()'), // insert-order stamp — see extensionMarkerEvents
+          });
+          continue;
+        }
+        if (reverseAmount < outstanding) {
+          logger.warn(`[annual-prepay] WaveGuard extension credit ${marker} only partially reversible ($${reverseAmount.toFixed(2)} of $${outstanding.toFixed(2)}) — balance exhausted; operator follow-up needed`);
+        }
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: -reverseAmount,
+          source: 'adjustment',
+          invoiceId: credit.invoice_id || null,
+          note: `Annual prepay refunded — reversing the WaveGuard extension credit ${marker}`,
+          createdBy: WAVEGUARD_EXTENSION_REVERSAL_BY,
+          stampInsertOrder: true,
+        }, t);
+        balance -= reverseAmount;
+        reversedCount += 1;
+      }
+    };
+    // Best-effort demands a SAVEPOINT on a caller's transaction (pre-push
+    // P1, codex r5 round): the catch below swallows, but a failed statement
+    // leaves a raw caller trx ABORTED — every later statement in that
+    // transaction then fails while this helper reports a quiet no-op.
+    // conn.transaction() on a knex trx is a savepoint: the failure rolls
+    // back to it and the caller's transaction stays healthy.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] WaveGuard extension credit reversal skipped for term ${term?.id}: ${err.message}`);
+  }
+  return reversedCount;
+}
+
+// Repayment restore (guards P0 counterpart to the clawback): a refunded
+// prepay invoice that is PAID AGAIN (lost-dispute revival — active and
+// decided paths alike) restores coverage, stamps, and billing mode, so the
+// clawed extension credit comes back with them. Restores exactly what the
+// reversal actually took (a partial claw restores the partial; the
+// zero-delta exhausted row restores nothing — that value was already spent
+// toward bills before the refund). Idempotent by the same last-event rule
+// the clawback uses: only a reversal-last marker is restorable.
+async function restoreWaveguardExtensionCredits(term, conn = db) {
+  let restoredCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return restoredCount;
+    const {
+      postCreditMovement,
+      WAVEGUARD_EXTENSION_REVERSAL_BY,
+      WAVEGUARD_EXTENSION_RESTORE_BY,
+    } = require('./customer-credit');
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id');
+      if (!customer) return;
+      const reversals = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .select('*');
+      if (!reversals.length) return;
+      const seenMarkers = new Set();
+      for (const reversal of reversals) {
+        const markerMatch = String(reversal.note || '').match(/\(term [^)]*\)/);
+        if (!markerMatch) continue;
+        const marker = markerMatch[0];
+        if (marker.includes('legacy ledger')) continue; // parked, operator-owned
+        if (seenMarkers.has(marker)) continue;
+        seenMarkers.add(marker);
+        const events = await extensionMarkerEvents(t, term.customer_id, marker);
+        const last = events[events.length - 1];
+        if (!last || last.created_by !== WAVEGUARD_EXTENSION_REVERSAL_BY) continue;
+        // Sum what the claw actually took since the last grant/restore —
+        // walking back stops at the first positive-class event.
+        let clawed = 0;
+        for (let i = events.length - 1; i >= 0; i -= 1) {
+          const row = events[i];
+          if (row.created_by === WAVEGUARD_EXTENSION_REVERSAL_BY) {
+            clawed = Math.round((clawed + Math.max(0, -(Number(row.delta) || 0))) * 100) / 100;
+          } else break;
+        }
+        if (!(clawed > 0)) continue;
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: clawed,
+          source: 'adjustment',
+          invoiceId: reversal.invoice_id || null,
+          note: `Annual prepay re-paid — restoring the WaveGuard extension credit ${marker}`,
+          createdBy: WAVEGUARD_EXTENSION_RESTORE_BY,
+          stampInsertOrder: true,
+        }, t);
+        restoredCount += 1;
+      }
+    };
+    // Savepoint on a caller's transaction — same reasoning as the reversal
+    // helper above (pre-push P1, codex r5 round): a swallowed failure must
+    // not leave the owning transaction aborted.
+    if (conn === db) await db.transaction(work);
+    else if (conn.isTransaction) await conn.transaction(work);
+    else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] WaveGuard extension credit restore skipped for term ${term?.id}: ${err.message}`);
+  }
+  return restoredCount;
+}
+
 // A dispute on the annual-prepay invoice restores a prior-monthly customer to
 // monthly billing (mid-dispute visits must not go out free — GUARD 5 excludes
 // dispute-suspended terms), so the monthly cron legitimately collects dues
@@ -1813,6 +2376,15 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+    // Attach + prepaid stamping run even on a palm-identity DEFERRAL
+    // (codex r18 pre-push P0, superseding the earlier hard-stop): the
+    // prepaid stamp is the anti-double-bill mechanism — an already-booked
+    // palm visit left unstamped would invoice at completion after the
+    // annual prepay was collected. The MONEY layer therefore always runs;
+    // the identity problem (wrong completion profile posture) remains
+    // quarantined by the deferral's durable coverage exception until the
+    // next refresh restores the catalog identity and re-runs this
+    // sequence idempotently.
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     // Callers sync customers.waveguard_renewal_date from the PRE-slide end
@@ -1965,6 +2537,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       current = updated || term;
       if (updated) {
         logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
+        // The refund clawed the extension credit; the repayment restores
+        // it with the coverage (guards P0). Idempotent (last-event rule).
+        await restoreWaveguardExtensionCredits(updated, conn);
       }
     } else if (nextStatus === 'cancelled') {
       const [updated] = await conn('annual_prepay_terms')
@@ -1978,6 +2553,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // renewal-lapse (renewal_decision set) keeps its paid window, so the
       // whereNull guard leaves `updated` undefined and we don't clear.
       if (updated && updated.status === 'cancelled') {
+        // Lock order (deadlock guard, guards round 1): the accept
+        // transaction locks the CUSTOMER at entry, before the extension's
+        // scheduled_services family lock — while this leg would otherwise
+        // take scheduled_services locks (the stamp clears below) first and
+        // the customer (credit reversals) last. Same order both sides or a
+        // concurrent accept + refund for one customer can deadlock. On
+        // autocommit (conn === db) every statement is its own transaction
+        // and no multi-statement order exists to invert.
+        if (conn.isTransaction && updated.customer_id) {
+          await conn('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+        }
         await clearPrepaidStampsForTerm(term.id, conn);
         // Also reopen any per-visit invoices this term settled as NON-CASH coverage
         // (status='prepaid' by this term, or a partial with a coverage line) — the
@@ -1993,6 +2579,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
         await reversePendingWindowCompletionCredits(updated, conn);
+        // Same double-pay shape for the WaveGuard tier-extension credit:
+        // the refund returns the prepaid dollars the discounted allocation
+        // was carved from, so the extension's prepaid-difference grant
+        // reverses with it.
+        await reverseWaveguardExtensionCredits(updated, conn);
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
         await resetBillingModeAfterTermCancel(updated, conn);
@@ -2064,6 +2655,10 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .where('t.id', decidedTerm.id)
           .first('t.id');
         if (!validPaid) continue;
+        // Repaid backing restores the clawed extension credit with the
+        // coverage (guards P0) — not window-gated: the credit was never
+        // date-bound, only payment-bound. Idempotent (last-event rule).
+        await restoreWaveguardExtensionCredits(decidedTerm, conn);
         const termStart = dateOnly(decidedTerm.term_start);
         const termEnd = dateOnly(decidedTerm.term_end);
         const coveredToday = !!(termStart && termEnd && termStart <= today && today <= termEnd);
@@ -2104,6 +2699,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       })
       .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
+      // Same customer-first lock order as the true-refund cancel branch
+      // above (deadlock guard vs the accept transaction).
+      if (conn.isTransaction && decided.customer_id) {
+        await conn('customers').where({ id: decided.customer_id }).forUpdate().first('id');
+      }
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
       // non-cash coverage — the refund voids their coverage too.
@@ -2113,6 +2713,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
       await reversePendingWindowCompletionCredits(decided, conn);
+      // Decided-lapse refund reverses the extension grant too — the paid
+      // window the credit rode on is the thing being refunded.
+      await reverseWaveguardExtensionCredits(decided, conn);
       // A decided-lapse term (status 'cancelled' + renewal_decision) whose
       // invoice refunds never passes through the active loop's reset — the
       // customer would stay 'annual_prepay' with the cron skipping them and
@@ -2405,6 +3008,14 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     const res = await reconcilePendingWindowCompletions(term, conn);
     summary.settled += res.settled || 0;
     summary.credited += res.credited || 0;
+    // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
+    // invoice), so any clawed extension credit is owed back — self-heals a
+    // repayment whose inline restore was lost (guards P0). Idempotent.
+    try {
+      summary.credited += await restoreWaveguardExtensionCredits(term, conn);
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
+    }
     try {
       const grants = await conn('customer_credit_ledger')
         .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
@@ -2458,6 +3069,223 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep expired-window marker pass failed: ${err.message}`);
+  }
+  // WaveGuard extension-credit recovery pass: a refund-cancelled term is no
+  // longer covered, so it never enters the dated loop above — an extension
+  // grant whose in-line clawback was lost (webhook died mid-sync) would
+  // strand forever. Re-scan the grant class directly: each grant's
+  // invoice_id anchors the term's PREPAY invoice; a cancelled/refunded
+  // anchor plus a cancelled term means the clawback is owed. A renewal
+  // lapse without a refund keeps its paid invoice, so it never trips this.
+  // The reversal is marker-deduped — re-running for an already-reversed
+  // grant is a no-op. The class is tiny (grants exist only for tier-raising
+  // accepts over prepaid visits), so the class-wide scan stays cheap.
+  try {
+    const { WAVEGUARD_EXTENSION_CREDIT_BY } = require('./customer-credit');
+    // Final lost-dispute backing (codex #3344 r9 P1): closed(lost)
+    // deliberately leaves the prepay invoice 'overdue' so recollection can
+    // chase it — never a terminal status — and the webhook's inline
+    // refund-shaped sync can lose a transient
+    // reverseWaveguardExtensionCredits failure AFTER the event was acked.
+    // The durable evidence is the payment row the webhook stamped:
+    // metadata.dispute_final='lost', bound to this invoice by the recorded
+    // dispute_invoice_id or by still owning its PI — the same two arms the
+    // webhook's own lostDisputeOwnedInvoice check uses. An OPEN dispute
+    // never writes dispute_final, so mid-dispute anchors stay excluded; a
+    // recollected invoice leaves 'overdue' and stops matching.
+    const lostDisputeBacked = async (c, anchor) => {
+      if (String(anchor.status || '').toLowerCase() !== 'overdue') return false;
+      const row = await c('payments')
+        .whereRaw("metadata->>'dispute_final' = 'lost'")
+        .where(function lostBinding() {
+          this.whereRaw("metadata->>'dispute_invoice_id' = ?", [String(anchor.id)]);
+          if (anchor.stripe_payment_intent_id) {
+            this.orWhere('stripe_payment_intent_id', String(anchor.stripe_payment_intent_id));
+          }
+        })
+        .first('id');
+      return !!row;
+    };
+    const extGrants = await conn('customer_credit_ledger')
+      .where({ created_by: WAVEGUARD_EXTENSION_CREDIT_BY })
+      .where('delta', '>', 0)
+      .select('customer_id', 'note', 'invoice_id');
+    const seenTerms = new Set();
+    for (const grant of extGrants) {
+      // Anything up to the marker's comma is the id — prod ids are UUIDs,
+      // but the parse must not silently skip a grant over id shape.
+      const termMatch = String(grant.note || '').match(/\(term ([^,)]+),/i);
+      const termId = termMatch ? termMatch[1] : null;
+      if (!termId || seenTerms.has(termId)) continue;
+      seenTerms.add(termId);
+      // UNANCHORED grants recover too (pre-push P0, codex r5 round): the
+      // accept path posts the grant with invoice_id null when its
+      // best-effort prepay-invoice lookup failed — filtering on the ledger
+      // anchor would leave exactly those grants without any sweep
+      // recovery. Resolve the anchor from the term's CURRENT prepay
+      // invoice instead; a term with no linked prepay invoice (legacy
+      // born-active) has no refundable anchor to detect and keeps its
+      // historical covered semantics.
+      let anchorInvoiceId = grant.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // collectible) out of the locked path entirely.
+      const anchorInvoice = await conn('invoices')
+        .where({ id: anchorInvoiceId })
+        .first('id', 'status', 'stripe_payment_intent_id');
+      if (!anchorInvoice) continue;
+      const anchorStatus = String(anchorInvoice.status || '').toLowerCase();
+      if (!INVOICE_CANCELLED_STATUSES.has(anchorStatus)
+        && !(await lostDisputeBacked(conn, anchorInvoice))) continue;
+      // The refunded ANCHOR is the whole evidence (codex #3344 r1 P1): a
+      // refunded term that had already decided renewal keeps its
+      // 'renewed'/'switch_plan' status through the inline refund path, so
+      // requiring status='cancelled' here would permanently skip exactly
+      // the grants a lost refund sync strands. The anchor is self-correct
+      // the other way too: a re-paid invoice (lost-dispute revival) leaves
+      // the cancelled set, and a DISPUTE parks the invoice at 'overdue' —
+      // never a mid-dispute clawback. The term row is only needed for its
+      // identity; the reversal itself is marker-deduped and balance-capped.
+      //
+      // Anchor recheck UNDER LOCK (codex #3344 r2): the pre-check above can
+      // observe 'refunded' while a lost-dispute repayment is mid-flight —
+      // clawing after it commits 'paid' would remove a credit whose backing
+      // payment was just restored. Lock the anchor row and re-read inside
+      // the same transaction the reversal runs in; the repayment's own
+      // invoice UPDATE serializes on the row lock, so whichever commits
+      // first, the other sees its final state.
+      //
+      // Customer BEFORE anchor (codex #3344 r5 P2): the extension accept
+      // path holds the customer FOR UPDATE and its ledger insert then takes
+      // KEY SHARE on this same prepay invoice via the invoice_id FK —
+      // anchor-first here would form the invoice→customer vs
+      // customer→invoice cycle Postgres resolves by aborting one side.
+      // Hoist the customer FOR UPDATE (the exact lock
+      // reverseWaveguardExtensionCredits takes anyway — re-locking in-txn
+      // is free) so every extension-credit writer agrees on customer →
+      // invoice, matching the mint paths' customer-first order.
+      const clawIfStillRefunded = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: grant.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
+        const lockedAnchor = await t('invoices')
+          .where({ id: anchorInvoiceId })
+          .forUpdate()
+          .first('id', 'status', 'stripe_payment_intent_id');
+        if (!lockedAnchor) return 0;
+        const lockedStatus = String(lockedAnchor.status || '').toLowerCase();
+        // The lost-dispute arm re-proves under the same lock: a
+        // recollection commits 'paid' on the anchor row this transaction
+        // now holds, so whichever side wins, the loser sees the final
+        // state — a repaid anchor stands down here exactly like a repaid
+        // refund would.
+        if (!INVOICE_CANCELLED_STATUSES.has(lockedStatus)
+          && !(await lostDisputeBacked(t, lockedAnchor))) return 0;
+        const term = await t('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'customer_id', 'status');
+        if (!term) return 0;
+        return reverseWaveguardExtensionCredits(term, t);
+      };
+      summary.reversed += conn === db
+        ? await db.transaction(clawIfStillRefunded)
+        : await clawIfStillRefunded(conn);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);
+  }
+  // WaveGuard extension-credit RESTORE recovery pass (codex #3344 r5 P1):
+  // the dated loop above restores only covered-TODAY terms, so a refunded
+  // anchor REPAID after term_end (late lost-dispute repayment) whose inline
+  // restore was lost never re-enters — the expired-window marker pass only
+  // runs the dispute recovery, and the inline restore swallows its own
+  // errors, so that follow-up can clear the marker with the credit still
+  // reversal-last. Mirror of the clawback pass, keyed on the REVERSAL
+  // class: each reversal's invoice_id anchors the term's prepay invoice; a
+  // paid-again anchor whose term shows valid paid backing
+  // (coveredTermsAsOf(null) — decided-repaid restores are deliberately NOT
+  // window-gated) means the restore is owed. The restore itself is
+  // last-event-idempotent, so overlap with an inline restore racing this
+  // sweep is a no-op, and the class is as tiny as the grant class.
+  try {
+    const { WAVEGUARD_EXTENSION_REVERSAL_BY } = require('./customer-credit');
+    const datedLoopTermIds = new Set(terms.map((term) => String(term.id)));
+    const reversalRows = await conn('customer_credit_ledger')
+      .where({ created_by: WAVEGUARD_EXTENSION_REVERSAL_BY })
+      .select('customer_id', 'note', 'invoice_id');
+    const seenRestoreTerms = new Set();
+    for (const reversal of reversalRows) {
+      const termMatch = String(reversal.note || '').match(/\(term ([^,)]+),/i);
+      const termId = termMatch ? termMatch[1] : null;
+      if (!termId || seenRestoreTerms.has(termId)) continue;
+      seenRestoreTerms.add(termId);
+      // The dated loop already ran the restore for covered-today terms —
+      // this pass owns only the terms outside today's window.
+      if (datedLoopTermIds.has(String(termId))) continue;
+      // Unanchored reversals resolve their anchor from the term's current
+      // prepay invoice — same recovery contract as the clawback pass above
+      // (pre-push P0, codex r5 round): a reversal inherits its grant's
+      // null invoice_id when the accept-time anchor lookup failed.
+      let anchorInvoiceId = reversal.invoice_id;
+      if (!anchorInvoiceId) {
+        const termRow = await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .first('id', 'prepay_invoice_id');
+        anchorInvoiceId = termRow?.prepay_invoice_id || null;
+      }
+      if (!anchorInvoiceId) continue;
+      // Cheap unlocked pre-check keeps the common case (anchor still
+      // refunded — nothing to restore) out of the locked path entirely.
+      const anchorInvoice = await conn('invoices')
+        .where({ id: anchorInvoiceId })
+        .first('id', 'status', 'paid_at');
+      if (!anchorInvoice) continue;
+      const anchorPaid = String(anchorInvoice.status || '').toLowerCase() === 'paid'
+        || anchorInvoice.paid_at != null;
+      if (!anchorPaid) continue;
+      // Same lock discipline as the clawback pass: customer FOR UPDATE
+      // first (the grant path's order — see the r5 P2 note above), then the
+      // anchor row so a racing refund's invoice UPDATE serializes, then the
+      // paid-backing recheck through coveredTermsAsOf on this transaction —
+      // whichever side commits first, the other sees its final state.
+      const restoreIfStillPaidBacked = async (t) => {
+        const lockedCustomer = await t('customers')
+          .where({ id: reversal.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return 0;
+        const lockedAnchor = await t('invoices')
+          .where({ id: anchorInvoiceId })
+          .forUpdate()
+          .first('id');
+        if (!lockedAnchor) return 0;
+        // Paid backing is the term-level authority, not the bare anchor
+        // status: coveredTermsAsOf(null) revalidates the prepay invoice AND
+        // the refunded-payment exclusion, and its windowless form is exactly
+        // the decided-repaid shape the restore rules cover. A term still
+        // stuck cancelled-unrevived (lost repayment sync) is out of scope
+        // here by design — the revival recoveries own it, and once revived
+        // it becomes paid-backed and this pass catches it next sweep.
+        const term = await coveredTermsAsOf(t, null)
+          .where('t.id', termId)
+          .first('t.id', 't.customer_id');
+        if (!term) return 0;
+        return restoreWaveguardExtensionCredits(term, t);
+      };
+      summary.credited += conn === db
+        ? await db.transaction(restoreIfStillPaidBacked)
+        : await restoreIfStillPaidBacked(conn);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
   }
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
@@ -3640,6 +4468,8 @@ module.exports = {
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,
   reversePendingWindowCompletionCredits,
+  reverseWaveguardExtensionCredits,
+  restoreWaveguardExtensionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,
@@ -3677,6 +4507,7 @@ module.exports = {
     normalizeWindowStart,
     addMinutesHHMM,
     normalizeCoverageCadence,
+    cadenceFromIntervalDays,
     coverageCadenceMonths,
     coverageCadenceDays,
     inferCoverageCadence,

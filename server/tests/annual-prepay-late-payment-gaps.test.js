@@ -12,6 +12,9 @@ jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn().mockResolvedValue(undefined),
   reverseAppliedCredit: jest.fn().mockResolvedValue(0),
   autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
+  WAVEGUARD_EXTENSION_CREDIT_BY: 'system:waveguard_tier_extension',
+  WAVEGUARD_EXTENSION_REVERSAL_BY: 'system:waveguard_tier_extension_reversal',
+  WAVEGUARD_EXTENSION_RESTORE_BY: 'system:waveguard_tier_extension_restore',
 }));
 
 const db = require('../models/db');
@@ -366,8 +369,12 @@ describe('annual prepay late-payment gap fixes', () => {
           query({ first: { id: 'prepay-inv-1', scheduled_service_id: null } }), // visit-invoice hook lookup
         ],
         customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock
           query({ first: { billing_mode: 'per_application' } }), // prior-mode read
           stampModeQ, // billing_mode re-stamp
+        ],
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
         ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
@@ -408,12 +415,16 @@ describe('annual prepay late-payment gap fixes', () => {
       const conn = makeConn({
         'annual_prepay_terms as t': [query({ rows: [bareTerm] })],
         customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
           query({ rows: [grant] }), // sweep grant scan
           query({ rows: [{ ...grant, id: 'ledger-1' }] }), // reversal: grants for term+visit
           query({ rows: [] }), // reversal: existing reversal notes
         ],
         invoices: [query({ first: { id: 'inv-1', status: 'refunded' } })],
-        customers: [query({ first: { id: 'cust-1', account_credits: '120.00' } })],
+        customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock
+          query({ first: { id: 'cust-1', account_credits: '120.00' } }),
+        ],
       });
 
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
@@ -445,6 +456,379 @@ describe('annual prepay late-payment gap fixes', () => {
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
 
       expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // WaveGuard extension-credit recovery pass — the refunded ANCHOR is the
+    // whole evidence (codex #3344 r1 P1): a refunded term that already
+    // decided renewal keeps 'renewed'/'switch_plan' status, so a
+    // status='cancelled' filter would permanently strand exactly the grants
+    // a lost refund sync leaves behind.
+    test('extension grant on a DECIDED (renewed) term with a refunded prepay anchor still recovers', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })], // dated loop — no covered terms
+        annual_prepay_terms: [
+          query({ columnInfo: {} }), // expired-window marker pass column probe → skipped
+          query({ first: { id: 'term-9', customer_id: 'cust-1', status: 'renewed' } }),
+        ],
+        customer_credit_ledger: [
+          query({ rows: [extGrant] }), // extension grant class scan
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: per-term grants
+          query({ rows: [] }), // reversal: legacy-shape grants — none
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: marker events (grant-last → clawable)
+        ],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // unlocked pre-check
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // in-lock recheck
+        ],
+        customers: [
+          query({ first: { id: 'cust-1' } }), // hoisted customer lock (r5 P2)
+          query({ first: { id: 'cust-1', account_credits: '10.00' } }), // reversal's own lock
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: -4.9,
+        createdBy: 'system:waveguard_tier_extension_reversal',
+      }), conn);
+      // Lock order (codex #3344 r5 P2): the customer lock must precede the
+      // in-lock anchor recheck — the grant path holds the customer FOR
+      // UPDATE and takes KEY SHARE on the anchor via the ledger FK, so
+      // anchor-first here would deadlock against it.
+      const tables = conn.mock.calls.map((call) => call[0]);
+      const firstAnchorIdx = tables.indexOf('invoices'); // unlocked pre-check
+      const inLockAnchorIdx = tables.indexOf('invoices', firstAnchorIdx + 1);
+      const customerLockIdx = tables.indexOf('customers');
+      expect(customerLockIdx).toBeGreaterThan(firstAnchorIdx);
+      expect(customerLockIdx).toBeLessThan(inLockAnchorIdx);
+    });
+
+    // TOCTOU guard (codex #3344 r2): the unlocked pre-check can observe
+    // 'refunded' while a lost-dispute REPAYMENT is mid-flight — the in-lock
+    // recheck must see the repaid anchor and stand down, or the sweep would
+    // claw a credit whose backing payment was just restored.
+    test('anchor repaid between pre-check and lock → the in-lock recheck stands down', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // stale pre-check
+          query({ first: { id: 'inv-prepay', status: 'paid' } }), // repayment won the race
+        ],
+        customers: [query({ first: { id: 'cust-1' } })], // hoisted customer lock (r5 P2)
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // Final lost dispute (codex #3344 r9 P1): closed(lost) leaves the
+    // prepay invoice 'overdue' for recollection — never a terminal status —
+    // so a cancelled-statuses-only filter permanently skips exactly the
+    // grants a transiently-failed inline clawback strands. The durable
+    // evidence is the payment row the webhook stamped
+    // (metadata.dispute_final='lost' bound to the anchor).
+    test('extension grant whose anchor sits overdue under a FINAL lost dispute claws back', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const overdueAnchor = { id: 'inv-prepay', status: 'overdue', stripe_payment_intent_id: null };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })], // dated loop — no covered terms
+        annual_prepay_terms: [
+          query({ columnInfo: {} }), // expired-window marker pass column probe → skipped
+          query({ first: { id: 'term-9', customer_id: 'cust-1', status: 'cancelled' } }),
+        ],
+        customer_credit_ledger: [
+          query({ rows: [extGrant] }), // extension grant class scan
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: per-term grants
+          query({ rows: [] }), // reversal: legacy-shape grants — none
+          query({ rows: [{ ...extGrant, id: 'lg-1' }] }), // reversal: marker events (grant-last → clawable)
+        ],
+        invoices: [
+          query({ first: overdueAnchor }), // unlocked pre-check
+          query({ first: overdueAnchor }), // in-lock recheck
+        ],
+        payments: [
+          query({ first: { id: 'pay-1' } }), // pre-check: dispute_final='lost' evidence
+          query({ first: { id: 'pay-1' } }), // in-lock re-proof
+        ],
+        customers: [
+          query({ first: { id: 'cust-1' } }), // hoisted customer lock (r5 P2)
+          query({ first: { id: 'cust-1', account_credits: '10.00' } }), // reversal's own lock
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: -4.9,
+        createdBy: 'system:waveguard_tier_extension_reversal',
+      }), conn);
+    });
+
+    // An OPEN dispute parks the invoice at 'overdue' too, but writes no
+    // dispute_final — the sweep must never claw mid-dispute.
+    test('overdue anchor under an OPEN dispute (no dispute_final) is left alone', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'overdue', stripe_payment_intent_id: 'pi_disputed' } }),
+        ],
+        payments: [query({ first: undefined })], // no dispute_final='lost' row
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // Recollection TOCTOU: the customer re-pays the lost-dispute invoice
+    // between the pre-check and the lock — the in-lock recheck sees 'paid'
+    // (lost-dispute evidence short-circuits on any non-overdue status) and
+    // stands down; the restore machinery owns the repaid state.
+    test('lost-dispute anchor recollected between pre-check and lock → stands down', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'overdue', stripe_payment_intent_id: null } }), // pre-check
+          query({ first: { id: 'inv-prepay', status: 'paid', stripe_payment_intent_id: 'pi_new' } }), // recollected
+        ],
+        payments: [query({ first: { id: 'pay-1' } })], // pre-check evidence only
+        customers: [query({ first: { id: 'cust-1' } })], // hoisted customer lock
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // Unanchored grants (pre-push P0, codex r5 round): the accept path
+    // posts the grant with invoice_id NULL when its best-effort anchor
+    // lookup failed — the sweep must resolve the anchor from the term's
+    // CURRENT prepay invoice or exactly those grants have no recovery.
+    test('a grant with NO ledger anchor resolves the term prepay invoice and still claws back', async () => {
+      const unanchoredGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: null,
+        delta: '4.90',
+        customer_id: 'cust-1',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [
+          query({ columnInfo: {} }), // expired-window marker pass probe
+          query({ first: { id: 'term-9', prepay_invoice_id: 'inv-prepay' } }), // anchor resolve
+          query({ first: { id: 'term-9', customer_id: 'cust-1', status: 'renewed' } }), // in-lock term fetch
+        ],
+        customer_credit_ledger: [
+          query({ rows: [unanchoredGrant] }), // grant class scan
+          query({ rows: [{ ...unanchoredGrant, id: 'lg-1' }] }), // reversal: per-term grants
+          query({ rows: [] }), // reversal: legacy-shape grants
+          query({ rows: [{ ...unanchoredGrant, id: 'lg-1', created_by: 'system:waveguard_tier_extension' }] }), // marker events
+        ],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // pre-check on the RESOLVED anchor
+          query({ first: { id: 'inv-prepay', status: 'refunded' } }), // in-lock recheck
+        ],
+        customers: [
+          query({ first: { id: 'cust-1' } }),
+          query({ first: { id: 'cust-1', account_credits: '10.00' } }),
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: -4.9,
+      }), conn);
+    });
+
+    test('extension grant whose prepay anchor is still collectible is never clawed by the sweep', async () => {
+      const extGrant = {
+        note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+        invoice_id: 'inv-prepay',
+        delta: '4.90',
+      };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        customer_credit_ledger: [query({ rows: [extGrant] })],
+        invoices: [query({ first: { id: 'inv-prepay', status: 'paid' } })],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.reversed).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    // Restore recovery pass (codex #3344 r5 P1): the dated loop restores
+    // only covered-TODAY terms, so a refunded anchor repaid AFTER term_end
+    // whose inline restore was lost would strand the clawed credit forever.
+    // The pass keys on the reversal class and re-validates paid backing
+    // windowlessly (decided-repaid restores are not window-gated).
+    const extReversal = {
+      note: 'Annual prepay refunded — reversing the WaveGuard extension credit (term term-9, estimate est-1)',
+      invoice_id: 'inv-prepay',
+      delta: '-4.90',
+      created_by: 'system:waveguard_tier_extension_reversal',
+      customer_id: 'cust-1',
+    };
+    const extGrantEvent = {
+      id: 'lg-grant',
+      note: 'WaveGuard Silver extension — prepaid-term difference (term term-9, estimate est-1)',
+      invoice_id: 'inv-prepay',
+      delta: '4.90',
+      created_by: 'system:waveguard_tier_extension',
+    };
+
+    test('clawed credit on an EXPIRED-window term whose anchor is repaid restores through the recovery pass', async () => {
+      const conn = makeConn({
+        'annual_prepay_terms as t': [
+          query({ rows: [] }), // dated loop: nothing covered today (window expired)
+          query({ first: { id: 'term-9', customer_id: 'cust-1' } }), // windowless paid-backing recheck
+        ],
+        annual_prepay_terms: [query({ columnInfo: {} })], // expired marker pass column probe → skipped
+        customer_credit_ledger: [
+          query({ rows: [] }), // clawback pass grant scan — none outstanding
+          query({ rows: [extReversal] }), // restore pass reversal scan
+          query({ rows: [extReversal] }), // restore fn: reversals for the term
+          query({ rows: [extGrantEvent, { ...extReversal, id: 'lg-rev' }] }), // marker events (reversal-last)
+        ],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'paid' } }), // unlocked pre-check: repaid
+          query({ first: { id: 'inv-prepay' } }), // in-lock anchor
+        ],
+        customers: [
+          query({ first: { id: 'cust-1' } }), // hoisted customer lock
+          query({ first: { id: 'cust-1' } }), // restore fn's own lock
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.credited).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: 4.9,
+        createdBy: 'system:waveguard_tier_extension_restore',
+      }), conn);
+    });
+
+    test('an UNANCHORED reversal resolves the term prepay invoice and still restores when repaid', async () => {
+      const unanchoredReversal = { ...extReversal, invoice_id: null };
+      const conn = makeConn({
+        'annual_prepay_terms as t': [
+          query({ rows: [] }), // dated loop
+          query({ first: { id: 'term-9', customer_id: 'cust-1' } }), // windowless paid-backing recheck
+        ],
+        annual_prepay_terms: [
+          query({ columnInfo: {} }), // marker pass probe
+          query({ first: { id: 'term-9', prepay_invoice_id: 'inv-prepay' } }), // anchor resolve
+        ],
+        customer_credit_ledger: [
+          query({ rows: [] }), // clawback pass grant scan
+          query({ rows: [unanchoredReversal] }), // restore pass reversal scan
+          query({ rows: [extReversal] }), // restore fn: reversals for the term
+          query({ rows: [extGrantEvent, { ...extReversal, id: 'lg-rev' }] }), // marker events
+        ],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'paid' } }), // pre-check on the RESOLVED anchor
+          query({ first: { id: 'inv-prepay' } }), // in-lock anchor
+        ],
+        customers: [
+          query({ first: { id: 'cust-1' } }),
+          query({ first: { id: 'cust-1' } }),
+        ],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.credited).toBe(1);
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: 4.9,
+        createdBy: 'system:waveguard_tier_extension_restore',
+      }), conn);
+    });
+
+    test('restore recovery stands down while the anchor is still refunded', async () => {
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [] })],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [
+          query({ rows: [] }), // clawback pass grant scan
+          query({ rows: [extReversal] }), // restore pass reversal scan
+        ],
+        invoices: [query({ first: { id: 'inv-prepay', status: 'refunded', paid_at: null } })],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.credited).toBe(0);
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+
+    test('paid anchor whose term fails the windowless paid-backing recheck restores nothing', async () => {
+      const conn = makeConn({
+        'annual_prepay_terms as t': [
+          query({ rows: [] }), // dated loop
+          query({ first: undefined }), // coveredTermsAsOf(null): term not paid-backed
+        ],
+        annual_prepay_terms: [query({ columnInfo: {} })],
+        customer_credit_ledger: [
+          query({ rows: [] }), // clawback pass grant scan
+          query({ rows: [extReversal] }), // restore pass reversal scan
+        ],
+        invoices: [
+          query({ first: { id: 'inv-prepay', status: 'paid' } }), // pre-check
+          query({ first: { id: 'inv-prepay' } }), // in-lock anchor
+        ],
+        customers: [query({ first: { id: 'cust-1' } })],
+      });
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.credited).toBe(0);
       expect(postCreditMovement).not.toHaveBeenCalled();
     });
 
@@ -680,6 +1064,7 @@ describe('annual prepay late-payment gap fixes', () => {
           query({ rows: [] }), // decided-coverage select
         ],
         customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock (revival leg)
           query({ columnInfo: {} }), // syncCustomerRenewalDate probe
           query({ first: { billing_mode: null } }), // stamp prior-mode read
           stampModeQ, // billing_mode stamp
@@ -692,7 +1077,10 @@ describe('annual prepay late-payment gap fixes', () => {
         payments: [query({
           rows: [{ id: 'pay-dues-1', status: 'paid', amount: '89.00', payment_date: '2026-07-06', refund_status: null, refund_amount: null }],
         })],
-        customer_credit_ledger: [query({ first: undefined })], // dues dedupe check
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
+          query({ first: undefined }), // dues dedupe check
+        ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
       db.mockImplementation(() => query({ columnInfo: SS_COLS }));
@@ -745,9 +1133,15 @@ describe('annual prepay late-payment gap fixes', () => {
         // stampAnnualPrepayBillingMode / applyPrepaidCoverageForTerm — any
         // attempt would consume the dues row lock below and fail the credit
         // assertion.
-        customers: [query({ first: { id: 'cust-1' } })], // dues credit row lock
+        customers: [
+          query({ first: { id: 'cust-1' } }), // extension-restore row lock (not window-gated)
+          query({ first: { id: 'cust-1' } }), // dues credit row lock
+        ],
         payments: [query({ rows: [PAID_DUES] })],
-        customer_credit_ledger: [query({ first: undefined })],
+        customer_credit_ledger: [
+          query({ rows: [] }), // extension-restore reversal lookup: none
+          query({ first: undefined }), // dues dedupe check
+        ],
         invoices: [query({ first: { id: 'prepay-inv-1', scheduled_service_id: null } })], // visit-hook lookup
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };

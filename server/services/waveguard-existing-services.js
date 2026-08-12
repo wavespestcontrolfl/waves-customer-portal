@@ -132,6 +132,25 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // (splitCoverageAmount slice) — the tier-extension credit derives from
   // what was PAID, never the undiscounted estimated_price.
   if (cols.prepaid_amount) selectCols.push('prepaid_amount');
+  // Which mechanism paid for the visit. A cash/Zelle prepayment keeps its own
+  // method even when attachScheduledServices links the row to an annual term,
+  // so the method is what distinguishes annual-prepay coverage from an
+  // unrelated out-of-band payment (annual-prepay-renewals' own
+  // annualPrepayCoversVisit keys on it first).
+  if (cols.prepaid_method) selectCols.push('prepaid_method');
+  // Appointment decomposition: estimated_price is the whole visit NET
+  // (primary + add-ons − appointment discount), so the primary line's own
+  // price and discount are what a per-application figure for the recurring
+  // service must be built from.
+  if (cols.primary_line_price) selectCols.push('primary_line_price');
+  if (cols.line_discount_dollars) selectCols.push('line_discount_dollars');
+  // Appointment-LEVEL discount signal (distinct from the primary line's own
+  // discount above): it spans the primary and every add-on with no recorded
+  // apportionment, so a composite row carrying one cannot honestly quote its
+  // primary line as a per-application price and must withhold instead.
+  if (cols.discount_id) selectCols.push('discount_id');
+  if (cols.discount_type) selectCols.push('discount_type');
+  if (cols.discount_dollars) selectCols.push('discount_dollars');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
@@ -227,7 +246,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+// opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
+// identity (the spend panel) passes its already-loaded map — including a
+// null from a failed load — so qualification and that caller's own
+// classification are guaranteed to see the SAME catalog snapshot (codex
+// #3359 r4: two sequential loads meant one could transiently fail while the
+// other succeeded, splitting tier and spend onto different identities).
+// Omitted (every other caller), the loader fetches its own.
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
@@ -244,7 +270,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+  const catalogById = (catalogFieldsByRowId !== undefined
+    ? catalogFieldsByRowId
+    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -428,6 +456,15 @@ function ownershipFamiliesFromText(raw) {
     if (/\b(bait|station|monitor)/.test(s) || combinedPestRodent) add('rodent_bait');
   }
   if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
+  // Recurring spot-foam termite program (foam_recurring — catalog name
+  // "Recurring Foam Treatment" carries no termite token). Its OWN family,
+  // NOT termite_bait: foam coverage must never suppress a bait-station
+  // quote. No pricing consumer keys off this today (mapKey passes unknown
+  // keys through and they only ever equality-match) — it exists so the
+  // Property Score's termite component sees foam coverage through the same
+  // lifecycle-filtered ownership path as every other family. The adjacency
+  // requirement keeps rodent-exclusion foam-sealing work unmatched.
+  if (/recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s)) add('termite_foam');
   return keys;
 }
 
@@ -450,7 +487,12 @@ function ownershipKeysForRow(row = {}) {
     // no family tokens at all ("Premium Home Plan") defers to service_type.
     const s = catalogText.toLowerCase();
     const informative = /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?)\b/.test(s)
-      || RODENT_TOKEN_RE.test(s);
+      || RODENT_TOKEN_RE.test(s)
+      // foam_recurring is an informative termite identity despite carrying
+      // no termite token — without this, a foam row under a stale generic
+      // 'Pest Control' service_type would fall through to the joined text
+      // and claim pest coverage on top of termite_foam.
+      || /recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s);
     if (informative) return ownershipFamiliesFromText(catalogText);
   }
   return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());
@@ -503,6 +545,7 @@ module.exports = {
   toQualifyingKeys,
   filterRowsToStreet,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysForRow,
   qualifyingKeysFromRows,

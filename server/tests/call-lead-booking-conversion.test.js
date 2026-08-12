@@ -139,11 +139,16 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(b.whereNotIn).toHaveBeenCalledWith('status', ['won', 'duplicate']);
   });
 
-  test('conversion failure is contained: returns false, never throws (booking must still commit)', async () => {
+  test('conversion failure is contained: returns null (transient marker), never throws (booking must still commit)', async () => {
+    // null (not false) so the legacy-activation hook can tell a transient
+    // failure — retry-worthy, leaves the row unstamped — from the deliberate
+    // false no-ops (quote kept open, already-won/unowned lead, lost race)
+    // that must not block activation (Codex #3361 r6 P1). Same falsiness
+    // for every truthiness-checking caller.
     const inner = makeInner({ failOn: 'update' });
     const trx = makeTrx(inner);
 
-    await expect(convertCallLeadOnPhoneBooking(trx, ARGS)).resolves.toBe(false);
+    await expect(convertCallLeadOnPhoneBooking(trx, ARGS)).resolves.toBeNull();
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('Lead conversion on phone booking failed'),
     );

@@ -525,6 +525,22 @@ describe('ownershipKeysForRow catalog authority', () => {
     })).toEqual(['rodent_bait']);
   });
 
+  test('recurring-foam catalog identity under a stale generic service_type owns termite_foam only', () => {
+    // foam_recurring carries no termite token but IS an informative catalog
+    // identity — a stale 'Pest Control' service_type must not add
+    // pest_control (that would suppress a valid pest quote).
+    expect(ownershipKeysForRow({
+      service_type: 'Pest Control',
+      service_key: 'foam_recurring',
+      service_name: 'Recurring Foam Treatment',
+    })).toEqual(['termite_foam']);
+    expect(ownershipKeysForRow({
+      service_type: 'Lawn Care',
+      service_key: 'foam_recurring',
+      service_name: 'Recurring Foam Treatment',
+    })).toEqual(['termite_foam']);
+  });
+
   test('explicit combined pest & rodent plan owns both', () => {
     expect(ownershipKeysForRow({ service_type: 'Pest & Rodent Control' }).sort())
       .toEqual(['pest_control', 'rodent_bait']);

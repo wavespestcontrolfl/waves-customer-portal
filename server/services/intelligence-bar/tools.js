@@ -1755,9 +1755,23 @@ async function rescheduleAppointment(input) {
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const {
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
+    needsLifecycleRewind, applyTrackLifecycleCas,
+  } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
-  const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+  // Rewind on stale evidence too, not just live status — see
+  // needsLifecycleRewind in rebooker.js. The status flip and the history
+  // append stay keyed on wasLive; an evidence-only rewind still gets the
+  // post-commit tracker cleanup below (tech pointer + customer refresh)
+  // without recording a status transition that never happened. Gated on
+  // the DATE actually changing: a same-date window edit of a visit with
+  // genuine same-day tracker state must not erase the active attempt.
+  const apptDay = appt.scheduled_date instanceof Date
+    ? appt.scheduled_date.toISOString().slice(0, 10)
+    : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
+  const trackRewound = !wasLive && dateStr !== apptDay && needsLifecycleRewind(appt);
+  const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
 
   // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
   // guard and the wasLive classification above came from the initial read —
@@ -1784,14 +1798,22 @@ async function rescheduleAppointment(input) {
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
-  const updatedRows = await db('scheduled_services')
-    .where('id', appointment_id)
-    .where('status', String(appt.status))
-    .where({
-      scheduled_date: observedDate,
-      window_start: appt.window_start ?? null,
-      window_end: appt.window_end ?? null,
-    })
+  const updatedRows = await applyTrackLifecycleCas(
+    db('scheduled_services')
+      .where('id', appointment_id)
+      .where('status', String(appt.status))
+      .where({
+        scheduled_date: observedDate,
+        window_start: appt.window_start ?? null,
+        window_end: appt.window_end ?? null,
+      }),
+    // The full observed tracker/lifecycle snapshot is in the CAS: a
+    // geofence/manual transition between the read and this write can
+    // advance track_state, add stamps to a same-state row, or stamp an
+    // SMS guard — any of it must make this miss instead of moving the
+    // visit on a stale snapshot. See applyTrackLifecycleCas.
+    appt,
+  )
     .update({
       scheduled_date: dateStr,
       window_start: newStart,
@@ -1820,6 +1842,16 @@ async function rescheduleAppointment(input) {
       await applyLiveMoveSideEffects(db, appt);
     } catch (err) {
       logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+    }
+  } else if (trackRewound) {
+    // No status transition happened (status was never live), so no history
+    // row — but the tracker rewind still released a manual En Route tap's
+    // state: free the tech pointer and refresh any open customer tracker
+    // with the row's unchanged status.
+    try {
+      await applyLiveMovePostCommitEffects(appt, { toStatus: appt.status });
+    } catch (err) {
+      logger.error(`[intelligence-bar] track-rewind side effects failed for ${appointment_id}: ${err.message}`);
     }
   }
 
@@ -1932,9 +1964,6 @@ async function cancelAppointment(input) {
   } catch (err) {
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
-    }
-    if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-      return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
     }
     throw err;
   }
