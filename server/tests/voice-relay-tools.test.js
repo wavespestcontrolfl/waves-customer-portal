@@ -205,7 +205,28 @@ describe('find_slots', () => {
 });
 
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
+  // ⭐ NO LEAD IS A REAL OUTCOME. createLeadFromExtraction deliberately creates
+  // nothing for a matched lifecycle customer (an ordinary support call must
+  // never overwrite a won lead) — so the model must not be told a lead was
+  // saved, and the transcript must not be stamped as one, while the hangup
+  // floor still stands down (a second attempt creates nothing either).
+  test('an existing lifecycle customer → honest "no lead created", floor still suppressed', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'asking about the last visit' },
+      { from: '+19415551234', callSid: 'CA-lifecycle', markCaptured }
+    );
+    expect(out).toMatch(/no new lead was created/i);
+    expect(out).not.toMatch(/Lead saved/);
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: false }));
+  });
+
   test('writes the lead, marks captured, drops invalid quality', async () => {
+    // A REAL lead id back: capture_lead now distinguishes "lead created" from
+    // "existing customer, deliberately no lead" (see the lifecycle test below).
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-1', created: true });
     const markCaptured = jest.fn();
     const out = await executeTool(
       'capture_lead',
@@ -216,7 +237,7 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect.objectContaining({ call_summary: 'ants in kitchen', first_name: 'Pat', lead_quality: null, preferred_date_time: 'Tue 9 AM' }),
       expect.objectContaining({ phone: '+19415551234', toPhone: '+19412691697', callSid: 'CA1' })
     );
-    expect(markCaptured).toHaveBeenCalled();
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: true }));
     expect(out).toMatch(/Lead saved/);
   });
 });

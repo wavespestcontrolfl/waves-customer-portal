@@ -911,7 +911,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
   const voiceCounts = await db('scheduled_services')
     .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // Same inactive set the commit-time counter uses — a skipped (office-
+    // rejected) AI request releases its slot instead of holding the day full.
+    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
     .whereBetween('scheduled_date', [rangeFrom, rangeTo])
     .select('scheduled_date')
     .count('* as count')

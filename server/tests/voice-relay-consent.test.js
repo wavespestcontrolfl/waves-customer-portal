@@ -375,7 +375,7 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     await executeTool('capture_lead', {
       first_name: 'Pat',
       call_summary: 'Asked to be taken off the list.',
-      contact_preference: 'take me off your list',
+      contact_preference: 'take me off your list, do not contact me again',
       do_not_contact_request: true,
     }, CTX);
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({
@@ -411,7 +411,7 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       do_not_contact_request: true,
     }, CTX);
     expect(recordSuppression).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/EMAIL-ONLY/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/NOT SMS/));
   });
 
   test('a GENERAL "stop contacting me" still takes the SMS suppression, email half flagged', async () => {

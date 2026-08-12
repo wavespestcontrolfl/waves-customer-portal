@@ -61,7 +61,10 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
   const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
   const voiceRow = await trx('scheduled_services')
     .where({ scheduled_date: String(dateStr), source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION })
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // 'skipped' is a REJECTION — the office declining an AI request — and a
+    // rejected request must give its capacity back, exactly as a cancellation
+    // does. Same inactive set the activation helper and the dedupe use.
+    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
     .count('* as count')
     .first();
   return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count || 0, 10);

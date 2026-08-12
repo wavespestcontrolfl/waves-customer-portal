@@ -308,7 +308,10 @@ async function commitVoiceBooking({
       // any live row of theirs at that date+start counts.
       const existing = await trx('scheduled_services')
         .where({ customer_id: customerId, scheduled_date: dateStr })
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        // A REJECTED request (office 'skipped') is not a live booking and
+        // must not block a replacement — the same inactive set the day cap and
+        // the activation helper honour.
+        .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
         .where((q) => q
           .where('window_start', windowStart)
           .orWhere('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION))

@@ -380,6 +380,10 @@ class RelayConversation {
     this.messages = [];
     this.ended = false;
     this.leadCaptured = false;
+    // Set when capture_lead ran but deliberately created NO lead (an existing
+    // lifecycle customer). Keeps the transcript honest without un-suppressing
+    // the capture floor.
+    this._noLeadCreated = false;
     this._ending = false; // set once we've decided to end the relay session
     this._controller = null;
     this._chain = Promise.resolve(); // serializes overlapping prompts
@@ -679,8 +683,15 @@ class RelayConversation {
       markBookingRequested: () => { this._bookingRequested = true; },
       leadId: () => this._leadId,
       noteLeadId: (id) => { if (id) this._leadId = id; },
-      markCaptured: () => {
+      // `leadCaptured` does two jobs: it suppresses the hangup capture floor
+      // and it stamps the transcript. They are NOT the same question for an
+      // existing lifecycle customer — createLeadFromExtraction deliberately
+      // creates no lead for one, so the floor must still stand down (a second
+      // attempt hits the same guard and creates nothing) while the record must
+      // not claim a lead that does not exist.
+      markCaptured: ({ leadCreated = true } = {}) => {
         this.leadCaptured = true;
+        if (leadCreated === false) this._noLeadCreated = true;
       },
       // Phase E: the model's own capture_lead summary becomes the call_log
       // call_summary at close (no extra model round trip on the live call).
@@ -925,7 +936,7 @@ class RelayConversation {
           turns: this._transcript,
           modelSummary: this._modelSummary,
           reason: reason || null,
-          leadCaptured: this.leadCaptured,
+          leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
           model: MODEL,
@@ -981,6 +992,17 @@ class RelayConversation {
     // still writing is that lead, so suppress rather than race it.
     if (this._inFlightWrites.has('capture_lead')) {
       logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — capture_lead is still in flight past the drain bound (never race a second lead write)`);
+      return;
+    }
+    // ⭐ A SLOW request_reservice OUTRANKS THE FLOOR TOO. A filed re-service is
+    // this call's durable artifact and suppresses the floor once it lands — but
+    // one still blocked in its transaction past the drain bound left the floor
+    // free to write a LEAD, and the ticket then committed behind it: two
+    // artifacts for one call, with the transcript stamped as a lead rather than
+    // the re-service it was. The floor exists so a call never ends with
+    // nothing; an in-flight write is not nothing.
+    if (this._inFlightWrites.has('request_reservice')) {
+      logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — request_reservice is still in flight past the drain bound (its ticket is this call's artifact, not a lead)`);
       return;
     }
     const write = createLeadFromExtraction(

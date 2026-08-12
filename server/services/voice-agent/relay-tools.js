@@ -743,12 +743,22 @@ async function executeTool(name, input = {}, ctx = {}) {
       const preferenceText = String(input.contact_preference || '');
       const mentionsEmail = /\bemail(s|ing)?\b/i.test(preferenceText)
         || String(input.preferred_contact_method || '') === 'email';
-      const mentionsSms = /\b(text|texts|texting|sms|message|messages|messaging|call|calls|contact|contacting)\b/i.test(preferenceText);
-      const emailOnlyRequest = mentionsEmail && !mentionsSms;
+      // The channels named, kept apart: "stop calling me" is a PHONE opt-out and
+      // suppressing SMS for it silences texts the caller never mentioned, the
+      // same over-application as the email case. Only a text/SMS request — or a
+      // genuinely broad "stop contacting me at all" — writes the phone-keyed
+      // messaging suppression.
+      const mentionsSms = /\b(text|texts|texting|sms|message|messages|messaging)\b/i.test(preferenceText)
+        || String(input.preferred_contact_method || '') === 'sms';
+      const mentionsBroadStop = /\b(contact|contacting|reach|reaching|leave me alone|any(thing|more)?)\b/i.test(preferenceText)
+        || !preferenceText.trim(); // a bare flag with no words = the broad request
+      const smsOptOut = mentionsSms || mentionsBroadStop;
+      const emailOnlyRequest = !smsOptOut;
       if (input.do_not_contact_request === true && emailOnlyRequest) {
         logger.warn(
-          `[voice-relay] verbal do-not-contact is EMAIL-ONLY callSid=${ctx.callSid || 'n/a'} — no SMS suppression written `
-          + '(that would stop texts they did not ask to stop); recorded on the lead for a human to action'
+          `[voice-relay] verbal do-not-contact names a channel that is NOT SMS callSid=${ctx.callSid || 'n/a'} `
+          + '— no messaging suppression written (that would stop texts they did not ask to stop); recorded on the '
+          + 'lead for a human to action'
         );
       }
       if (input.do_not_contact_request === true && !emailOnlyRequest) {
@@ -815,8 +825,18 @@ async function executeTool(name, input = {}, ctx = {}) {
         const { attachLeadToVoiceBookingCard } = require('./relay-booking');
         await attachLeadToVoiceBookingCard(ctx.callSid, capturedLeadId);
       }
-      if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
-      logger.info(`[voice-relay] capture_lead saved callSid=${ctx.callSid || 'n/a'}`);
+      // ⭐ NO LEAD IS A REAL OUTCOME, NOT A FAILURE — AND NOT A SUCCESS EITHER.
+      // createLeadFromExtraction deliberately creates NOTHING for a matched
+      // lifecycle customer (an ordinary support call must never overwrite a won
+      // lead). The floor still stands down — a second attempt hits the same
+      // guard and creates nothing — but the record must not claim a lead that
+      // does not exist, and the model must not be told one was saved.
+      const leadCreated = Boolean(capturedLeadId);
+      if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated });
+      logger.info(
+        `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
+        + `callSid=${ctx.callSid || 'n/a'}`
+      );
       // The model's own one-line summary becomes call_log.call_summary at
       // session close — no second LLM round trip on the live call path.
       if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
@@ -825,6 +845,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       // must never be lost to an alert failure. Never customer-facing.
       const { alertOwnerHotLead } = require('./relay-alert');
       await alertOwnerHotLead({ ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null }, ctx);
+      if (!leadCreated) {
+        return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
+          + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
+          + 'a Waves team member will follow up, and do not say a new request or appointment was created.';
+      }
       return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm details and scheduling.';
     }
 
