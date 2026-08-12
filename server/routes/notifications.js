@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
+const { recordServiceContactChanges } = require('../services/service-contact-events');
 
 router.use(authenticate);
 
@@ -675,19 +676,30 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
+      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
+      const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       await db.transaction(async (trx) => {
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
         }
         await trx('customers').where({ id: req.params.customerId }).update({
-          ...serviceContactSlotUpdates(contacts, beforeRow),
-          ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
+          ...slotUpdates,
+          ...consentUpdates,
           updated_at: new Date(),
         });
       });
       savedContacts = contacts.map(serviceContactPayload);
       if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
+      // Contact change events for the 360 timeline — post-commit, best-effort
+      // (the recorder never throws; a logging failure must not fail the save).
+      void recordServiceContactChanges({
+        customerId: req.params.customerId,
+        before: beforeRow,
+        after: { ...beforeRow, ...slotUpdates, ...consentUpdates },
+        source: 'portal',
+        actorCustomerId: req.customerId,
+      });
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
       // mirrors the list save: the same person (matched by phone/email/name
@@ -728,21 +740,34 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
+      const legacySlot1Updates = {
+        service_contact_name: slot1.service_contact_name,
+        service_contact_phone: slot1.service_contact_phone,
+        service_contact_email: slot1.service_contact_email,
+        service_contact_role: slot1.service_contact_role,
+      };
+      const legacyConsentUpdates = serviceContactConsentUpdates(postSave, updates.serviceContactsConsent);
       await db.transaction(async (trx) => {
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
         await trx('customers').where({ id: req.params.customerId }).update({
-          service_contact_name: slot1.service_contact_name,
-          service_contact_phone: slot1.service_contact_phone,
-          service_contact_email: slot1.service_contact_email,
-          service_contact_role: slot1.service_contact_role,
-          ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
+          ...legacySlot1Updates,
+          ...legacyConsentUpdates,
           updated_at: new Date(),
         });
       });
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
+      // Same events as the list save — the legacy shape must not be a
+      // logging loophole either. Post-commit, best-effort.
+      void recordServiceContactChanges({
+        customerId: req.params.customerId,
+        before: beforeRow,
+        after: { ...beforeRow, ...legacySlot1Updates, ...legacyConsentUpdates },
+        source: 'portal',
+        actorCustomerId: req.customerId,
+      });
     }
 
     const existing = await ensurePrefs(req.params.customerId);

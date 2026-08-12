@@ -3445,6 +3445,23 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // Contact change events for the 360 timeline — post-commit, best-effort
+    // (the recorder never throws). Compaction above puts every slot column in
+    // `updates` whenever any contact field was touched, so `{...before,
+    // ...updates}` is the full post-save slot state; diffing against the same
+    // `before` the compaction used keeps event identity consistent with the
+    // role-carry matching.
+    if (SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => field in updates)) {
+      const { recordServiceContactChanges } = require('../services/service-contact-events');
+      void recordServiceContactChanges({
+        customerId: req.params.id,
+        before,
+        after: { ...before, ...updates },
+        source: 'admin',
+        adminUserId: req.technicianId || null,
+      });
+    }
+
     res.json({ success: true });
   } catch (err) {
     if (err.message?.includes('customers_email_unique') || err.message?.includes('duplicate key')) {
