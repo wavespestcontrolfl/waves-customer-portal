@@ -370,3 +370,38 @@ describe('isPendingOutboundReviewBooking — dispatch-implies-confirm detection'
     expect(isPendingOutboundReviewBooking(undefined)).toBe(false);
   });
 });
+
+describe('confirm-hook reminder resync — explicit null-start guard (Codex r21 P2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('handleReschedule expectGuard enforces window_start IS NULL for an asserted windowless slot', () => {
+    // A date-only move observed windowless must not overwrite a
+    // concurrently-assigned real window with the fabricated 09:00 fallback:
+    // the guard distinguishes "windowStart key absent" (date-only check)
+    // from "explicitly null" (IS NULL required).
+    const reminders = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');
+    expect(reminders).toContain("Object.prototype.hasOwnProperty.call(options.expectSchedule, 'windowStart')");
+    expect(reminders).toContain("else if (hasStartAssertion) q.whereNull('scheduled_services.window_start');");
+  });
+
+  test('the confirm hook passes the observed null start explicitly (not an omitted key)', () => {
+    const hook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    expect(hook).toContain('windowStart: postSlot.window_start || null,');
+  });
+});
+
+describe('live-booking confirmation — TCPA-blocked SMS email fallback (Codex r21 P1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('the call pipeline flags the v2 TCPA SMS block as permanent so the default-sms channel emails instead', () => {
+    // Behavior coverage lives in appointment-notification-channels.test.js
+    // (deliverConfirmationByChannel smsPermanentlyBlocked cases); this pins
+    // the pipeline wiring: only the TCPA gate (email still permitted) sets
+    // the flag — the implied-consent non-ANI hold keeps its Needs Review
+    // card instead.
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(callProc).toContain('smsPermanentlyBlocked: v2SmsBlocked && !v2EmailBlocked,');
+  });
+});

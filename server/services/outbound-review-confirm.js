@@ -164,10 +164,13 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
           // expectSchedule = the observed slot, enforced atomically inside
           // handleReschedule: a SECOND move (B) landing after the postSlot
           // read makes this stale resync miss instead of stomping B's own
-          // sync back to A (Codex #3361 r12 P2). handleReschedule is
-          // fail-soft (null on no-row/invalid-time/error) — a null here is
-          // an unsynced slot, so the leg fails and the sweep retries
-          // (Codex #3361 r12 P2).
+          // sync back to A (Codex #3361 r12 P2). The explicit null start is
+          // enforced too (window_start IS NULL) — a date-only move observed
+          // windowless must not overwrite a concurrently-assigned real
+          // window with the fabricated 09:00 fallback (Codex #3361 r21 P2).
+          // handleReschedule is fail-soft (null on no-row/invalid-time/
+          // error) — a null here is an unsynced slot, so the leg fails and
+          // the sweep retries (Codex #3361 r12 P2).
           const resynced = await AppointmentReminders.handleReschedule(
             svc.id,
             `${dateOnly(postSlot.scheduled_date)}T${postSlot.window_start || '09:00'}`,

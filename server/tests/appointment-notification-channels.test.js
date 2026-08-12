@@ -273,6 +273,69 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(reached).toBe(false);
   });
 
+  test("'sms' preference: a consent-blocked text (smsPermanentlyBlocked) falls back to the confirmation email", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      scheduled_services: [
+        // scheduledServiceApptTime resolves the slot for the email body...
+        firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
+        // ...then buildRescheduleLink reads the row (no token → no CTA link).
+        firstChain({ id: 'ss1', customer_id: 'c1', reschedule_token: null }),
+      ],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    const callArg = AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0];
+    expect(callArg.appointmentTime instanceof Date).toBe(true);
+    expect(reached).toBe(true);
+  });
+
+  test("'sms' preference: a delivered text never triggers the smsPermanentlyBlocked email leg", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(reached).toBe(true);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test("'sms' preference: an ordinary failed send (no smsPermanentlyBlocked) still never emails — deferrals/sweeps own the retry", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt });
+
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('opted-out customer: smsPermanentlyBlocked never emails (the email path bypasses the opt-out validator)', async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation: false })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
   test('falls back to the SMS send when channel prefs are unavailable', async () => {
     setDbQueues({
       notification_prefs: [firstChain(null)],

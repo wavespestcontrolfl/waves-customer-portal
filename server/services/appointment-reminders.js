@@ -395,7 +395,18 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
 // preference routes through the channel-aware deliverAppointmentNotice (which
 // adds the email send and the both-failed admin alert). Best-effort: a
 // prefs-lookup failure falls back to the plain SMS send.
-async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+//
+// `smsPermanentlyBlocked`: the caller already knows its SMS leg CANNOT deliver
+// — not a transient failure or a send-window deferral some sweep will retry,
+// but a consent gate that suppresses the text outright (the call pipeline's v2
+// TCPA gate). On the default 'sms' channel that would otherwise leave the
+// customer with no confirmation at all despite a usable email on file, so the
+// blocked text falls back to the confirmation email (Codex #3361 r21 P1).
+// Never for an opted-out account — the email path bypasses the
+// sendCustomerMessage validator that suppresses their SMS. The email/both
+// branches ignore the flag: deliverAppointmentNotice already runs its own
+// email leg, and a second send here would double-deliver.
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false }) {
   let channel = 'sms';
   let confirmationOn = true;
   try {
@@ -410,7 +421,24 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // which already enforces the appointment_confirmation opt-out (suppressing it
   // for opted-out customers) — and we must NOT email them, because the email
   // path bypasses that validator.
-  if (channel === 'sms' || !confirmationOn) return smsAttempt();
+  if (channel === 'sms' || !confirmationOn) {
+    const smsOk = await smsAttempt();
+    if (smsOk || !smsPermanentlyBlocked || !confirmationOn) return smsOk;
+    // Consent-blocked text on the default channel: reach them by email.
+    // deliverAppointmentEmailFallback raises the no-channel human alert
+    // itself when the email is missing/suppressed.
+    let resolvedApptTime = apptTime;
+    if (!resolvedApptTime && scheduledServiceId) {
+      resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
+    }
+    return deliverAppointmentEmailFallback({
+      kind: 'confirmation',
+      customerId,
+      scheduledServiceId,
+      apptTime: resolvedApptTime,
+      serviceLabel,
+    });
+  }
 
   // email / both — resolve the appointment time for the email body when the
   // caller didn't pass one, so the confirmation email shows the right ET slot.
@@ -2455,6 +2483,15 @@ const AppointmentReminders = {
       // stomping the winner's reminder state.
       const expectGuard = (query) => {
         if (!(options.expectSchedule && options.expectSchedule.date)) return query;
+        // A caller that passes the windowStart key is asserting the FULL
+        // observed slot — including "no window". An explicitly-null start
+        // must therefore require window_start IS NULL, not silently drop to
+        // a date-only check: a date-only guard lets a resync built on a
+        // windowless read pass after a concurrent move assigned a real
+        // window on the same date, overwriting that move's reminder state
+        // with a fabricated fallback time (Codex #3361 r21 P2). Callers
+        // that omit the key entirely keep the date-only guard.
+        const hasStartAssertion = Object.prototype.hasOwnProperty.call(options.expectSchedule, 'windowStart');
         const expectStart = options.expectSchedule.windowStart
           ? String(options.expectSchedule.windowStart).slice(0, 5)
           : null;
@@ -2465,6 +2502,7 @@ const AppointmentReminders = {
             .whereRaw('scheduled_services.scheduled_date = ?::date', [String(options.expectSchedule.date)])
             .modify((q) => {
               if (expectStart) q.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [expectStart]);
+              else if (hasStartAssertion) q.whereNull('scheduled_services.window_start');
             });
         });
       };

@@ -12214,6 +12214,15 @@ const CallRecordingProcessor = {
                 customerId,
                 scheduledServiceId,
                 serviceLabel: serviceType,
+                // The v2 TCPA gate blocks the text outright (the smsAttempt
+                // stub below returns blocked without sending) while email
+                // stays permitted: let the default-'sms' channel fall back to
+                // the confirmation email instead of leaving the newly live
+                // booking with no immediate confirmation at all (Codex #3361
+                // r21 P1). Deliberately NOT set for the implied-consent
+                // non-ANI hold — that path files its own Needs Review card so
+                // the office confirms the number first.
+                smsPermanentlyBlocked: v2SmsBlocked && !v2EmailBlocked,
                 smsAttempt: async () => {
                   smsRan = true;
                   let confirmationRearmed = false;
@@ -12473,6 +12482,12 @@ const CallRecordingProcessor = {
                   return primaryOk;
                 },
               });
+              if (smsRan && confirmationReached && appointmentResult && appointmentResult.smsBlocked) {
+                // The blocked text was rescued by an email leg (the TCPA
+                // fallback above, or a 'both' channel's email) — record it so
+                // the route-decision log doesn't read as "never notified".
+                appointmentResult.emailSent = true;
+              }
               if (!smsRan) {
                 // Email-only confirmation channel: smsAttempt never runs, but the
                 // schedule row was created — record it so the route-decision log
