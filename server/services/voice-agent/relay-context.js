@@ -328,6 +328,60 @@ async function findUniqueCustomerByAni(phone) {
   };
 }
 
+/**
+ * ── THE WS SETUP FRAME IS NOT EVIDENCE OF A PHONE CALL ────────────────────
+ *
+ * `from` arrives in the ConversationRelay setup frame (relay-server.js), and
+ * the socket is guarded only by a static shared secret carried as a URL query
+ * param — which Twilio logs. A leaked key therefore lets anyone open a session
+ * and DECLARE any `from`, with no phone call at all; ANI being the sole
+ * authenticator then hands them a stranger's account.
+ *
+ * So the frame is cross-checked against the `call_log` row the
+ * SIGNATURE-VERIFIED `/voice` webhook wrote at call start (twilio-voice-webhook
+ * .js: `from_phone: toE164(From)`, `twilio_call_sid: CallSid`). The webhook
+ * validates Twilio's request signature, so that row is the trustworthy record
+ * that this CallSid is a real inbound call from that number.
+ *
+ * MISMATCH OR ABSENCE ⇒ UNKNOWN CALLER, never a failed call: no context block,
+ * no account tools, the agent behaves exactly as it does for any unrecognised
+ * caller. (Absence also covers the TwiML-Bin sandbox path, which has no
+ * call_log row — correctly, since nothing there is signature-verified either.)
+ *
+ * FOLLOW-UP (not implemented here): the row's `metadata.stir_verstat` carries
+ * the carrier's STIR/SHAKEN attestation. Gating the FULL tier on attestation A
+ * — i.e. requiring the carrier to vouch that the calling number really belongs
+ * to the caller, which is the only defence against plain caller-ID spoofing —
+ * is the natural next step. It needs an owner ruling first: most real leads
+ * arrive with no attestation at all (see the /voice preconnect-screen notes),
+ * so an A-only full tier would silently demote a large share of genuine
+ * customers. It is LOGGED here so the distribution can be measured before
+ * anyone decides.
+ */
+async function verifyInboundCaller({ callSid, from } = {}) {
+  const aniKey = aniDigitKey(from);
+  if (!callSid || !aniKey) return { verified: false, reason: 'no_call_sid_or_ani' };
+  try {
+    const db = require('../../models/db');
+    const row = await db('call_log')
+      .where({ twilio_call_sid: callSid })
+      .first('from_phone', 'direction', 'metadata');
+    if (!row) return { verified: false, reason: 'no_call_log_row' };
+    if (String(row.direction || 'inbound') !== 'inbound') return { verified: false, reason: 'not_inbound' };
+    if (lastTenDigits(row.from_phone) !== aniKey) return { verified: false, reason: 'ani_mismatch' };
+    let attestation = null;
+    try {
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+      attestation = (meta && meta.stir_verstat) || null;
+    } catch { attestation = null; }
+    return { verified: true, attestation };
+  } catch (err) {
+    // FAIL CLOSED: an unverifiable caller is an unknown caller.
+    logger.warn(`[voice-relay-context] caller verification failed for ${maskPhone(from)} — treating as unknown: ${err.message}`);
+    return { verified: false, reason: 'error' };
+  }
+}
+
 // ── Read-only account loaders (each fails toward null/[]; never throws) ────
 
 async function loadRecurringServiceNames(customerId) {
@@ -497,9 +551,17 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from) {
+async function resolveCallerContext(from, { callSid = null } = {}) {
   if (!isContextEnabled()) return null;
   const work = (async () => {
+    // The WS setup frame is unverified input — cross-check it against the
+    // signature-verified /voice webhook's call_log row BEFORE any account read.
+    const verification = await verifyInboundCaller({ callSid, from });
+    if (!verification.verified) {
+      logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
+      return null;
+    }
+    logger.info(`[voice-relay-context] caller ${maskPhone(from)} verified against call_log callSid=${callSid} attestation=${verification.attestation || 'none'}`);
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
@@ -909,6 +971,7 @@ module.exports = {
   clockMinutes,
   speakClock,
   resolveCallerContext,
+  verifyInboundCaller,
   findUniqueCustomerByAni,
   buildKnownCallerBlock,
   accountOverviewText,

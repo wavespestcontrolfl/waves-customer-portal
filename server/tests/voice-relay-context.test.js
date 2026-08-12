@@ -42,6 +42,10 @@ const { SYSTEM_PROMPT, buildBasePrompt, PRICE_LINE_NO_CONTEXT } = require('../se
 
 // Synthetic fixtures only — 555 numbers, no real customer data (repo P0).
 const FROM = '+19415550142';
+// The WS setup frame is unverified input; the SIGNATURE-VERIFIED /voice webhook's
+// call_log row is what proves this CallSid is a real inbound call from that number.
+const CALL_SID = 'CA-relay-1';
+const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }) };
 // `phone` is the ONE authenticating column. A fixture without it is a
 // contact-slot recognition and fails closed to the redacted tier.
 const CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '2023-04-01T00:00:00Z', pipeline_stage: 'active_customer', phone: FROM };
@@ -66,11 +70,12 @@ function makeBuilder(rows) {
 }
 
 let builders;
-function primeDb({ customers = [], scheduled = [], records = [] } = {}) {
+function primeDb({ customers = [], scheduled = [], records = [], callLog = [VERIFIED_CALL_ROW] } = {}) {
   builders = {
     customers: makeBuilder(customers),
     scheduled_services: makeBuilder(scheduled),
     service_records: makeBuilder(records),
+    call_log: makeBuilder(callLog),
   };
   db.mockImplementation((table) => {
     if (!builders[table]) builders[table] = makeBuilder([]);
@@ -116,7 +121,7 @@ describe('GATE OFF (default) — everything dark, fail-closed', () => {
   });
 
   test('resolveCallerContext returns null WITHOUT touching the DB', async () => {
-    expect(await relayContext.resolveCallerContext(FROM)).toBeNull();
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
     expect(db).not.toHaveBeenCalled();
   });
 
@@ -179,7 +184,7 @@ describe('GATE ON — caller recognition', () => {
 
   test('unknown caller → null (no block), matcher queried all 4 canonical columns', async () => {
     primeDb({ customers: [] });
-    expect(await relayContext.resolveCallerContext(FROM)).toBeNull();
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
     const custQ = builders.customers;
     expect(custQ.whereNull).toHaveBeenCalledWith('deleted_at');
     const cols = custQ.orWhereRaw.mock.calls.map(([sql]) => sql);
@@ -195,14 +200,59 @@ describe('GATE ON — caller recognition', () => {
 
   test('AMBIGUOUS — 2 customers share the number → treated exactly as unknown', async () => {
     primeDb({ customers: [CUSTOMER, { ...CUSTOMER, id: 'c-2222', first_name: 'Sam' }] });
-    expect(await relayContext.resolveCallerContext(FROM)).toBeNull();
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
   });
 
   test('blocked/short caller id → null without a DB query', async () => {
     for (const bad of ['', null, 'anonymous', '+1941555']) {
-      expect(await relayContext.resolveCallerContext(bad)).toBeNull();
+      expect(await relayContext.resolveCallerContext(bad, { callSid: CALL_SID })).toBeNull();
     }
     expect(db).not.toHaveBeenCalled();
+  });
+
+  // ⭐ THE WS SETUP FRAME IS NOT EVIDENCE OF A PHONE CALL. `from` arrives in an
+  // unverified frame on a socket guarded only by a static secret in a URL query
+  // param (which Twilio logs). A leaked key would otherwise let anyone declare
+  // any caller ID and read that account. The cross-check is the call_log row the
+  // SIGNATURE-VERIFIED /voice webhook wrote.
+  test('no call_log row for this CallSid → UNKNOWN caller, no account read, call not failed', async () => {
+    primeDb({ customers: [CUSTOMER], callLog: [] });
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+  });
+
+  test('declared `from` that does not match the call_log row → UNKNOWN caller', async () => {
+    primeDb({
+      customers: [CUSTOMER],
+      callLog: [{ ...VERIFIED_CALL_ROW, from_phone: '+19415557777' }],
+    });
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('no callSid at all (sandbox / TwiML-Bin path) → UNKNOWN caller, no DB touch', async () => {
+    primeDb({ customers: [CUSTOMER] });
+    expect(await relayContext.resolveCallerContext(FROM)).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an OUTBOUND call_log row never verifies an inbound relay session', async () => {
+    primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, direction: 'outbound' }] });
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+  });
+
+  test('verifyInboundCaller fails CLOSED on a DB error and surfaces the attestation on success', async () => {
+    primeDb({ callLog: [] });
+    builders.call_log.first = jest.fn(() => Promise.reject(new Error('pool exhausted')));
+    expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+      .toEqual({ verified: false, reason: 'error' });
+
+    primeDb({});
+    // STIR/SHAKEN attestation is surfaced for measurement; gating the FULL tier
+    // on attestation A is a documented follow-up, not implemented here.
+    expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+      .toEqual({ verified: true, attestation: 'TN-Validation-Passed-A' });
   });
 
   test('matched caller → KNOWN CALLER block with name, since-year, services, appt, visit, balance, prior call', async () => {
@@ -215,7 +265,7 @@ describe('GATE ON — caller recognition', () => {
     openBalanceSummary.mockResolvedValue({ total: 150, count: 2, moreCount: 0, invoices: [] });
     summarizePriorCall.mockResolvedValue({ hoursAgo: 18, summary: 'Asked about ants in the kitchen', captured: {} });
 
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.customer).toEqual({ id: 'c-1111', first_name: 'Pat' });
     expect(ctx.tier).toBe('full'); // the ANI IS customers.phone
     const block = ctx.block;
@@ -239,7 +289,7 @@ describe('GATE ON — caller recognition', () => {
     const saved = crp.summarizePriorCall;
     crp.summarizePriorCall = undefined;
     try {
-      const ctx = await relayContext.resolveCallerContext(FROM);
+      const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
       expect(ctx.customer.id).toBe('c-1111');
       expect(ctx.block).not.toContain('Previous call');
     } finally {
@@ -565,7 +615,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     primeDb({ customers: [CONTACT_SLOT_CUSTOMER] });
     loadOwnedRecurringServiceKeys.mockResolvedValue([]);
     openBalanceSummary.mockResolvedValue({ total: 231.75, count: 3, moreCount: 0, invoices: [] });
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.customer.id).toBe('c-1111');
     expect(ctx.tier).toBe('redacted');
     expect(ctx.matchedColumn).toBe('service_contact2_phone');
@@ -583,7 +633,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
 
   test('customers.phone wins when the ANI is in BOTH its own column and a slot', async () => {
     primeDb({ customers: [{ ...CONTACT_SLOT_CUSTOMER, phone: FROM }] });
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.tier).toBe('full');
     expect(ctx.matchedColumn).toBe('phone');
   });

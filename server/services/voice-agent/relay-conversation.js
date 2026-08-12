@@ -364,7 +364,7 @@ class RelayConversation {
     this._officeHours = null;
     this._officeHoursReady = null;
     if (isContextEnabled()) {
-      this._contextReady = resolveCallerContext(this.from)
+      this._contextReady = resolveCallerContext(this.from, { callSid: this.callSid })
         .then((ctx) => { this._callerContext = ctx; })
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');

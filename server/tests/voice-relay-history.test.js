@@ -46,6 +46,8 @@ const { activeTools, executeTool } = require('../services/voice-agent/relay-tool
 const { buildBasePrompt } = require('../services/voice-agent/relay-conversation');
 
 const FROM = '+19415550142';
+const CALL_SID = 'CA-relay-1';
+const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: null };
 const CUSTOMER_ID = 'c-1111';
 // `phone` is the ONE authenticating column — a fixture without it is a
 // contact-slot recognition and caps at the redacted tier (fail-closed).
@@ -67,6 +69,9 @@ function makeBuilder(rows) {
 
 let builders;
 function primeDb(tables = {}) {
+  // The relay session's caller verification reads call_log first — default it
+  // to the /voice webhook's real row unless a test primes its own.
+  if (!tables.call_log) tables = { ...tables, call_log: [VERIFIED_CALL_ROW] };
   builders = {};
   for (const [t, rows] of Object.entries(tables)) builders[t] = makeBuilder(rows);
   db.mockImplementation((table) => {
@@ -277,7 +282,7 @@ describe('Session RECENT TEXTS block', () => {
   // bodies are the only text in this lane the CUSTOMER authored.
   test('matched caller → texts ride `dataTurn`, NOT the system block, scrubbed, oldest first', async () => {
     primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.block).toContain('KNOWN CALLER');
     expect(ctx.block).not.toContain('RECENT TEXTS'); // system role stays clean
     expect(ctx.dataTurn).toContain('RECENT TEXTS');
@@ -295,28 +300,28 @@ describe('Session RECENT TEXTS block', () => {
         { direction: 'inbound', body: 'Also the gate sticks', created_at: '2026-08-08T13:00:00Z' },
       ],
     });
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.dataTurn).not.toMatch(/ignore your previous instructions/i);
     expect(ctx.dataTurn).toContain('the gate sticks'); // the benign line survives
   });
 
   test('no texts → no data turn at all (KNOWN CALLER unchanged)', async () => {
     primeDb({ customers: [CUSTOMER], messages: [] });
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.block).toContain('KNOWN CALLER');
     expect(ctx.dataTurn).toBeNull();
   });
 
   test('unmatched caller → no context at all, so no texts are ever read', async () => {
     primeDb({ customers: [], messages: MSG_ROWS });
-    expect(await relayContext.resolveCallerContext(FROM)).toBeNull();
+    expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
   });
 
   test('a failing message read never blocks the session (block is optional context)', async () => {
     primeDb({ customers: [CUSTOMER] });
     builders.messages = makeBuilder([]);
     builders.messages.then = (_res, rej) => Promise.reject(new Error('pool exhausted')).catch(rej);
-    const ctx = await relayContext.resolveCallerContext(FROM);
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
     expect(ctx.customer.id).toBe(CUSTOMER_ID);
     expect(ctx.block).toContain('KNOWN CALLER');
     expect(ctx.dataTurn).toBeNull();
