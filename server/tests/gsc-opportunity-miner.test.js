@@ -616,6 +616,53 @@ describe('deriveLinkBoost', () => {
     ...over,
   });
 
+  test('a same-page mixed-source collapse keeps the rewrite floor when a qualifying rewrite parent justifies it', () => {
+    // deriveLinkBoost collapses same-page parents by score. If the decay
+    // parent wins on score, tagging the companion 'decay_refresh' would
+    // hold it to the global floor and drop work the (persistable)
+    // ctr_rewrite parent on the same page justifies at the lower rewrite
+    // floor. Provenance is additive.
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      const [companion] = deriveLinkBoost([
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 65,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: 'q',
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: null,
+        },
+      ]);
+      expect(companion.score).toBe(69); // strongest signal still wins the score
+      expect(companion.signal_metadata.source_bucket).toBe('ctr_rewrite'); // …but the permissive floor
+      expect(companion.signal_metadata.source_buckets).toEqual(
+        expect.arrayContaining(['ctr_rewrite', 'decay_refresh'])
+      );
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
+  });
+
+  test('a BELOW-floor rewrite parent does not grant the rewrite floor to a decay companion', () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      const [companion] = deriveLinkBoost([
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 40, // under 60
+          page_url: 'https://x/p/', service: 'pest', city: null, query: 'q',
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 80,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: null,
+        },
+      ]);
+      expect(companion.signal_metadata.source_bucket).toBe('decay_refresh');
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
+  });
+
   test('a ctr_rewrite parent spawns an add_internal_links companion that inherits its signal', () => {
     const [opp, ...rest] = deriveLinkBoost([ctrParent()], { cap: 10 });
     expect(rest).toHaveLength(0);

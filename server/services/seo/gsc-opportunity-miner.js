@@ -1097,6 +1097,15 @@ function linkBoostCap() {
 // taking the safer refresh route), and a link_boost companion DERIVED from
 // a ctr_rewrite inherits the rewrite floor because it inherits that
 // parent's score by construction.
+// Log-safe identifier for a GSC query. Search terms are arbitrary
+// external text — names, addresses, phone numbers all show up in real GSC
+// exports — so they must never reach the logs (AGENTS.md non-card PII
+// rule). The digest is stable across runs, so repeat failures still
+// correlate.
+function queryDigest(query) {
+  return crypto.createHash('sha256').update(String(query || '')).digest('hex').slice(0, 12);
+}
+
 function persistFloorFor(o) {
   const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
   if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
@@ -1167,7 +1176,29 @@ function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new
     // the same page) collapse to one companion per dedupe key; keep the
     // strongest signal.
     const existing = byKey.get(opp.dedupe_key);
-    if (!existing || opp.score > existing.score) byKey.set(opp.dedupe_key, opp);
+    const winner = (!existing || opp.score > existing.score) ? opp : existing;
+    // …but the FLOOR follows the most permissive JUSTIFIED parent, not the
+    // score winner. Collapsing by raw score alone could tag a companion
+    // 'decay_refresh' (global floor 75) when a persistable ctr_rewrite
+    // parent on the same page justified it at the lower rewrite floor —
+    // dropping work that parent should admit (audit P1). Provenance is
+    // additive: any qualifying rewrite parent grants the rewrite floor.
+    const contributors = new Set([
+      ...(existing?.signal_metadata?.source_buckets || [existing?.signal_metadata?.source_bucket]),
+      ...(opp.signal_metadata?.source_buckets || [opp.signal_metadata?.source_bucket]),
+    ].filter(Boolean));
+    // Only override when the rewrite floor is genuinely LOWER than the
+    // one the winner would otherwise ride — with the env unset the two are
+    // equal and the recorded provenance stays the score winner's.
+    const rewriteJustified = minScoreToActFor('rewrite_title_meta') < persistFloorFor(winner)
+      && ((existing?.signal_metadata?.source_bucket === 'ctr_rewrite' && isPersistable(existing))
+        || (opp.signal_metadata?.source_bucket === 'ctr_rewrite' && isPersistable(opp)));
+    winner.signal_metadata = {
+      ...winner.signal_metadata,
+      source_buckets: Array.from(contributors),
+      source_bucket: rewriteJustified ? 'ctr_rewrite' : winner.signal_metadata.source_bucket,
+    };
+    byKey.set(opp.dedupe_key, winner);
   }
   return Array.from(byKey.values())
     .sort((a, b) => b.score - a.score)
@@ -3488,7 +3519,11 @@ class GscOpportunityMiner {
             });
         }
       } catch (err) {
-        logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (${query}): ${err.message}`);
+        // Never log the raw query: GSC search terms are arbitrary external
+        // text and routinely contain names, addresses, and phone numbers
+        // (AGENTS.md non-card PII rule). A stable digest is enough to
+        // correlate repeat failures.
+        logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (query ${queryDigest(query)}): ${err.message}`);
       }
     }
   }
