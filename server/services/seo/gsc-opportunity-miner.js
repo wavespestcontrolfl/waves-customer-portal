@@ -702,7 +702,7 @@ function buildListicleFamilyRefreshOpp(entries) {
 // emitted by NEITHER, so excluding its family would lose the demand to
 // no bucket at all. Top-3 reps are irrelevant here: family admission drops
 // them as won intent regardless.
-function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false, mappedBestPos = null, queryPageMapAvailable = false } = {}) {
+function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false, mappedBestPos = null, mapCoveredDomains = null } = {}) {
   if (!rep) return false;
   // mineSeasonalRising emits the rep independently of position and the
   // own-page map — a seasonal-emittable rep must count as reachable or the
@@ -720,6 +720,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     plainPosition: rep.position || 0,
     service_category: rep.service_category || null,
     city_target: rep.city_target || null,
+    domains: Array.isArray(rep.domains) ? rep.domains : [],
   }];
   for (const t of tuples) {
     if ((t.impressions || 0) < thresholds.minImpressionsToScore) continue;
@@ -748,13 +749,17 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     if (pos <= thresholds.strikingDistancePositionMax) continue;
     // no_content_yet mirror — MUST match mineNoContentYet's admission
     // exactly (the reachability contract). Its served-ness test is
-    // noContentYetMapServed over true query→page rows, and it fails
-    // CLOSED when the map is unavailable (emits nothing) — so an
-    // unavailable map makes the rep unreachable here too, leaving the
-    // demand with the family, which is the same no-double-emission
-    // outcome from the other side.
+    // noContentYetMapServed over true query→page rows, gated on map
+    // coverage judged PER TUPLE from that tuple's own contributing
+    // domains — the miner checks each (query, service, city, intent)
+    // candidate's domains individually, so a union across tuples would
+    // read a mixed-coverage query as wholly uncheckable while the miner
+    // emits its covered tuple: both sides would enqueue for one intent.
+    // Uncovered tuples (and tuples without domain provenance — fallback
+    // reps, older callers) fail closed exactly like the miner's uncovered
+    // candidates: unreachable here, demand stays with the family.
     if (!service) continue;
-    if (!queryPageMapAvailable) continue;
+    if (!queryDomainsCovered(t.domains, mapCoveredDomains || new Set())) continue;
     if (noContentYetMapServed(mappedBestPos, thresholds)) continue;
     const cand = {
       bucket: 'no_content_yet',
@@ -872,19 +877,6 @@ function queryDomainsCovered(domains, coveredDomains) {
   return list.every((d) => d && coveredDomains.has(String(d).toLowerCase()));
 }
 
-// The reachability-side twin: a representative's map evidence is
-// trustworthy only when every domain across its cross-domain tuples is
-// covered. Tuples without domain provenance (older callers, fallback
-// variant tuples) fail closed — the rep reads unreachable via
-// no_content_yet and the family keeps the demand, which is exactly what
-// mineNoContentYet does with an uncovered candidate.
-function repQueryMapCheckable(tuples, coveredDomains) {
-  const domains = [];
-  for (const t of tuples || []) {
-    for (const d of (Array.isArray(t.domains) ? t.domains : [])) domains.push(d);
-  }
-  return queryDomainsCovered(domains, coveredDomains);
-}
 
 function dedupeKey({ bucket, service, city, query, page_url }) {
   const parts = [
@@ -2263,7 +2255,7 @@ class GscOpportunityMiner {
         {
           seasonalEmittable: seasonalEmittable.has(v.query),
           mappedBestPos: reachBestMapped.get(v.query) ?? null,
-          queryPageMapAvailable: repQueryMapCheckable(crossTuples.get(v.query), reachCoveredDomains),
+          mapCoveredDomains: reachCoveredDomains,
         }
       ));
       return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket: anyVariantReachable });
@@ -3204,7 +3196,6 @@ module.exports._internals = {
   listicleFamilyRepReachable,
   noContentYetMapServed,
   queryDomainsCovered,
-  repQueryMapCheckable,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
   // producer's in-flight check covers the same actions (r34 follow-up).

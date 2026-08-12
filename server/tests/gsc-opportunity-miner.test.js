@@ -39,7 +39,6 @@ const {
   listicleFamilyRepReachable,
   noContentYetMapServed,
   queryDomainsCovered,
-  repQueryMapCheckable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -352,7 +351,7 @@ describe('noContentYetMapServed', () => {
 // Map syncs fail independently per domain; a candidate's absent mapping is
 // evidence only when every contributing domain has in-window map rows.
 
-describe('queryDomainsCovered / repQueryMapCheckable', () => {
+describe('queryDomainsCovered (per-tuple map coverage)', () => {
   const covered = new Set(['wavespestcontrol.com', 'parrishpestcontrol.com']);
   test('all contributing domains covered → checkable', () => {
     expect(queryDomainsCovered(['wavespestcontrol.com'], covered)).toBe(true);
@@ -366,17 +365,27 @@ describe('queryDomainsCovered / repQueryMapCheckable', () => {
     expect(queryDomainsCovered(null, covered)).toBe(false);
     expect(queryDomainsCovered([null], covered)).toBe(false);
   });
-  test('rep twin unions domains across tuples and applies the same rule', () => {
-    const tuples = [
-      { domains: ['wavespestcontrol.com'] },
-      { domains: ['parrishpestcontrol.com'] },
-    ];
-    expect(repQueryMapCheckable(tuples, covered)).toBe(true);
-    expect(repQueryMapCheckable(tuples.concat([{ domains: ['palmettoflpestcontrol.com'] }]), covered)).toBe(false);
-    // Tuples without provenance (fallback variant tuples) → fail closed.
-    expect(repQueryMapCheckable([{ impressions: 60, plainPosition: 20 }], covered)).toBe(false);
-    expect(repQueryMapCheckable([], covered)).toBe(false);
-    expect(repQueryMapCheckable(undefined, covered)).toBe(false);
+  test('reachability judges coverage PER TUPLE, not unioned across tuples (mixed coverage must not double-emit)', () => {
+    // One covered tuple + one uncovered tuple for the same query:
+    // mineNoContentYet emits the covered candidate, so the mirror must
+    // read the rep as reachable through that tuple — a domain union would
+    // read the whole rep uncheckable and let the family emit beside it.
+    const mixed = {
+      query: 'drought tolerant plants florida',
+      impressions: 120,
+      position: 20,
+      tuples: [
+        { impressions: 60, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] },
+        { impressions: 60, plainPosition: 22, service_category: 'lawn', city_target: null, domains: ['palmettoflpestcontrol.com'] },
+      ],
+    };
+    expect(listicleFamilyRepReachable(mixed, new Map(), undefined, { mapCoveredDomains: covered })).toBe(true);
+    // Only the uncovered tuple → unreachable (fail closed, family keeps demand).
+    const uncoveredOnly = { ...mixed, tuples: [mixed.tuples[1]] };
+    expect(listicleFamilyRepReachable(uncoveredOnly, new Map(), undefined, { mapCoveredDomains: covered })).toBe(false);
+    // Tuples without domain provenance (fallback reps) → fail closed.
+    const noProvenance = { ...mixed, tuples: [{ impressions: 60, plainPosition: 20, service_category: 'tree_shrub', city_target: null }] };
+    expect(listicleFamilyRepReachable(noProvenance, new Map(), undefined, { mapCoveredDomains: covered })).toBe(false);
   });
 });
 
@@ -1019,17 +1028,19 @@ describe('listicle_family scoring + action mapping', () => {
   });
 
   test('rep reachability mirrors the REAL query-bucket admission conditions (Codex r12)', () => {
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
     const rep = (over = {}) => ({
       query: 'drought tolerant plants florida',
       impressions: 51,
       position: 20,
       service_category: null,
       city_target: null,
+      domains: ['wavespestcontrol.com'],
       ...over,
     });
     // Beyond 15 with no resolvable service (raw AND inferred blank) →
     // unreachable: mineNoContentYet skips !service.
-    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map(), undefined, { queryPageMapAvailable: true })).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(false);
     // Striking-distance window (4-15): SQL admission alone is NOT
     // reachability (Codex r16) — the mirrored candidate must also clear
     // persistAll's action-aware floor, and at these signal levels a
@@ -1037,22 +1048,23 @@ describe('listicle_family scoring + action mapping', () => {
     // blog floor 45 without): the family keeps the demand.
     expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
     expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(false);
-    // Beyond 15, map available, query unmapped (no owned page ranks for
-    // it) → no_content_yet reaches it.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true })).toBe(true);
+    // Beyond 15, contributing domain covered, query unmapped (no owned
+    // page ranks for it) → no_content_yet reaches it.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(true);
     // Beyond 15 but mapped weakly (best owned page past
     // answerGapPositionMax) → still a content gap: reachable.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 45 })).toBe(true);
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedBestPos: 45 })).toBe(true);
     // Beyond 15 with a mapped page at ≤ answerGapPositionMax →
     // no_content_yet skips it (refresh/answer-gap territory) and
     // striking_distance is out of window: NO bucket emits the rep, so the
     // family must stay eligible (noContentYetMapServed mirror).
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 25 })).toBe(false);
-    // Map UNAVAILABLE (sync outage): mineNoContentYet fails closed and
-    // emits nothing, so the mirror must read unreachable — demand stays
-    // with the family, no double emission from either side.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedBestPos: 25 })).toBe(false);
+    // Map coverage MISSING for the contributing domain (sync outage):
+    // mineNoContentYet fails closed and emits nothing, so the mirror must
+    // read unreachable — demand stays with the family, no double emission
+    // from either side.
     expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(false);
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { queryPageMapAvailable: false, mappedBestPos: null })).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: new Set(), mappedBestPos: null })).toBe(false);
     // Seasonal-emittable rep → reachable regardless of position/own-page
     // (mineSeasonalRising emits it independently; Codex r13).
     expect(listicleFamilyRepReachable(
@@ -1071,15 +1083,16 @@ describe('listicle_family scoring + action mapping', () => {
     // avg(position)=54 (out of window) and mineNoContentYet skips when a
     // mapped page serves the query — NO bucket emits it, so the family
     // must stay eligible.
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
     const volatile = {
       query: 'drought tolerant plants florida',
       impressions: 101,
       position: 8.9, // family weighting — must NOT decide reachability
-      tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null }],
+      tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }],
     };
-    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { queryPageMapAvailable: true, mappedBestPos: 22 })).toBe(false);
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedBestPos: 22 })).toBe(false);
     // Same rep unmapped → no_content_yet emits (plain avg > 15).
-    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { queryPageMapAvailable: true })).toBe(true);
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(true);
     // Split classification: 30+21 imps across two tuples — each tuple is
     // under the per-tuple ≥50 floor the query miners apply per group, so
     // neither miner emits despite the 51-imp total.
@@ -1088,11 +1101,11 @@ describe('listicle_family scoring + action mapping', () => {
       impressions: 51,
       position: 8,
       tuples: [
-        { impressions: 30, plainPosition: 8, service_category: 'tree_shrub', city_target: null },
-        { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null },
+        { impressions: 30, plainPosition: 8, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] },
+        { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null, domains: ['wavespestcontrol.com'] },
       ],
     };
-    expect(listicleFamilyRepReachable(split, new Map(), undefined, { queryPageMapAvailable: true })).toBe(false);
+    expect(listicleFamilyRepReachable(split, new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(false);
     // In-window tuple over the SQL floor — but the mirrored candidate
     // scores ~32, under its persistence floor, so the query bucket would
     // mine-and-drop it: the family keeps the demand (Codex r16).
