@@ -3922,7 +3922,16 @@ class GscOpportunityMiner {
       const protectedKeys = await this._companionProtection(
         runner, fullBatch || bucketOpportunities, new Set(probeStale.map((r) => r.dedupe_key))
       );
-      const companionKeys = protectedKeys === null ? [] : probeStale
+      // FAIL CLOSED, as documented on _companionProtection: without the
+      // protection set we cannot tell which companions are still needed,
+      // and expiring parents anyway would orphan a still-claimable
+      // companion from its retired parent (audit P1). Suppress the whole
+      // retirement for this run — the next mine retries.
+      if (protectedKeys === null) {
+        logger.warn(`[gsc-opp-miner] ${bucket} sweep: companion protection unavailable — retirement suppressed this run`);
+        return;
+      }
+      const companionKeys = probeStale
         .filter((r) => r.page_url)
         .map((r) => dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,

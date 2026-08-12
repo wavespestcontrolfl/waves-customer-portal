@@ -409,6 +409,34 @@ describe('miner persistAll action-aware gate', () => {
     expect(updates[0].updates).toMatchObject({ status: 'expired', skip_reason: 'seo_actions_owns_page' });
   });
 
+  test('a failed protection lookup suppresses the WHOLE retirement (fail closed)', async () => {
+    // Without the protection set we cannot tell which companions are
+    // still needed; expiring parents anyway orphans a claimable companion.
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: null, _in: null,
+        where: jest.fn((f) => { if (typeof f === 'object') q._filters = f; return q; }),
+        whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q),
+        whereNotNull: jest.fn(() => { throw new Error('protection lookup down'); }),
+        select: jest.fn(() => q),
+        then: (res, rej) => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []
+        ).then(res, rej),
+        forUpdate: jest.fn(() => Promise.resolve((q._in?.[1] || []).map((k) => ({ dedupe_key: k })))),
+        update: jest.fn((u) => { updates.push({ updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
+
+    expect(updates).toHaveLength(0);
+  });
+
   test('a parent whose companion never existed is still retired', async () => {
     // The cap excluded the companion, link boosts are off, or another
     // queue owns the page: the synthesized key has no row behind it, so
