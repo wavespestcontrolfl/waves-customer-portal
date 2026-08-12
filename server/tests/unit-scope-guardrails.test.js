@@ -1306,3 +1306,65 @@ describe('a whole-building-classified tenant keeps their own stated area (r48)',
     expect(facts.structureArea.kind).toBe('building_area_sqft');
   });
 });
+
+describe('an owner-occupied commercial condo is a unit without any address suffix (r49)', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+
+  // The r8 case, end to end: a commercial CONDOMINIUM owner has no tenancy
+  // and — with no Unit/Suite line on the address — no subpremise, so the
+  // suite branch's `(tenant || unitSignal)` conjunct dropped them into
+  // entire_commercial_building and the county BUILDING area priced their
+  // unit. The condo RECORD is the unit-occupancy evidence.
+  const condoOwner = (overrides = {}) => resolveUnitScopeModel({
+    propertyRecord: { propertyType: 'Commercial Condo' },
+    extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+    intent: { is_commercial: true, address: '3400 Cattlemen Rd, Sarasota, FL 34232' },
+    propertyFacts: { tenant: false, home: { value: 24000, source: 'county_assessed' } },
+    address: '3400 Cattlemen Rd, Sarasota, FL 34232',
+    ...overrides,
+  });
+
+  test('the scope is a suite and the ownership is a commercial condominium', () => {
+    const model = condoOwner();
+    expect(model.serviceScope).toBe('commercial_suite');
+    // The ownership behind it is a commercial condominium, so the lot is
+    // the development's master parcel — never a private one.
+    expect(model.lotApplicability).toBe('common_master_parcel');
+  });
+
+  test('the whole-building county area never prices the unit', () => {
+    const facts = { home: { value: 24000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, condoOwner());
+    expect(facts.home.value).toBeNull();
+    expect((facts.home.rejected || []).some((r) => r.value === 24000)).toBe(true);
+  });
+
+  test('county land-use text carries the same evidence as the type', () => {
+    expect(shadowPrivate.isCondoRecord({
+      aggregated: false, propertyType: 'Commercial', landUseDescription: 'Office Condominium',
+    })).toBe(true);
+  });
+
+  test('an AGGREGATED stacked complex stays an association job (r17/r42)', () => {
+    // A condo complex bought whole is not one unit — the aggregate must
+    // keep its association scope and its own measurements.
+    expect(shadowPrivate.isCondoRecord({ aggregated: true, propertyType: 'Commercial Condo' })).toBe(false);
+    const model = condoOwner({
+      propertyRecord: { propertyType: 'Commercial Condo', _parcel: { aggregated: true } },
+    });
+    expect(model.serviceScope).not.toBe('commercial_suite');
+  });
+
+  test('the kill switch still restores prior behavior', () => {
+    // The V2 shadow path opts out per call, so a condo record cannot make
+    // it a suite with GATE_UNIT_SCOPE_GUARDRAILS off.
+    const args = {
+      propertyType: 'Commercial Condo', isCommercial: true, tenant: false,
+      aggregated: false, unitSignal: false, partBuilding: true, condoRecord: true,
+    };
+    expect(shadowPrivate.inferServiceScope(args)).toBe('entire_commercial_building');
+    expect(shadowPrivate.inferServiceScope({ ...args, unitScopeSuites: true })).toBe('commercial_suite');
+    expect(shadowPrivate.inferOwnershipType(args)).toBe('residential_condominium');
+    expect(shadowPrivate.inferOwnershipType({ ...args, unitScopeSuites: true })).toBe('commercial_condominium');
+  });
+});

@@ -136,9 +136,27 @@ function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType, l
     || MULTI_UNIT_TEXT.test(String(landUseDescription || ''));
 }
 
+// A CONDOMINIUM record describes ONE unit of a larger development by
+// definition — its own folio, its own walls. An owner-occupied commercial
+// condo has no tenancy and, with no Unit/Suite suffix on the address, no
+// subpremise either, so `unitSignal` is false and the suite branch's
+// `(tenant || unitSignal)` conjunct failed it: the owner-occupied commercial
+// condo r8 fixed came back `entire_commercial_building`, and the county
+// BUILDING area priced their unit (codex r49 P1). The record type IS the
+// unit-occupancy evidence. Read from the same two texts as
+// hasPartBuildingEvidence (which already counts 'condo' since r43), so the
+// two predicates cannot disagree. An AGGREGATED stacked parcel is excluded —
+// an aggregate complex bought whole is an association job (r17/r42).
+function isCondoRecord({ aggregated, propertyType, landUseDescription }) {
+  if (aggregated === true) return false;
+  return CONDO_TYPES.test(String(propertyType || ''))
+    || CONDO_TYPES.test(String(landUseDescription || ''));
+}
+
 function inferServiceScope({
   propertyType, isCommercial, tenant, aggregated, unitSignal,
   unitScopeSuites = false, partBuilding = false, subpremise = false,
+  condoRecord = false,
 }) {
   if (isCommercial) {
     // ASSOCIATION/aggregate first when nobody occupies one unit: an owner or
@@ -161,7 +179,10 @@ function inferServiceScope({
     //  - lane OFF: the legacy tenancy⇒suite mapping, unchanged, so the
     //    independently-gated V2 pricing path cannot inherit new behavior
     //    after the advertised kill switch is flipped (codex r12 P1).
-    if (unitScopeSuites ? ((tenant || unitSignal) && partBuilding) : tenant) {
+    //  - a CONDO record is unit occupancy in itself (codex r49 P1): the
+    //    owner-occupied commercial condo has neither tenancy nor a
+    //    subpremise to signal with.
+    if (unitScopeSuites ? ((tenant || unitSignal || condoRecord) && partBuilding) : tenant) {
       return 'commercial_suite';
     }
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
@@ -183,7 +204,7 @@ function inferServiceScope({
 
 function inferOwnershipType({
   propertyType, isCommercial, tenant, aggregated, unitSignal,
-  unitScopeSuites = false, partBuilding = false,
+  unitScopeSuites = false, partBuilding = false, condoRecord = false,
 }) {
   if (tenant) {
     // A commercial tenant is a leased SUITE only when they occupy part of a
@@ -201,7 +222,10 @@ function inferOwnershipType({
   // never a private lot (pairs with the suite scope above, codex r8 P1).
   // Same opt-in as inferServiceScope so the V2 path can't inherit the new
   // behavior with the unit-scope kill switch off (codex r12 P1).
-  if (isCommercial && unitSignal && unitScopeSuites) return 'commercial_condominium';
+  // The condo RECORD counts here too (codex r49 P1) — without it a
+  // suffix-less commercial condo owner fell through to the residential
+  // CONDO_TYPES line below and was labelled a residential condominium.
+  if (isCommercial && (unitSignal || condoRecord) && unitScopeSuites) return 'commercial_condominium';
   if (aggregated) return 'association_common_property';
   const type = String(propertyType || '');
   // Multifamily without positive unit evidence is an OWNED whole-property
@@ -474,12 +498,17 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
       landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
     });
+    const condoRecord = isCondoRecord({
+      aggregated, propertyType,
+      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+    });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
-      subpremise: subpremiseSignalForScope,
+      subpremise: subpremiseSignalForScope, condoRecord,
     });
     const ownershipType = inferOwnershipType({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
+      condoRecord,
     });
     const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
     if (!evidence.length) return null;
@@ -646,5 +675,6 @@ module.exports = {
     hasUnitSignal,
     hasSubpremiseSignal,
     hasPartBuildingEvidence,
+    isCondoRecord,
   },
 };

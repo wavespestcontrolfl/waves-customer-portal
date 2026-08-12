@@ -301,9 +301,17 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // This module IS the unit-scope lane, so owner-unit suites are always on
   // for the model it composes (its pricing-affecting apply is separately
   // gated); the V2 shadow path opts out by default — see inferServiceScope.
+  // A condo RECORD is unit occupancy in itself — the owner-occupied
+  // commercial condo has neither tenancy nor a Unit/Suite suffix to signal
+  // with (codex r49 P1). Same shared predicate as the V2 path.
+  const condoRecord = shadowPrivate.isCondoRecord({
+    aggregated, propertyType,
+    landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+  });
   let serviceScope = shadowPrivate.inferServiceScope({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
     unitScopeSuites: true, partBuilding: partBuildingEvidence, subpremise: subpremiseSignal,
+    condoRecord,
   });
   // An explicit Unit/Apt/Suite subpremise on a residential job whose type
   // is missing or generic reads as a UNIT — a misclassified or
@@ -347,7 +355,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   }
   const ownershipType = shadowPrivate.inferOwnershipType({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
-    unitScopeSuites: true, partBuilding: partBuildingEvidence,
+    unitScopeSuites: true, partBuilding: partBuildingEvidence, condoRecord,
   });
 
   return {
