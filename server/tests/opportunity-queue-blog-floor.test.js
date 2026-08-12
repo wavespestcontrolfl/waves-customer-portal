@@ -285,6 +285,7 @@ describe('miner persistAll action-aware gate', () => {
   function reconcileHarness(staleRows) {
     const updates = [];
     const locks = [];
+    const selects = [];
     db.mockImplementation((table) => {
       const q = {
         _filters: null, _notIn: null, _in: null,
@@ -300,11 +301,19 @@ describe('miner persistAll action-aware gate', () => {
         // rows it is about to retire and then updates them by locked key,
         // so predicate and update target are asserted apart).
         select: jest.fn(() => q),
-        then: (resolve, reject) => Promise.resolve(
-          SWEPT_BUCKETS.has(q._filters?.bucket) ? staleRows : []
-        ).then(resolve, reject),
+        then: (resolve, reject) => {
+          selects.push({ table, filters: q._filters, notIn: q._notIn, in: q._in });
+          return Promise.resolve(
+            SWEPT_BUCKETS.has(q._filters?.bucket) ? staleRows : []
+          ).then(resolve, reject);
+        },
         forUpdate: jest.fn(() => {
-          locks.push({ table, filters: q._filters, notIn: q._notIn });
+          locks.push({ table, filters: q._filters, notIn: q._notIn, in: q._in });
+          // The sweep's authoritative lock is key-scoped (parents AND
+          // companions in one statement); everything it locks is returned.
+          if (q._in?.[0] === 'dedupe_key') {
+            return Promise.resolve(q._in[1].map((k) => ({ dedupe_key: k })));
+          }
           return Promise.resolve(SWEPT_BUCKETS.has(q._filters?.bucket) ? staleRows : []);
         }),
         update: jest.fn((u) => {
@@ -317,7 +326,7 @@ describe('miner persistAll action-aware gate', () => {
     // db.raw serves the persist upsert (rowCount) AND
     // _queryPageMapCoveredDomains (rows). staleRow's page host is 'x'.
     db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }, { domain: 'wavespestcontrol.com' }] });
-    return { updates, locks };
+    return { updates, locks, selects };
   }
 
   const staleRow = {
@@ -331,7 +340,7 @@ describe('miner persistAll action-aware gate', () => {
     // ONE mechanism now: a moved target, a recovered signal, a query that
     // became served, and lost map evidence all present identically — the
     // stored key is simply absent from this mine's persistable set.
-    const { updates, locks } = reconcileHarness([staleRow]);
+    const { updates, selects } = reconcileHarness([staleRow]);
 
     await miner._sweepRecoveredQueries('ctr_rewrite', [
       opp({
@@ -341,22 +350,21 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ], null, null, new Set(), SINCE);
 
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
     // Keyed on dedupe keys, not query strings: one query can produce
     // several (query, service, city, intent) tuples, and a surviving
     // tuple must not shelter a sibling whose evidence disappeared.
-    expect(lock.notIn).toEqual(['dedupe_key', ['ctr::live']]);
+    const probe = selects.find((x) => x.filters?.bucket === 'ctr_rewrite');
+    expect(probe.notIn).toEqual(['dedupe_key', ['ctr::live']]);
 
     const sweeps = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_signal_recovered');
     expect(sweeps.length).toBeGreaterThanOrEqual(1);
-    expect(sweeps[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
+    expect(sweeps[0].in[1]).toContain(staleRow.dedupe_key);
     expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
   });
 
   test('a BELOW-FLOOR candidate does not defend its stored row (stale higher score would stay claimable)', async () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    const { locks } = reconcileHarness([staleRow]);
+    const { selects } = reconcileHarness([staleRow]);
 
     await miner._sweepRecoveredQueries('ctr_rewrite', [
       opp({
@@ -367,8 +375,8 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ], null, null, new Set(), SINCE);
 
-    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
-    expect(lock.notIn).toBe(null); // no live keys at all
+    const probe = selects.find((x) => x.filters?.bucket === 'ctr_rewrite');
+    expect(probe.notIn).toBe(null); // no live keys at all
   });
 
   test('a companion queued BEFORE seo_actions claimed its page is retired', async () => {
@@ -429,30 +437,29 @@ describe('miner persistAll action-aware gate', () => {
     expect(updates.some((u) => u.updates.skip_reason === 'no_content_yet_signal_recovered')).toBe(true);
   });
 
-  test('companions are LOCKED before any parent is expired (no claim slips into the window)', async () => {
-    // claimNext uses FOR UPDATE SKIP LOCKED, so a companion claimed after
-    // its parent was expired but before the companion update would keep
-    // doing link work for a retired parent.
+  test('parents and companions are locked in ONE statement (no claim can slip between)', async () => {
+    // Locking parents, running more queries, then locking companions left
+    // a gap in which claimNext (FOR UPDATE SKIP LOCKED) could claim a
+    // companion — the later select would omit it and only the parent
+    // would be expired, leaving a claimed orphan doing obsolete link work.
     const order = [];
     db.mockImplementation(() => {
       const q = {
         _filters: null, _in: null, _notIn: null,
-        where: jest.fn((f) => { q._filters = f; return q; }),
+        where: jest.fn((f) => { if (typeof f === 'object') q._filters = f; return q; }),
         whereNot: jest.fn(() => q), whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
         whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
         select: jest.fn(() => q),
-        then: (res, rej) => Promise.resolve([]).then(res, rej),
+        then: (res, rej) => {
+          order.push('probe(unlocked)');
+          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []).then(res, rej);
+        },
         forUpdate: jest.fn(() => {
-          order.push(`lock:${q._filters?.bucket}`);
-          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite'
-            ? [staleRow]
-            : [{ dedupe_key: 'link_boost::pest::_::https://x/old-page/' }]);
+          order.push(`lock:${(q._in?.[1] || []).length}keys`);
+          return Promise.resolve((q._in?.[1] || []).map((k) => ({ dedupe_key: k })));
         }),
-        update: jest.fn(() => {
-          order.push(`expire:${q._in?.[1]?.[0]?.startsWith('link_boost') ? 'link_boost' : 'ctr_rewrite'}`);
-          return Promise.resolve(1);
-        }),
+        update: jest.fn(() => { order.push('expire'); return Promise.resolve(1); }),
       };
       return q;
     });
@@ -460,10 +467,10 @@ describe('miner persistAll action-aware gate', () => {
 
     await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
 
-    // Both locks precede both expiries.
-    expect(order).toEqual([
-      'lock:ctr_rewrite', 'lock:link_boost', 'expire:ctr_rewrite', 'expire:link_boost',
-    ]);
+    // Exactly ONE lock, covering the parent AND its companion, then one
+    // expiry — no second lock after any intervening statement.
+    expect(order.filter((o) => o.startsWith('lock:'))).toEqual(['lock:2keys']);
+    expect(order[order.length - 1]).toBe('expire');
   });
 
   test('a companion is protected by a LIVE QUEUE parent absent from this batch (errored/dipped bucket)', async () => {
@@ -489,7 +496,11 @@ describe('miner persistAll action-aware gate', () => {
           ].filter((r) => !excluded.has(r.dedupe_key));
           return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : live).then(res, rej);
         },
-        forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
+        forUpdate: jest.fn(() => Promise.resolve(
+          q._in?.[0] === 'dedupe_key'
+            ? q._in[1].map((k) => ({ dedupe_key: k }))
+            : (q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])
+        )),
         update: jest.fn((u) => {
           updates.push({ table, filters: q._filters, in: q._in, updates: u });
           return Promise.resolve(1);
@@ -501,9 +512,11 @@ describe('miner persistAll action-aware gate', () => {
 
     await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
 
-    // Parent retired; companion spared by the unrelated live parent.
-    expect(updates.some((u) => u.in?.[1]?.includes(staleRow.dedupe_key))).toBe(true);
-    expect(updates.filter((u) => u.filters?.bucket === 'link_boost')).toHaveLength(0);
+    // Parent retired; the companion is spared by the unrelated live
+    // parent, so its key never enters the locked/expired set.
+    const expired = updates.flatMap((u) => u.in?.[1] || []);
+    expect(expired).toContain(staleRow.dedupe_key);
+    expect(expired.some((k) => String(k).startsWith('link_boost::'))).toBe(false);
   });
 
 
@@ -513,6 +526,7 @@ describe('miner persistAll action-aware gate', () => {
         where: jest.fn(() => q),
         whereNotIn: jest.fn(() => q),
         select: jest.fn(() => q),
+        then: (res, rej) => Promise.reject(new Error('boom')).then(res, rej),
         forUpdate: jest.fn(() => Promise.reject(new Error('boom'))),
       };
       return q;

@@ -3860,8 +3860,16 @@ class GscOpportunityMiner {
       // Rows for queries we could not judge this run are preserved: the
       // sweep retires RECOVERED signals, never unavailable evidence.
       if (exemptQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(exemptQueries));
-      const locked = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
-      if (!locked.length) return;
+      // Read WITHOUT a lock first, purely to derive companion keys — the
+      // authoritative lock below covers parents and companions in ONE
+      // statement. Locking parents, running more queries, then locking
+      // companions leaves a gap in which claimNext (FOR UPDATE SKIP
+      // LOCKED) can claim a companion: the later select would omit it as
+      // no-longer-pending and the transaction would expire only its
+      // parent, leaving a claimed orphan doing obsolete link work
+      // (audit P1).
+      const probe = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+      if (!probe.length) return;
 
       // DOMAIN-SCOPED. ctr_rewrite mines across every property, so a
       // single stale spoke sync makes that property's queries vanish from
@@ -3871,54 +3879,47 @@ class GscOpportunityMiner {
       // coverage. Rows without a page (hub-only buckets) ride HUB
       // coverage. Coverage unavailable → judge nothing.
       const sweepCovered = since ? await this._queryPageMapCoveredDomains(since) : null;
-      const stale = locked.filter((r) => {
+      const probeStale = probe.filter((r) => {
         if (!sweepCovered) return false;
         const host = r.page_url
           ? String(routeIdentity(r.page_url) || '').split('::')[0]
           : HUB_DOMAIN;
         return !!host && sweepCovered.has(host);
       });
-      if (!stale.length) return;
+      if (!probeStale.length) return;
 
-      // Parents and companions are locked BEFORE either is expired.
-      // Expiring parents first left a window where claimNext (FOR UPDATE
-      // SKIP LOCKED) could claim a companion whose parent was already
-      // gone: the status='pending' filter then skipped it and obsolete
-      // link work proceeded against a retired parent (audit P1).
-      //
       // Protection must see the COMPLETE batch — a live decay_refresh
       // parent targeting a stale rewrite's page shares its companion key,
       // and the single-bucket list cannot see it.
       const protectedKeys = await this._companionProtection(
-        runner, fullBatch || bucketOpportunities, new Set(stale.map((r) => r.dedupe_key))
+        runner, fullBatch || bucketOpportunities, new Set(probeStale.map((r) => r.dedupe_key))
       );
-      const companionKeys = protectedKeys === null ? [] : stale
+      const companionKeys = protectedKeys === null ? [] : probeStale
         .filter((r) => r.page_url)
         .map((r) => dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
         }))
         .filter((k) => !protectedKeys.has(k));
-      const lockedCompanions = companionKeys.length
-        ? await runner('opportunity_queue')
-          .where({ bucket: 'link_boost', status: 'pending' })
-          .whereIn('dedupe_key', companionKeys)
-          .select('dedupe_key')
-          .forUpdate()
-        : [];
+
+      // ONE locking statement over parents AND companions. Everything
+      // above ran unlocked and is only used to derive keys; this select is
+      // the authoritative snapshot, so nothing can be claimed between
+      // locking a parent and locking its companion. Rows claimed before it
+      // are simply absent (the status filter re-evaluates under the lock).
+      const targetKeys = probeStale.map((r) => r.dedupe_key).concat(companionKeys);
+      const locked = await runner('opportunity_queue')
+        .whereIn('dedupe_key', targetKeys)
+        .where('status', 'pending')
+        .select('dedupe_key')
+        .forUpdate();
+      if (!locked.length) return;
 
       await runner('opportunity_queue')
-        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+        .whereIn('dedupe_key', locked.map((r) => r.dedupe_key))
         .update({
           status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
         });
-      if (lockedCompanions.length) {
-        await runner('opportunity_queue')
-          .whereIn('dedupe_key', lockedCompanions.map((r) => r.dedupe_key))
-          .update({
-            status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
-          });
-      }
-      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${stale.length} recovered-query row(s) expired`);
+      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${locked.length} row(s) expired (parents + companions)`);
     } catch (err) {
       // Inside the persist transaction the caller owns rollback semantics;
       // rethrow so a failed sweep cannot leave half-reconciled state.
