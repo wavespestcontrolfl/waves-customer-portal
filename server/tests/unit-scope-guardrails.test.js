@@ -78,6 +78,14 @@ describe('commercialTextSignal', () => {
     expect(commercialTextSignal('ants in the master suite bathroom')).toBe(false);
     expect(commercialTextSignal('our en-suite bathroom has ants')).toBe(false);
     expect(commercialTextSignal('Suite A, Bradenton — roaches')).toBe(true);
+    // hotel_resort / healthcare_childcare risk types (codex r33 P1).
+    expect(commercialTextSignal('need pest control for our hotel')).toBe(true);
+    expect(commercialTextSignal('service our daycare please')).toBe(true);
+    expect(commercialTextSignal('roaches at our motel')).toBe(true);
+    // Retail needs ownership/service context (codex r33 P2).
+    expect(commercialTextSignal('ants in our retail store')).toBe(true);
+    expect(commercialTextSignal('we lease retail space downtown')).toBe(true);
+    expect(commercialTextSignal('I bought spray at a retail store, but the ants are at my house')).toBe(false);
     // Whole-property multifamily/association requests (codex r25 P1).
     expect(commercialTextSignal('I manage an apartment complex')).toBe(true);
     expect(commercialTextSignal('pest control for our HOA common areas')).toBe(true);

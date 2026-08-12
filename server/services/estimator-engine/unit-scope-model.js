@@ -93,7 +93,16 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     'office\\s+(?:and|&|\\+)\\s+warehouse',
     'warehouse\\s+(?:and|&|\\+)\\s+office',
     'commercial\\s+(?:building|property|unit|space|suite|kitchen)',
-    'retail\\s+(?:space|unit|store|plaza)',
+    // 'retail store' needs ownership/service context — "I bought spray at a
+    // retail store, but the ants are at my house" is residential prose
+    // (codex r33 P2). retail SPACE/UNIT/PLAZA stay unconditional: those name
+    // a premises, not a shopping trip.
+    'retail\\s+(?:space|unit|plaza)',
+    '(?:my|our|the)\\s+retail\\s+(?:store|location|shop)',
+    '(?:at|for|in)\\s+(?:my|our)\\s+retail\\s+store',
+    // hotel_resort / healthcare_childcare are supported commercial risk
+    // types (intent-schema.js:203) but matched nothing (codex r33 P1).
+    '(?:my|our|the)\\s+(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare)\\b',
     '\\bflex\\s+(?:space|unit|building)\\b',
     // Suite identifiers are alphabetic as often as numeric ("Suite A",
     // "Suite B-2") — a digit-only pattern missed them (codex r21 P1) — but
@@ -129,7 +138,10 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // The premises noun must sit DIRECTLY after the optional article, so
     // "…for the home office" (a residential room) still does not match
     // while "…for an office" (codex r23 P1) does.
-    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store)\\b',
+    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store|hotel|motel|resort|daycare|day\\s?care|preschool|childcare)\\b',
+    // "service our daycare" / "treat our hotel" — the possessive form with
+    // a service verb in front (codex r33 P1).
+    '(?:service|treat|spray|exterminat\\w*)\\w*\\s+(?:my|our|the)\\s+(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare|warehouse|restaurant|clinic|office|shop|store)\\b',
   ].join('|'),
   'i',
 );
