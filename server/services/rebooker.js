@@ -775,6 +775,7 @@ class SmartRebooker {
     // anchor's own rewind is tracked separately (same trx-fresh decision).
     const rewoundSiblings = [];
     let anchorRewound = false;
+    let rewoundAnchorRow = null;
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -975,6 +976,7 @@ class SmartRebooker {
         if (sibRewound) {
           if (String(sib.id) === String(serviceId)) {
             anchorRewound = true;
+            rewoundAnchorRow = { ...sib, customer_id: service.customer_id };
           } else {
             rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
           }
@@ -1189,10 +1191,14 @@ class SmartRebooker {
     // same-day edit that preserved the lifecycle never clears an active
     // tech, and a concurrent tap after the outer read is still covered.
     if (wasLive || anchorRewound) {
-      if (service.technician_id) {
+      // The trx-fresh anchor row wins over the outer snapshot: a concurrent
+      // reassignment between the two reads would otherwise clear the OLD
+      // tech (or none) and leave the current tech pinned to the moved visit.
+      const anchorTechId = (rewoundAnchorRow || service).technician_id;
+      if (anchorTechId) {
         try {
           await clearTechCurrentJob({
-            tech_id: service.technician_id,
+            tech_id: anchorTechId,
             current_job_id: serviceId,
             status: 'idle',
           });
@@ -1200,7 +1206,7 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh({ ...service, ...(rewoundAnchorRow || {}), id: serviceId }, 'confirmed');
     }
     // Rewound non-anchor siblings get the same cleanup: release any tech
     // pinned to them and refresh open trackers. They all landed on
