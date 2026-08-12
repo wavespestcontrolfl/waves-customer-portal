@@ -133,7 +133,7 @@ describe('GATE ON — caller recognition', () => {
     expect(names).toEqual(['capture_lead', 'find_slots', 'get_account_overview', 'get_availability',
       'get_call_history', 'get_invoice_history', 'get_message_history', 'get_open_estimates',
       'get_pricing', 'get_service_history', 'get_service_report', 'get_services_catalog',
-      'get_today_eta', 'lookup_customer']);
+      'get_today_eta', 'lookup_customer', 'request_reservice']);
     expect(CONTEXT_TOOLS.every((t) => t.input_schema)).toBe(true);
   });
 

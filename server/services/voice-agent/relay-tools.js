@@ -19,6 +19,15 @@
  * gate on they still refuse unless the session carries a matched customer id
  * (relay-context.resolveCallerContext — identity is ANI-only). Bodies live in
  * relay-context.js.
+ *
+ * Phase E adds one more context tool and two capture behaviors:
+ *   - `request_reservice` — an ANI-matched EXISTING customer reporting a
+ *     problem between visits files in the re-service lane (relay-reservice.js),
+ *     not the new-business lead pipeline. Unmatched callers keep capture_lead.
+ *   - capture_lead now carries the caller's stated contact preference /
+ *     consent instruction (captured for a human, never acted on) and fires the
+ *     INTERNAL owner alert for a hot/urgent lead (relay-alert.js — one per
+ *     call, fail-open, never customer-facing).
  */
 
 const logger = require('../logger');
@@ -59,7 +68,30 @@ const TOOLS = [
         lead_quality: {
           type: 'string',
           enum: LEAD_QUALITIES,
-          description: 'hot = ready to buy / urgent, warm = interested, cold = just asking, spam = not a real lead',
+          description: 'hot = urgent or ready to buy (emergency, swarming, active infestation, angry customer), '
+            + 'warm = interested, cold = just asking, spam = not a real lead. Use hot ONLY when it is genuinely '
+            + 'urgent or they are ready to move — it pages the owner.',
+        },
+        urgency_reason: {
+          type: 'string',
+          description: 'If lead_quality is hot, one short phrase saying WHY it is urgent (e.g. "swarming termites in the '
+            + 'living room", "wasp nest, allergic child", "upset about a missed visit").',
+        },
+        contact_preference: {
+          type: 'string',
+          description: 'Any contact instruction the caller stated, IN THEIR OWN WORDS (e.g. "stop texting me", '
+            + '"call my husband Dave at 941-555-0114 instead, not me", "email only, I work nights"). Capture it '
+            + 'verbatim if they said one. Leave empty if they said nothing about how to be contacted.',
+        },
+        preferred_contact_method: {
+          type: 'string',
+          enum: ['phone', 'sms', 'email', 'unspecified'],
+          description: 'How the caller asked to be reached, if they said. Omit when they did not say.',
+        },
+        do_not_contact_request: {
+          type: 'boolean',
+          description: 'True ONLY if the caller asked us to stop contacting them (or stop texting/emailing them). '
+            + 'You do not act on this yourself — it is recorded for a Waves team member to handle.',
         },
       },
       required: ['call_summary'],
@@ -253,6 +285,38 @@ const CONTEXT_TOOLS = [
       'matched a customer account; it NEVER works for looked-up accounts. Use ' +
       'it when the caller mentions a text they sent or received.',
     input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'request_reservice',
+    description:
+      'File a re-service request for an EXISTING customer whose problem came ' +
+      'back between their scheduled visits ("the ants are back", "I\'m still ' +
+      'seeing roaches after last week"). Use this INSTEAD of capture_lead for ' +
+      'the matched caller — they are already a customer, not a new lead. It ' +
+      'files the request with the office; it does NOT schedule anything and ' +
+      'sends the customer nothing. Works only for the account the caller\'s own ' +
+      'phone number matched. Never state a date, a link, or a code afterwards.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lane: {
+          type: 'string',
+          enum: ['pest', 'lawn'],
+          description: 'Which service the problem is with: "pest" for bugs/rodents, "lawn" for turf.',
+        },
+        issue: {
+          type: 'string',
+          description: 'What the caller is seeing and where, in their own words (e.g. "ants back in the kitchen '
+            + 'since the weekend, along the baseboard").',
+        },
+        urgent: {
+          type: 'boolean',
+          description: 'True only when it genuinely cannot wait (heavy activity, stings/bites, a vulnerable person '
+            + 'in the home). Leave false otherwise.',
+        },
+      },
+      required: ['lane', 'issue'],
+    },
   },
   {
     name: 'get_pricing',
@@ -452,6 +516,14 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (name === 'get_services_catalog') {
         return await relayContext.servicesCatalogText();
       }
+      // Phase E: an ANI-matched EXISTING customer reporting a problem between
+      // visits goes to the re-service lane (a service_requests row on their
+      // account), NOT the new-business lead pipeline. Matched-caller only —
+      // the body re-checks. Unmatched callers keep using capture_lead.
+      if (name === 'request_reservice') {
+        const { requestReserviceText } = require('./relay-reservice');
+        return await requestReserviceText(input, ctx);
+      }
       // lookup_customer: find any account (spouse/landlord/parent calling
       // about a shared one). Output shaping + the session ref registry
       // (ctx.rememberLookup) keep this from ever dumping a record.
@@ -577,6 +649,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         pain_points: input.pain_points || null,
         call_summary: input.call_summary || null,
         lead_quality: LEAD_QUALITIES.includes(input.lead_quality) ? input.lead_quality : null,
+        // Phase E — CAPTURED, NEVER ACTED ON. These ride into the lead's
+        // extracted_data for a human to action; nothing in the voice agent
+        // writes an opt-out, a messaging preference, or a suppression.
+        contact_preference: input.contact_preference || null,
+        preferred_contact_method: input.preferred_contact_method || null,
+        do_not_contact_request: input.do_not_contact_request === true,
       };
       await createLeadFromExtraction(extracted, {
         phone: callerPhone,
@@ -586,6 +664,14 @@ async function executeTool(name, input = {}, ctx = {}) {
       });
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
       logger.info(`[voice-relay] capture_lead saved callSid=${ctx.callSid || 'n/a'}`);
+      // The model's own one-line summary becomes call_log.call_summary at
+      // session close — no second LLM round trip on the live call path.
+      if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+      // Urgent/hot lead → INTERNAL owner alert, once per call, fail-open.
+      // Deliberately AFTER the lead write: the lead is the durable artifact and
+      // must never be lost to an alert failure. Never customer-facing.
+      const { alertOwnerHotLead } = require('./relay-alert');
+      await alertOwnerHotLead({ ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null }, ctx);
       return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm details and scheduling.';
     }
 

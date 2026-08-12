@@ -68,9 +68,9 @@ describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)'
       ['capture_lead', 'find_slots', 'get_account_overview', 'get_availability',
         'get_call_history', 'get_invoice_history', 'get_message_history', 'get_open_estimates',
         'get_pricing', 'get_service_history', 'get_service_report', 'get_services_catalog',
-        'get_today_eta', 'lookup_customer']
+        'get_today_eta', 'lookup_customer', 'request_reservice']
     );
-    expect(CONTEXT_TOOLS).toHaveLength(11);
+    expect(CONTEXT_TOOLS).toHaveLength(12);
   });
 
   test('gate off → executeTool refuses context tools outright', async () => {

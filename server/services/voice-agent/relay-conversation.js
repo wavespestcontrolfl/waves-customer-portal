@@ -23,7 +23,7 @@ const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools, executeTool } = require('./relay-tools');
-const { isContextEnabled, resolveCallerContext } = require('./relay-context');
+const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
@@ -141,6 +141,43 @@ function contextPromptAddendum() {
     '  payment on this call and must never read out a payment link, receipt link, or code —',
     '  they can pay in the Waves customer portal, or a team member can help them directly.',
     '  Never ask for or accept a card number.',
+    '',
+    'TIME AND CALLBACK PROMISES:',
+    '- A CLOCK DATA block below tells you the real date, time, and whether the office is',
+    '  open. Use it. Never guess the time, the day, or whether anyone is there.',
+    '- Set the expectation the clock actually supports: if the office is OPEN, "someone will',
+    '  call you back shortly" is fine. If it is CLOSED, say when — "first thing tomorrow',
+    '  morning" or "when the office opens at 8" — never "shortly" or "in a few minutes".',
+    '- If the office hours are unavailable in the block, do not state hours at all: say a',
+    '  team member will follow up as soon as possible.',
+    '- Waves never starts an appointment before 8:00 AM Eastern. Never offer, suggest, or',
+    '  agree to anything earlier, however the caller asks.',
+    '',
+    'THE PROBLEM CAME BACK (existing customers):',
+    '- When the KNOWN CALLER block is present and they are calling because a problem is back',
+    '  between their scheduled visits ("the ants are back", "still seeing roaches"), use',
+    '  request_reservice — NOT capture_lead. They are already a customer; a lead is the',
+    '  wrong record and it buries a service problem in the new-business pile.',
+    '- request_reservice files the request with the office. It does NOT book anything: never',
+    '  state a date or time for it, and never read out a link or a code. If the tool says a',
+    '  request or a visit is already there, say so and do not file a second one.',
+    '- With NO matched account, keep using capture_lead exactly as before.',
+    '',
+    'URGENT CALLS:',
+    '- Set lead_quality "hot" on capture_lead for a genuine emergency — swarming termites, an',
+    '  active infestation, stings or bites, a vulnerable person in the home, or a customer who',
+    '  is upset with us — and put one short phrase in urgency_reason saying why.',
+    '- "hot" pages a Waves team member immediately, so use it for real urgency only, not for',
+    '  ordinary interest. You may tell the caller a team member is being notified right away.',
+    '',
+    'IF THEY TELL YOU HOW TO CONTACT THEM:',
+    '- When a caller states a contact instruction — "stop texting me", "call my husband',
+    '  instead, not me", "email only" — capture it on capture_lead: their own words in',
+    '  contact_preference, plus preferred_contact_method and do_not_contact_request when they',
+    '  apply. Do this even if the rest of the call was about something else.',
+    '- You cannot change anything about how Waves contacts them, and you must not say you',
+    '  have. Acknowledge it plainly ("I\'ve made a note of that for the team") and let a',
+    '  Waves team member action it. Never promise they will stop receiving messages.',
   ].join('\n');
 }
 
@@ -298,11 +335,35 @@ class RelayConversation {
     // this call actually looked up (an invented ref resolves to nothing).
     this._lookupRefs = new Map(); // 'C1' -> customerId
     this._lookupRefsByCustomer = new Map(); // customerId -> 'C1'
+    // Phase E — the audit trail. Ordered turn list (caller / agent / tool) for
+    // the call_log transcript written at close, the model's own capture_lead
+    // summary (so the close needs no second LLM round trip), and the
+    // once-per-call owner-alert latch.
+    this._transcript = [];
+    this._modelSummary = null;
+    this._ownerAlerted = false;
+    this._reserviceFiled = false;
+    // Office hours for the CLOCK block: read ONCE per session (booking_config,
+    // the same source the availability tools quote from), then re-rendered on
+    // every turn so the time stays live without a per-turn DB read.
+    this._officeHours = null;
+    this._officeHoursReady = null;
     if (isContextEnabled()) {
       this._contextReady = resolveCallerContext(this.from)
         .then((ctx) => { this._callerContext = ctx; })
         .catch(() => {});
+      const { loadOfficeHours } = require('./relay-context');
+      this._officeHoursReady = loadOfficeHours()
+        .then((hours) => { this._officeHours = hours; })
+        .catch(() => {});
     }
+  }
+
+  /** Append one turn to the session transcript (the record; never truncated here). */
+  _recordTurn(role, text) {
+    const t = String(text == null ? '' : text).trim();
+    if (!t) return;
+    this._transcript.push({ role, text: t });
   }
 
   /**
@@ -323,10 +384,13 @@ class RelayConversation {
     }
   }
 
-  /** Speak a line to the caller (no-op on empty). */
+  /** Speak a line to the caller (no-op on empty). Everything spoken is recorded. */
   say(text) {
     const t = String(text || '').trim();
-    if (t) this._send(t);
+    if (t) {
+      this._recordTurn('agent', t);
+      this._send(t);
+    }
   }
 
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
@@ -358,6 +422,9 @@ class RelayConversation {
     this._chain = this._chain.then(() => {
       if (this.ended) return undefined;
       this.messages.push({ role: 'user', content: t });
+      // Recorded HERE (inside the serialized chain), not at enqueue time, so
+      // the transcript's caller/agent ordering matches what actually happened.
+      this._recordTurn('caller', t);
       return this._runLoop();
     }).catch((e) => {
       logger.error(`[voice-relay] loop error callSid=${this.callSid}: ${e.message}`);
@@ -405,10 +472,27 @@ class RelayConversation {
       markCaptured: () => {
         this.leadCaptured = true;
       },
+      // Phase E: the model's own capture_lead summary becomes the call_log
+      // call_summary at close (no extra model round trip on the live call).
+      noteCallSummary: (summary) => {
+        const s = String(summary == null ? '' : summary).trim();
+        if (s) this._modelSummary = s;
+      },
+      // Owner hot-lead alert: at most ONE per call, never per turn. Read
+      // through a function, not a snapshot boolean — the tool ctx is rebuilt
+      // per turn but two capture_lead calls can land inside ONE turn.
+      isOwnerAlerted: () => this._ownerAlerted,
+      markOwnerAlerted: () => { this._ownerAlerted = true; },
+      markReserviceFiled: () => { this._reserviceFiled = true; },
     };
 
     const contextEnabled = isContextEnabled();
+    if (this._officeHoursReady) {
+      try { await this._officeHoursReady; } catch { /* clock block degrades, never blocks */ }
+    }
+    const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
     const basePrompt = buildBasePrompt(contextEnabled)
+      + (clockBlock ? `\n\n${clockBlock}` : '')
       + (contextEnabled && this._callerContext && this._callerContext.block
         ? `\n\n${this._callerContext.block}`
         : '');
@@ -467,6 +551,10 @@ class RelayConversation {
         const results = [];
         for (const block of msg.content) {
           if (block.type !== 'tool_use') continue;
+          // Part of the record: reviewing a call must show that Sandy looked
+          // something up rather than invented it. Name only — tool INPUT can
+          // carry the caller's contact details and belongs in the lead row.
+          this._recordTurn('tool', block.name);
           const out = await executeTool(block.name, block.input, toolCtx);
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
@@ -523,7 +611,23 @@ class RelayConversation {
         // reverse ordering, /relay-complete's unconditional failure write still
         // overwrites this ai_handled. ('voicemail' here can only mean a real
         // failure, since the leg started at NULL.)
-        await db('call_log')
+        // Phase E — the TRANSCRIPT rides the SAME fenced update. Folding it in
+        // (rather than issuing a second statement) is what keeps the guard
+        // above load-bearing for it too: a relay-failure row that
+        // /relay-complete already stamped voicemail must not be retro-fitted
+        // with an AI transcript. Composition never throws; null just means
+        // there was nothing said worth recording.
+        const { buildTranscriptUpdate } = require('./relay-transcript');
+        const transcriptUpdate = buildTranscriptUpdate({
+          turns: this._transcript,
+          modelSummary: this._modelSummary,
+          reason: reason || null,
+          leadCaptured: this.leadCaptured,
+          callSid: this.callSid,
+          model: MODEL,
+          startedAt: this._startedAt,
+        });
+        const updated = await db('call_log')
           .where('twilio_call_sid', this.callSid)
           .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'))
           .update({
@@ -532,7 +636,18 @@ class RelayConversation {
             call_outcome: 'ai_handled',
             duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
+            ...(transcriptUpdate || {}),
           });
+        // LOUD on a dropped audit record: 0 rows with a real transcript means
+        // either the voicemail guard fired (a genuinely failed relay leg) or
+        // there is no call_log row for this CallSid (the TwiML-Bin sandbox
+        // path). Either way the conversation is not recoverable, so say so.
+        if (transcriptUpdate && !updated) {
+          logger.error(
+            `[voice-relay] transcript NOT persisted callSid=${this.callSid} (0 rows: voicemail-guard or missing call_log row) `
+            + `— ${this._transcript.length} turns lost from the audit trail`
+          );
+        }
         await syncVoiceMessageForCall(this.callSid); // awaited so a rejection is caught here, not floated
       } catch (err) {
         logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);

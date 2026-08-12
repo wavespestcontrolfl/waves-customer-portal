@@ -16,6 +16,27 @@
  * existing customer when one unambiguously matches but never creates a
  * customer — the lead is the capture artifact; conversion stays a human step.
  *
+ * CONTACT PREFERENCE / CONSENT (Phase E): a caller who says "stop texting me",
+ * "call my husband, not me", or "email only" mid-call has stated something that
+ * must not evaporate. Those three fields ride `extracted_data` (and the
+ * ai_triage activity metadata) so a human sees them on the lead:
+ *   - contact_preference        — the caller's own words, verbatim
+ *   - preferred_contact_method  — 'phone' | 'sms' | 'email' | 'unspecified'
+ *   - do_not_contact_request    — boolean
+ * The key names and the enum deliberately MIRROR the call-extraction schemas'
+ * existing shape (caller.preferred_contact_method, consent.do_not_contact_request
+ * in server/schemas/call-extraction.{model-output,persisted}.schema.json) so the
+ * two capture surfaces speak the same vocabulary. This module does NOT extend
+ * those JSON schemas: they describe the RECORDED-CALL extraction contract, no
+ * relay field flows through them, and any key added there bumps
+ * validate-extraction.SCHEMA_VERSION + the prompt contract hash and re-cohorts
+ * the promotion-readiness gate.
+ *
+ * CAPTURED, NEVER ACTED ON. Nothing here (or anywhere in the voice agent)
+ * writes an opt-out, a messaging preference, or a suppression from a stated
+ * preference — a human actions it. The only customer-row write in this module
+ * remains the empty-only preferred_language hint.
+ *
  * Core lead writes PROPAGATE on failure (the caller — the agent webhook —
  * returns 5xx so ElevenLabs retries). Unlike the voicemail path there is no
  * persisted recording/transcript to replay, so a swallowed DB error would
@@ -28,6 +49,27 @@ const { properCase } = require('../utils/name-case');
 const { composeServiceInterest } = require('../utils/lead-service-interest');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
+
+// Mirrors caller.preferred_contact_method in the call-extraction schemas.
+const CONTACT_METHODS = new Set(['phone', 'sms', 'email', 'unspecified']);
+
+/**
+ * The stated contact preference / consent instruction, normalized for storage.
+ * Returns null when the caller said nothing about it, so a later payload with
+ * no preference can never blank one already recorded.
+ */
+function contactPreferenceFields(extracted = {}) {
+  const note = extracted.contact_preference == null ? '' : String(extracted.contact_preference).trim().slice(0, 300);
+  const method = String(extracted.preferred_contact_method || '').trim().toLowerCase();
+  const dnc = extracted.do_not_contact_request === true;
+  if (!note && !CONTACT_METHODS.has(method) && !dnc) return null;
+  return {
+    contact_preference: note || null,
+    preferred_contact_method: CONTACT_METHODS.has(method) ? method : null,
+    do_not_contact_request: dnc,
+  };
+}
+
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
 const nameCase = (v) => (v && String(v).trim() ? properCase(String(v).trim()) : null);
 
@@ -111,7 +153,8 @@ async function resolveLeadSourceId(toPhone) {
  * @param {object} extracted  agent-captured fields:
  *   { first_name, last_name, email, address_line1, city, zip,
  *     requested_service|matched_service, preferred_date_time, pain_points,
- *     call_summary, lead_quality ('hot'|'warm'|'cold') }
+ *     call_summary, lead_quality ('hot'|'warm'|'cold'),
+ *     contact_preference, preferred_contact_method, do_not_contact_request }
  * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds }
  * @returns {Promise<{ leadId: string|null, customerId: string|null, created: boolean }>}
  */
@@ -216,11 +259,16 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
     if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+    // Contact preference / consent instruction: recorded for a HUMAN to
+    // action. Spread only when the caller actually stated one, so a later
+    // preference-free payload cannot erase a recorded instruction.
+    const contactPreference = contactPreferenceFields(extracted);
     leadUpdates.extracted_data = JSON.stringify({
       pain_points: extracted.pain_points,
       preferred_date_time: extracted.preferred_date_time,
       source: 'voice_agent',
       language,
+      ...(contactPreference || {}),
     });
     // Only touch is_qualified when the agent sent a recognized quality, so a
     // later quality-less payload can't demote a previously qualified lead.
@@ -242,6 +290,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         pain_points: extracted.pain_points,
         language,
         source: 'voice_agent',
+        ...(contactPreference || {}),
       }),
     }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
@@ -249,4 +298,4 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   return { leadId, customerId, created };
 }
 
-module.exports = { createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId };
+module.exports = { createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields };
