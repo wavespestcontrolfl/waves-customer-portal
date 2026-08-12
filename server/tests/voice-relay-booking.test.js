@@ -93,11 +93,19 @@ const relayBooking = require('../services/voice-agent/relay-booking');
 const { activeTools, executeTool, BOOKING_TOOLS } = require('../services/voice-agent/relay-tools');
 const sourceActions = require('../services/call-booking-source-actions'); // REAL module on purpose
 
+// ⭐ RELATIVE, NEVER A HARD-CODED DAY. This date flows through the REAL
+// not-in-the-past check inside revalidateSlot (ET-anchored, unmocked), so a
+// fixed fixture date silently rots the whole suite the day the ET calendar
+// passes it. Derived from the real ET clock, a week out — inside the 90-day
+// horizon and past any advance_days_min floor.
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const BOOK_DATE = etDateString(addETDays(new Date(), 7));
+
 const CUSTOMER = { id: 'c-1111', first_name: 'Pat', address_line1: '12 Shore Dr', city: 'Bradenton', zip: '34209' };
 const PEST_ROW = { id: 'svc-pest', service_key: 'general_pest', name: 'General Pest Control', billing_type: 'one_time', pricing_type: 'fixed', base_price: 150, default_duration_minutes: 45 };
 const ASSESSMENT_ROW = { id: 'ba1c3b87', service_key: 'waves_assessment', name: 'Waves Assessment', billing_type: 'one_time', pricing_type: 'fixed', base_price: 0, default_duration_minutes: 30 };
 const SLOT = {
-  date: '2026-08-20', start_time: '09:00', end_time: '10:00',
+  date: BOOK_DATE, start_time: '09:00', end_time: '10:00',
   start_label: '9:00 AM', end_label: '10:00 AM', startTime24: '09:00', endTime24: '10:00',
   technician_id: 't-1',
 };
@@ -107,11 +115,11 @@ const SLOT = {
 // the curated list looked correct. They are deliberately DIFFERENT here: the
 // 2 PM slot exists on the day but is NOT the day's curated pick.
 const SLOT_2PM = {
-  date: '2026-08-20', start_time: '14:00', end_time: '15:00',
+  date: BOOK_DATE, start_time: '14:00', end_time: '15:00',
   start_label: '2:00 PM', end_label: '3:00 PM', startTime24: '14:00', endTime24: '15:00',
   technician_id: 't-2',
 };
-const AVAILABILITY = { slots: [SLOT], days: [{ date: '2026-08-20', slots: [SLOT, SLOT_2PM] }] };
+const AVAILABILITY = { slots: [SLOT], days: [{ date: BOOK_DATE, slots: [SLOT, SLOT_2PM] }] };
 const CONFIG = { advance_days_min: 1, advance_days_max: 14, slot_duration_minutes: 60 };
 
 // ── knex-ish harness ───────────────────────────────────────────────────────
@@ -221,9 +229,9 @@ beforeEach(() => {
 // generated from, so the commit-time re-check re-runs the engine identically.
 function slotCtx(extra = {}) {
   const slots = new Map([
-    ['S1', { date: '2026-08-20', startMinutes: 540, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
-    ['S2', { date: '2026-08-20', startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'afternoon', expandOpenDays: true }],
-    ['S3', { date: '2026-08-20', startMinutes: 420, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
+    ['S1', { date: BOOK_DATE, startMinutes: 540, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
+    ['S2', { date: BOOK_DATE, startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'afternoon', expandOpenDays: true }],
+    ['S3', { date: BOOK_DATE, startMinutes: 420, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
   ]);
   let booked = false;
   return {
@@ -329,7 +337,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     const row = insert.mock.calls[0][0];
     expect(row).toMatchObject({
       customer_id: CUSTOMER.id,
-      scheduled_date: '2026-08-20',
+      scheduled_date: BOOK_DATE,
       window_start: '09:00',
       window_end: '10:00',
       service_type: 'General Pest Control',
@@ -352,7 +360,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
 
     // Slot was re-validated through the live engine, pinned to the requested day.
     expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
-      rangeFrom: '2026-08-20', rangeTo: '2026-08-20',
+      rangeFrom: BOOK_DATE, rangeTo: BOOK_DATE,
     }));
 
     // NOTHING customer-facing fired at create.
@@ -540,13 +548,72 @@ describe('BOTH GATES ON — request_booking behavior', () => {
 
   // timeOfDay is not just a narrowing filter: dropping it lets morning
   // candidates push an offered afternoon slot out of the per-day cap.
-  test('the re-check re-runs the engine with the OFFER\'s own inputs (timeOfDay, coords, duration)', async () => {
+  test('the re-check re-runs the engine with the OFFER\'s own inputs (timeOfDay, coords)', async () => {
     await executeTool('request_booking', { slot_ref: 'S2', service: 'ants' }, slotCtx());
     expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
-      rangeFrom: '2026-08-20', rangeTo: '2026-08-20',
+      rangeFrom: BOOK_DATE, rangeTo: BOOK_DATE,
       timeOfDay: 'afternoon', expandOpenDays: true,
-      lat: 27.4, lng: -82.5, duration: 60,
+      lat: 27.4, lng: -82.5,
     }));
+  });
+
+  // ⭐ THE DURATION THE ROW ACTUALLY OCCUPIES. The offer was generated with the
+  // GLOBAL slot duration (60), but the row is written with the CATALOG
+  // service's — so a 90-minute service offered in a 60-minute slot used to be
+  // conflict-checked for 60 and the next job could overlap it. The catalog
+  // service is now resolved BEFORE the re-check, and that one number drives the
+  // engine re-run, the conflict probe and the written row.
+  test('the catalog duration — not the global slot length — drives the re-check, the probe and the row', async () => {
+    catalog.resolveCallBookingCatalogService.mockReturnValue({ ...PEST_ROW, default_duration_minutes: 90 });
+    // A 90-minute service offered at 9:00 occupies 09:00–10:30.
+    booking.buildBookingAvailability.mockResolvedValue({
+      slots: [], days: [{ date: BOOK_DATE, slots: [{ ...SLOT, end_time: '10:30', endTime24: '10:30', end_label: '10:30 AM' }] }],
+    });
+    await executeTool('request_booking', GOOD_INPUT, slotCtx());
+
+    // The engine was asked for the CATALOG window, not the offered 60.
+    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({ duration: 90 }));
+    // …and the probe covers the same window the row claims.
+    expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      windowStart: '09:00', windowEnd: '10:30',
+    }));
+    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+    expect(row.estimated_duration_minutes).toBe(90);
+    expect(row.window_end).toBe('10:30');
+  });
+
+  test('the probe never covers LESS than the written duration, even if the offered end is short', async () => {
+    // Belt: a slot whose end predates start + the row's duration must not
+    // shrink the conflict window (COALESCE(window_end, …) is what every other
+    // writer's occupancy predicate reads).
+    catalog.resolveCallBookingCatalogService.mockReturnValue({ ...PEST_ROW, default_duration_minutes: 90 });
+    await executeTool('request_booking', GOOD_INPUT, slotCtx()); // fixture slot ends 10:00
+    expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      windowStart: '09:00', windowEnd: '10:30:00',
+    }));
+    // …and the ROW carries the same end — every other writer's occupancy
+    // predicate reads COALESCE(window_end, …), so a short end would under-cover
+    // this visit for them too.
+    expect(trxBuilders.scheduled_services.insert.mock.calls[0][0].window_end).toBe('10:30:00');
+  });
+
+  test('a null/absurd catalog duration falls back to the offered slot length, never to a 0-minute window', () => {
+    const offer = { duration: 60 };
+    expect(relayBooking.resolveVoiceBookingDuration({ default_duration_minutes: 45 }, offer)).toBe(45);
+    expect(relayBooking.resolveVoiceBookingDuration({ default_duration_minutes: null }, offer)).toBe(60);
+    expect(relayBooking.resolveVoiceBookingDuration({ default_duration_minutes: 0 }, offer)).toBe(60);
+    expect(relayBooking.resolveVoiceBookingDuration({ default_duration_minutes: 5000 }, offer)).toBe(60);
+    expect(relayBooking.resolveVoiceBookingDuration({}, {})).toBe(60);
+  });
+
+  test('an unbookable catalog is refused BEFORE the availability engine is re-run', async () => {
+    // The service resolves first now: no bookable catalog means no duration to
+    // check availability for, so the engine is never consulted.
+    catalog.loadBookableCallServices.mockResolvedValue([]);
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/no booking request was\s+placed/i);
+    expect(booking.buildBookingAvailability).not.toHaveBeenCalled();
+    assertNoCreateWrites();
   });
 
   test('an invented slot_ref resolves to nothing — no engine call, no write', async () => {
@@ -563,18 +630,18 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   test('takes the ORDERING CONTRACT rungs, in order, before the insert', async () => {
     await executeTool('request_booking', GOOD_INPUT, slotCtx());
     // Rung 1 — date occupancy, the FIRST statement in the transaction.
-    expect(occupancy.acquireOccupancyLock).toHaveBeenCalledWith(trx, '2026-08-20');
+    expect(occupancy.acquireOccupancyLock).toHaveBeenCalledWith(trx, BOOK_DATE);
     // Rung 2 — per customer+date (this is what makes the dedupe read safe).
-    expect(trx.raw).toHaveBeenCalledWith(expect.any(String), ['self-booking-confirm', `${CUSTOMER.id}:2026-08-20`]);
+    expect(trx.raw).toHaveBeenCalledWith(expect.any(String), ['self-booking-confirm', `${CUSTOMER.id}:${BOOK_DATE}`]);
     // Rung 3 — technician, when the offer carries one.
-    expect(trx.raw).toHaveBeenCalledWith(expect.any(String), ['slot-reserve', 't-1:2026-08-20']);
+    expect(trx.raw).toHaveBeenCalledWith(expect.any(String), ['slot-reserve', `t-1:${BOOK_DATE}`]);
     // Rung 5 — the global self-booking day cap.
-    expect(availability.acquireSelfBookingDayCapLock).toHaveBeenCalledWith(trx, '2026-08-20');
+    expect(availability.acquireSelfBookingDayCapLock).toHaveBeenCalledWith(trx, BOOK_DATE);
     // Rung 6 — owed by EVERY writer that commits a scheduled_services INSERT.
     expect(lockCustomerComms).toHaveBeenCalledWith(trx, CUSTOMER.id);
     // Second half of the contract: the GLOBAL tech-blind probe, under the lock.
     expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-      db: trx, date: '2026-08-20', windowStart: '09:00', windowEnd: '10:00',
+      db: trx, date: BOOK_DATE, windowStart: '09:00', windowEnd: '10:00',
     }));
     // Rungs are coarsest-first — occupancy before the day cap, both before comms.
     const order = [

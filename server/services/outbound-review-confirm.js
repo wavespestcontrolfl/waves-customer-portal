@@ -1,6 +1,8 @@
 /**
- * Office-confirmation side effects for a pending outbound-callback review
- * booking (source_action = CALL_OUTBOUND_REVIEW_SOURCE_ACTION).
+ * Office-confirmation side effects for a pending office-review booking
+ * (source_action ∈ OFFICE_REVIEW_PENDING_SOURCE_ACTIONS — the outbound-
+ * callback review booking, and the voice-agent booking that reuses the same
+ * lifecycle rather than inventing a parallel pending state).
  *
  * The AI call pipeline creates these rows PENDING and intentionally defers
  * everything that treats the appointment as live: reminder registration (the
@@ -33,7 +35,7 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
 /**
  * Run the confirm side effects for `svc` (a scheduled_services row already
  * flipped to 'confirmed' by the calling route). Caller is responsible for
- * checking source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION.
+ * checking source_action ∈ OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.
  *
  * @param {object} db   knex instance
  * @param {object} svc  the scheduled_services row (needs id, customer_id,
@@ -536,8 +538,13 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
 }
 
 /**
- * Lazy activation for a LEGACY outbound-review row (created pending before
- * the 2026-08-11 review-hold removal, PR #3361) touched by a writer that
+ * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
+ * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
+ * OR a voice-agent booking, which is created with the same pending/
+ * unconfirmed shape and owes the same legs (the membership list is
+ * call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS; matching
+ * only the outbound marker here is what let a moved voice booking go
+ * operational half-armed) — touched by a writer that
  * does NOT go through transitionJobStatus — the direct reschedule writers
  * (SmartRebooker, admin-schedule update-details, the bulk paths) and the
  * shared reschedule-notice sender. The hook runs BEFORE the stamp and the
@@ -552,13 +559,13 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
  */
 async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation', opts = {}) {
   try {
-    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
     const row = await db('scheduled_services')
       .where({ id: serviceId })
       .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
         'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
         'is_callback', 'estimated_price');
-    if (!row || row.source_action !== CALL_OUTBOUND_REVIEW_SOURCE_ACTION || row.customer_confirmed) {
+    if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
     }
     // Rejected rows are not activated — a cancelled/skipped legacy review
@@ -632,11 +639,39 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * stays clearance-gated). Idempotent (the helper's guarded stamp), bounded
  * per run, and self-terminating: the legacy population only shrinks, so
  * runs become free no-ops once it drains.
+ *
+ * ⭐ VOICE-AGENT ROWS ARE IN THIS SWEEP, BUT ONLY ONCE SOMETHING MOVED THEM.
+ * Every other activation consumer takes the whole
+ * OFFICE_REVIEW_PENDING_SOURCE_ACTIONS set unchanged, because each of them
+ * fires on a WRITER TOUCHING THE ROW (a transition, a reschedule, a pipeline
+ * reuse) — the touch is the activation trigger, and a voice booking owes the
+ * same legs as an outbound-review one. This sweep is the one consumer whose
+ * predicate is not a touch: it drains the LEGACY population outright,
+ * including never-touched pending rows, and that is correct ONLY because the
+ * office-review hold was removed collectively for those rows (owner directive
+ * 2026-08-11) and that population only shrinks. Voice bookings are the
+ * opposite: they are created pending on purpose, RIGHT NOW, with an
+ * outbound_booking_review card for the office to work — and this hook resolves
+ * that card, arms customer reminders and converts the lead. Draining
+ * never-touched voice rows would therefore auto-confirm an unreviewed AI
+ * booking, close the office's own review card behind their back, and arm
+ * customer-facing reminder SMS for it. So voice rows enter this backstop only
+ * in the state it exists to repair: a row some writer already moved off
+ * 'pending' that is still unstamped (a crash or a transient core-leg failure
+ * after a lazy activation). Untouched pending voice rows stay for the office.
  */
 async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } = {}) {
-  const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+  const {
+    CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    VOICE_AGENT_BOOKING_SOURCE_ACTION,
+  } = require('./call-booking-source-actions');
   const rows = await dbh('scheduled_services')
-    .where({ source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false })
+    .where({ customer_confirmed: false })
+    .where((q) => q
+      .where('source_action', CALL_OUTBOUND_REVIEW_SOURCE_ACTION)
+      .orWhere((q2) => q2
+        .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
+        .whereNot('status', 'pending')))
     .whereNotIn('status', ['cancelled', 'skipped'])
     // Random order (Codex #3361 r15 P2): with more rows than the batch cap,
     // an unordered LIMIT could hand a batch of permanently-unactivatable

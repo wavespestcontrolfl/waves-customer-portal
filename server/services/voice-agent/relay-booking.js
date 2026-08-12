@@ -106,15 +106,26 @@ function slotStartMinutes(slot) {
  *     containing only the 9 AM and get `slot_gone` — for a slot that was still
  *     wide open. `days[].slots` is the full per-day list (up to 8 with
  *     expandOpenDays).
- *  2. It carries the ORIGINAL `timeOfDay`, `expandOpenDays`, coords and
- *     duration. timeOfDay is not merely a narrowing filter: dropping it lets
+ *  2. It carries the ORIGINAL `timeOfDay`, `expandOpenDays` and coords.
+ *     timeOfDay is not merely a narrowing filter: dropping it lets
  *     morning candidates push an afternoon slot out of the per-day cap
  *     (`slots.slice(0, perDayCap)` after a start_time sort), so re-running
  *     "wide" can LOSE the very slot that was offered. Coords likewise — the
  *     offer was route-scored from the address the CALLER gave, and re-scoring
  *     from a different origin returns a different slot set.
+ *
+ * DURATION is the one input deliberately NOT taken from the offer. The offer
+ * was generated with the GLOBAL slot duration (relay-tools.resolveAvailability
+ * reads config.slot_duration_minutes), but the row this writer inserts occupies
+ * the CATALOG service's duration — so a 90-minute service offered in a
+ * 60-minute slot was conflict-checked for only 60 and the next job could
+ * overlap it. The caller resolves the catalog service FIRST and passes
+ * `durationMinutes` here, so the re-check, the engine's `end_time`, the written
+ * `window_end` and `estimated_duration_minutes` all describe the SAME window.
+ * A service that no longer fits at the offered start simply fails the re-check
+ * (slot_gone) — fail closed, exactly like any other stale offer.
  */
-async function revalidateSlot({ offer }) {
+async function revalidateSlot({ offer, durationMinutes = null }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'engine_unavailable' };
   if (!offer || !offer.lat || !offer.lng || !offer.date) return { status: 'need_location' };
@@ -143,7 +154,7 @@ async function revalidateSlot({ offer }) {
   const availability = await booking.buildBookingAvailability({
     lat: offer.lat,
     lng: offer.lng,
-    duration: offer.duration || config.slot_duration_minutes || 60,
+    duration: durationMinutes || offer.duration || config.slot_duration_minutes || 60,
     rangeFrom: offer.date,
     rangeTo: offer.date,
     config,
@@ -154,6 +165,27 @@ async function revalidateSlot({ offer }) {
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
   return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
+}
+
+// The window the booked row will OCCUPY, resolved from the admin-portal
+// catalog row (server-side, never model-supplied) and sanity-bounded the same
+// way routes/booking.resolveBookingDuration bounds its own input: a catalog
+// row with a null/0/absurd default_duration_minutes falls back to the duration
+// the slot was OFFERED with, then to 60. This one number drives the
+// availability re-check, the conflict probe and the written row — see
+// revalidateSlot's DURATION note.
+const MIN_VOICE_BOOKING_DURATION_MINUTES = 15;
+const MAX_VOICE_BOOKING_DURATION_MINUTES = 480;
+function resolveVoiceBookingDuration(catalogRow, offer) {
+  const catalog = parseInt(catalogRow && catalogRow.default_duration_minutes, 10);
+  if (Number.isInteger(catalog)
+    && catalog >= MIN_VOICE_BOOKING_DURATION_MINUTES
+    && catalog <= MAX_VOICE_BOOKING_DURATION_MINUTES) {
+    return catalog;
+  }
+  const offered = parseInt(offer && offer.duration, 10);
+  if (Number.isInteger(offered) && offered > 0) return offered;
+  return 60;
 }
 
 /** The real catalog row for the caller's ask, or the Waves Assessment fallback, or null. */
@@ -220,8 +252,17 @@ async function commitVoiceBooking({
   const config = await booking.loadBookingConfig();
   const { maxPerDay } = booking.bookingSlotWindow(config);
   // window_end may be NULL on a slot with no explicit end; the conflict
-  // predicate needs a real end, so fall back to the row's own duration.
-  const endTime = windowEnd || addMinutesToClock(windowStart, insertData.estimated_duration_minutes || 60);
+  // predicate needs a real end, so fall back to the row's own duration. When
+  // BOTH exist they agree by construction (the engine was re-run with the
+  // catalog duration), but take the LATER of the two anyway: the probe must
+  // never cover less time than the row it is about to write claims to occupy.
+  const durationEnd = addMinutesToClock(windowStart, insertData.estimated_duration_minutes || 60);
+  const endTime = laterClock(windowEnd, durationEnd);
+  // …and the ROW carries that same end. Every other writer's occupancy
+  // predicate reads COALESCE(window_end, window_start + estimated_duration), so
+  // a window_end shorter than the duration would under-cover this visit for
+  // everyone else too. Identical to `windowEnd` whenever the two agree.
+  const insertRow = { ...insertData, window_end: endTime };
 
   try {
     return await db.transaction(async (trx) => {
@@ -273,7 +314,7 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
-      const [created] = await trx('scheduled_services').insert(insertData).returning('*');
+      const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
       // possible when the live call has a call_log row (the card FKs it).
@@ -323,6 +364,21 @@ function addMinutesToClock(value, minutes) {
   const total = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + (Number(minutes) || 0);
   const h = Math.floor(total / 60) % 24;
   return `${String(h).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
+}
+
+/** 'HH:MM[:SS]' → minutes past midnight, else null (clock comparison helper). */
+function clockToMinutes(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+/** The later of two 'HH:MM[:SS]' clocks; either may be null/unparseable. */
+function laterClock(a, b) {
+  const am = clockToMinutes(a);
+  const bm = clockToMinutes(b);
+  if (am === null) return b || null;
+  if (bm === null) return a || null;
+  return bm > am ? b : a;
 }
 
 const REFUSE_GATE_OFF =
@@ -435,9 +491,21 @@ async function requestBookingText(input = {}, ctx = {}) {
     return 'Could not load that account. Do not retry; capture the lead and a team member will follow up.';
   }
 
+  // Real catalog service or the Waves Assessment fallback — never invented.
+  // Resolved BEFORE the availability re-check on purpose: the catalog row
+  // carries the duration the booked window must occupy, and the re-check has to
+  // ask the engine for THAT window, not the global slot length the offer was
+  // generated with (see revalidateSlot's DURATION note).
+  const catalogRow = await resolveBookableService(db, input.service);
+  if (!catalogRow) {
+    return 'Could not match this to a bookable Waves service right now, so no booking request was '
+      + 'placed. Capture the lead with what the caller needs; a team member will call to schedule.';
+  }
+  const bookingDurationMinutes = resolveVoiceBookingDuration(catalogRow, offer);
+
   // Never trust the model's memory of a slot: re-check the offered slot
   // through the same availability engine, with the same inputs, right now.
-  const recheck = await revalidateSlot({ offer });
+  const recheck = await revalidateSlot({ offer, durationMinutes: bookingDurationMinutes });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '
       + 'Capture the lead with the caller\'s preferred time; a team member will call to schedule.';
@@ -455,13 +523,6 @@ async function requestBookingText(input = {}, ctx = {}) {
       + 'and offer the caller a new option. Never promise a time the tools have not just confirmed.';
   }
   const slot = recheck.slot;
-
-  // Real catalog service or the Waves Assessment fallback — never invented.
-  const catalogRow = await resolveBookableService(db, input.service);
-  if (!catalogRow) {
-    return 'Could not match this to a bookable Waves service right now, so no booking request was '
-      + 'placed. Capture the lead with what the caller needs; a team member will call to schedule.';
-  }
 
   const { resolveCallBookingPrice, callBookingInvoiceOnComplete } = require('../call-booking-catalog');
   const priceInfo = resolveCallBookingPrice({ quotedPrice: null, catalogRow });
@@ -505,7 +566,10 @@ async function requestBookingText(input = {}, ctx = {}) {
     service_id: catalogRow.id || null,
     estimated_price: priceInfo.price,
     create_invoice_on_complete: callBookingInvoiceOnComplete({ price: priceInfo.price, catalogRow }),
-    estimated_duration_minutes: catalogRow.default_duration_minutes || 60,
+    // The SAME number the availability re-check and the conflict probe used —
+    // never a second, independently-derived duration (that divergence is how a
+    // 90-minute service got a 60-minute conflict check).
+    estimated_duration_minutes: bookingDurationMinutes,
     // PENDING office review — the office confirming it is what makes it real
     // (and what arms reminders, via the shared confirm hook). Same lifecycle
     // shape as the call pipeline's outbound-review insert.
@@ -612,5 +676,7 @@ module.exports = {
   parseTimeToMinutes,
   normalizeDateInput,
   addMinutesToClock,
+  laterClock,
+  resolveVoiceBookingDuration,
   EARLIEST_START_MINUTES,
 };

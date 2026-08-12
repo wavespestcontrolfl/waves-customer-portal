@@ -149,6 +149,67 @@ describe('RelayConversation — explicit end after capture', () => {
       }
     });
 
+    // ⭐ "Do NOT call it again" was an INSTRUCTION, not a mechanism. The timed-
+    // out write is detached and still running, and nothing stopped the model
+    // starting the same one again — request_reservice's dedupe is an unlocked
+    // read-before-insert, so the retry files a second ticket and pages the
+    // owner twice.
+    test('a WRITE that timed out cannot be started again while it is still in flight', async () => {
+      const finish = {}; // toolName -> resolver for that tool's detached work
+      jest.spyOn(relayTools, 'executeTool')
+        .mockImplementation((name) => new Promise((resolve) => { finish[name] = resolve; }));
+      const convo = new RelayConversation({ callSid: 'CAw', from: '+19415551234', send: jest.fn() });
+
+      const first = await raceWithTimers(convo._executeToolBounded('request_reservice', {}, {}));
+      expect(first).toMatch(/do not have confirmation either way/i);
+      expect(relayTools.executeTool).toHaveBeenCalledTimes(1);
+
+      // The model retries anyway — refused, and NOT executed a second time.
+      const second = await convo._executeToolBounded('request_reservice', {}, {});
+      expect(second).toMatch(/still being processed/i);
+      expect(second).toMatch(/NOT started again/);
+      expect(relayTools.executeTool).toHaveBeenCalledTimes(1);
+
+      // A DIFFERENT write is unaffected — the latch is per tool.
+      await raceWithTimers(convo._executeToolBounded('capture_lead', {}, {}));
+      expect(relayTools.executeTool).toHaveBeenCalledTimes(2);
+
+      // Once the detached write settles, the latch clears.
+      const detached = convo._inFlightWrites.get('request_reservice');
+      finish.request_reservice('Re-service request filed for this account.');
+      await detached; // the clear callback was registered first, so it has run
+      expect(convo._inFlightWrites.has('request_reservice')).toBe(false);
+    });
+
+    // The turn chain does NOT cover a detached write, so end() could reach the
+    // capture floor while capture_lead was still writing — and write a SECOND
+    // lead for the same call.
+    test('end() drains detached writes before the capture floor decides', async () => {
+      const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+      createLeadFromExtraction.mockClear();
+      let finishWork;
+      jest.spyOn(relayTools, 'executeTool')
+        .mockImplementation(() => new Promise((resolve) => { finishWork = resolve; }));
+      // callSid null → the call_log reconcile is skipped; the capture floor is
+      // the only thing left in end().
+      const convo = new RelayConversation({ callSid: null, from: '+19415551234', send: jest.fn() });
+      await raceWithTimers(convo._executeToolBounded('capture_lead', {}, {}));
+
+      let ended = false;
+      const closing = convo.end('hangup').then(() => { ended = true; });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ended).toBe(false); // still waiting on the in-flight write
+      expect(createLeadFromExtraction).not.toHaveBeenCalled();
+
+      // The write lands and sets the latch the floor reads.
+      convo.leadCaptured = true;
+      finishWork('Lead saved successfully.');
+      await closing;
+      expect(ended).toBe(true);
+      expect(createLeadFromExtraction).not.toHaveBeenCalled(); // no duplicate lead
+    });
+
     test('a fast tool is untouched by the bound', async () => {
       jest.useRealTimers(); // no clock nudging — the work simply wins the race
       jest.spyOn(relayTools, 'executeTool').mockResolvedValue('the real answer');
@@ -208,6 +269,26 @@ describe('RelayConversation — explicit end after capture', () => {
     }
     expect(grants.filter(Boolean)).toHaveLength(LOOKUP_SESSION_BUDGET);
     expect(grants.slice(LOOKUP_SESSION_BUDGET)).toEqual([false, false]);
+  });
+
+  // ⭐ THE CALLED NUMBER IS THE LEAD SOURCE. capture_lead stamps ctx.to as the
+  // lead's toPhone, which is what maps a tracking/GBP number to its
+  // lead_source_id. The ctx omitted it, so every model-captured lead lost its
+  // source — hidden by the hangup capture floor, which passes this.to directly.
+  test('the tool ctx carries the DIALLED number, and capture_lead stamps it as toPhone', async () => {
+    const { executeTool } = require('../services/voice-agent/relay-tools');
+    const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+    createLeadFromExtraction.mockClear();
+    const convo = new RelayConversation({
+      callSid: 'CAto', from: '+19415551234', to: '+19417770000', send: jest.fn(),
+    });
+    expect(convo._buildToolCtx().to).toBe('+19417770000');
+
+    await executeTool('capture_lead', { call_summary: 'ants in the kitchen' }, convo._buildToolCtx());
+    expect(createLeadFromExtraction).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ phone: '+19415551234', toPhone: '+19417770000', callSid: 'CAto' }),
+    );
   });
 
   // Contact-slot recognition must never reach the ctx as 'full'.

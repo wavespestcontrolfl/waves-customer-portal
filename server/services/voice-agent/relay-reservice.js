@@ -90,6 +90,13 @@ function unverifiedRequesterStamp(from) {
     + '(spouse, tenant, or a previous occupant), NOT the account holder\'s own number.';
 }
 
+/** The one "already open, do not file another" script — used by both dedupes. */
+function alreadyOpenText(lane, openRequest, speakDate) {
+  return `A ${LANE_LABEL[lane]} re-service request is already open on this account (filed `
+    + `${speakDate(openRequest && openRequest.created_at) || 'recently'}) — do NOT file another. Tell the caller it is `
+    + 'already with the office and a Waves team member will reach out to get them on the schedule.';
+}
+
 /**
  * File a re-service request for the matched caller.
  *
@@ -128,17 +135,16 @@ async function requestReserviceText(input = {}, ctx = {}) {
   const db = require('../../models/db');
 
   // Already-open ticket in this lane → never file a second one. Covers both a
-  // model retry inside one call and a caller who already reported it.
+  // model retry inside one call and a caller who already reported it. This is
+  // the FAST PATH only — the authoritative dedupe re-runs under an advisory
+  // lock in the same transaction as the insert (see filedTicket below), because
+  // a bare read-before-insert loses to a concurrent retry.
   const openRequest = await db('service_requests')
     .where({ customer_id: customerId, category })
     .whereIn('status', OPEN_REQUEST_STATUSES)
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
-  if (openRequest) {
-    return `A ${LANE_LABEL[lane]} re-service request is already open on this account (filed `
-      + `${speakDate(openRequest.created_at) || 'recently'}) — do NOT file another. Tell the caller it is `
-      + 'already with the office and a Waves team member will reach out to get them on the schedule.';
-  }
+  if (openRequest) return alreadyOpenText(lane, openRequest, speakDate);
 
   // Already-booked free re-service in this lane → tell the caller when it is,
   // don't file anything. Reuses the picker's own lane dedupe read
@@ -193,18 +199,47 @@ async function requestReserviceText(input = {}, ctx = {}) {
   const description = unverifiedRequester
     ? `⚠️ ${unverifiedNote}\n\n${issue}`.slice(0, MAX_DESCRIPTION)
     : issue;
-  const [created] = await db('service_requests')
-    .insert({
-      customer_id: customerId,
-      category,
-      subject,
-      description,
-      urgency,
-      photos: JSON.stringify([]),
-      status: 'new',
-      source: VOICE_REQUEST_SOURCE,
-    })
-    .returning('*');
+  // ⭐ THE COMMIT GATE. The dedupe above is a read, and the live-call path can
+  // genuinely run this tool twice: a write that blows the relay's WRITE timeout
+  // is DETACHED and still running, so a retry (or two callers on one account)
+  // could pass the same "nothing open" read and file two tickets — two owner
+  // pages for one problem. Serialize per (customer, lane) on an advisory lock
+  // held for the transaction, re-read the dedupe INSIDE it, and insert there.
+  // Same doctrine as the booking writer's rung-2 lock: the lock is what makes a
+  // read-then-insert safe.
+  const filedTicket = await db.transaction(async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['voice-reservice-file', `${customerId}:${category}`],
+    );
+    const raced = await trx('service_requests')
+      .where({ customer_id: customerId, category })
+      .whereIn('status', OPEN_REQUEST_STATUSES)
+      .orderBy('created_at', 'desc')
+      .first('id', 'created_at');
+    if (raced) return { status: 'already_open', row: raced };
+    const [row] = await trx('service_requests')
+      .insert({
+        customer_id: customerId,
+        category,
+        subject,
+        description,
+        urgency,
+        photos: JSON.stringify([]),
+        status: 'new',
+        source: VOICE_REQUEST_SOURCE,
+      })
+      .returning('*');
+    return { status: 'created', row };
+  });
+  if (filedTicket.status === 'already_open') {
+    logger.warn(
+      `[voice-relay-reservice] concurrent ${category} request for customer ${customerId} — `
+      + `no second ticket filed (callSid=${ctx.callSid || 'n/a'})`
+    );
+    return alreadyOpenText(lane, filedTicket.row, speakDate);
+  }
+  const created = filedTicket.row;
 
   logger.info(
     `[voice-relay-reservice] ${category} request ${created && created.id} filed for customer ${customerId} `

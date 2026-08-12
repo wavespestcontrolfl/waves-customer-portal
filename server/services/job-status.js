@@ -350,12 +350,19 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // a rejected state (cancelled/skipped) is left to the hourly sweep,
     // whose post-commit read sees the transition's outcome.
     if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      // The SHARED office-review set, not the single outbound-review marker:
+      // a voice-agent booking (source_action 'voice_agent') is created with
+      // exactly the same pending/unconfirmed shape and owes exactly the same
+      // activation legs, so matching only the outbound marker here let a
+      // voice row go operational half-armed — the very P0 this branch of the
+      // writer exists to prevent. Membership decisions live in
+      // call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.
+      const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed', 'customer_id');
       legacyOutboundActivationNeeded = !!legacyRow
-        && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)
         && !['cancelled', 'skipped'].includes(String(legacyRow.status || ''))
         && !legacyRow.customer_confirmed;
       // COMPLETION is the billing moment: the inspection-credit booking

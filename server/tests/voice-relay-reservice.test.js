@@ -73,15 +73,23 @@ function makeBuilder(rows, { insertRows } = {}) {
 }
 
 let builders;
+let trx;
 function primeDb({ requests = [], customers = [{ id: CUSTOMER_ID, active: true, waveguard_tier: 'silver', monthly_rate: 49 }] } = {}) {
   builders = {
     service_requests: makeBuilder(requests),
     customers: makeBuilder(customers),
   };
-  db.mockImplementation((table) => {
+  const resolve = (table) => {
     if (!builders[table]) builders[table] = makeBuilder([]);
     return builders[table];
-  });
+  };
+  db.mockImplementation(resolve);
+  // The filing COMMIT GATE: the dedupe re-read + the insert run inside one
+  // transaction under a per-(customer, lane) advisory lock. Same builders, so
+  // the existing insert assertions still see the write.
+  trx = jest.fn(resolve);
+  trx.raw = jest.fn(async () => ({}));
+  db.transaction = jest.fn(async (cb) => cb(trx));
 }
 
 function assertNoComms() {
@@ -261,6 +269,41 @@ describe('GATE ON', () => {
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
     // The open-request query used the portal's own non-terminal status set.
     expect(builders.service_requests.whereIn).toHaveBeenCalledWith('status', ['new', 'acknowledged', 'scheduled']);
+  });
+
+  // ⭐ THE COMMIT GATE. The open-request read is a READ, and the live-call path
+  // can genuinely run this tool twice: a write that blows the relay's WRITE
+  // timeout is detached and still running, so a retry could pass the same
+  // "nothing open" read and file a second ticket — two owner pages for one
+  // problem. The authoritative dedupe re-runs inside the insert's transaction,
+  // under a per-(customer, lane) advisory lock.
+  test('the dedupe re-read and the insert share ONE transaction under a per-(customer, lane) lock', async () => {
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['voice-reservice-file', `${CUSTOMER_ID}:pest_issue`],
+    );
+    // The lock is taken BEFORE the re-read and the insert it protects.
+    const lockOrder = trx.raw.mock.invocationCallOrder[0];
+    expect(lockOrder).toBeLessThan(builders.service_requests.insert.mock.invocationCallOrder[0]);
+    expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a ticket that appears between the read and the insert wins — no second ticket, no second owner page', async () => {
+    // The first (unlocked) read sees nothing; the in-transaction re-read under
+    // the lock finds the racer's row. Without the re-read this filed a duplicate.
+    builders.service_requests.first = jest.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'sr-racer', created_at: '2026-08-11T12:00:00Z' });
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(out).toMatch(/already open/i);
+    expect(out).toMatch(/do NOT file another/i);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+    expect(CTX.markReserviceFiled).not.toHaveBeenCalled();
+    assertNoComms();
   });
 
   test('an already-BOOKED free re-service in the lane blocks a second one (picker\'s own dedupe read)', async () => {

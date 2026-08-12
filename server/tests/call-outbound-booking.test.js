@@ -401,6 +401,185 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
   });
 });
 
+// ⭐ THE VOICE-AGENT ROW TAKES THE SAME ACTIVATION PATH — the P0 this branch
+// shipped with. 'voice_agent' was added to OFFICE_REVIEW_PENDING_SOURCE_ACTIONS
+// (and honoured by the dispatch/schedule confirm routes and tech-track), but the
+// LAZY-ACTIVATION machinery still matched the single outbound marker. #3361
+// removed the office-review dispatch/reschedule hold, so SmartRebooker can flip
+// a pending voice booking straight to confirmed with a direct UPDATE — and the
+// completion that followed skipped reminder arming, lead/card resolution and the
+// inspection-credit evidence: the half-activated completion job-status.js itself
+// classifies P0. These assert a voice_agent row behaves EXACTLY like an
+// ai_call_outbound_review one.
+describe('voice-agent bookings share the office-review activation path', () => {
+  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+  const InspectionCredit = require('../services/inspection-credit');
+
+  const voiceRow = (extra = {}) => ({
+    id: 'svc-v1',
+    source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+    customer_id: 'cust-v1',
+    scheduled_date: '2026-08-20',
+    window_start: '09:00',
+    service_type: 'General Pest Control',
+    source_call_log_id: 'cl-v1',
+    is_callback: false,
+    estimated_price: 150,
+    ...extra,
+  });
+
+  // Table-aware knex-ish handle shared by the helper and the transition writer.
+  const makeHandle = (row, { rows = null } = {}) => {
+    const state = { updates: [], raws: [] };
+    const fn = (table) => {
+      const q = {};
+      ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
+        'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' && rows ? rows : []));
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services') return { ...row };
+        if (table === 'appointment_reminders') return reminderRowFor(row);
+        // The review card the voice booking wrote, carrying the lead capture_lead
+        // created on the same call.
+        if (table === 'triage_items') return { payload: JSON.stringify({ lead_id: 'lead-v1' }) };
+        if (table === 'scheduled_services as s') {
+          return {
+            job_id: row.id, customer_id: row.customer_id, tech_id: null, service_type: row.service_type,
+            scheduled_date: row.scheduled_date, window_start: row.window_start, window_end: null,
+            notes: null, internal_notes: null, updated_at: new Date(),
+          };
+        }
+        return null;
+      });
+      q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return 1; });
+      q.insert = jest.fn(async () => 1);
+      q.del = jest.fn(async () => 1);
+      return q;
+    };
+    fn.fn = { now: () => new Date() };
+    fn.transaction = async (cb) => cb(fn);
+    fn.raw = jest.fn(async (...args) => { state.raws.push(args); return {}; });
+    fn.executionPromise = Promise.resolve();
+    fn._state = state;
+    return fn;
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a SmartRebooker-style direct flip activates it: reminders armed, lead converted, card resolved, stamped', async () => {
+    // The rebooker moves the visit with a direct UPDATE (status 'confirmed'),
+    // then calls this helper — which used to no-op for a voice row.
+    const db = makeHandle(voiceRow({ status: 'confirmed' }));
+    const activated = await activateLegacyOutboundReviewRowIfNeeded(db, 'svc-v1', 'rebooker-reschedule');
+
+    expect(activated).toBe(true);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      'svc-v1', 'cust-v1', '2026-08-20T09:00', 'General Pest Control', 'admin_manual',
+      { sendConfirmation: false, closeReminderWindows: false },
+    );
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({
+      customerId: 'cust-v1', scheduledServiceId: 'svc-v1',
+    }));
+    expect(db._state.updates.some((u) => u.table === 'triage_items' && u.vals.status === 'resolved')).toBe(true);
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  test('completing an unstamped voice row writes the inspection-credit evidence IN the transition trx', async () => {
+    // The billing moment. Without the shared set here the completion committed
+    // with no credit evidence at all.
+    const row = voiceRow({ status: 'confirmed' });
+    const trx = makeHandle(row);
+    const db = require('../models/db');
+    const dbHandle = makeHandle(row);
+    db.mockImplementation(dbHandle);
+    db.transaction = dbHandle.transaction;
+    db.fn = dbHandle.fn;
+    db.raw = dbHandle.raw;
+
+    await transitionJobStatus({
+      jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', trx,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(InspectionCredit.markBookingForInspectionCredit).toHaveBeenCalledWith(
+      trx,
+      expect.objectContaining({
+        customerId: 'cust-v1', scheduledServiceId: 'svc-v1', source: 'phone_call',
+        recoveryStatusIn: ['completed'],
+      }),
+    );
+    // …and the post-commit activation still ran the rest of the legs.
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  test('a pending voice row going straight to en_route activates instead of going half-armed', async () => {
+    const row = voiceRow();
+    const trx = makeHandle(row);
+    const db = require('../models/db');
+    const dbHandle = makeHandle(row);
+    db.mockImplementation(dbHandle);
+    db.transaction = dbHandle.transaction;
+    db.fn = dbHandle.fn;
+    db.raw = dbHandle.raw;
+
+    await transitionJobStatus({
+      jobId: 'svc-v1', fromStatus: 'pending', toStatus: 'en_route', transitionedBy: 'tech1', trx,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  // ⭐ THE ONE CONSUMER WHERE FULL MEMBERSHIP WOULD BE WRONG. The hourly sweep
+  // is not a touch-driven activation: it drains the LEGACY population outright,
+  // never-touched pending rows included, which is correct only because that
+  // hold was removed collectively and the population only shrinks. Voice rows
+  // are created pending ON PURPOSE with an outbound_booking_review card for the
+  // office — and this hook RESOLVES that card, arms customer reminders and
+  // converts the lead. So voice rows enter the sweep only in the state it
+  // exists to repair: already moved off 'pending', still unstamped.
+  test('the sweep takes STRANDED voice rows but never a never-touched pending one', async () => {
+    const db = makeHandle(voiceRow({ status: 'completed' }), { rows: [{ id: 'svc-v1' }] });
+    const result = await sweepStrandedLegacyOutboundActivations(db, { limit: 5 });
+    expect(result).toEqual({ candidates: 1, activated: 1 });
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+
+    // The predicate itself: the voice branch is scoped to rows that are no
+    // longer 'pending'.
+    const predicates = [];
+    const probe = (table) => {
+      const q = {};
+      ['whereNotIn', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.where = jest.fn((arg, val) => {
+        if (typeof arg === 'function') { predicates.push({ op: 'group' }); arg(q); } else predicates.push({ op: 'where', arg, val });
+        return q;
+      });
+      q.orWhere = jest.fn((arg, val) => {
+        if (typeof arg === 'function') { predicates.push({ op: 'orGroup' }); arg(q); } else predicates.push({ op: 'orWhere', arg, val });
+        return q;
+      });
+      q.whereNot = jest.fn((arg, val) => { predicates.push({ op: 'whereNot', arg, val }); return q; });
+      q.select = jest.fn(async () => []);
+      return q;
+    };
+    probe.raw = jest.fn(() => ({}));
+    await sweepStrandedLegacyOutboundActivations(probe, { limit: 5 });
+    // The legacy marker keeps its unscoped membership; the voice marker sits in
+    // an OR group that also carries the not-pending scope.
+    expect(predicates).toContainEqual({ op: 'where', arg: 'source_action', val: CALL_OUTBOUND_REVIEW_SOURCE_ACTION });
+    const orGroupAt = predicates.findIndex((p) => p.op === 'orGroup');
+    expect(orGroupAt).toBeGreaterThan(-1);
+    expect(predicates.slice(orGroupAt)).toContainEqual({ op: 'where', arg: 'source_action', val: 'voice_agent' });
+    expect(predicates.slice(orGroupAt)).toContainEqual({ op: 'whereNot', arg: 'status', val: 'pending' });
+  });
+});
+
 // A hand-built knex-ish db mock for the confirm hook: table-aware first()/
 // select()/update() so the triage-payload path and the fallback lead lookup
 // can be exercised independently.

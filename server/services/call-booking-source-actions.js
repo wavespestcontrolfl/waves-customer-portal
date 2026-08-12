@@ -49,12 +49,19 @@ const OFFICE_REVIEW_PENDING_SOURCE_ACTIONS = [
  * THE pending-office-review classifier — the single source of truth for
  * "this row is an AI-created booking still awaiting office review"
  * (outbound-callback bookings AND voice-agent bookings; see
- * OFFICE_REVIEW_PENDING_SOURCE_ACTIONS). Used by BOTH the shared status
- * writer's guard (job-status.js, which blocks day-of transitions on such
- * rows) and the sanctioned confirmation points (tech-track
- * dispatch-implies-confirm) that bypass it — one function so the two
- * mechanisms can never drift (Codex P1 on PR #3356). `svc` needs
- * source_action, status, customer_confirmed.
+ * OFFICE_REVIEW_PENDING_SOURCE_ACTIONS). Used by tech-track for BOTH halves
+ * of dispatch-implies-confirm — the en-route detector and the under-lock
+ * re-check that must still see the same state — one function so the two
+ * can never drift (Codex P1 on PR #3356). `svc` needs source_action,
+ * status, customer_confirmed.
+ *
+ * NOT the predicate for LAZY ACTIVATION: #3361 removed the dispatch/
+ * reschedule hold, so an unconfirmed office-review row that some writer
+ * already moved is no longer 'pending' yet still owes its activation legs.
+ * Those consumers (job-status.transitionJobStatus,
+ * outbound-review-confirm.activateLegacyOutboundReviewRowIfNeeded) key on
+ * OFFICE_REVIEW_PENDING_SOURCE_ACTIONS membership + customer_confirmed
+ * instead.
  */
 function isPendingOutboundReviewBooking(svc) {
   return !!svc

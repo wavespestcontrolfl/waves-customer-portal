@@ -60,6 +60,19 @@ const WRITE_TOOL_TIMEOUT_TEXT =
   'That is taking longer than expected and I do not have confirmation either way. Do NOT call it again — a second '
   + 'attempt could duplicate it. Tell the caller a Waves team member will follow up to confirm, and do not say '
   + 'anything is booked, filed, or saved.';
+// The ENFORCEMENT behind that instruction. The timed-out write is detached and
+// still running, so "do not retry" cannot be left to the model's compliance: a
+// second invocation of the SAME write tool while the first is in flight is
+// refused outright (request_reservice's dedupe is a read-before-insert, so a
+// retry that overtakes it files a second ticket AND pages the owner twice).
+const WRITE_TOOL_IN_FLIGHT_TEXT =
+  'That request is still being processed from your previous call to this tool — it was NOT started again. '
+  + 'Do not call it again. Tell the caller a Waves team member will follow up to confirm, and do not say '
+  + 'anything is booked, filed, or saved.';
+// Hangup drain bound: a detached write must be allowed to finish (and set its
+// capture latch) before the capture floor decides whether to write a lead, but
+// a wedged one must never hold the socket-close handler open forever.
+const WRITE_DRAIN_TIMEOUT_MS = 10000;
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
 function withTimeout(promise, ms, fallback = undefined) {
@@ -421,6 +434,10 @@ class RelayConversation {
     // once-per-call owner-alert latch.
     this._transcript = [];
     this._modelSummary = null;
+    // Detached WRITE tools that blew their timeout and are still running:
+    // toolName -> promise. Blocks a same-tool retry (see _executeToolBounded)
+    // and is drained on hangup before the capture floor decides anything.
+    this._inFlightWrites = new Map();
     this._ownerAlerted = false;
     this._reserviceFiled = false;
     // Office hours for the CLOCK block: read ONCE per session (booking_config,
@@ -532,6 +549,14 @@ class RelayConversation {
     const isWrite = WRITE_TOOLS.has(name);
     const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
     const onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
+    // IN-FLIGHT LATCH (writes only). A write that blew its budget kept running
+    // while the model was told "no confirmation either way" — and nothing
+    // stopped the model calling it again. Refuse the second call instead of
+    // racing the first; the latch clears when the detached write settles.
+    if (isWrite && this._inFlightWrites.has(name)) {
+      logger.warn(`[voice-relay] tool "${name}" re-invoked while still in flight callSid=${this.callSid} — refused (no second write)`);
+      return WRITE_TOOL_IN_FLIGHT_TEXT;
+    }
     // Resolved at call time (not destructured at module load) so the timeout
     // wrapper is the only thing between the loop and the tool.
     const { executeTool: run } = require('./relay-tools');
@@ -543,6 +568,14 @@ class RelayConversation {
         return onTimeout;
       });
     work.catch(() => {}); // a late loser must never surface as unhandled
+    if (isWrite) {
+      this._inFlightWrites.set(name, work);
+      // Cleared on settle, not on the timeout — the whole point is that the
+      // detached write outlives the wait. Guarded by identity so a later
+      // invocation's entry is never cleared by an earlier one.
+      const clear = () => { if (this._inFlightWrites.get(name) === work) this._inFlightWrites.delete(name); };
+      work.then(clear, clear);
+    }
     const out = await withTimeout(work, ms, onTimeout);
     if (out === onTimeout) {
       logger.warn(`[voice-relay] tool "${name}" exceeded ${ms}ms callSid=${this.callSid} — degrading${isWrite ? ' (write may still be in flight)' : ''}`);
@@ -559,6 +592,12 @@ class RelayConversation {
   _buildToolCtx() {
     return {
       from: this.from,
+      // The number the caller DIALLED. capture_lead stamps it as the lead's
+      // toPhone, which is what maps a tracking number to its lead_source_id —
+      // dropping it here silently un-sourced every model-captured lead (the
+      // hangup capture floor passes this.to directly, which is why the loss
+      // only showed on the normal path).
+      to: this.to,
       callSid: this.callSid,
       language: this.language,
       customerId: (this._callerContext && this._callerContext.customer && this._callerContext.customer.id) || null,
@@ -794,6 +833,22 @@ class RelayConversation {
     // stream, and queued turns early-return once `ended` is set, so this settles
     // promptly.
     try { await this._chain; } catch { /* per-turn loop errors are already logged */ }
+
+    // …and then drain the writes the chain does NOT cover. A tool that blew its
+    // WRITE timeout was detached from the turn loop deliberately (the caller
+    // hears a sentence instead of silence), so the chain can settle while a
+    // capture_lead / request_booking / request_reservice is still writing.
+    // Without this, the capture floor below reads a stale leadCaptured=false and
+    // writes a SECOND lead for the same call, and the transcript update misses
+    // the summary the write was about to record. Bounded — a wedged write must
+    // not hold the WebSocket close handler open.
+    if (this._inFlightWrites.size) {
+      logger.info(`[voice-relay] draining ${this._inFlightWrites.size} in-flight write(s) before close callSid=${this.callSid}`);
+      await withTimeout(
+        Promise.allSettled([...this._inFlightWrites.values()]),
+        WRITE_DRAIN_TIMEOUT_MS,
+      );
+    }
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
