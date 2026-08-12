@@ -432,6 +432,16 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
   // ⭐ NEVER THE CHANNEL THEY ASKED FOR. "Stop emailing me; text me instead"
   // names SMS as the WANTED channel — suppressing it silences exactly what the
   // caller chose.
+  // ⭐ MORE THAN ONE STOP CLAUSE. The SMS withdrawal can be the SECOND one.
+  test('"don\'t email me, don\'t text me" suppresses SMS (both clauses are read)', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Wants no contact at all.',
+      contact_preference: "don't email me, don't text me",
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   test('"stop emailing me, text me instead" never suppresses SMS', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Prefers texts.',

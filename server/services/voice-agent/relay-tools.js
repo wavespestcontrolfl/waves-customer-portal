@@ -761,33 +761,44 @@ async function executeTool(name, input = {}, ctx = {}) {
       // the stop word to the next clause boundary, with the replacement channel
       // that follows deliberately out of scope.
       const STOP = '(?:stop|no more|don\'?t|do not|quit|cease|remove|unsubscribe|take me off)';
-      const stopClause = (() => {
-        const m = new RegExp(`\\b${STOP}\\b`, 'i').exec(preferenceText);
-        if (!m) return '';
-        const rest = preferenceText.slice(m.index);
-        // First clause boundary after the stop word: punctuation, a dash, or a
-        // coordinating word that introduces the replacement.
-        const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b/i);
-        return cut === -1 ? rest : rest.slice(0, cut);
+      // ⭐ EVERY STOP CLAUSE, NOT JUST THE FIRST. A caller can name more than
+      // one: "don't email me, don't text me" puts the SMS withdrawal in the
+      // SECOND clause, and reading only the first classified the whole request
+      // as email-only — leaving running exactly the texts they stopped. Each
+      // clause still ends at its own boundary, so a replacement channel
+      // ("…, text me instead") stays outside the clause that stopped anything.
+      const stopClauses = (() => {
+        const out = [];
+        const re = new RegExp(`\\b${STOP}\\b`, 'gi');
+        let m = re.exec(preferenceText);
+        while (m) {
+          const rest = preferenceText.slice(m.index);
+          const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b/i);
+          out.push(cut === -1 ? rest : rest.slice(0, cut));
+          m = re.exec(preferenceText);
+        }
+        return out;
       })();
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
-      const statedSmsStop = TEXTY.test(stopClause);
+      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c));
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
       // anymore", "take me off your list". It is NOT total when the same clause
       // scopes it to a non-SMS channel ("don't reach me by email"), which is
       // the inverse mistake: suppressing texts the caller never mentioned.
       const NON_SMS_CHANNEL = /\b(?:e-?mail|mail|letter|post|call|calls|calling|phone)\b/i;
-      const totalIdiom = /\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(stopClause)
-        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText);
-      const totalStop = (totalIdiom && !NON_SMS_CHANNEL.test(stopClause))
+      const totalStop = stopClauses.some((c) => (
+        /\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c)
+        && !NON_SMS_CHANNEL.test(c)
+      ))
+        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText)
         || !preferenceText.trim(); // a bare flag with no words = the total request
       const smsOptOut = statedSmsStop || totalStop;
       const emailOnlyRequest = !smsOptOut;
       if (input.do_not_contact_request === true && emailOnlyRequest) {
         logger.warn(
           `[voice-relay] verbal do-not-contact is NOT an unambiguous SMS stop callSid=${ctx.callSid || 'n/a'} `
-          + `(classified: ${totalIdiom ? 'total-stop scoped to another channel' : 'no texting words in the stop clause'}) `
+          + `(classified: ${stopClauses.length} stop clause(s), none withdrawing SMS) `
           + '— no messaging suppression written (that would stop texts they did not ask to stop); recorded on the '
           + 'lead for a human. The instruction itself is NOT logged: it is caller free text and can carry a name, '
           + 'a number or an address (AGENTS.md PII rule).'

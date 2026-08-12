@@ -285,6 +285,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let existingLead = phone
     ? await db('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
+  // ⭐ THE IDENTITY FIX HAS TO REACH THE LEAD LOOKUP TOO. Leads resolve BY
+  // PHONE, and when the caller gave an ALTERNATE callback number that number
+  // can already belong to somebody else's lead — so reusing it would rewrite
+  // that lead's customer_id to this authenticated caller and hand them another
+  // person's record. An authenticated call therefore only reuses a lead that is
+  // unclaimed or already this customer's; anything else starts a fresh one.
+  if (existingLead && opts.identityCustomerId
+    && existingLead.customer_id && existingLead.customer_id !== customerId) {
+    logger.info(
+      `[voice-agent-lead] callback number ${maskPhone(phone)} already belongs to another customer's lead — `
+      + 'not reusing it for the authenticated caller'
+    );
+    existingLead = null;
+  }
 
   // Don't reuse a lead that belongs to a different person on a shared line: if
   // the captured name conflicts with the existing lead's name and it isn't our
