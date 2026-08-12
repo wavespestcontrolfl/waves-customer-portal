@@ -257,17 +257,39 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
   const summary = await openBalanceSummary(customerId, { displayLimit: INVOICE_HISTORY_LIMIT })
     .catch(() => null);
 
-  // Recently settled invoices, same self-pay discipline as the open set
-  // (payer-owned statements belong to the payer, not this caller). No token
-  // column is selected, so no receipt or pay link can leak.
-  const paidRows = await db('invoices')
+  // Recently settled invoices, the SAME self-pay discipline as the open set —
+  // and that discipline is not the SQL nulls alone. open-balance.js records the
+  // pre-push P0: a payer assigned AFTER the invoice row was written (per-visit,
+  // or the customer's default payer) leaves the row payer-null, so payer-null
+  // SQL plus a LIVE per-row re-resolution is the invariant, failing toward DROP.
+  // A payer-billed invoice is the third party's debt and must never be read out
+  // to the homeowner. No token column is selected, so no receipt or pay link can
+  // leak either.
+  const candidatePaidRows = await db('invoices')
     .where({ customer_id: customerId })
     .whereIn('status', ['paid', 'processing', 'prepaid'])
     .whereNull('payer_id')
     .whereNull('payer_statement_id')
     .orderBy('created_at', 'desc')
     .limit(INVOICE_HISTORY_LIMIT)
-    .select('invoice_number', 'status', 'service_type', 'service_date', 'created_at', 'total');
+    .select('invoice_number', 'status', 'service_type', 'service_date', 'created_at', 'total',
+      'scheduled_service_id');
+  const PayerService = require('../payer');
+  const paidRows = [];
+  for (const row of candidatePaidRows) {
+    try {
+      const resolved = await PayerService.resolveForInvoice({
+        customerId: String(customerId),
+        ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
+        throwOnError: true,
+      });
+      if (resolved && resolved.payerId) continue; // somebody else's bill
+    } catch (err) {
+      require('../logger').warn(`[voice-relay-money] payer resolve failed for invoice ${row.invoice_number} — dropping from the spoken history (fail closed): ${err.message}`);
+      continue;
+    }
+    paidRows.push(row);
+  }
 
   const parts = [];
   const openRows = (summary && Array.isArray(summary.invoices) ? summary.invoices : []);

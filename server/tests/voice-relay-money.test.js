@@ -36,6 +36,11 @@ jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }))
 // sendSnapshot JSON by hand.
 jest.mock('../routes/estimate-public', () => ({ buildPricingBundle: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
+// The LIVE payer authority. open-balance.js records the pre-push P0: payer-null
+// SQL is not proof of self-pay, because a payer assigned after the invoice row
+// was written leaves the row null — every surface must re-resolve per row and
+// fail toward DROP.
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 jest.mock('../services/call-booking-catalog', () => ({ loadBookableCallServices: jest.fn() }));
 
 const db = require('../models/db');
@@ -365,6 +370,40 @@ describe('get_invoice_history — matched caller only', () => {
     expect(b.whereNull).toHaveBeenCalledWith('payer_id');
     expect(b.whereNull).toHaveBeenCalledWith('payer_statement_id');
     expect(b.select.mock.calls.flat()).not.toContain('token');
+  });
+
+  // ⭐ THE PAYER-NULL SQL IS NOT PROOF OF SELF-PAY. open-balance.js records the
+  // pre-push P0: a payer assigned AFTER the invoice row was written (per-visit,
+  // or the customer's default payer) leaves the row payer-null, so every
+  // balance surface re-resolves LIVE per row and fails toward DROP. The spoken
+  // history stood on the SQL alone and would read a third party's settled
+  // invoice — number, date and amount — to the homeowner.
+  test('a settled invoice that LIVE-resolves to a payer is dropped, not spoken', async () => {
+    const PayerService = require('../services/payer');
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    primeDb({
+      invoices: [
+        { invoice_number: 'WPC-2026-0255', status: 'paid', service_type: 'Pest Control', service_date: '2026-06-01', total: 112, scheduled_service_id: 'ss-1' },
+      ],
+    });
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-7' });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: CUSTOMER_ID, scheduledServiceId: 'ss-1', throwOnError: true,
+    }));
+    expect(out).not.toContain('WPC-2026-0255');
+    expect(out).not.toContain('$112');
+  });
+
+  test('a payer resolve OUTAGE drops the row too (fail closed, never fail open)', async () => {
+    const PayerService = require('../services/payer');
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    primeDb({
+      invoices: [{ invoice_number: 'WPC-2026-0255', status: 'paid', service_type: 'Pest Control', service_date: '2026-06-01', total: 112 }],
+    });
+    PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('pool exhausted'));
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toContain('WPC-2026-0255');
   });
 
   test('output carries no pay link, receipt link, or token, and refuses card-taking', async () => {
