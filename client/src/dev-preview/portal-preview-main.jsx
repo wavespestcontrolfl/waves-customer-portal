@@ -383,6 +383,16 @@ Object.assign(api, {
   getServicePreferences: async () => ({ preferences: { interior_spray: true, exterior_sweep: true } }),
   updateServicePreferences: async () => ({ preferences: { interior_spray: true, exterior_sweep: true } }),
   getStationMap: async () => ({ available: false, reason: 'disabled', programs: {} }),
+  getTermiteBond: async () => ({
+    available: true,
+    bonds: [{
+      serviceType: 'Termite Bond (Billed Quarterly | 1-Year Term)',
+      termYears: 1,
+      startedAt: day(-345),
+      renewsAt: day(20),
+      status: 'active',
+    }],
+  }),
 
   // lawn health
   getLawnHealth: async () => ({

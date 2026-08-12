@@ -67,6 +67,7 @@ const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { normalizeAddendumPhoto } = require('../services/pdf/addendum-photo');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
+const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('../services/scheduled-invoice-mint');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { isEnabled } = require('../config/feature-gates');
@@ -2719,7 +2720,13 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 }
 
 function isReusableInvoice(inv) {
-  return inv && !['void', 'paid'].includes(inv.status);
+  // Terminal invoices are never reuse candidates (codex #3344 r9-round
+  // pre-push): every payment route rejects refunded/cancelled invoices, so
+  // reusing one links the project to a dead bill and blocks the
+  // replacement the in-lock re-checks deliberately allow. 'paid' stays
+  // excluded because reuse means "send for collection" — the already-billed
+  // guard owns settled invoices.
+  return inv && !['void', 'paid', ...TERMINAL_INVOICE_STATUSES].includes(inv.status);
 }
 
 const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)';
@@ -2847,7 +2854,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     if (project.scheduled_service_id || project.service_record_id) {
       const linked = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        .whereNotIn('status', ['void', 'paid'])
+        // Same terminal exclusion as the in-lock re-check below (codex
+        // #3344 r9-round pre-push): without it a refunded/cancelled
+        // invoice is adopted HERE and returned before the guarded
+        // recheck ever runs.
+        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
         .where(function invoiceLinkage() {
           if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
@@ -3000,9 +3011,75 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // invoice off a different appointment than the one being reported on. Without
     // any scheduled service there's no priced line set to bill from.
     const scheduledServiceId = serviceRecord?.scheduled_service_id || project.scheduled_service_id;
+    // Mint-serialization (codex #3344 r2, WaveGuard #3338 fast-follow):
+    // this draft bills the visit's scheduled-service pricing, so it must
+    // contend on the same visit row lock every other scheduled-price mint
+    // takes — the WaveGuard extension apply holds FOR UPDATE on the rows it
+    // reprices, and an unlocked build here could line-item the old price
+    // after both of the extension's invoice probes have passed. Lock on
+    // THIS transaction and build the lines through it; the create below
+    // commits on the pooled connection while the lock (held to this trx's
+    // commit) keeps the reprice out until the invoice is visible to the
+    // extension's probes.
+    if (scheduledServiceId) {
+      // The shared mint serialization, not a parallel one (pre-push P0,
+      // codex r5 round; consolidated in r8): every other scheduled-service
+      // invoice writer (completion mint, Charge Now, checkout) takes the
+      // SAME chain in the SAME order — advisory mint lock → customer
+      // key-share → visit row lock — owned by scheduled-invoice-mint, so
+      // this path contends identically and cannot drift.
+      await acquireScheduledMintLockChain(trx, {
+        scheduledServiceId,
+        customerId: project.customer_id,
+      });
+      // In-lock replay re-check (pre-push P0, codex r5 round): the reuse and
+      // already-billed checks above ran BEFORE these locks — a canonical
+      // mint that held them first can commit an invoice for this visit and
+      // this transaction would wake and create a duplicate collectible.
+      // Repeat both checks now that no other writer can mint: an invoice
+      // that appeared is adopted (or 409s) exactly like the pre-lock pass.
+      // The derived scheduledServiceId is included in the linkage — the
+      // pre-lock pass could only see project.scheduled_service_id.
+      const lockedReuse = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        // Terminal invoices are NOT adoption candidates (codex r7 P1) —
+        // adopting a refunded/cancelled invoice would link the project to
+        // a dead bill and block the replacement the shared mint paths
+        // deliberately allow. THE shared terminal filter (r8), plus 'paid'
+        // — a paid invoice is the lockedBilled check's business below.
+        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
+        .where(function invoiceLinkage() {
+          this.orWhere({ scheduled_service_id: scheduledServiceId });
+          if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (lockedReuse) {
+        await persistProjectInvoiceLink(project, lockedReuse.id, trx);
+        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project), created: false };
+      }
+      const lockedBilled = await trx('invoices')
+        .where({ customer_id: project.customer_id })
+        .whereIn('status', ['paid', 'processing'])
+        .where(function billedLinkage() {
+          this.orWhere({ scheduled_service_id: scheduledServiceId });
+          if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (lockedBilled) {
+        await persistProjectInvoiceLink(project, lockedBilled.id, trx);
+        const err = new Error(`This visit is already billed on invoice ${lockedBilled.invoice_number} (${lockedBilled.status}). Nothing was sent.`);
+        err.code = 'already_billed';
+        err.invoiceId = lockedBilled.id;
+        err.invoiceNumber = lockedBilled.invoice_number;
+        throw err;
+      }
+    }
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
           fallbackDescription: serviceRecord?.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+          database: trx,
         })
       : { lineItems: [], discountIds: [] };
     // Sum the non-discount (positive) lines — a draft with no positive lines
@@ -3025,6 +3102,12 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // the draft total matches the appointment (mirrors createFromService).
       trustedStoredDiscountSources: ['scheduled_service'],
       notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
+      // On THIS transaction, not the pool: the invoice's scheduled_service_id
+      // FK takes a key-share lock on the visit row we hold FOR UPDATE above —
+      // a pooled-connection insert would wait on our own lock while we await
+      // it (self-deadlock until timeout). Same-trx also makes invoice + link
+      // commit atomically.
+      database: trx,
     });
     const builtFresh = await trx('invoices').where({ id: createdNonWdo.id }).first();
     const builtInvoice = builtFresh || createdNonWdo;
@@ -3915,10 +3998,45 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
               scheduled_sms_log_id: smsClaim.id,
             },
           });
-          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
-          channels.sms = result.sent
-            ? { ok: true }
-            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          // Send-window hold: the claim row IS an sms_log row, so flip it
+          // onto the scheduled rail at the window open — the executor
+          // replays the exact body from the claim itself. Counted as a
+          // successful channel ONLY when the email leg already delivered
+          // (the customer holds the report; the text is the follow-up
+          // copy). An SMS-ONLY release must NOT mark a paid official
+          // report 'released' on a merely-queued text — it keeps the old
+          // failed path (revertToHeld → the payment-settled sweep retries
+          // inside the window), and the claim row stays 'failed' so
+          // nothing double-sends. If a queued email-backed replay later
+          // terminally blocks, the registry's onTerminal restores the
+          // hold when no email delivered (belt for future flows).
+          if (!result.sent
+            && result.code === 'QUIET_HOURS_HOLD'
+            && result.deferred
+            && result.nextAllowedAt
+            && channels.email?.ok) {
+            await db('sms_log').where({ id: smsClaim.id }).update({
+              status: 'scheduled',
+              scheduled_for: new Date(result.nextAllowedAt),
+              updated_at: db.fn.now(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                entry_point: 'project_report_hold_release_deferred',
+                project_id: refreshed.id,
+                email_delivered: true,
+                original_block_code: result.code,
+                replay_purpose: 'support_resolution',
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              })]),
+            });
+            channels.sms = { ok: true, scheduled: true };
+            logger.info(`[admin-projects] Report-release SMS for project ${refreshed.id} held outside the 8AM-8PM ET send window — claim rescheduled for ${result.nextAllowedAt}`);
+          } else {
+            await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+            channels.sms = result.sent
+              ? { ok: true }
+              : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          }
         }
       } catch (err) {
         channels.sms = { ok: false, error: err.message };

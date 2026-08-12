@@ -44,8 +44,10 @@ describe('reply training capture', () => {
 
     // Rain-out Quick Moves stamp adminUserId for sms_log audit attribution,
     // but the body is a rendered TEMPLATE (proactive notice), not a human
-    // reply to the customer's last inbound — all three rungs excluded.
-    for (const messageType of ['rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3']) {
+    // reply to the customer's last inbound — every rung excluded. The
+    // custom rung carries dispatcher-typed words yet is still a proactive
+    // move notice, not a reply (codex #3363 r4).
+    for (const messageType of ['rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3', 'rain_out_moved_custom_v1']) {
       expect(shouldCaptureReply({
         channel: 'sms',
         direction: 'outbound',

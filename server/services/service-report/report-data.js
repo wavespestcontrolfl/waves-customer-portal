@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -32,6 +32,8 @@ const {
 const {
   loadVisitTimelineConfig,
   buildVisitTimeline,
+  staleTimestampBounds,
+  isStaleTimestamp,
 } = require('./visit-timeline');
 const {
   loadApprovedVisualServiceMomentsForReport,
@@ -843,15 +845,26 @@ function firstValidTimestamp(...values) {
   return null;
 }
 
-function publicTimingFields(record = {}) {
+// staleBounds (optional, from staleTimestampBounds): arrival-side fields
+// that predate the visit's own attempt boundary are dropped — they belong
+// to an aborted pre-reschedule attempt, and exposing them raw let the
+// client recompute a week-long "time on site" even after the timeline
+// filtered its own events (2026-08-11 incident). Completion-side fields
+// pass through: they postdate the attempt by construction.
+function publicTimingFields(record = {}, staleBounds = null) {
+  const arrival = (value) => {
+    const timestamp = validTimestamp(value);
+    if (!timestamp) return null;
+    return staleBounds && isStaleTimestamp(timestamp, staleBounds) ? null : timestamp;
+  };
   return {
-    arrived_at: validTimestamp(record.arrived_at) || null,
-    actual_start_time: validTimestamp(record.actual_start_time) || null,
-    check_in_time: validTimestamp(record.check_in_time) || null,
+    arrived_at: arrival(record.arrived_at),
+    actual_start_time: arrival(record.actual_start_time),
+    check_in_time: arrival(record.check_in_time),
     completed_at: validTimestamp(record.completed_at) || null,
     actual_end_time: validTimestamp(record.actual_end_time) || null,
     check_out_time: validTimestamp(record.check_out_time) || null,
-    started_at: validTimestamp(record.started_at) || null,
+    started_at: arrival(record.started_at),
     ended_at: validTimestamp(record.ended_at) || null,
   };
 }
@@ -864,7 +877,16 @@ function workflowEventTimestamp(workflowEvents = [], type) {
 function resolveReportArrivalTime(service = {}, scheduledService = {}, options = {}) {
   const structured = options.structured || {};
   const serviceData = options.serviceData || {};
-  return firstValidTimestamp(
+  // Same per-candidate staleness rule as the visit timeline: a stale
+  // canonical column from an aborted pre-reschedule attempt must neither
+  // render nor shadow a genuine later source. This anchor feeds
+  // visitTiming.arrivedAt and the on-site duration math.
+  const bounds = staleTimestampBounds(
+    resolveReportCompletionTime(service, scheduledService, options),
+    service.scheduled_date,
+    scheduledService?.scheduled_date,
+  );
+  const candidates = [
     service.arrived_at,
     service.actual_start_time,
     service.check_in_time,
@@ -877,7 +899,12 @@ function resolveReportArrivalTime(service = {}, scheduledService = {}, options =
     scheduledService?.arrived_at,
     scheduledService?.actual_start_time,
     scheduledService?.check_in_time,
-  );
+  ];
+  for (const value of candidates) {
+    const timestamp = validTimestamp(value);
+    if (timestamp && !isStaleTimestamp(timestamp, bounds)) return timestamp;
+  }
+  return null;
 }
 
 function resolveReportCompletionTime(service = {}, scheduledService = {}, options = {}) {
@@ -3212,8 +3239,6 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     areaLabels,
     evidenceLevel,
   });
-  const serviceRecordTiming = publicTimingFields(service);
-  const scheduledServiceTiming = publicTimingFields(scheduledService || {});
   const workflowEvents = buildWorkflowEvents({
     service: {
       ...service,
@@ -3254,6 +3279,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const timingOptions = { structured, serviceData, workflowEvents };
   const arrivalTime = resolveReportArrivalTime(service, scheduledService, timingOptions);
   const completionTime = resolveReportCompletionTime(service, scheduledService, timingOptions);
+  // Public timing fields carry the same staleness bounds as the timeline
+  // and the arrival anchor — the client's normalizeVisitTimeline prefers
+  // these raw values, so an unfiltered stale start would resurrect the
+  // week-long duration the filtered timeline just suppressed.
+  const publicTimingBounds = staleTimestampBounds(
+    completionTime,
+    service.scheduled_date,
+    scheduledService?.scheduled_date,
+  );
+  const serviceRecordTiming = publicTimingFields(service, publicTimingBounds);
+  const scheduledServiceTiming = publicTimingFields(scheduledService || {}, publicTimingBounds);
   const centerLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
   const centerLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
   const mapCenter = centerLat != null && centerLng != null ? { lat: centerLat, lng: centerLng } : null;
@@ -3331,11 +3367,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
-            // 'lawn' | 'lawn_highlight' | 'perimeter' | 'interior' | null
-            // (legacy rows predate the column) — the client only claims
-            // "highlighted"/"treated lawn area"/interior coverage for rows
-            // actually captured by those workflows (codex P1 #3038; interior
-            // owner 2026-07-29; lawn_highlight codex P1 #3075).
+            // 'lawn' | 'lawn_highlight' | 'yard' | 'perimeter' | 'interior'
+            // | null (legacy rows predate the column) — the client only
+            // claims "highlighted"/"treated lawn area"/yard/interior
+            // coverage for rows actually captured by those workflows (codex
+            // P1 #3038; interior owner 2026-07-29; lawn_highlight codex P1
+            // #3075; yard = mosquito outline, owner 2026-08-11).
             captureMode: tracedRow.capture_mode || null,
             label: tracedRow.capture_mode === 'interior'
               ? 'Interior and perimeter treatment traced on-site by your technician.'
@@ -3364,12 +3401,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             // band. The satellite verdict is the one that describes this
             // bitmap's lane.
             variant: (traceEligibilityGateOn() && satelliteVerdict)
-              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight'
+                || tracedRow.capture_mode === 'yard')
                 ? 'outline' : satelliteVerdict.variant)
               : null,
             captionKey: (traceEligibilityGateOn() && satelliteVerdict)
               ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
-                ? 'lawnCoverage' : satelliteVerdict.captionKey)
+                ? 'lawnCoverage'
+                : (tracedRow.capture_mode === 'yard' ? 'yardCoverage' : satelliteVerdict.captionKey))
               : null,
           };
         }
@@ -3486,7 +3525,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   const onSiteMin = computeOnSiteMin({
     ...service,
-    started_at: arrivalTime || service.started_at,
+    // arrivalTime is the SANITIZED anchor (stale pre-reschedule stamps
+    // filtered; raw started_at was already one of its candidates) — falling
+    // back to raw service.started_at here would reintroduce the rejected
+    // timestamp and book a multi-day on_site_min. Null = honest unknown.
+    started_at: arrivalTime,
     ended_at: completionTime || service.ended_at,
     timeOnSite: structured.timeOnSite,
   });
@@ -3629,7 +3672,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         : {}),
     });
   const advisory = normalizeAdvisoryForTreatmentScope({
-    ...config.advisoryDefaults,
+    // Type-aware defaults (cockroach-family visits default to a 120-min
+    // interior window — owner rule 2026-08-11); the STORED advisory still
+    // wins whenever the completion persisted one.
+    ...getAdvisoryDefaults(service.service_type),
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, {

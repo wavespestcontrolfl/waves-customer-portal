@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -1135,6 +1135,36 @@ function reentryEditPlan({ exteriorMinutes, interiorMinutes, service = {} } = {}
   return { exterior, interior };
 }
 
+// Tech re-entry steppers at completion (owner rule 2026-08-11): optional
+// reentryExteriorMinutes / reentryInteriorMinutes posted by CompletionPanel
+// when the tech moved a stepper off its seeded default. Same 0–1440 bounds
+// as the after-the-fact admin edit above; an omitted/blank side returns
+// undefined so the computed-default advisory path stays byte-identical.
+// The 5/15-minute increments are a UI affordance only — the wire accepts
+// any whole minute so a legit stored value never bounces on replay. Pure
+// for testability (_test).
+function completionReentryPlan({ exteriorMinutes, interiorMinutes } = {}) {
+  const parseSide = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const rounded = Math.round(Number(value));
+    return Number.isFinite(rounded) && rounded >= 0 && rounded <= REENTRY_EDIT_MAX_MINUTES
+      ? rounded
+      : NaN;
+  };
+  const exterior = parseSide(exteriorMinutes);
+  const interior = parseSide(interiorMinutes);
+  if (Number.isNaN(exterior) || Number.isNaN(interior)) {
+    return {
+      status: 400,
+      error: {
+        error: `Re-entry minutes must be between 0 and ${REENTRY_EDIT_MAX_MINUTES}`,
+        code: 'reentry_invalid',
+      },
+    };
+  }
+  return { exterior, interior };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -1311,24 +1341,38 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   return blocks;
 }
 
-// Manufacturer re-entry interval (REI) for the products applied this visit, in
-// minutes — the most restrictive (max) across products. Returns null when no
-// applied product carries an REI so the caller keeps the service-line default.
-// Used to make the "Exterior ready in …" countdown reflect the product label
-// instead of a flat default.
-// Fail-open by design for the COMPLETION path only: there the floor is
-// defense-in-depth over the service-line defaults being written anyway, and
+// Manufacturer re-entry interval (REI) for the products applied this visit —
+// the most restrictive (max) across products, as { minutes, verified }.
+// `minutes` is null when no resolved product carries an REI so the caller
+// keeps the service-line default; `verified` is true only when the catalog
+// lookup succeeded AND resolved every submitted product id — a failed query
+// or a missing row (deploy skew, deleted product) means the label floor
+// could not be confirmed. Used to make the "Exterior ready in …" countdown
+// reflect the product label instead of a flat default.
+// Fail-open for the DEFAULTS leg only: there an unverified floor still
+// can't lower anything (the service-line defaults are written anyway), and
 // failing the whole closeout on a catalog blip would block the visit. The
+// tech stepper override leg must treat verified:false as "floor unknown"
+// and refuse to go below the computed default (codex P1 #3360). The lookup
+// runs in a SAVEPOINT so a failure degrades to unverified instead of
+// aborting the caller's completion transaction (waves-db §5b). The
 // re-entry correction PATCH deliberately does NOT use this helper — it
 // resolves the applied products inline and fails closed (codex P1 PR #3180
 // r2/r3).
-async function maxProductReentryMinutes(knex, submittedProducts = []) {
+async function productReentryFloor(knex, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
-  if (!productIds.length) return null;
-  const rows = await knex('products_catalog')
-    .whereIn('id', productIds)
-    .select('rei_hours')
-    .catch(() => []);
+  if (!productIds.length) return { minutes: null, verified: true };
+  let rows = null;
+  try {
+    rows = await knex.transaction(async (sp) => sp('products_catalog')
+      .whereIn('id', productIds)
+      .select('id', 'rei_hours'));
+  } catch {
+    rows = null;
+  }
+  if (!Array.isArray(rows)) return { minutes: null, verified: false };
+  const resolvedIds = new Set(rows.map((row) => String(row.id)));
+  const verified = productIds.every((id) => resolvedIds.has(String(id)));
   let maxMinutes = null;
   for (const row of rows) {
     const hours = Number(row.rei_hours);
@@ -1337,7 +1381,7 @@ async function maxProductReentryMinutes(knex, submittedProducts = []) {
       if (maxMinutes == null || minutes > maxMinutes) maxMinutes = minutes;
     }
   }
-  return maxMinutes;
+  return { minutes: maxMinutes, verified };
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -2790,6 +2834,25 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/reentry-defaults — the re-entry
+// stepper seeds for the completion panel: what a hands-off completion
+// would persist for this visit's service type (before any product-label
+// REI floor, which only ever raises the exterior side). Tech-or-admin
+// (router base auth) unlike the admin-only stored-advisory endpoints
+// below, because the steppers are a tech control at closeout; exposes
+// line defaults only, never a stored advisory.
+router.get('/:serviceId/reentry-defaults', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+    res.json({
+      exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/reentry — the completed visit's stored
 // re-entry windows plus the service-line defaults a fresh completion would
 // write. Read-only seed for the appointment editor's re-entry fields; the
@@ -2800,10 +2863,13 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
   try {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    const config = getServiceLineConfig(svc.service_type);
+    // Type-aware (not just line-aware): cockroach-family visits default to
+    // a 120-min interior window (owner rule 2026-08-11) — the editor's
+    // defaults must match what a fresh completion would persist.
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
     const defaults = {
-      exteriorMinutes: Number(config?.advisoryDefaults?.exterior_reentry_min) || 0,
-      interiorMinutes: Number(config?.advisoryDefaults?.interior_reentry_min) || 0,
+      exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
     };
     // Schema lookup failures PROPAGATE (same posture as the time-on-site
     // edit): a degraded {} would silently report "no record" for a visit
@@ -2862,7 +2928,7 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // service_report_v1 record must exist (legacy records render from the old
 // dry-time fields — an "edit" there would audit a change the customer never
 // sees); an exterior correction may not undercut the most restrictive label
-// REI of the products applied on the visit (same maxProductReentryMinutes
+// REI of the products applied on the visit (same productReentryFloor
 // floor the completion path applies).
 //
 // What it writes (single transaction):
@@ -2965,7 +3031,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       }
       // Manufacturer REI floor (codex P1 PR #3180): the completion path
       // floors the exterior window against the most restrictive label REI of
-      // the products actually applied (maxProductReentryMinutes) — a
+      // the products actually applied (productReentryFloor) — a
       // correction must not undercut it, or the permanent report says an
       // area is ready before the label permits. Interior is not floored,
       // matching the completion path (rei_hours is the outdoor-treatment
@@ -2973,7 +3039,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       // lookup failure 500s and the admin retries, rather than skipping a
       // safety floor.
       if (plan.exterior !== undefined) {
-        // Inline STRICT resolution, not maxProductReentryMinutes: the
+        // Inline STRICT resolution, not productReentryFloor: the
         // helper's .catch(() => []) posture and its filter(Boolean) both
         // fail OPEN — a catalog lookup failure or a deleted product
         // (ON DELETE SET NULL leaves service_products.product_id null)
@@ -3002,7 +3068,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
         // A resolvable product with NO rei_hours on file carries no label
         // REI ("until dry") — that's a real answer, not a verification
         // failure; only finite intervals floor, most restrictive wins
-        // (same rule as the completion path's maxProductReentryMinutes).
+        // (same rule as the completion path's productReentryFloor).
         let productFloor = null;
         for (const row of catalogRows) {
           const hours = Number(row.rei_hours);
@@ -3827,6 +3893,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
           feeOutcome: noShowFeeOutcome,
+          // Authenticated dispatcher action with an explicit notify
+          // choice — operator provenance for the 8AM-8PM send window
+          // (same contract as the rain-out/quick-move moves).
+          operatorInitiated: true,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 
@@ -4118,6 +4188,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
+      reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
     } = req.body;
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return res.status(400).json({ error: 'offerInspectionCredit must be a boolean' });
@@ -4147,6 +4219,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'client_pest_rating_invalid',
         });
       }
+    }
+    // Tech-adjusted re-entry countdown (owner rule 2026-08-11): validated
+    // up-front like clientPestRating. An omitted side stays undefined and
+    // the advisory keeps its computed default for that side.
+    const reentryOverridePlan = completionReentryPlan({
+      exteriorMinutes: reentryExteriorMinutes,
+      interiorMinutes: reentryInteriorMinutes,
+    });
+    if (reentryOverridePlan.error) {
+      return res.status(reentryOverridePlan.status).json(reentryOverridePlan.error);
     }
     const zoneShapesError = PropertyZones.validateZoneShapesBody(zoneShapes);
     if (zoneShapesError) {
@@ -6455,16 +6537,62 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // back to the service-line default when no product carries an REI. Kept
             // no lower than the default so a 0-hr / "until dry" product still shows
             // a sensible dry-down window.
-            const productReentryMin = await maxProductReentryMinutes(trx, products || []);
-            const advisoryDefaultsForVisit = productReentryMin != null
+            const productReentry = await productReentryFloor(trx, products || []);
+            const productReentryMin = productReentry.minutes;
+            // Type-aware base: cockroach-family visits default to a 120-min
+            // INTERIOR window (owner rule 2026-08-11) instead of the pest
+            // line's 30 — see getAdvisoryDefaults.
+            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+            let advisoryDefaultsForVisit = productReentryMin != null
               ? {
-                ...reportConfig.advisoryDefaults,
+                ...lineAdvisoryDefaults,
                 exterior_reentry_min: Math.max(
-                  Number(reportConfig.advisoryDefaults?.exterior_reentry_min) || 0,
+                  Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
                   productReentryMin,
                 ),
               }
-              : reportConfig.advisoryDefaults;
+              : lineAdvisoryDefaults;
+            // Tech re-entry steppers (owner rule 2026-08-11): an adjusted
+            // side overrides its computed default and carries the same
+            // per-side reentry_adjusted marker the admin correction writes,
+            // so an explicit choice survives scope normalization (below and
+            // at read time) exactly like an after-the-fact edit. Label REI
+            // stays the exterior floor — a tech-lowered dry-down window
+            // never undercuts the most restrictive product label applied.
+            {
+              let techExterior = reentryOverridePlan.exterior;
+              const techInterior = reentryOverridePlan.interior;
+              // Fail closed when the label floor is UNVERIFIABLE (codex P1
+              // #3360): a lowering exterior override is dropped entirely —
+              // the computed default (line default raised by any known REI)
+              // stands unmarked, so scope normalization treats it like an
+              // untouched side. Raising is always safe and still applies.
+              const computedExteriorMin = Number(advisoryDefaultsForVisit?.exterior_reentry_min) || 0;
+              if (techExterior !== undefined && !productReentry.verified
+                && techExterior < computedExteriorMin) {
+                logger.warn('[completion] re-entry exterior override dropped — product REI floor unverifiable', {
+                  serviceId: svc.id,
+                  requestedExteriorMin: techExterior,
+                  keptExteriorMin: computedExteriorMin,
+                });
+                techExterior = undefined;
+              }
+              if (techExterior !== undefined || techInterior !== undefined) {
+                advisoryDefaultsForVisit = {
+                  ...advisoryDefaultsForVisit,
+                  ...(techExterior !== undefined
+                    ? { exterior_reentry_min: Math.max(techExterior, productReentryMin || 0) }
+                    : {}),
+                  ...(techInterior !== undefined
+                    ? { interior_reentry_min: techInterior }
+                    : {}),
+                  reentry_adjusted: {
+                    exterior: techExterior !== undefined,
+                    interior: techInterior !== undefined,
+                  },
+                };
+              }
+            }
             // Treatment Zone Mapper trace = explicit exterior scope (the
             // trace is drawn on the satellite exterior) — keeps the
             // dry-down timer on typed closeouts that hide area chips.
@@ -6511,7 +6639,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               tracedExteriorZone,
             });
             recordInsert.advisory = serializeJsonb(advisoryNormalized);
-            const interiorBefore = reportConfig.advisoryDefaults?.interior_reentry_min ?? null;
+            // Diff against the visit's PRE-normalization advisory (tech
+            // override included) so a stepper adjustment alone doesn't log
+            // as a scope normalization.
+            const interiorBefore = advisoryDefaultsForVisit?.interior_reentry_min ?? null;
             const interiorAfter = advisoryNormalized.interior_reentry_min ?? null;
             if (interiorBefore !== interiorAfter) {
               logger.info('[completion] re-entry scope normalized', {
@@ -8780,6 +8911,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
+          // Live replay mints prove the row price hasn't moved since this
+          // completion derived its amount (codex #3344 r2) — a WaveGuard
+          // reprice landing mid-completion 409s and the retry bills fresh
+          // (for the required lane, via the release catch restamping the
+          // frozen cents from the 409's locked price — codex r5 P1).
+          // Frozen-money lanes bypass replay entirely and keep their
+          // provable frozen figure.
+          scheduledPriceBasis: svc.estimated_price,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
@@ -8862,7 +9001,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }];
           }
           const minted = await mintScheduledServiceInvoiceWithDeposit({
-            svc,
+            // A REQUIRED resume mints the FROZEN amount — and PROVES it
+            // (codex r7 P0): the guard compares the caller snapshot to the
+            // locked row, so the resume passes the frozen cents AS the
+            // snapshot price. Frozen ≡ locked row is the typed lane's money
+            // identity (the freeze stamps estimated_price at commit and the
+            // r5 catch restamps it from every reprice refusal), so a match
+            // mints the provable frozen figure and ANY divergence — a
+            // reprice after the restamp, or a restamp write that failed —
+            // 409s back into the refresh→release loop instead of silently
+            // billing the stale freeze. primary_line_price is NULL on the
+            // synthetic snapshot (r9-round pre-push P0): invoice lines
+            // PREFER primary_line_price, so the frozen single line at
+            // estimated_price is provable money ONLY for a visit with no
+            // primary line — null makes the guard PROVE that absence, and
+            // a primary-carrying locked row 409s instead of silently
+            // billing the wrong single-line total. First runs keep the
+            // live snapshot: a mid-flight reprice 409s, the catch restamps
+            // the frozen cents from the locked price, and the resume bills
+            // the moved price.
+            svc: useReplayLines
+              ? svc
+              : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
+            allowPriceMovement: false,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -8877,7 +9038,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           invoice = minted.invoice;
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
-          invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          try {
+            invoice = await InvoiceService.createFromService(record.id, mintOptions);
+          } catch (mintErr) {
+            // Typed reprice refusal on a NON-required live lane (codex r6
+            // P1): these lanes' failure posture is non-blocking — the
+            // completion finalizes succeeded — so without an in-place retry
+            // the 409 that exists to make the retry bill fresh would
+            // instead finalize the visit with NO invoice at all (lost AR,
+            // strictly worse than the stale price it refused). Rebuild once
+            // from the price the refusal proved current (read under the
+            // mint's own row lock): amount AND basis move together, so the
+            // replay rebuilds from the moved price and a SECOND movement
+            // mid-retry 409s again and falls through to the non-blocking
+            // catch like any transient failure. Required lanes never enter
+            // this branch's 409 (backfill mints bypass replay; typed
+            // one-time mints go through the serialized helper above and
+            // release for resume on refusal).
+            if (mintErr?.code === 'SCHEDULED_PRICE_MOVED'
+              && Number.isInteger(mintErr.currentEstimatedPriceCents)
+              && mintErr.currentEstimatedPriceCents > 0) {
+              const movedPrice = mintErr.currentEstimatedPriceCents / 100;
+              logger.warn(`[dispatch] visit ${svc.id} repriced mid-mint — retrying the completion invoice at the moved price $${movedPrice.toFixed(2)}`);
+              invoice = await InvoiceService.createFromService(record.id, {
+                ...mintOptions,
+                amount: movedPrice,
+                scheduledPriceBasis: movedPrice,
+              });
+            } else {
+              throw mintErr;
+            }
+          }
+          // createFromService can ADOPT an invoice another mint committed
+          // first (codex r6 round) — fold that into the same
+          // adopted-concurrent handling as the serialized helper's
+          // `reused` flag: setup-fee claim restore, service-record
+          // back-link, and already-paid messaging all key off it.
+          if (invoice?.adopted_existing_invoice) adoptedConcurrentInvoice = true;
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on
@@ -8907,11 +9104,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // the exact negative marker). If this clear fails or the process
         // dies first, the orphaned-claim recovery above finds the minted
         // line on the next completion and heals without a second charge.
+        // Retire ONLY when the fee actually rides the invoice (codex r6
+        // round): createFromService can now ADOPT an invoice another mint
+        // committed first — the claimed fee did not ride that one, so the
+        // claim goes back positive (the recovery re-mints it on the next
+        // completion) instead of being silently retired unbilled.
         if (secureSetupFee) {
+          const feeRode = JSON.stringify(invoice?.line_items || '')
+            .toLowerCase().includes('one-time setup fee');
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
-              .update({ pending_setup_fee: null, updated_at: new Date() });
+              .update(feeRode
+                ? { pending_setup_fee: null, updated_at: new Date() }
+                : { pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+            if (!feeRode) {
+              logger.warn(`[dispatch] setup-fee claim RESTORED for series ${secureSetupFee.parentId} — the completion adopted an invoice the fee did not ride`);
+            }
           } catch (clearErr) {
             logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
           }
@@ -8999,6 +9208,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // recomputation from the by-now-mutable billing profile.
         if (backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
+          // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
+          // the resume this release promises mints the frozen cents with
+          // replay disabled — without this, the stale-price 409 the guard
+          // just raised would be replayed as the stale price itself. The
+          // required live lane's amount IS estimated_price (typed one-time
+          // requires hasVisitPrice, so completionInvoiceAmount returns it),
+          // and the attached cents were read under the mint's own row lock
+          // — the moved price is the new money truth, so restamp it as the
+          // frozen figure. A FAILED restamp is safe to release anyway
+          // (codex r7 P0): the live typed resume passes the frozen cents AS
+          // the guard's price snapshot, so a resume whose freeze disagrees
+          // with the locked row 409s right back into this refresh instead
+          // of minting the stale figure — the release IS the restamp's
+          // retry, never a stale-mint promise. Zero/absent cents never
+          // restamp — a frozen figure must stay a positive committed price.
+          if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents == null
+            && Number.isInteger(invErr.currentEstimatedPriceCents)
+            && invErr.currentEstimatedPriceCents > 0) {
+            try {
+              await mergeRecordNotesKeys(record.id, {
+                backfillMintAmountCents: invErr.currentEstimatedPriceCents,
+              });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentEstimatedPriceCents}c for ${svc.id} after mid-mint reprice — the resume bills the moved price`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen mint refresh FAILED for ${svc.id} — the resume will mint the pre-reprice freeze: ${refreshErr.message}`);
+            }
+          } else if (invErr?.code === 'SCHEDULED_PRICE_MOVED'
+            && invErr.currentPrimaryLinePriceCents != null) {
+            // Primary-carrying visit (r9-round pre-push P0): the locked row
+            // holds a primary_line_price, so estimated_price is NOT the
+            // whole bill and no single frozen figure can honestly cover it
+            // — never restamp a guess. The resume's null-primary proof
+            // 409s right back here, so the closeout stays unfinalized and
+            // parked for the operator instead of minting wrong money.
+            logger.error(`[dispatch] frozen mint NOT refreshed for ${svc.id} — the visit carries a primary line price, so a single-line freeze cannot honestly cover the bill; bill manually or clear primary_line_price, then retry the closeout`);
+          }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
             // The conditional flip found the attempt not in
@@ -9655,6 +9901,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
+      // 'deferred' = a send-window hold requeued the text on the
+      // scheduled-SMS rail; that queued row owns the obligation, so a
+      // re-completion must not send a second copy.
+      || recordStructuredNotes.completionSmsStatus === 'deferred'
       || completionSmsSendingFresh;
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
@@ -9836,12 +10086,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // was marked succeeded would text the same decline twice. 'sending' also
     // counts as handled for DEDUPE (a crash mid-send has an unknown outcome
     // and a duplicate payment text is worse than a drop — the admin
-    // payment-failed bell covers the drop), but only a confirmed 'sent'
-    // suppresses the completion SMS's pay link.
+    // payment-failed bell covers the drop), as does 'deferred' (a queued
+    // scheduled-rail row owns the one notice; its registry hooks settle the
+    // status to sent/failed), but only a confirmed 'sent' suppresses the
+    // completion SMS's pay link.
     const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
     if (priorPaymentFailedNoticeStatus === 'sent') {
       paymentFailedNoticeSent = true;
-    } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
+    } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id
@@ -9894,17 +10146,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
           });
           paymentFailedNoticeSent = !!failResult.sent;
-          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
+          // Send-window hold: the decline is deliberately independent of
+          // completion messaging — when the operator skipped the separate
+          // completion SMS, this notice is the ONLY carrier of the failure
+          // + pay link, and an unqueued 'failed' silently commits an unpaid
+          // invoice with no customer-facing collection path. Queue the
+          // exact rendered notice on the scheduled rail; the registry's
+          // recheck suppresses a meanwhile-paid/payer-billed invoice, its
+          // finalize runs the same markDeliverySent + notes flip as the
+          // inline success below, and its onTerminal restores 'failed'.
+          // The completion SMS keeps its pay link either way (only a
+          // confirmed 'sent' drops it) — a morning double-link is coherent
+          // copy; a night with no link is not.
+          let paymentFailedNoticeDeferred = false;
+          if (!failResult.sent && failResult.code === 'QUIET_HOURS_HOLD' && failResult.deferred && failResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: paymentFailedBody,
+                status: 'scheduled',
+                scheduled_for: new Date(failResult.nextAllowedAt),
+                message_type: 'payment_failed',
+                metadata: JSON.stringify({
+                  entry_point: 'autopay_completion_decline_deferred',
+                  service_record_id: record.id,
+                  invoice_id: invoice.id,
+                  pay_url: payUrl,
+                  original_message_type: 'payment_failed',
+                  original_block_code: failResult.code,
+                  replay_purpose: 'payment_failure',
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              paymentFailedNoticeDeferred = true;
+            } catch (queueErr) {
+              logger.error(`[dispatch] held payment-failed notice requeue failed for invoice ${invoice.id} — recording failed (completion SMS keeps the pay link): ${queueErr.message}`);
+            }
+          }
+          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
-          else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
+          else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
           await mergeRecordNotesKeys(record.id, {
             paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
             ...(failResult.sent
               ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
-              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
+              : (paymentFailedNoticeDeferred ? {} : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError })),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
-          if (!failResult.sent) {
+          if (paymentFailedNoticeDeferred) {
+            logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
+          } else if (!failResult.sent) {
             logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
           } else {
             // The notice DELIVERED the pay link — the invoice must finalize
@@ -10254,7 +10550,93 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
-          if (!smsResult.sent) {
+          // Send-window hold: a late completion (catch-up bookkeeping after
+          // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
+          // worker retries a 'blocked' status — so the held text is requeued
+          // on the scheduled-SMS rail and goes out at the window open.
+          // Queued as the plain-SMS body (no MMS attachment): the executor
+          // replays text-only, mirroring this route's own MMS→SMS fallback.
+          // The bundled review link rides inside the queued body, so the
+          // review claim is NOT marked failed on this path. If the enqueue
+          // itself fails, fall through to the ordinary blocked handling.
+          let completionHoldQueued = false;
+          if (!smsResult.sent
+            && smsResult.code === 'QUIET_HOURS_HOLD'
+            && smsResult.deferred
+            && smsResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              // Queue row + 'deferred' notes marker commit ATOMICALLY: the
+              // marker is what the re-completion idempotency guard reads
+              // (completionSmsAlreadyHandled), so a committed queue row
+              // without it would let a later re-completion send a second
+              // completion text while the first still sits queued.
+              const deferredDelta = {
+                completionSmsStatus: 'deferred',
+                completionSmsDeferredTo: smsResult.nextAllowedAt,
+              };
+              await db.transaction(async (trx) => {
+                await trx('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: sentSmsBody,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: sentSmsType,
+                metadata: JSON.stringify({
+                  entry_point: 'dispatch_completion_deferred',
+                  service_record_id: record.id,
+                  original_block_code: smsResult.code,
+                  refresh_customer_phone: true,
+                  // from_phone above is a NOT-NULL placeholder — the
+                  // executor resolves the customer's LOCATION number at
+                  // send time so the morning text stays on their thread.
+                  resolve_from_by_customer: true,
+                  // Delivery-time finalization references (services/
+                  // dispatch-completion-deferred.js, invoked by the
+                  // scheduled-SMS executor AFTER the provider accepts): the
+                  // invoice draft→sent flip, the bundled review's delivered
+                  // mark, and the combined-receipt claim all run at actual
+                  // delivery — never here, so a terminally-blocked replay
+                  // leaves the invoice in draft on the operator's radar.
+                  ...(invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink
+                    ? { mark_invoice_delivery: true, invoice_id: invoice.id, pay_url: payUrl }
+                    : {}),
+                  ...(bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)
+                    ? { bundled_review_request_id: bundledReviewRequestId }
+                    : {}),
+                  ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id
+                    ? { stamp_receipt_invoice_id: invoice.id }
+                    : {}),
+                }),
+                });
+                await trx('service_records').where({ id: record.id }).update({
+                  structured_notes: trx.raw(
+                    "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+                    [JSON.stringify(deferredDelta)],
+                  ),
+                });
+              });
+              Object.assign(smsNotesDelta, deferredDelta);
+              completionHoldQueued = true;
+              // The bundled review ask rides inside the queued body. Its
+              // standalone fallback is armed by the scheduled-SMS executor
+              // ONLY if the queued row terminally blocks — a fixed timer
+              // here would race a still-retryable replay and double-text
+              // the ask (delivered replays mark the request delivered via
+              // the finalization hook instead).
+            } catch (queueErr) {
+              logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
+            }
+          }
+          if (completionHoldQueued) {
+            // Notes marker already committed atomically with the queue row
+            // above — only sync the in-memory snapshot here.
+            record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
+            logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } else if (!smsResult.sent) {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
@@ -11790,6 +12172,36 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
+// body: { message, target: { date, window } }
+//
+// Server-side segment counter for the Quick Move sheet's Custom mode:
+// renders the EXACT body commit() would send (same template row, link
+// selection, and renderer normalizations) and returns the 2-segment math —
+// the sheet keeps no client-side render mirrors (codex #3363 r9).
+// Advisory + read-only: never mints short codes, never moves anything;
+// commit() re-renders and enforces.
+router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+  try {
+    const { message, target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.previewCustomSms({
+      serviceId: req.params.serviceId,
+      customMessage: message,
+      target,
+    });
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : ['bad_reason', 'bad_target'].includes(result.reason) ? 400 : 409;
+      return res.status(code).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -11883,13 +12295,17 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // record shows which operator drove the send / authored the note.
       actorUserId: req.technicianId || null,
       initiatedBy: 'admin',
+      // Authenticated dispatch-board click — the moved SMS is exempt from
+      // the 8AM-8PM send window (operator-initiated, not machine-initiated).
+      operatorInitiated: true,
     });
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
           'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked',
-          'note_compliance_blocked', 'note_invalid'].includes(result.reason) ? 400
+          'note_compliance_blocked', 'note_invalid',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
@@ -12049,6 +12465,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
               purpose: 'appointment',
               customerId: svc.customer_id,
               identityTrustLevel: 'phone_matches_customer',
+              // Authenticated dispatcher explicitly asked to notify the
+              // customer of the series move — exempt from the 8AM-8PM send
+              // window like the neighboring rain-out and quick-move actions
+              // (nothing re-enqueues this exact message; a held night send
+              // would silently drop the notice for a next-morning move).
+              operatorInitiated: true,
               metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
             });
             notificationSent = !(msg?.blocked || msg?.sent === false);
@@ -13386,6 +13808,8 @@ module.exports._test = {
   adjustedCompletionEndInstant,
   timeOnSiteEditPlan,
   reentryEditPlan,
+  completionReentryPlan,
+  productReentryFloor,
   REENTRY_EDIT_MAX_MINUTES,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,

@@ -100,6 +100,13 @@ export default function TechTreatmentZoneModal({
   // Lawn visits outline the treated AREA (clean pulsing outline on the report)
   // instead of the perimeter spray-mist metaphor (owner 2026-07-28).
   lawnMode = false,
+  // Mosquito visits (owner 2026-08-11): same outline workflow as lawn, but
+  // the traced boundary is the whole treated YARD — turf plus the
+  // landscape/bedding areas. Callers set lawnMode AND yardMode together.
+  // yardMode swaps the auto-trace prompt to the yard boundary, skips the
+  // turf-only highlight mask (it would exclude the beds the treatment
+  // covers), and saves captureMode 'yard'.
+  yardMode = false,
 }) {
   const light = appearance === 'light';
   const T = light ? LIGHT : DARK;
@@ -309,8 +316,10 @@ export default function TechTreatmentZoneModal({
       form.append('map', blob, 'map.png');
       // Lawn mode asks the vision suggester for the TURF boundary — the
       // default building-footprint suggestion would outline the house as the
-      // treated lawn area (pre-push audit P1 2026-07-28).
-      if (lawnMode) form.append('mode', 'lawn');
+      // treated lawn area (pre-push audit P1 2026-07-28). Yard mode
+      // (mosquito) asks for the full landscape boundary — turf + beds
+      // (owner 2026-08-11).
+      if (lawnMode) form.append('mode', yardMode ? 'yard' : 'lawn');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone/suggest`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
@@ -319,7 +328,9 @@ export default function TechTreatmentZoneModal({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.suggestion?.perimeter?.length) {
         throw new Error(data.error || (lawnMode
-          ? 'Could not detect the lawn outline — trace it manually.'
+          ? (yardMode
+            ? 'Could not detect the yard outline — trace it manually.'
+            : 'Could not detect the lawn outline — trace it manually.')
           : 'Could not detect the building outline — trace it manually.'));
       }
       let pts = data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT }));
@@ -423,7 +434,11 @@ export default function TechTreatmentZoneModal({
         }
       }
       let lawnMask = null;
-      if (lawnMode && closed) {
+      // Yard mode (mosquito) never builds the turf highlight: the mask
+      // classifies GRASS pixels only, and the traced yard deliberately
+      // includes the landscape beds the treatment covers — a turf-only
+      // pulse would visually exclude them (owner 2026-08-11).
+      if (lawnMode && !yardMode && closed) {
         // Grass highlight for the SAVED snapshot (no box — owner
         // 2026-07-30), built from the same (possibly aligned) base the
         // snapshot composes over. A tainted canvas throws — retry from a
@@ -485,9 +500,10 @@ export default function TechTreatmentZoneModal({
         // Discriminates what was ACTUALLY rendered (codex P1 #3038, #3075):
         // 'lawn_highlight' = grass mask baked into this snapshot;
         // 'lawn' = lawn area claim that fell back to the outline;
+        // 'yard' = mosquito outline — turf + beds (owner 2026-08-11);
         // 'interior' = building footprint + interior wash (owner 2026-07-29).
         captureMode: lawnMode
-          ? (lawnMask ? 'lawn_highlight' : 'lawn')
+          ? (yardMode ? 'yard' : (lawnMask ? 'lawn_highlight' : 'lawn'))
           : (interior ? 'interior' : 'perimeter'),
       }));
       const token = getAdminAuthToken();
@@ -507,7 +523,7 @@ export default function TechTreatmentZoneModal({
     } catch (err) {
       setSaveState(err.message || 'Save failed');
     }
-  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, interior]);
+  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, yardMode, interior]);
 
   useEffect(() => {
     // Back to trace = the trace may change; the next Play must save fresh.
@@ -571,10 +587,14 @@ export default function TechTreatmentZoneModal({
   const settled = status.phase !== 'spraying';
   const statusText = lawnMode
     ? (settled
-      ? (lawnRender === 'outline'
-        ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
-        : `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`)
-      : (lawnRender === 'outline' ? 'Outlining the treated lawn…' : 'Highlighting the lawn…'))
+      ? (yardMode
+        ? `Treated yard outlined — ${Math.round(totalFeet)} linear ft`
+        : (lawnRender === 'outline'
+          ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+          : `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`))
+      : (yardMode
+        ? 'Outlining the treated yard…'
+        : (lawnRender === 'outline' ? 'Outlining the treated lawn…' : 'Highlighting the lawn…')))
     : settled
       ? (interior
         ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`
@@ -686,7 +706,9 @@ export default function TechTreatmentZoneModal({
             <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>
               {points.length === 0
                 ? (lawnMode
-                  ? 'Auto-trace the lawn outline, or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                  ? (yardMode
+                    ? 'Auto-trace the yard outline — lawn and landscape beds — or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                    : 'Auto-trace the lawn outline, or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.')
                   : 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.')
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}

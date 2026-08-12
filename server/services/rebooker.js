@@ -58,6 +58,70 @@ const LIVE_LIFECYCLE_RESET = {
   arrival_sms_sent_at: null,
 };
 
+// Live TRACK states the rewind test recognizes alongside the operational
+// statuses above. `status` alone under-detects: the manual En Route taps
+// advance track_state and stamp lifecycle columns WITHOUT syncing status
+// (track-transitions' syncOperationalStatus is opt-in and only the geofence
+// handler passes it), and a partially-rewound row can carry stale stamps
+// under a pending/rescheduled status. A moved row keeping any of this
+// evidence makes the new day's markEnRoute a silent no-op — no en_route_at,
+// no track SMS — and leaks the aborted attempt's timestamps into the
+// customer report's visit timeline (live incident 2026-08-11).
+const LIVE_TRACK_STATES = new Set(['en_route', 'on_property']);
+
+// Observed tracker/lifecycle snapshot for a mover's CAS. track_state alone
+// is not enough: markOnProperty can add lifecycle timestamps to an
+// already-on_property row, and the en-route SMS completion stamps
+// track_sms_sent_at without changing state — a mover matching only
+// track_state could reset the row from a stale snapshot and still let an
+// old-attempt guard write land afterward, suppressing the new attempt's
+// text. Matching the full observed snapshot makes ANY concurrent lifecycle
+// write miss the move instead. Applied to the query builder (not a plain
+// where-object) because timestamptz equality needs ms truncation on BOTH
+// sides: node-postgres round-trips Dates at millisecond precision while
+// rows written by SQL now() carry microseconds — a naive equality would
+// NEVER match those and every move would false-conflict (same pattern as
+// call-research-miner / estimate-public's date_trunc CAS).
+const TRACK_CAS_TIMESTAMP_COLUMNS = [
+  'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'track_sms_sent_at', 'arrival_sms_sent_at',
+];
+function applyTrackLifecycleCas(query, row = {}) {
+  query.where({ track_state: row.track_state ?? null });
+  for (const col of TRACK_CAS_TIMESTAMP_COLUMNS) {
+    const value = row[col];
+    if (value == null) {
+      query.whereNull(col);
+    } else {
+      query.whereRaw(
+        `date_trunc('milliseconds', ??) = date_trunc('milliseconds', ?::timestamptz)`,
+        [col, new Date(value)],
+      );
+    }
+  }
+  return query;
+}
+
+// Should a date move rewind this row's tracker lifecycle? True on live
+// operational status, live track_state, or any leftover lifecycle stamp.
+// Callers gate movability separately (terminal rows never reach this).
+function needsLifecycleRewind(service = {}) {
+  if (LIVE_OVERRIDE_STATUSES.has(service.status)) return true;
+  if (LIVE_TRACK_STATES.has(service.track_state)) return true;
+  return Boolean(
+    service.en_route_at
+    || service.arrived_at
+    || service.actual_start_time
+    || service.check_in_time
+    // Leftover SMS guards count too: a partial reset can clear the
+    // timestamps but keep track_sms_sent_at / arrival_sms_sent_at, and a
+    // moved row keeping them silently suppresses the new day's en-route
+    // and arrival texts.
+    || service.track_sms_sent_at
+    || service.arrival_sms_sent_at,
+  );
+}
+
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
   if (!safe) return opts;
@@ -297,6 +361,17 @@ class SmartRebooker {
       });
     }
     const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
+    // Evidence-based rewind test — broader than wasLive (live track_state
+    // or stale stamps under a non-live status). Drives the lifecycle reset
+    // AND the post-commit tracker cleanup below; movability stays
+    // status-based. For NON-live rows the rewind is additionally gated on
+    // the DATE actually changing: a same-date window edit of a visit with
+    // genuine same-day tracker state must not erase the active attempt.
+    const sameDayTarget = String(newDate || '').split('T')[0]
+      === String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date || '').slice(0, 10);
+    const lifecycleRewound = wasLive || (!sameDayTarget && needsLifecycleRewind(service));
 
     // A past target date moves the job where no "upcoming" query will ever
     // find it — silently never serviced. Stale SMS replies and freeform
@@ -362,7 +437,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: 'confirmed',
-      ...(wasLive ? LIVE_LIFECYCLE_RESET : {}),
+      ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -456,9 +531,19 @@ class SmartRebooker {
         }
       }
 
-      const updated = await trx('scheduled_services')
-        .where({ id: serviceId, status: service.status })
-        .whereIn('status', Array.from(allowedStatuses))
+      const updated = await applyTrackLifecycleCas(
+        trx('scheduled_services')
+          // The full observed tracker/lifecycle snapshot is in the CAS (see
+          // applyTrackLifecycleCas): the lifecycleRewound decision above
+          // came from the outer read, and tracker writers advance state and
+          // stamps WITHOUT touching status — a status-only match would let
+          // this move commit while carrying freshly written lifecycle state
+          // onto the new date. Any tracker change makes the write miss and
+          // surface the concurrent-change 409 below instead.
+          .where({ id: serviceId, status: service.status })
+          .whereIn('status', Array.from(allowedStatuses)),
+        service,
+      )
         // Optional caller-supplied expected-state predicate (e.g. auto-dispatch
         // passing the locked/excluded flags + original date) so a concurrent
         // operator lock/move is caught atomically here, not just by a prior read.
@@ -503,7 +588,12 @@ class SmartRebooker {
     //      here leaves a stale pointer, not inconsistent job state.
     //   2. A customer watching the public tracker would otherwise stay
     //      on the stale en-route / on-site screen — push the refresh.
-    if (wasLive) {
+    if (wasLive || lifecycleRewound) {
+      // lifecycleRewound without wasLive: a manual En Route tap advanced
+      // track_state (and pinned tech_status) without syncing status — the
+      // rewind above cleared the row, so the tech pointer and any open
+      // customer tracker need the same cleanup. This path lands the row on
+      // 'confirmed' either way, so the refresh status is unchanged.
       if (service.technician_id) {
         try {
           await clearTechCurrentJob({
@@ -696,6 +786,12 @@ class SmartRebooker {
     const TERMINAL = ['completed', 'cancelled'];
     const RESCHEDULABLE = RESCHEDULABLE_STATUSES;
 
+    // Non-anchor siblings whose tracker lifecycle was rewound inside the
+    // trx — they get the shared post-commit cleanup after commit. The
+    // anchor's own rewind is tracked separately (same trx-fresh decision).
+    const rewoundSiblings = [];
+    let anchorRewound = false;
+    let rewoundAnchorRow = null;
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -716,7 +812,14 @@ class SmartRebooker {
         .where('scheduled_date', '>=', service.scheduled_date)
         .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
-        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+        .select(
+          'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Rewind evidence for needsLifecycleRewind below — a pending
+          // sibling can still carry stale tracker stamps (or SMS guards)
+          // from an aborted attempt that a partial reset left behind.
+          'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+          'track_sms_sent_at', 'arrival_sms_sent_at',
+        );
 
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
@@ -862,14 +965,38 @@ class SmartRebooker {
           ? newDate
           : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
 
+        // Non-live rows rewind only when this row's date actually changes
+        // (same-date landings keep a genuine same-day attempt intact).
+        const sibDateChanges = String(date || '').split('T')[0]
+          !== String(sib.scheduled_date instanceof Date
+            ? sib.scheduled_date.toISOString()
+            : sib.scheduled_date || '').slice(0, 10);
+        const sibRewound = isLiveAnchor || (sibDateChanges && needsLifecycleRewind(sib));
         const updateData = {
           scheduled_date: date,
           window_start: win.start || sib.window_start,
           window_end: win.end || sib.window_end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
-          ...(isLiveAnchor ? LIVE_LIFECYCLE_RESET : {}),
+          ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
         };
+        // Rewound rows need the post-commit cleanup (tech pointer release +
+        // customer tracker refresh) — collected here, applied after the trx
+        // commits. The sibling SELECT is column-limited, so carry the
+        // series' customer_id for the refresh payload. The anchor's flag is
+        // tracked separately and drives the anchor cleanup block below —
+        // keyed on THIS trx's fresh read (with the same date-change gate),
+        // never the outer snapshot, so a concurrent tap after the outer
+        // read is covered and a same-day edit that did NOT rewind never
+        // clears an active tech.
+        if (sibRewound) {
+          if (String(sib.id) === String(serviceId)) {
+            anchorRewound = true;
+            rewoundAnchorRow = { ...sib, customer_id: service.customer_id };
+          } else {
+            rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
+          }
+        }
         // The ANCHOR may carry a caller-chosen technician (the customer
         // self-serve path validated its slot against a specific tech's
         // route — dropping that assignment would bypass the slot's
@@ -1005,19 +1132,24 @@ class SmartRebooker {
         // the whole trx — the series shift is all-or-none, so the customer
         // is never told "your visits moved" while one stayed on the old
         // cadence.
-        const updated = await trx('scheduled_services')
-          .where({
-            id: sib.id,
-            status: sib.status,
-            scheduled_date: sib.scheduled_date,
-            window_start: sib.window_start,
-            // window_end and technician_id are overwritten by this sweep
-            // (duration + the conflict-unassign decision were computed from
-            // the values read above) — a concurrent resize/reassignment
-            // must invalidate the match, not be steamrolled.
-            window_end: sib.window_end ?? null,
-            technician_id: sib.technician_id ?? null,
-          })
+        const updated = await applyTrackLifecycleCas(
+          trx('scheduled_services')
+            .where({
+              id: sib.id,
+              status: sib.status,
+              scheduled_date: sib.scheduled_date,
+              window_start: sib.window_start,
+              // window_end and technician_id are overwritten by this sweep
+              // (duration + the conflict-unassign decision were computed from
+              // the values read above) — a concurrent resize/reassignment
+              // must invalidate the match, not be steamrolled.
+              window_end: sib.window_end ?? null,
+              technician_id: sib.technician_id ?? null,
+            }),
+          // Full tracker/lifecycle snapshot too: the sibRewound decision
+          // came from this read — see the single-job CAS above.
+          sib,
+        )
           .update(updateData);
         if (updated === 0) {
           throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
@@ -1072,12 +1204,22 @@ class SmartRebooker {
     // Live-anchor post-commit cleanup — same pattern as the single-job
     // override in reschedule(): free the tech_status pointer and push
     // the customer-tracker refresh so an open TrackPage doesn't sit on
-    // the stale en-route / on-site screen.
-    if (wasLive) {
-      if (service.technician_id) {
+    // the stale en-route / on-site screen. Keyed on the trx's OWN rewind
+    // decision (anchorRewound — fresh read, date-change gated), so a
+    // same-day edit that preserved the lifecycle never clears an active
+    // tech, and a concurrent tap after the outer read is still covered.
+    if (wasLive || anchorRewound) {
+      // The trx-fresh anchor row wins over the outer snapshot: a concurrent
+      // reassignment between the two reads would otherwise clear the OLD
+      // tech (or none) and leave the current tech pinned to the moved
+      // visit. Falls back to the outer read when the fresh row carries no
+      // tech — clearTechCurrentJob is conditional on the job pointer, so a
+      // stale fallback is a no-op at worst.
+      const anchorTechId = rewoundAnchorRow?.technician_id ?? service.technician_id;
+      if (anchorTechId) {
         try {
           await clearTechCurrentJob({
-            tech_id: service.technician_id,
+            tech_id: anchorTechId,
             current_job_id: serviceId,
             status: 'idle',
           });
@@ -1085,7 +1227,17 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh({ ...service, ...(rewoundAnchorRow || {}), id: serviceId }, 'confirmed');
+    }
+    // Rewound non-anchor siblings get the same cleanup: release any tech
+    // pinned to them and refresh open trackers. They all landed on
+    // 'confirmed' in the sweep. Best-effort per row.
+    for (const rewoundSib of rewoundSiblings) {
+      try {
+        await applyLiveMovePostCommitEffects(rewoundSib);
+      } catch (err) {
+        logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
+      }
     }
 
     // Same escalation check the single-visit path runs — a series re-anchor
@@ -1150,7 +1302,12 @@ async function applyLiveMoveHistory(conn, svc, { actor = null } = {}) {
 // successful commit — otherwise a rollback leaves the tech cleared and
 // clients holding a phantom refresh for a move that never happened. Matches
 // reschedule()'s own post-commit sequencing above.
-async function applyLiveMovePostCommitEffects(svc) {
+// toStatus: the operational status the customer refresh should carry —
+// 'confirmed' for a genuine live move (the movers land those on
+// 'confirmed'), the row's unchanged status for a tracker-evidence-only
+// rewind (track_state was live but status never synced, so the move did
+// not flip it).
+async function applyLiveMovePostCommitEffects(svc, { toStatus = 'confirmed' } = {}) {
   if (svc.technician_id) {
     try {
       await clearTechCurrentJob({
@@ -1162,7 +1319,7 @@ async function applyLiveMovePostCommitEffects(svc) {
       logger.error(`[rebooker] tech_status clear after live move failed for ${svc.id}: ${err.message}`);
     }
   }
-  emitCustomerJobRefresh(svc, 'confirmed');
+  emitCustomerJobRefresh(svc, toStatus);
 }
 
 // Convenience composition for NON-transactional callers (the IB movers run
@@ -1190,6 +1347,8 @@ module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.needsLifecycleRewind = needsLifecycleRewind;
+module.exports.applyTrackLifecycleCas = applyTrackLifecycleCas;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;

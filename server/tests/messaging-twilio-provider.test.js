@@ -144,6 +144,38 @@ describe('Twilio messaging provider adapter', () => {
     expect(result.error).toBe('HTTP 503: Twilio service unavailable');
   });
 
+  test('forwards the preSendCheck hook to TwilioService.sendSMS', async () => {
+    const preSendCheck = jest.fn(() => ({ ok: true }));
+    await sendViaTwilio(baseInput(), { preSendCheck });
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ preSendCheck }),
+    );
+  });
+
+  test('maps a preSendBlocked result onto the blocked/deferral contract, not a provider failure', async () => {
+    TwilioService.sendSMS.mockResolvedValue({
+      success: false,
+      sid: null,
+      preSendBlocked: true,
+      code: 'QUIET_HOURS_HOLD',
+      error: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+      retryable: true,
+      deferred: true,
+      nextAllowedAt: '2026-08-07T12:00:00.000Z',
+    });
+    const res = await sendViaTwilio(baseInput(), { preSendCheck: () => ({ ok: false }) });
+    expect(res.sent).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.code).toBe('QUIET_HOURS_HOLD');
+    expect(res.retryable).toBe(true);
+    expect(res.deferred).toBe(true);
+    expect(res.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
+    // Must not be classified as a Twilio provider failure.
+    expect(res.providerErrorCode).toBeUndefined();
+  });
+
   test('exposes the same media authorization logic for direct unit coverage', () => {
     expect(_internals.providerMediaUrls(baseInput({
       metadata: { mediaUrls: ['https://example.com/a.jpg'] },

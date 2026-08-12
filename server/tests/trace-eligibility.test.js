@@ -213,10 +213,12 @@ describe('classification behavior', () => {
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Source reduction'] },
     })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // Mosquito is yard geometry (owner 2026-08-11): outline overlay, same
+    // as lawn, with the landscape beds included in the traced boundary.
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Barrier treatment', 'Source reduction'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
     expect(resolveTraceEligibility({
       findingsType: 'one_time_lawn_treatment',
       typedValues: { work_completed: 'Inspection completed' },
@@ -275,7 +277,17 @@ describe('classification behavior', () => {
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Larvicide applied', 'Barrier treatment'] },
-    })).toMatchObject({ eligible: true, variant: 'spray' });
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('mosquito programs are yard geometry — outline overlay with the beds included (owner 2026-08-11)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'mosquito_monthly' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
+    expect(resolveTraceEligibility({ serviceKey: 'mosquito_seasonal' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
+    // identity-less mosquito rows resolve the same geometry by name
+    expect(resolveTraceEligibility({ displayName: 'Mosquito Treatment — Backyard' }))
+      .toMatchObject({ eligible: true, variant: 'outline', captionKey: 'yardCoverage' });
   });
 
   test('tick control is yard geometry and survives its stale snapshot (round 10)', () => {
@@ -771,6 +783,56 @@ describe('classification behavior', () => {
         )).toBeNull();
         expect(await mod.traceCaptureBlockPayload(
           { service_type: 'Quarterly Pest Control' }, null, {},
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prev;
+      jest.resetModules();
+    }
+  });
+
+  test('yard and lawn capture modes are not interchangeable within the outline family (codex P2 #3354)', async () => {
+    const prev = process.env.GATE_TRACE_ELIGIBILITY;
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    try {
+      // Mosquito lane wants 'yard': a stale client posting 'lawn' would
+      // publish "treated lawn area" for a yard treatment.
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'mosquito_monthly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, { captureMode: 'lawn' },
+        )).toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'yard' } });
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, { captureMode: 'yard' },
+        )).toBeNull();
+        // absent mode (legacy clients) still passes
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Mosquito Monthly' }, null, {},
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+      jest.resetModules();
+      // Lawn lane wants lawn modes: 'yard' would claim beds the visit
+      // never covered.
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'lawn_care_monthly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Lawn Care Monthly' }, null, { captureMode: 'yard' },
+        )).toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'lawn' } });
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Lawn Care Monthly' }, null, { captureMode: 'lawn_highlight' },
         )).toBeNull();
       });
       jest.dontMock('../services/service-completion-profiles');

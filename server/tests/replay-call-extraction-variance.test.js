@@ -92,6 +92,101 @@ describe('call extraction replay variance reporting', () => {
     ]);
   });
 
+  test('block-reasons subset passes when only allowed holds block the call', () => {
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        routeReason: 'address_not_validated',
+        appointmentBlockingFlags: [],
+        flags: [],
+        schedulingStatus: 'confirmed',
+      },
+    });
+
+    expect(evaluateFixtureExpectation(result, {
+      expect: { current_block_reasons_subset_of: ['address_not_validated'] },
+    })).toMatchObject({ status: 'pass', failures: [] });
+  });
+
+  test('block-reasons subset passes when the call auto-routes outright', () => {
+    expect(evaluateFixtureExpectation(validResult(), {
+      expect: { current_block_reasons_subset_of: ['address_not_validated'] },
+    })).toMatchObject({ status: 'pass', failures: [] });
+  });
+
+  test('block-reasons subset unwraps the triage_flags umbrella to its specific flags', () => {
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        routeReason: 'triage_flags',
+        appointmentBlockingFlags: ['no_sms_consent_captured'],
+        flags: ['no_sms_consent_captured'],
+        schedulingStatus: 'confirmed',
+      },
+    });
+
+    expect(evaluateFixtureExpectation(result, {
+      expect: {
+        current_block_reasons_subset_of: ['address_not_validated', 'no_sms_consent_captured'],
+      },
+    })).toMatchObject({ status: 'pass', failures: [] });
+  });
+
+  test('block-reasons subset ignores the all-flags fallback on central-gate vetoes', () => {
+    // On a central-gate veto routeForV2 falls back to ALL merged flags for
+    // appointmentBlockingFlags — advisory flags there must not count as holds.
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        routeReason: 'address_not_validated',
+        appointmentBlockingFlags: ['no_sms_consent_captured', 'prior_complaint_unresolved'],
+        flags: ['no_sms_consent_captured', 'prior_complaint_unresolved'],
+        schedulingStatus: 'confirmed',
+      },
+    });
+
+    expect(evaluateFixtureExpectation(result, {
+      expect: { current_block_reasons_subset_of: ['address_not_validated'] },
+    })).toMatchObject({ status: 'pass', failures: [] });
+  });
+
+  test('block-reasons subset fails on any hold outside the allowed list', () => {
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        routeReason: 'triage_flags',
+        appointmentBlockingFlags: ['no_sms_consent_captured', 'name_email_mismatch'],
+        flags: ['no_sms_consent_captured', 'name_email_mismatch'],
+        schedulingStatus: 'confirmed',
+      },
+    });
+
+    const expectation = evaluateFixtureExpectation(result, {
+      expect: {
+        current_block_reasons_subset_of: ['address_not_validated', 'no_sms_consent_captured'],
+      },
+    });
+    expect(expectation.status).toBe('fail');
+    expect(expectation.failures.map((failure) => failure.name)).toEqual([
+      'current_block_reasons_subset_of',
+    ]);
+  });
+
+  test('block-reasons subset records a fixture error on a non-array value', () => {
+    const expectation = evaluateFixtureExpectation(validResult(), {
+      expect: { current_block_reasons_subset_of: 'address_not_validated' },
+    });
+    expect(expectation.status).toBe('fail');
+    expect(expectation.failures.map((failure) => failure.name)).toEqual([
+      'fixture_error:invalid_current_block_reasons_subset_of',
+      'fixture_error:no_recognized_checks',
+    ]);
+  });
+
   test('checks call-nature and recommended-disposition membership expectations', () => {
     const result = validResult({
       current: {

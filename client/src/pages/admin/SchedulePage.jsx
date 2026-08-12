@@ -608,6 +608,17 @@ export function completionReconcilePrompt(error) {
   return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
 }
 
+// Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
+// "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
+export function formatReentryStepperMinutes(min) {
+  const n = Math.max(0, Math.round(Number(min) || 0));
+  if (n === 0) return "No wait";
+  const hr = Math.floor(n / 60);
+  const rem = n % 60;
+  if (!hr) return `${n} min`;
+  return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
@@ -618,6 +629,8 @@ export function completionPreferencesNeedDraft({
   backfillTimeOnSite = "",
   adjustedTimeOnSite = "",
   offerInspectionCredit = true,
+  reentryExteriorDirty = false,
+  reentryInteriorDirty = false,
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
@@ -636,7 +649,12 @@ export function completionPreferencesNeedDraft({
     || String(backfillTimeOnSite || "").trim() !== ""
     // The live admin override rides along the same way: losing typed
     // minutes across a reload silently records the inflated timer instead.
-    || String(adjustedTimeOnSite || "").trim() !== "";
+    || String(adjustedTimeOnSite || "").trim() !== ""
+    // A moved re-entry stepper is operator input on the customer's
+    // countdown: losing it across a reload silently restores the default
+    // window the tech explicitly changed.
+    || reentryExteriorDirty
+    || reentryInteriorDirty;
 }
 
 // timeOnSite fragment of the completion POST body. The panel's running
@@ -9134,6 +9152,47 @@ export function CompletionPanel({
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
+  // Re-entry countdown steppers (owner rule 2026-08-11): tech-adjustable at
+  // completion. Seeds come from the tech-accessible /reentry-defaults
+  // endpoint (what a hands-off completion would persist for this service
+  // type); values stay null until seeded so an untouched panel posts
+  // nothing and the server's computed-default path stays byte-identical.
+  // A side whose seed is 0 (no countdown concept for the line — e.g. lawn
+  // interior, rodent both) renders no stepper.
+  const [reentrySeeds, setReentrySeeds] = useState(null);
+  const [reentryExtMinutes, setReentryExtMinutes] = useState(null);
+  const [reentryIntMinutes, setReentryIntMinutes] = useState(null);
+  useEffect(() => {
+    let live = true;
+    if (!service?.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/reentry-defaults`)
+      .then((d) => {
+        if (!live) return;
+        const ext = Number(d?.exteriorMinutes);
+        const int_ = Number(d?.interiorMinutes);
+        const seeds = {
+          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
+          interiorMinutes: Number.isFinite(int_) && int_ > 0 ? Math.round(int_) : 0,
+        };
+        setReentrySeeds(seeds);
+        // Functional updates: a draft restore may have already set a value —
+        // the seed must never clobber restored operator input.
+        setReentryExtMinutes((cur) => (cur == null ? seeds.exteriorMinutes : cur));
+        setReentryIntMinutes((cur) => (cur == null ? seeds.interiorMinutes : cur));
+      })
+      .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
+    return () => { live = false; };
+  }, [service?.id]);
+  // Dirty per side = the tech moved the stepper off its seed (or a restored
+  // draft carries a moved value). Only dirty sides post — see the body build.
+  const reentryExtDirty =
+    reentryExtMinutes != null && reentryExtMinutes !== (reentrySeeds?.exteriorMinutes ?? null);
+  const reentryIntDirty =
+    reentryIntMinutes != null && reentryIntMinutes !== (reentrySeeds?.interiorMinutes ?? null);
+  const stepReentryMinutes = (setter) => (delta) =>
+    setter((cur) => Math.min(1440, Math.max(0, (cur ?? 0) + delta)));
+  const stepReentryExt = stepReentryMinutes(setReentryExtMinutes);
+  const stepReentryInt = stepReentryMinutes(setReentryIntMinutes);
   // Inspection credit — DEFAULT ON per the owner ruling: an inspection
   // carries the credit promise unless the tech clears it. The server
   // defaults it on too, so an older client that sends nothing behaves
@@ -9870,9 +9929,20 @@ export function CompletionPanel({
   // building-perimeter workflow and store a spray barrier the report then
   // renders as a treated-lawn outline. Absent variant (gate off, other
   // feeds) keeps the isLawn heuristic.
+  // Mosquito traces the treated YARD — turf + landscape beds — with the
+  // outline workflow, saved as captureMode 'yard' (owner 2026-08-11: the
+  // mosquito report gets the lawn-style overlay with the bedding included).
+  // The feed's captionKey is authoritative when present (codex P2 on
+  // #3354): an ineligible primary rescued by a mosquito ADD-ON carries
+  // 'yardCoverage' from the winning satellite line, which the primary's
+  // display name cannot reveal. Absent captionKey (gate off, older
+  // payloads) keeps the category heuristic.
+  const isMosquitoTrace = service.traceCaptionKey
+    ? service.traceCaptionKey === "yardCoverage"
+    : detectServiceCategory(service.serviceType) === "mosquito";
   const traceOutlineMode = service.traceVariant
     ? service.traceVariant === "outline"
-    : isLawn;
+    : isLawn || isMosquitoTrace;
   // Lawn visits replace the Service Photos uploader with the turf photos from
   // the Lawn Assessment block — but only for a PURE lawn visit. A combined
   // visit (e.g. lawn + Tree & Shrub) carries a companion findings schema whose
@@ -10686,6 +10756,8 @@ export function CompletionPanel({
         backfillTimeOnSite,
         adjustedTimeOnSite,
         offerInspectionCredit,
+        reentryExteriorDirty: reentryExtDirty,
+        reentryInteriorDirty: reentryIntDirty,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -10726,6 +10798,10 @@ export function CompletionPanel({
         // Live-override minutes are operator input the same way: losing
         // them across a reload records the inflated timer instead.
         adjustedTimeOnSite,
+        // Moved re-entry steppers ride along (dirty sides only — an
+        // untouched side restores to the live seed, not a stale copy).
+        ...(reentryExtDirty ? { reentryExteriorMinutes: reentryExtMinutes } : {}),
+        ...(reentryIntDirty ? { reentryInteriorMinutes: reentryIntMinutes } : {}),
         visitOutcome,
         customerRecap,
         recapSource,
@@ -10809,6 +10885,14 @@ export function CompletionPanel({
     backfillCloseout,
     backfillTimeOnSite,
     adjustedTimeOnSite,
+    // Moved re-entry steppers are operator input (codex P1 #3360 r2): the
+    // effect must rerun on a stepper-only change or the draft never saves
+    // it. Dirty flags ride along so a seed arriving late (flipping dirty
+    // false without changing the value) also re-evaluates hasDraftContent.
+    reentryExtMinutes,
+    reentryIntMinutes,
+    reentryExtDirty,
+    reentryIntDirty,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -10894,6 +10978,14 @@ export function CompletionPanel({
     setBackfillCloseout(restoredBackfill.backfillCloseout);
     setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
     setAdjustedTimeOnSite(restoredBackfill.adjustedTimeOnSite);
+    // Moved re-entry steppers restore as-is; a draft without the field (or
+    // an untouched side) leaves null so the live seed fills it in.
+    if (Number.isFinite(savedDraft.reentryExteriorMinutes)) {
+      setReentryExtMinutes(Math.min(1440, Math.max(0, Math.round(savedDraft.reentryExteriorMinutes))));
+    }
+    if (Number.isFinite(savedDraft.reentryInteriorMinutes)) {
+      setReentryIntMinutes(Math.min(1440, Math.max(0, Math.round(savedDraft.reentryInteriorMinutes))));
+    }
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
@@ -12522,6 +12614,11 @@ export function CompletionPanel({
           elapsed,
           adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
         }),
+        // Re-entry steppers: only sides the tech moved off their seed post.
+        // An untouched panel sends nothing and the server's computed
+        // defaults (line + product-label REI floor) apply unchanged.
+        ...(reentryExtDirty ? { reentryExteriorMinutes: reentryExtMinutes } : {}),
+        ...(reentryIntDirty ? { reentryInteriorMinutes: reentryIntMinutes } : {}),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
@@ -14015,7 +14112,9 @@ export function CompletionPanel({
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  {traceOutlineMode ? "Outline the treated lawn" : "Trace where we sprayed"}
+                  {traceOutlineMode
+                    ? (isMosquitoTrace ? "Outline the treated yard" : "Outline the treated lawn")
+                    : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -14028,11 +14127,14 @@ export function CompletionPanel({
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
                     lawnMode={traceOutlineMode}
+                    yardMode={isMosquitoTrace}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
                   {traceOutlineMode
-                    ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
+                    ? (isMosquitoTrace
+                      ? "Auto-trace the yard — lawn and landscape beds — on the satellite photo; it renders as the treated-area outline on the customer report."
+                      : "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report.")
                     : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>
               </Field>
@@ -15032,6 +15134,135 @@ export function CompletionPanel({
                     duration — use it when the visit wasn't closed out on
                     time. Leave blank to record the timer.
                   </span>{" "}
+                </div>
+              )}{" "}
+              {!isIncompleteVisit &&
+                reentrySeeds &&
+                (reentrySeeds.exteriorMinutes > 0 ||
+                  reentrySeeds.interiorMinutes > 0) && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                    }}
+                  >
+                    Re-entry countdown
+                  </span>{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 2,
+                      marginBottom: 12,
+                    }}
+                  >
+                    What the customer's report counts down before treated
+                    areas are ready.
+                  </span>{" "}
+                  {[
+                    reentrySeeds.exteriorMinutes > 0 && {
+                      key: "exterior",
+                      label: "Exterior (dry-down)",
+                      value: reentryExtMinutes ?? reentrySeeds.exteriorMinutes,
+                      step: 5,
+                      onStep: stepReentryExt,
+                    },
+                    reentrySeeds.interiorMinutes > 0 && {
+                      key: "interior",
+                      label: "Interior re-entry",
+                      value: reentryIntMinutes ?? reentrySeeds.interiorMinutes,
+                      step: 15,
+                      onStep: stepReentryInt,
+                    },
+                  ]
+                    .filter(Boolean)
+                    .map((row, i, rows) => (
+                      <div
+                        key={row.key}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                          marginBottom: i < rows.length - 1 ? 12 : 0,
+                        }}
+                      >
+                        {" "}
+                        <span
+                          style={{
+                            fontFamily: font,
+                            fontSize: 14,
+                            color: M.ink2,
+                            flex: 1,
+                          }}
+                        >
+                          {row.label}
+                          <span
+                            style={{
+                              display: "block",
+                              fontFamily: font,
+                              fontSize: 15,
+                              color: M.ink,
+                              marginTop: 2,
+                            }}
+                          >
+                            {formatReentryStepperMinutes(row.value)}
+                          </span>
+                        </span>{" "}
+                        <button
+                          type="button"
+                          aria-label={`Decrease ${row.label} by ${row.step} minutes`}
+                          disabled={row.value <= 0}
+                          onClick={() => row.onStep(-row.step)}
+                          style={{
+                            minWidth: 56,
+                            height: 44,
+                            border: `0.5px solid ${M.hairline}`,
+                            borderRadius: 10,
+                            background: M.muted,
+                            color: M.ink,
+                            fontFamily: font,
+                            fontSize: 15,
+                            opacity: row.value <= 0 ? 0.4 : 1,
+                          }}
+                        >
+                          −{row.step}
+                        </button>{" "}
+                        <button
+                          type="button"
+                          aria-label={`Increase ${row.label} by ${row.step} minutes`}
+                          disabled={row.value >= 1440}
+                          onClick={() => row.onStep(row.step)}
+                          style={{
+                            minWidth: 56,
+                            height: 44,
+                            border: `0.5px solid ${M.hairline}`,
+                            borderRadius: 10,
+                            background: M.muted,
+                            color: M.ink,
+                            fontFamily: font,
+                            fontSize: 15,
+                            opacity: row.value >= 1440 ? 0.4 : 1,
+                          }}
+                        >
+                          +{row.step}
+                        </button>{" "}
+                      </div>
+                    ))}{" "}
                 </div>
               )}{" "}
               <label
@@ -16983,6 +17214,93 @@ export function CompletionPanel({
                 duration — use it when the visit wasn't closed out on time.
                 Leave blank to record the timer.
               </div>{" "}
+            </div>
+          )}{" "}
+          {!isIncompleteVisit &&
+            reentrySeeds &&
+            (reentrySeeds.exteriorMinutes > 0 ||
+              reentrySeeds.interiorMinutes > 0) && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 2 }}>
+                Re-entry countdown
+              </div>{" "}
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 8 }}>
+                What the customer's report counts down before treated areas
+                are ready.
+              </div>{" "}
+              {[
+                reentrySeeds.exteriorMinutes > 0 && {
+                  key: "exterior",
+                  label: "Exterior (dry-down)",
+                  value: reentryExtMinutes ?? reentrySeeds.exteriorMinutes,
+                  step: 5,
+                  onStep: stepReentryExt,
+                },
+                reentrySeeds.interiorMinutes > 0 && {
+                  key: "interior",
+                  label: "Interior re-entry",
+                  value: reentryIntMinutes ?? reentrySeeds.interiorMinutes,
+                  step: 15,
+                  onStep: stepReentryInt,
+                },
+              ]
+                .filter(Boolean)
+                .map((row) => (
+                  <div
+                    key={row.key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {" "}
+                    <span style={{ fontSize: 14, color: D.text, flex: 1 }}>
+                      {row.label}:{" "}
+                      <span style={{ color: D.white }}>
+                        {formatReentryStepperMinutes(row.value)}
+                      </span>
+                    </span>{" "}
+                    <button
+                      type="button"
+                      aria-label={`Decrease ${row.label} by ${row.step} minutes`}
+                      disabled={row.value <= 0}
+                      onClick={() => row.onStep(-row.step)}
+                      style={{
+                        padding: "6px 14px",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 8,
+                        background: "transparent",
+                        color: D.text,
+                        fontSize: 14,
+                        cursor: row.value <= 0 ? "default" : "pointer",
+                        opacity: row.value <= 0 ? 0.4 : 1,
+                      }}
+                    >
+                      −{row.step}
+                    </button>{" "}
+                    <button
+                      type="button"
+                      aria-label={`Increase ${row.label} by ${row.step} minutes`}
+                      disabled={row.value >= 1440}
+                      onClick={() => row.onStep(row.step)}
+                      style={{
+                        padding: "6px 14px",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 8,
+                        background: "transparent",
+                        color: D.text,
+                        fontSize: 14,
+                        cursor: row.value >= 1440 ? "default" : "pointer",
+                        opacity: row.value >= 1440 ? 0.4 : 1,
+                      }}
+                    >
+                      +{row.step}
+                    </button>{" "}
+                  </div>
+                ))}{" "}
             </div>
           )}{" "}
           <label style={checkboxRow}>

@@ -394,6 +394,11 @@ async function maybeAutoSend(params = {}) {
         customerId,
         identityTrustLevel: 'phone_matches_customer',
         entryPoint: 'sms_auto_send_executor',
+        // Send-window inbound-reply provenance: the auto-send executor only
+        // dispatches green-judged replies to a message the customer just
+        // texted into an active thread — the send class the window
+        // deliberately never defers.
+        conversationalContext: true,
         metadata: {
           original_message_type: AUTOSEND_MESSAGE_TYPE,
           agentDecisionId: claim.decisionId,

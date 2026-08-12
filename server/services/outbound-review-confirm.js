@@ -38,8 +38,17 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
  *                      scheduled_date, window_start, service_type,
  *                      source_call_log_id)
  * @param {string} [routeTag] label for log lines ('admin-schedule' / 'admin-dispatch')
+ * @param {object} [options]
+ * @param {boolean} [options.skipCardRequest] Owner decision 2026-08-11: a
+ *                      FIELD-confirmed booking (tech-track dispatch-implies-
+ *                      confirm) skips the card-on-file leg — the tech is
+ *                      already driving to meet the customer and collects a
+ *                      card in person, and the funnel's pending/confirmed
+ *                      eligibility window doesn't survive the immediate
+ *                      advance to en_route/on_site. Office-confirmed
+ *                      bookings keep the full funnel.
  */
-async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review') {
+async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review', options = {}) {
   // 1. Arm the 72h/24h reminders that were deferred at booking time.
   // Idempotent (registerAppointment dedupes by scheduled_service_id);
   // sendConfirmation:false = arm reminders only, the office owns any
@@ -189,11 +198,16 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // appointment with the customer (same trust point that arms reminders),
   // and the funnel's canonical send path still enforces stored SMS
   // consent + suppression. Idempotent; dark until APPOINTMENT_CARD_REQUEST
-  // + the template flip.
-  try {
-    const { requestCardForAppointment } = require('./appointment-card-request');
-    await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm' });
-  } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  // + the template flip. Field-confirmed bookings opt out — see the
+  // skipCardRequest JSDoc above.
+  if (options.skipCardRequest) {
+    logger.info(`[${routeTag}] Skipping card-on-file request for field-confirmed booking ${svc.id} (tech collects in person)`);
+  } else {
+    try {
+      const { requestCardForAppointment } = require('./appointment-card-request');
+      await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm' });
+    } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  }
 }
 
 module.exports = { runOutboundReviewConfirmHook };

@@ -476,24 +476,38 @@ describe('traceFeedFields — the schedule/dispatch tracer affordance', () => {
   test('a photo lane never offers the tracer, under either gate', () => {
     for (const gate of [undefined, 'true']) {
       withEligibilityGate(gate, () => {
-        expect(traceFeedFields(photo)).toEqual({ traceEligible: false, traceVariant: 'photo' });
+        expect(traceFeedFields(photo)).toEqual({ traceEligible: false, traceVariant: 'photo', traceCaptionKey: null });
       });
     }
   });
 
   test('satellite lanes are unchanged with the eligibility gate on', () => {
     withEligibilityGate('true', () => {
-      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: 'spray' });
-      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: false, traceVariant: null });
+      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: 'spray', traceCaptionKey: 'sprayPerimeter' });
+      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: false, traceVariant: null, traceCaptionKey: null });
     });
   });
 
   test('with the eligibility gate off, only a photo lane may hide the tracer', () => {
     withEligibilityGate(undefined, () => {
       // Enabling marks must not start hiding tracers across unrelated lanes.
-      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: true, traceVariant: null });
-      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: null });
-      expect(traceFeedFields(null)).toEqual({ traceEligible: true, traceVariant: null });
+      expect(traceFeedFields(ineligible)).toEqual({ traceEligible: true, traceVariant: null, traceCaptionKey: null });
+      expect(traceFeedFields(spray)).toEqual({ traceEligible: true, traceVariant: null, traceCaptionKey: null });
+      expect(traceFeedFields(null)).toEqual({ traceEligible: true, traceVariant: null, traceCaptionKey: null });
+    });
+  });
+
+  test('the winning satellite line carries its captionKey — a mosquito add-on rescue reads yardCoverage (codex P2 #3354)', () => {
+    withEligibilityGate('true', () => {
+      const yard = { eligible: true, variant: 'outline', captionKey: 'yardCoverage' };
+      // Ineligible bait-station primary rescued by a mosquito add-on: the
+      // feed must tell the client WHICH outline geometry to capture — the
+      // primary's display name cannot.
+      expect(traceFeedFields(ineligible, [yard]))
+        .toEqual({ traceEligible: true, traceVariant: 'outline', traceCaptionKey: 'yardCoverage' });
+      // Eligible satellite primary keeps its own caption over the add-on's.
+      expect(traceFeedFields(spray, [yard]))
+        .toEqual({ traceEligible: true, traceVariant: 'spray', traceCaptionKey: 'sprayPerimeter' });
     });
   });
 });

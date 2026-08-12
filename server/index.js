@@ -484,6 +484,8 @@ app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/satisfaction', satisfactionRoutes);
 app.use('/api/property', propertyRoutes);
+// Unified Property Score — dark behind GATE_PROPERTY_SCORE (request-time read).
+app.use('/api/property-score', require('./routes/property-score'));
 app.use('/api/customer-pricing', customerPricingAiRoutes);
 app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);

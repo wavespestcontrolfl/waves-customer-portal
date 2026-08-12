@@ -255,9 +255,45 @@ const EmailAutomationService = {
               automation_key: key,
             },
           });
-          smsResult = sendResult.sent
-            ? { sent: true }
-            : { sent: false, blocked: sendResult.blocked, error: sendResult.code || sendResult.reason || 'SMS send blocked/failed' };
+          // Send-window hold: the 24h automation dedupe is written right
+          // after this attempt, so a held companion SMS would never
+          // retry — queue it on the scheduled-SMS rail and record it as
+          // scheduled (the queued row owns delivery at 8:00 AM).
+          if (!sendResult.sent
+            && sendResult.code === 'QUIET_HOURS_HOLD'
+            && sendResult.deferred
+            && sendResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: customer.phone,
+                message_body: smsBody,
+                status: 'scheduled',
+                scheduled_for: new Date(sendResult.nextAllowedAt),
+                message_type: `auto_${key}`,
+                metadata: JSON.stringify({
+                  entry_point: 'email_automation_sms_deferred',
+                  automation_key: key,
+                  original_block_code: sendResult.code,
+                  replay_purpose: purposeForAutomation(key),
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              smsResult = { sent: false, scheduled: true };
+              logger.info(`[email-auto] SMS companion for ${key} customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+            } catch (queueErr) {
+              logger.error(`[email-auto] Held SMS companion requeue failed for ${key} customer ${customer.id}: ${queueErr.message}`);
+              smsResult = { sent: false, blocked: sendResult.blocked, error: sendResult.code || 'SMS send blocked/failed' };
+            }
+          } else {
+            smsResult = sendResult.sent
+              ? { sent: true }
+              : { sent: false, blocked: sendResult.blocked, error: sendResult.code || sendResult.reason || 'SMS send blocked/failed' };
+          }
         } else {
           logger.warn(`[email-auto] SMS template ${templateKey} missing/disabled; SMS companion skipped for ${key} customer ${customer.id}`);
           smsResult = {

@@ -358,8 +358,14 @@ async function buildScheduledServiceInvoiceLines(
     fallbackAmount = 0,
     fallbackDescription = "Service visit",
     extraLineItems = [],
+    // Mint-serialization (WaveGuard #3338 fast-follow): a mint that holds
+    // FOR UPDATE on the visit row must build its lines on the SAME
+    // connection, or the price read here would come from a different
+    // connection's snapshot and the lock would be theater.
+    database = null,
   } = {},
 ) {
+  const conn = database || db;
   if (!scheduledServiceId) {
     return {
       lineItems:
@@ -378,7 +384,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const scheduled = await db("scheduled_services")
+  const scheduled = await conn("scheduled_services")
     .where({ id: scheduledServiceId })
     .first()
     .catch(() => null);
@@ -400,7 +406,7 @@ async function buildScheduledServiceInvoiceLines(
     };
   }
 
-  const addons = await db("scheduled_service_addons")
+  const addons = await conn("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy("created_at", "asc")
     .catch(() => []);
@@ -1582,6 +1588,14 @@ const InvoiceService = {
       // these — this method just carries them into the same mint so the fee
       // and the visit share one invoice.
       extraLineItems = [],
+      // The estimated_price the caller's `amount` was DERIVED from (codex
+      // #3344 r2): replay callers that pre-compute a price from the row
+      // (billing recovery, live completion) pass it so the locked rebuild
+      // can prove the row hasn't been repriced since — fallbackAmount
+      // outranks the row price in the line builder, so without this check
+      // a stale amount would silently win over the freshly locked value.
+      // Omitted = the amount is its own authority (operator-typed).
+      scheduledPriceBasis = undefined,
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -1593,49 +1607,105 @@ const InvoiceService = {
       // intact, individually sendable). Attachment happens only at create,
       // so a reviewer who wants it consolidated voids + re-creates it.
       skipAccrual = false,
+      // Caller's open transaction (codex r6 P1): a caller that already
+      // holds the schedule.invoice.mint advisory lock (billing recovery)
+      // MUST thread its transaction here — the replay mint otherwise opens
+      // a SEPARATE connection and requests the same lock, deadlocking on
+      // the caller until timeout (advisory locks are only re-entrant
+      // within one session). Threaded transactions run the mint under a
+      // SAVEPOINT, so deposit-machinery failures stay isolated from the
+      // caller's transaction, and the invoice commits atomically with the
+      // caller's own writes.
+      database = null,
     },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
       .first();
     if (!sr) throw new Error("Service record not found");
+    const runMintTransaction = (fn) => (
+      database && database.isTransaction ? database.transaction(fn) : db.transaction(fn)
+    );
 
     const hasExplicitAmount =
       amount !== undefined && amount !== null && Number(amount) > 0;
-    const scheduledInvoice =
-      (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
+    const replayFromScheduled =
+      (useScheduledReplay || !hasExplicitAmount) && !!sr.scheduled_service_id;
+    // Params are built PER MINT ATTEMPT, on the minting connection
+    // (mint-serialization, WaveGuard #3338 fast-follow): the replay path
+    // derives its price from the scheduled row, so that read happens under
+    // FOR UPDATE inside the same transaction the invoice mints in — a
+    // concurrent reprice (the tier-extension apply holds the same lock)
+    // either commits first and is billed, or waits for this mint. The
+    // explicit-amount path bills the operator's figure and needs no lock.
+    const buildParams = async (conn = null) => {
+      if (replayFromScheduled && conn) {
+        const {
+          acquireScheduledMintLockChain,
+          scheduledPriceMovedError,
+        } = require("./scheduled-invoice-mint");
+        // The shared lock chain (codex #3344 r9 P1 — this was the last
+        // hand-rolled copy of the key-share → visit-lock order): the
+        // advisory re-acquire inside the chain is a same-transaction no-op
+        // after adoptUnderMintLock, and the customer-before-visit order the
+        // extension accept path establishes is owned by the ONE module.
+        const lockedRow = await acquireScheduledMintLockChain(conn, {
+          scheduledServiceId: sr.scheduled_service_id,
+          customerId: sr.customer_id,
+          visitColumns: ["id", "estimated_price"],
+        });
+        // Stale-basis refusal (codex #3344 r2): when the caller's amount
+        // was derived from the row price, a locked price that no longer
+        // matches means a reprice (the WaveGuard extension) landed since —
+        // and fallbackAmount would outrank the fresh price in the line
+        // builder. Terminal 409, same contract as the shared mint helper:
+        // the retry re-reads and bills the current price.
+        if (
+          lockedRow &&
+          scheduledPriceBasis !== undefined &&
+          scheduledPriceBasis !== null
+        ) {
+          const cents = (v) =>
+            v === null || v === undefined ? null : Math.round(Number(v) * 100);
+          if (cents(lockedRow.estimated_price) !== cents(scheduledPriceBasis)) {
+            throw scheduledPriceMovedError(lockedRow);
+          }
+        }
+      }
+      const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
             fallbackAmount: amount,
             fallbackDescription: description || sr.service_type,
+            database: conn,
           })
         : null;
-    let lineItems = scheduledInvoice?.lineItems?.length
-      ? scheduledInvoice.lineItems
-      : [
-          {
-            description: description || sr.service_type,
-            quantity: 1,
-            unit_price: amount,
-            amount,
-            category: sr.service_type,
-          },
-        ];
-    if (Array.isArray(extraLineItems) && extraLineItems.length) {
-      lineItems = [...lineItems, ...extraLineItems];
-    }
-
-    const createParams = {
-      customerId: sr.customer_id,
-      serviceRecordId,
-      scheduledServiceId: sr.scheduled_service_id || undefined,
-      lineItems,
-      discountIds: scheduledInvoice?.discountIds || undefined,
-      taxRate,
-      dueDate,
-      trustedStoredDiscountSources: scheduledInvoice
-        ? ["scheduled_service"]
-        : [],
-      skipAccrual,
+      let lineItems = scheduledInvoice?.lineItems?.length
+        ? scheduledInvoice.lineItems
+        : [
+            {
+              description: description || sr.service_type,
+              quantity: 1,
+              unit_price: amount,
+              amount,
+              category: sr.service_type,
+            },
+          ];
+      if (Array.isArray(extraLineItems) && extraLineItems.length) {
+        lineItems = [...lineItems, ...extraLineItems];
+      }
+      return {
+        customerId: sr.customer_id,
+        serviceRecordId,
+        scheduledServiceId: sr.scheduled_service_id || undefined,
+        lineItems,
+        discountIds: scheduledInvoice?.discountIds || undefined,
+        taxRate,
+        dueDate,
+        trustedStoredDiscountSources: scheduledInvoice
+          ? ["scheduled_service"]
+          : [],
+        skipAccrual,
+      };
     };
 
     // Estimate-deposit roll-forward: when this service traces back to an
@@ -1659,6 +1729,24 @@ const InvoiceService = {
     // receipt or customer notification — but it moves deposit money and
     // reduces/zeroes the invoice, which is exactly the mutation the review
     // contract forbids.)
+    // The shared mint serialization, not a parallel one (pre-push P0,
+    // codex r6 round; consolidated into scheduled-invoice-mint in r8):
+    // every scheduled-service invoice writer serializes on the two-key
+    // ['schedule.invoice.mint', ssId] advisory lock with an in-lock replay
+    // re-check. The replay transactions below lock the visit ROW, but a
+    // Charge Now / completion mint that wins that lock and commits first
+    // would leave this transaction to wake and blindly create a SECOND
+    // collectible invoice for the same visit. Take the same advisory lock
+    // FIRST (same order as the helper: advisory → customer key-share →
+    // visit lock, the latter two inside buildParams), then adopt any
+    // non-terminal invoice that landed — the caller's reuse filters ran
+    // before this transaction and cannot have seen it.
+    const adoptUnderMintLock = async (trx) => {
+      if (!replayFromScheduled) return null;
+      const { adoptScheduledInvoiceUnderMintLock } = require("./scheduled-invoice-mint");
+      return adoptScheduledInvoiceUnderMintLock(trx, sr.scheduled_service_id);
+    };
+
     let sourceEstimateId = null;
     if (!skipDepositCredit && sr.scheduled_service_id) {
       try {
@@ -1687,13 +1775,18 @@ const InvoiceService = {
         const requested = depositCredit ? depositCredit.amount : 0;
         if (!(requested > 0)) break;
         try {
-          return await db.transaction(async (trx) => {
+          return await runMintTransaction(async (trx) => {
+            // An adopted invoice already ran its own deposit/credit flow —
+            // return it untouched; the roll-forward belongs to the mint
+            // that actually created the invoice.
+            const adopted = await adoptUnderMintLock(trx);
+            if (adopted) return adopted;
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...createParams,
+              ...(await buildParams(trx)),
               database: trx,
               depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
@@ -1714,6 +1807,10 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          // Stale-price/authorization refusals are terminal — retrying the
+          // same stale params can't fix them (mirrors the shared mint
+          // helper's contract).
+          if (err.status) throw err;
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
@@ -1733,7 +1830,17 @@ const InvoiceService = {
       }
     }
 
-    return this.create(createParams);
+    if (replayFromScheduled) {
+      return runMintTransaction(async (trx) => {
+        const adopted = await adoptUnderMintLock(trx);
+        if (adopted) return adopted;
+        return this.create({ ...(await buildParams(trx)), database: trx });
+      });
+    }
+    return this.create({
+      ...(await buildParams(null)),
+      ...(database ? { database } : {}),
+    });
   },
 
   /**
@@ -1809,7 +1916,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -2046,6 +2153,10 @@ const InvoiceService = {
         customerId: customer.id,
         invoiceId,
         entryPoint: "invoice_send_via_sms",
+        // Send-window operator marker: this shared path serves both the
+        // admin send click and automated resends — only the authenticated
+        // routes pass operatorInitiated (see validators/send-window.js).
+        ...(operatorInitiated ? { operatorInitiated: true } : {}),
         // Preserve the legacy messageType so the admin-sms-templates
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken
@@ -2064,6 +2175,16 @@ const InvoiceService = {
         const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
         err.code = sendResult.code;
         err.reason = sendResult.reason;
+        // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
+        // 8 AM", not a delivery failure — carry the hold metadata so
+        // sendViaSMSAndEmail / processScheduledSends can reschedule instead
+        // of burning one of the five generic scheduled-send attempts. The
+        // rendered body + recipient ride along so a direct (non-scheduled)
+        // caller can requeue the exact pay-link text on the scheduled rail.
+        if (sendResult.deferred) err.deferred = true;
+        if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
+        err.smsBody = body;
+        err.toPhone = customer.phone;
         throw err;
       }
 
@@ -2136,6 +2257,7 @@ const InvoiceService = {
       allowClaimed = false,
       emailRecipientOverride = null,
       payUrlParams = null,
+      operatorInitiated = false,
     } = {},
   ) {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -2204,6 +2326,7 @@ const InvoiceService = {
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
           payUrlParams,
+          operatorInitiated,
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.sent) {
@@ -2215,21 +2338,117 @@ const InvoiceService = {
       } catch (err) {
         sms.error = err.message;
         if (err.code) sms.code = err.code;
+        // Preserve the send-window hold so callers with a retry rail
+        // (processScheduledSends) can move the due time to the window open
+        // instead of treating the hold as a spent delivery attempt.
+        if (err.deferred) sms.deferred = true;
+        if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
+        if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
 
-    try {
-      const r = await sendInvoiceEmail(invoiceId, {
-        recipientOverride: emailRecipientOverride,
-        payUrlParams,
-      });
-      if (r?.ok) email.ok = true;
-      else if (r?.error) email.error = r.error;
-      if (!payUrl && r?.payUrl) payUrl = r.payUrl;
-      if (r?.recipient) email.recipient = r.recipient;
-      if (r?.messageId) email.messageId = r.messageId;
-    } catch (err) {
-      email.error = err.message;
+    // DIRECT callers (estimate acceptance/conversion, admin resends —
+    // anything not on the scheduled queue): the email leg below finalizes
+    // the invoice, which clears every retry hook, so a held SMS pay link
+    // must be persisted on the scheduled-SMS rail FIRST or the customer
+    // never receives it. The queued row replays the exact rendered body at
+    // 8:00 AM under the same payment_link policy. Scheduled callers
+    // (allowClaimed) skip this — their whole send defers below instead.
+    if (!allowClaimed
+      && sms.code === "QUIET_HOURS_HOLD"
+      && sms.deferred
+      && sms.nextAllowedAt
+      && sms.heldBody
+      && sms.heldToPhone) {
+      try {
+        // Retry-idempotent: when the email leg fails, this method restores
+        // the send claim and callers legitimately retry — a second pass
+        // must adopt the already-queued row, not enqueue a duplicate that
+        // double-texts the pay link at 8:00 AM.
+        const existingQueued = await db("sms_log")
+          .whereIn("status", ["scheduled", "sending"])
+          .whereRaw("metadata->>'entry_point' = 'invoice_send_deferred'")
+          .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+          .first("id");
+        if (existingQueued) {
+          sms.scheduled = true;
+          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} already queued for the window open (${existingQueued.id}) — not re-queued`);
+        } else {
+          const TWILIO_NUMBERS = require("../config/twilio-numbers");
+          await db("sms_log").insert({
+            customer_id: claim.invoice.customer_id,
+            direction: "outbound",
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: sms.heldToPhone,
+            message_body: sms.heldBody,
+            status: "scheduled",
+            scheduled_for: new Date(sms.nextAllowedAt),
+            message_type: "invoice",
+            metadata: JSON.stringify({
+              entry_point: "invoice_send_deferred",
+              invoice_id: invoiceId,
+              original_block_code: sms.code,
+              replay_purpose: "payment_link",
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+              // Delivery-time finalization (executor → markDeliverySent):
+              // when the email leg ALSO failed, this queued row is the only
+              // delivery, and without the flip the morning SMS would carry
+              // a live pay link while the invoice sits in draft with
+              // follow-ups unarmed. Idempotent when the email leg DID
+              // finalize (markDeliverySent no-ops on non-finalizable
+              // status / leaves 'sent' unchanged).
+              mark_invoice_delivery: true,
+            }),
+          });
+          sms.scheduled = true;
+          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
+        }
+      } catch (queueErr) {
+        // The scheduled rail does NOT own the held text — the email leg
+        // below must not run: its success would finalize the invoice and
+        // clear the send claim, permanently losing the requested SMS
+        // pay-link leg. Failing the whole send keeps the claim
+        // restorable, and the caller's retry adopts the queued row (or
+        // re-queues) via the idempotent lookup above.
+        sms.holdUnowned = true;
+        logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — deferring the whole send (email leg skipped) so the claim stays retryable`);
+      }
+    }
+    delete sms.heldBody;
+    delete sms.heldToPhone;
+
+    // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
+    // successful email here would make `ok` true, finalize the invoice and
+    // clear scheduled_send_at — stranding the held SMS pay link with no
+    // retry rail. Skipping the email leg keeps ok=false, so
+    // processScheduledSends moves the due time to nextAllowedAt and both
+    // legs go out together at 8:00 AM. Direct callers (estimate-accept
+    // night sends, admin resends) are NOT deferred: their documented
+    // gate-ON behavior is email-immediate with the SMS leg held.
+    const scheduledSmsHeld = allowClaimed
+      && sms.code === "QUIET_HOURS_HOLD"
+      && Boolean(sms.nextAllowedAt);
+    if (scheduledSmsHeld || sms.holdUnowned) {
+      email.error = sms.holdUnowned
+        ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
+        : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
+      email.code = "QUIET_HOURS_HOLD";
+    } else {
+      try {
+        const r = await sendInvoiceEmail(invoiceId, {
+          recipientOverride: emailRecipientOverride,
+          payUrlParams,
+        });
+        if (r?.ok) email.ok = true;
+        else if (r?.error) email.error = r.error;
+        if (!payUrl && r?.payUrl) payUrl = r.payUrl;
+        if (r?.recipient) email.recipient = r.recipient;
+        if (r?.messageId) email.messageId = r.messageId;
+      } catch (err) {
+        email.error = err.message;
+      }
     }
 
     if (effectiveRequestReview && (sms.ok || email.ok)) {
@@ -2448,11 +2667,96 @@ const InvoiceService = {
         "scheduled_send_attempts",
         "scheduled_request_review",
         "scheduled_review_delay_minutes",
+        // For the send-window pre-claim guard's SMS-leg check: a
+        // payer-billed invoice is delivered email-only by design.
+        "payer_id",
+        "customer_id",
       );
 
     let sent = 0;
     let failed = 0;
+    let deferred = 0;
+    // Send-window pre-claim guard (mirrors the appointment-reminders
+    // pre-send guard): a scheduled send due outside 8AM-8PM ET moves to the
+    // window open WITHOUT claiming or burning one of the five attempts.
+    // Deferring the whole send — email leg included — keeps the invoice
+    // arriving as one unit at 8:00 AM; letting the email go overnight would
+    // finalize the row ('sent', scheduled_send_at cleared) with the SMS pay
+    // link held and no rail left to retry it. Checked per row: pure clock
+    // math, and a batch that starts at 19:59 can straddle the cutoff.
+    const { isEnabled } = require("../config/feature-gates");
+    const {
+      isWithinSendWindowET,
+      nextSendWindowOpenET,
+    } = require("./messaging/send-window");
     for (const inv of due) {
+      if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
+        // SMS-leg check: the window is an SMS fence, so an invoice with no
+        // SMS leg must not have its EMAIL delayed by it — a third-party
+        // payer invoice is delivered email-only by design, a customer with
+        // no phone can only be emailed, and an SMS-opted-out customer
+        // (sms_enabled=false — texted STOP or flipped the toggle) would
+        // deterministically block the SMS leg anyway. Those fall through
+        // and send at their requested time. Fail toward deferral on a
+        // lookup error: worst case an email waits for 8:00 AM, never a
+        // night text.
+        let hasSmsLeg = !inv.payer_id;
+        if (hasSmsLeg) {
+          try {
+            const cust = await db("customers")
+              .where({ id: inv.customer_id })
+              .first("phone");
+            hasSmsLeg = Boolean(String(cust?.phone || "").trim());
+          } catch {
+            hasSmsLeg = true;
+          }
+        }
+        if (hasSmsLeg) {
+          try {
+            const prefs = await db("notification_prefs")
+              .where({ customer_id: inv.customer_id })
+              .first("sms_enabled");
+            if (prefs?.sms_enabled === false) hasSmsLeg = false;
+          } catch {
+            /* keep hasSmsLeg — defer on an unreadable pref */
+          }
+        }
+        if (!hasSmsLeg) {
+          logger.info(
+            `[invoice] Scheduled send for ${inv.invoice_number} has no SMS leg — sending at its requested time despite the send window`,
+          );
+        } else {
+          const nextOpen = nextSendWindowOpenET();
+          // Mirror the claim predicates (still due, still attempt-eligible),
+          // not just id+status: an admin can reschedule the invoice between
+          // the due-list read and this update, and a bare id+status match
+          // would overwrite their newly chosen scheduled_send_at with the
+          // window open. 0 rows affected = the row changed underneath — the
+          // newer schedule owns it, count nothing.
+          const deferredRows = await db("invoices")
+            .where({ id: inv.id, status: "scheduled" })
+            .whereNotNull("scheduled_send_at")
+            .where("scheduled_send_at", "<=", new Date())
+            .where((q) =>
+              q
+                .whereNull("scheduled_send_attempts")
+                .orWhere("scheduled_send_attempts", "<", 5),
+            )
+            .update({
+              scheduled_send_at: nextOpen,
+              scheduled_send_error:
+                "QUIET_HOURS_HOLD — outside 8AM-8PM ET send window, deferred to window open",
+              updated_at: new Date(),
+            });
+          if (deferredRows) {
+            deferred += 1;
+            logger.info(
+              `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
+            );
+          }
+          continue;
+        }
+      }
       const [claimed] = await db("invoices")
         .where({ id: inv.id, status: "scheduled" })
         .whereNotNull("scheduled_send_at")
@@ -2480,7 +2784,6 @@ const InvoiceService = {
         continue;
       }
 
-      failed += 1;
       const error =
         [
           result.sms?.error && `sms: ${result.sms.error}`,
@@ -2488,14 +2791,33 @@ const InvoiceService = {
         ]
           .filter(Boolean)
           .join(" | ") || "send failed";
-      await db("invoices")
-        .where({ id: inv.id })
-        .update({
-          status: "scheduled",
-          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-          scheduled_send_error: error,
-          updated_at: new Date(),
-        });
+      // A send-window hold that slipped past the pre-claim guard (the
+      // 19:59→20:01 race) is a deferral, not a failure: move the due time
+      // to the window open and leave the attempt counter alone — five
+      // overnight cron passes must not permanently fail the send.
+      const smsHeld =
+        result.sms?.code === "QUIET_HOURS_HOLD" && result.sms?.nextAllowedAt;
+      if (smsHeld) {
+        deferred += 1;
+        await db("invoices")
+          .where({ id: inv.id })
+          .update({
+            status: "scheduled",
+            scheduled_send_at: new Date(result.sms.nextAllowedAt),
+            scheduled_send_error: error,
+            updated_at: new Date(),
+          });
+      } else {
+        failed += 1;
+        await db("invoices")
+          .where({ id: inv.id })
+          .update({
+            status: "scheduled",
+            scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+            scheduled_send_error: error,
+            updated_at: new Date(),
+          });
+      }
       // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
       // it auto-applied (the row was 'sending'). Now that it's back to 'scheduled'
       // and nothing was delivered, return that credit so it isn't stranded +
@@ -2508,11 +2830,17 @@ const InvoiceService = {
           logger.warn(`[invoice] credit reversal after failed scheduled send skipped for ${inv.id}: ${e.message}`);
         }
       }
-      logger.error(
-        `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
-      );
+      if (smsHeld) {
+        logger.info(
+          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${result.sms.nextAllowedAt}`,
+        );
+      } else {
+        logger.error(
+          `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
+        );
+      }
     }
-    return { sent, failed };
+    return { sent, failed, deferred };
   },
 
   /**
@@ -2581,7 +2909,7 @@ const InvoiceService = {
     return { amount, cardLine, receiptUrl };
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -2645,6 +2973,10 @@ const InvoiceService = {
       customerId: customer.id,
       invoiceId,
       entryPoint: "invoice_receipt_sms",
+      // Send-window operator marker: only the admin manual-resend routes
+      // set it (an operator chose to text THIS receipt now); the
+      // automated receipt paths stay fenced and ride the receipt queue.
+      ...(operatorInitiated ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: "receipt" },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -2688,6 +3020,11 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
+      // Send-window hold: carry the window-open time so the receipt queue
+      // schedules its retry there instead of burning generic backoff
+      // attempts overnight (an after-8PM payment's receipt must go out at
+      // 8:00 AM, not fail permanently ~75 minutes in).
+      if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
       throw err;
     }
     logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);

@@ -1,10 +1,10 @@
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
-async function renderSmsTemplate(templateKey, vars, context = {}) {
+async function renderSmsTemplate(templateKey, vars, context = {}, opts = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context, opts);
       // Normalize at render time, not just at send time: callers use the
       // rendered body for content-level dedup against sms_log (e.g. the
       // call-recording processor's 10-minute confirmation guard), and the

@@ -46,6 +46,10 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // never claim a highlight the snapshot doesn't contain (codex P1 #3075).
   const highlightCapture = traced.captureMode === 'lawn_highlight';
   const lawnCapture = traced.captureMode === 'lawn' || highlightCapture;
+  // Mosquito yard capture (owner 2026-08-11): the traced boundary is the
+  // whole treated landscape — turf AND beds — so the caption says so
+  // instead of claiming a lawn-only area.
+  const yardCapture = traced.captureMode === 'yard';
   // Interior-spray captures (owner 2026-07-29) flood the traced footprint
   // with the brand-blue wash — only rows captured that way, and only closed
   // loops, get the fill (same area-claim rule as lawn).
@@ -56,9 +60,11 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   const caption = outline
     ? (highlightCapture
       ? 'Treated lawn areas highlighted on-site by your technician.'
-      : (lawnCapture
-        ? 'Treated lawn area outlined on-site by your technician.'
-        : 'Service area traced on-site by your technician.'))
+      : (yardCapture
+        ? 'Treated yard — lawn and landscape beds — outlined on-site by your technician.'
+        : (lawnCapture
+          ? 'Treated lawn area outlined on-site by your technician.'
+          : 'Service area traced on-site by your technician.')))
     : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
@@ -76,9 +82,11 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
           alt={outline
             ? (highlightCapture
               ? 'Satellite photo of the property with the treated lawn areas highlighted'
-              : (lawnCapture
-                ? 'Satellite photo of the property with the treated lawn area outlined'
-                : 'Satellite photo of the property with the technician-traced service area outlined'))
+              : (yardCapture
+                ? 'Satellite photo of the property with the treated yard — lawn and landscape beds — outlined'
+                : (lawnCapture
+                  ? 'Satellite photo of the property with the treated lawn area outlined'
+                  : 'Satellite photo of the property with the technician-traced service area outlined')))
             : (interiorCapture
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}

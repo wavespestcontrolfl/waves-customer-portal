@@ -52,6 +52,32 @@ describe('resolveScheduledRecipient', () => {
     )).resolves.toBe('(941) 555-0100');
   });
 
+  test('unverified rows (r24): send only when the LIVE account phone still matches the snapshot', async () => {
+    // Enqueue-time identity lookup failed, so the refresh-vs-freeze
+    // decision was deferred here. Live match → refresh semantics.
+    mockCustomerLookup({ phone: '+1 (941) 555-0100' });
+    await expect(resolveScheduledRecipient(
+      { to_phone: '9415550100', customer_id: 'cust-1' },
+      { recipient_identity_unverified: true },
+    )).resolves.toBe('+1 (941) 555-0100');
+
+    // Live mismatch is ambiguous (changed phone vs intentional alternate)
+    // — null puts the row on the bounded-retry-then-terminal rail instead
+    // of guessing where a bearer link should go.
+    mockCustomerLookup({ phone: '(941) 555-0999' });
+    await expect(resolveScheduledRecipient(
+      { to_phone: '(941) 555-0100', customer_id: 'cust-1' },
+      { recipient_identity_unverified: true },
+    )).resolves.toBeNull();
+
+    // Lookup failing again holds the row too.
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(resolveScheduledRecipient(
+      { to_phone: '(941) 555-0100', customer_id: 'cust-1' },
+      { recipient_identity_unverified: true },
+    )).resolves.toBeNull();
+  });
+
   test('keeps the queued number for lead rows even if flagged', async () => {
     db.mockImplementation(() => { throw new Error('must not query'); });
     await expect(resolveScheduledRecipient(

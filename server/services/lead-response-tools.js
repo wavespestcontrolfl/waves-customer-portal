@@ -242,6 +242,41 @@ async function executeLeadTool(toolName, input) {
         metadata: { original_message_type: 'lead_response' },
       });
 
+      // Send-window hold: the lead agent is a fenced automation (house
+      // precedent: dropped-call/voicemail/lead-webhook speed plays all
+      // respect 8-8), but the reply must not be LOST — requeue it on the
+      // scheduled-SMS rail so the lead still hears back at 8:00 AM. The
+      // lead stays un-contacted in the pipeline until the replay actually
+      // delivers (phantom-contact rule below).
+      if (!result.sent
+        && result.code === 'QUIET_HOURS_HOLD'
+        && result.deferred
+        && result.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await db('sms_log').insert({
+            customer_id: customer.id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: customer.phone,
+            message_body: input.message,
+            status: 'scheduled',
+            scheduled_for: new Date(result.nextAllowedAt),
+            message_type: 'lead_response',
+            metadata: JSON.stringify({
+              entry_point: 'lead_response_auto_reply_deferred',
+              lead_id: input.lead_id || null,
+              original_block_code: result.code,
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+            }),
+          });
+          logger.info(`[lead-response] Auto-reply for lead ${input.lead_id || customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+        } catch (queueErr) {
+          logger.error(`[lead-response] Held auto-reply requeue failed for lead ${input.lead_id || customer.id}: ${queueErr.message}`);
+        }
+      }
+
       // Activity log captures EVERY attempt (sent / blocked / failed) for
       // operator triage. But the lead-status / pipeline transition only
       // advances on an actual successful send — a wrapper-policy block
@@ -504,4 +539,48 @@ async function executeLeadTool(toolName, input) {
   }
 }
 
-module.exports = { executeLeadTool };
+// Delivery-time bookkeeping for a quiet-hours-deferred auto-reply, invoked
+// by the deferred-replay registry after the scheduled executor's provider
+// accept — the same lifecycle stamps the immediate sent path runs inline:
+// activity log, contacted status + response-time metric, funnel bridge,
+// pipeline first_contact. Guarded on a still-live lead throughout.
+async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null } = {}) {
+  if (leadId) {
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'sms_sent',
+      description: 'Auto-response sent by lead agent (deferred replay)',
+      performed_by: 'lead_agent',
+      metadata: JSON.stringify({ deferred_replay: true }),
+    }).catch(() => {});
+    const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
+    if (lead?.first_contact_at) {
+      // MONOTONIC: the replay lands hours after enqueue, and the lead may
+      // have advanced overnight (estimated/booked/won via other channels) —
+      // 'contacted' must only ever move a lead FORWARD from a pre-contact
+      // state, never overwrite an advanced one. The funnel bridge is
+      // already monotonic in SQL, so it runs regardless.
+      const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
+      await db('leads')
+        .where('id', leadId)
+        .whereNull('deleted_at')
+        // Pre-contact states ONLY — an existing 'contacted' stamp belongs
+        // to whoever contacted first (their response_time must not be
+        // overwritten by a replay landing seconds later).
+        .where((q) => q.whereIn('status', ['new', 'pending', 'started']).orWhereNull('status'))
+        .update({
+          response_time_minutes: responseMinutes,
+          status: 'contacted',
+          updated_at: new Date(),
+        });
+      const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+      await bridgeLeadFunnelStage(leadId, 'contacted');
+    }
+  }
+  if (customerId) {
+    const PipelineManager = require('./pipeline-manager');
+    await PipelineManager.onEvent(customerId, 'first_contact');
+  }
+}
+
+module.exports = { executeLeadTool, recordLeadAutoReplyDelivered };

@@ -468,3 +468,56 @@ describe('WDO photo addendum captions', () => {
     )).toBe('Obstruction or inaccessible area: North attic corner blocked by stored materials.');
   });
 });
+
+// Project draft-invoice mint serialization (pre-push P0, codex #3344 r5
+// round): the non-WDO draft bills scheduled-service pricing, so it must be
+// impossible for it and a canonical completion/Charge Now mint to each
+// create a collectible invoice for the same visit. The contract: the SHARED
+// two-key advisory lock first (same key every scheduled-service invoice
+// writer uses), then the customer key-share, then the visit row lock, and
+// the reuse/already-billed checks REPEATED inside the locks before
+// InvoiceService.create runs on the lock transaction.
+describe('resolveOrCreateProjectInvoice mint serialization (source contract)', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../routes/admin-projects.js'), 'utf8');
+
+  test('shared lock chain → in-lock reuse/billed re-checks → create', () => {
+    // The lock ORDER (advisory → customer key-share → visit FOR UPDATE) is
+    // owned by scheduled-invoice-mint's chain helper (codex #3344 r8 P1) —
+    // this route imports it instead of keeping a drift-prone local copy.
+    expect(source).toMatch(/const \{ acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES \} = require\('\.\.\/services\/scheduled-invoice-mint'\);/);
+    const chainAt = source.indexOf('await acquireScheduledMintLockChain(trx, {');
+    const reuseRecheckAt = source.indexOf('const lockedReuse =');
+    const billedRecheckAt = source.indexOf('const lockedBilled =');
+    const createAt = source.indexOf('const createdNonWdo = await InvoiceService.create({');
+    expect(chainAt).toBeGreaterThan(-1);
+    expect(reuseRecheckAt).toBeGreaterThan(chainAt);
+    expect(billedRecheckAt).toBeGreaterThan(reuseRecheckAt);
+    expect(createAt).toBeGreaterThan(billedRecheckAt);
+    // No project-private lock statement survives the consolidation.
+    expect(source).not.toContain('SELECT pg_advisory_xact_lock');
+    // The chain itself holds the canonical order in the ONE shared module.
+    const chain = fs.readFileSync(require.resolve('../services/scheduled-invoice-mint.js'), 'utf8');
+    const chainDefAt = chain.indexOf('async function acquireScheduledMintLockChain');
+    const chainAcquireAt = chain.indexOf('await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);', chainDefAt);
+    const chainKeyShareAt = chain.indexOf('FOR KEY SHARE', chainAcquireAt);
+    const chainVisitLockAt = chain.indexOf('.forUpdate()', chainKeyShareAt);
+    expect(chainDefAt).toBeGreaterThan(-1);
+    expect(chainAcquireAt).toBeGreaterThan(chainDefAt);
+    expect(chainKeyShareAt).toBeGreaterThan(chainAcquireAt);
+    expect(chainVisitLockAt).toBeGreaterThan(chainKeyShareAt);
+    // The create stays on the lock transaction (self-deadlock guard).
+    const createBlock = source.slice(createAt, source.indexOf('});', createAt));
+    expect(createBlock).toContain('database: trx');
+  });
+
+  // Project↔visit lock order (codex #3344 r9 P2): the invoice send above
+  // holds the project FOR UPDATE and then waits on the visit lock via the
+  // shared chain, so the completion path must lock the project FIRST —
+  // its old visit-then-project order was the ABBA half Postgres resolves
+  // by aborting one side.
+  test('completeProjectBackedService locks the project row at transaction entry', () => {
+    const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
+    expect(completion).toMatch(/const project = await trx\('projects'\)\.where\(\{ id: projectId \}\)\.forUpdate\(\)\.first\(\);/);
+  });
+});

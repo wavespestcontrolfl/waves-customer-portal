@@ -26,6 +26,7 @@ function chain(overrides = {}) {
     }),
     orWhere: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     // Booster-safe sibling select + advisory-lock probes (PR #2725/#2733).
     whereRaw: jest.fn().mockReturnThis(),

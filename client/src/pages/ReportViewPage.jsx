@@ -4020,6 +4020,18 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 // the image). When present it replaces the generic schematic drawing as the
 // report's coverage map.
 
+// Render variant for a traced map when the server's eligibility variant is
+// absent (older payloads, GATE_TRACE_ELIGIBILITY off). A 'yard' capture
+// (mosquito outline — turf + beds, owner 2026-08-11) renders as the calm
+// outline regardless of service line; everything else keeps the
+// pre-existing serviceLine switch, so legacy mosquito building-perimeter
+// traces keep their spray replay and every lawn/pest report renders
+// exactly as before.
+function tracedVariantFallback(traced, serviceLine) {
+  if (traced?.variant) return traced.variant;
+  if (traced?.captureMode === 'yard') return 'outline';
+  return serviceLine === 'lawn' ? 'outline' : 'spray';
+}
 
 function ServiceCoverageCard({
   coverage,
@@ -8443,8 +8455,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.treatmentMap?.traced?.variant
-                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
+              tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8586,8 +8597,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.treatmentMap?.traced?.variant
-                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
+              tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
               live={mode === 'live'}
               applications={data.applications || []}
             />

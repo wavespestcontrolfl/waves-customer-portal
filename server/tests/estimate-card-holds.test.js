@@ -44,6 +44,8 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 const mockSendReceiptEmail = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
+const mockEnqueueReceiptDelivery = jest.fn(async () => ({ enqueued: true }));
+jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery: (...a) => mockEnqueueReceiptDelivery(...a) }));
 const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
@@ -1291,7 +1293,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     stubDb([null, { payment_receipt_channel: 'email', email_enabled: true }, { first_name: 'Sam' }]);
     await settleNoShowFee(pi());
     expect(mockSendReceipt).not.toHaveBeenCalled();
-    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
   });
 
   it('receipt-texts opt-out on the sms channel: the SMS leg is doomed at the consent gate, so the email carries the fee receipt', async () => {
@@ -1303,7 +1305,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceipt.mockResolvedValueOnce({ sent: false, reason: 'receipt_texts_opted_out' });
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
   });
 
   it("channel 'both' delivers BOTH legs — the email stamp must not make sendReceipt read already-sent", async () => {
@@ -1313,7 +1315,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
     expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
   });
 
@@ -1358,5 +1360,39 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceipt.mockRejectedValueOnce(new Error('twilio down'));
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
+  });
+
+  it("channel 'both' with the SMS held for the send window: queue owns the text — the delivered email must NOT stamp receipt_sent_at", async () => {
+    // Stamping off tonight's email while the held SMS sits on the receipt
+    // queue makes the queue's unforced 8 AM sendReceipt read 'already-sent'
+    // and silently drop the text the customer asked for (codex r15 P2 on
+    // 0b64ab5). The queue's SMS leg stamps when it actually delivers.
+    stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
+    mockSendReceipt.mockRejectedValueOnce(Object.assign(new Error('receipt SMS blocked: QUIET_HOURS_HOLD'), {
+      code: 'QUIET_HOURS_HOLD',
+      nextAllowedAt: '2026-08-08T12:00:00.000Z',
+    }));
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockEnqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({
+      invoiceId: 'inv1',
+      source: 'no_show_fee_window_hold',
+    }));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ receipt_sent_at: 'NOW' }),
+    ]));
+  });
+
+  it("channel 'both' with a NON-hold SMS failure still stamps off the delivered email (no queue handoff)", async () => {
+    stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
+    mockSendReceipt.mockRejectedValueOnce(new Error('twilio down'));
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockEnqueueReceiptDelivery).not.toHaveBeenCalled();
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ receipt_sent_at: 'NOW' }),
+    ]));
   });
 });
