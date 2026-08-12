@@ -104,12 +104,16 @@ function pushPresentation(messageType) {
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
  */
-function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated }) {
+function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed }) {
   if (!gateOn) return 'sms_only';
   if (!customerId) return 'sms_only';
   if (hasMedia) return 'sms_only'; // push carries no MMS media
   if (humanAuthored) return 'sms_only'; // operator-typed → reply-able SMS
   if (operatorInitiated) return 'sms_only'; // operator chose SMS explicitly
+  // Admin attribution = operator provenance even when the entry point never
+  // learned the operatorInitiated flag (IB send_sms, comms composer both
+  // stamp adminUserId) — staff-triggered sends stay on the channel staff chose.
+  if (adminAttributed) return 'sms_only';
   return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
 }
 
@@ -142,6 +146,15 @@ const PREF_CHANNEL_COLUMN = {
   autopay_retry_final_failed: 'billing_channel',
 };
 
+// Channel columns that live on the account PRIMARY profile (see
+// routes/notifications.js loadPreferencePayload) — everything else
+// (billing/receipt) is per charged customer row.
+const PRIMARY_SCOPED_COLUMNS = new Set([
+  'en_route_channel',
+  'service_reminder_24h_channel',
+  'service_reminder_72h_channel',
+]);
+
 function normalizeDigits(phone) {
   return String(phone || '').replace(/\D+/g, '').slice(-10);
 }
@@ -172,15 +185,20 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
 
   const col = PREF_CHANNEL_COLUMN[messageType];
   if (col) {
-    // Channel prefs are ACCOUNT-level and live on the account's primary
-    // profile (the same resolver the portal prefs surface uses) — a token
-    // registered while a secondary property was selected must not dodge
-    // the choice saved on the primary profile.
-    const { resolvePrimaryProfileId } = require('../../routes/notifications');
-    const prefsOwnerId = await resolvePrimaryProfileId(
-      { accountId: accountId || null, customerId },
-      knex,
-    ).catch(() => customerId);
+    // Preference OWNERSHIP mirrors routes/notifications.js exactly:
+    // appointment/en-route channels are ACCOUNT-level and live on the
+    // primary profile, but billing_channel + payment_receipt_channel are
+    // deliberately PER CHARGED PROFILE (excluded from the primary-channel
+    // list there) — a secondary charged profile's explicit receipt choice
+    // must be read from its own row.
+    let prefsOwnerId = customerId;
+    if (PRIMARY_SCOPED_COLUMNS.has(col)) {
+      const { resolvePrimaryProfileId } = require('../../routes/notifications');
+      prefsOwnerId = await resolvePrimaryProfileId(
+        { accountId: accountId || null, customerId },
+        knex,
+      ).catch(() => customerId);
+    }
     const ERR = Symbol('prefs-lookup-failed');
     const prefsRow = await knex('notification_prefs')
       .where({ customer_id: prefsOwnerId })
@@ -199,38 +217,23 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
   return true;
 }
 
-// Backstop ceiling on the whole fan-out. The PRIMARY bound lives in the
-// transports: apns.js/fcm.js destroy a request after 8s, which both fails
-// the send promptly AND prevents a late delivery after the SMS fallback.
-// This outer race only fires on pathological multi-device stalls; there a
-// rare duplicate is the accepted lesser evil vs a message stuck forever.
-const PUSH_ATTEMPT_TIMEOUT_MS = 30000;
-
+// No abandoning outer race — abandonment is what creates duplicates (a
+// still-running leg delivering after the SMS fallback). Instead EVERY
+// network stage is individually destroy-bounded at 8s (APNs request, FCM
+// token fetch + request, web-push request), so the whole sequential
+// fan-out is bounded by construction and the caller simply awaits it: no
+// leg can still be running when the SMS fallback decision is made.
 async function sendPush(customerId, messageType, body) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
-  let timer;
-  try {
-    const stats = await Promise.race([
-      PushService.sendToCustomer(customerId, {
-        title,
-        body,
-        url: link,
-        category,
-        tag: `push-routed:${messageType}`,
-      }),
-      new Promise((resolve) => {
-        timer = setTimeout(() => resolve(null), PUSH_ATTEMPT_TIMEOUT_MS);
-      }),
-    ]);
-    if (stats === null) {
-      logger.warn(`[push-routing] ${messageType}: push fan-out exceeded ${PUSH_ATTEMPT_TIMEOUT_MS}ms — treating as undelivered`);
-      return { stats: null, delivered: false };
-    }
-    return { stats, delivered: Number(stats && stats.sent) > 0 };
-  } finally {
-    clearTimeout(timer);
-  }
+  const stats = await PushService.sendToCustomer(customerId, {
+    title,
+    body,
+    url: link,
+    category,
+    tag: `push-routed:${messageType}`,
+  });
+  return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
 
 // Durable in-app record, written only AFTER delivery is proven so retry

@@ -63,8 +63,19 @@ function getJwtClient() {
 }
 
 async function getAccessToken() {
-  const res = await getJwtClient().getAccessToken();
-  return res && res.token;
+  // Bounded: the OAuth token fetch runs BEFORE the 8s request timer starts,
+  // so an unbounded stall here would still pin callers. A timeout resolves
+  // null → the send fails soft as fcm_token_unavailable.
+  let timer;
+  try {
+    const res = await Promise.race([
+      getJwtClient().getAccessToken(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), FCM_REQUEST_TIMEOUT_MS); }),
+    ]);
+    return res && res.token;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

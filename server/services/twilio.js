@@ -551,6 +551,9 @@ const TwilioService = {
         hasMedia: urls.length > 0 || Boolean(options.media),
         humanAuthored: options.humanAuthored === true,
         operatorInitiated: options.operatorInitiated === true,
+        // IB send_sms / comms composer stamp adminUserId without the
+        // operatorInitiated flag — admin attribution is operator provenance.
+        adminAttributed: Boolean(options.adminUserId),
       });
       if (pushRoute === "push_first") {
         const pushed = await PushRouting.attemptPushFirst({

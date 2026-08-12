@@ -60,7 +60,14 @@ async function sendSubscription(sub, notification) {
 
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
   try {
-    await webpush.sendNotification(JSON.parse(sub.subscription_data), JSON.stringify(notification));
+    // timeout aborts the underlying request — a hung push endpoint fails
+    // this leg promptly and cannot deliver later (see apns.js/fcm.js: the
+    // same bound exists on every transport so no leg outlives its caller).
+    await webpush.sendNotification(
+      JSON.parse(sub.subscription_data),
+      JSON.stringify(notification),
+      { timeout: 8000 },
+    );
     return { sent: true };
   } catch (err) {
     if (err.statusCode === 410 || err.statusCode === 404) {

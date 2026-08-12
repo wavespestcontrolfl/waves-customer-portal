@@ -41,6 +41,10 @@ describe('decidePushRoute', () => {
     expect(decidePushRoute({ ...base, messageType: 'receipt', operatorInitiated: true })).toBe('sms_only');
   });
 
+  it('is sms_only for admin-attributed sends (IB tools stamp adminUserId only)', () => {
+    expect(decidePushRoute({ ...base, messageType: 'billing_reminder', adminAttributed: true })).toBe('sms_only');
+  });
+
   it('routes critical templates to both channels', () => {
     for (const t of ['appointment_reminder', 'reminder_72h', 'billing_reminder', 'payment_failure', 'autopay']) {
       expect(decidePushRoute({ ...base, messageType: t })).toBe('push_and_sms');
@@ -106,6 +110,22 @@ describe('pushEligibleRuntime', () => {
        
       await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
     }
+  });
+
+  it('reads BILLING/receipt choices from the charged profile own row, never the primary', async () => {
+    // routes/notifications.js deliberately keeps billing_channel +
+    // payment_receipt_channel per charged customer row — a secondary
+    // profile's explicit 'both' must veto even when the primary sits at
+    // the seeded default.
+    const knex = stubKnex({
+      customers: (where) => (where && where.account_id
+        ? { id: 'primary-1' }
+        : { phone: '9415550123', account_id: 'acct-1' }),
+      notification_prefs: (where) => (where && where.customer_id === 'primary-1'
+        ? { payment_receipt_channel: 'sms' } // primary at default
+        : { payment_receipt_channel: 'both' }), // charged profile's explicit choice
+    });
+    await expect(_test.pushEligibleRuntime('c-2', '9415550123', 'receipt', knex)).resolves.toBe(false);
   });
 
   it('reads the channel choice from the account PRIMARY profile, not the selected property', async () => {
