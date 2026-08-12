@@ -17,8 +17,9 @@ function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
       whereNotIn() { return q; },
       orWhereNull() { return q; },
       leftJoin() { return q; },
+      orderBy() { return q; },
       select() { return rows; },
-      limit() { return rows; },
+      limit() { return q; },
       first(col) {
         void col;
         return rows[0] || null;
@@ -65,7 +66,7 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, failCatalogJoin = false } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], failCatalogJoin = false } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
@@ -75,6 +76,7 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, f
     // legacy path the classifier documents.
     'scheduled_services as s': scheduled,
     customer_turf_profiles: turfProfile ? [turfProfile] : [],
+    estimates,
   }, { failCatalogJoin });
 }
 
@@ -206,6 +208,82 @@ describe('buildReportCrossSell', () => {
     const service = SERVICE({ address_line1: '9 Rental Way', city: 'Venice', zip: '34285' });
     const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
     expect(result).toBeNull();
+  });
+
+  test('report-family guard: a pest report with zero upcoming rows never offers pest', async () => {
+    // Recurring customer whose next visit isn't seeded yet — ownership sees
+    // nothing upcoming, but the report itself proves they buy pest.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control Service' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('lawn_care');
+  });
+
+  test('one-time report identities (cockroach cleanout) do NOT count as owned pest', async () => {
+    const db = dbFor({ serviceTypes: [] });
+    const service = SERVICE({ service_type: 'Cockroach Treatment' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+  });
+
+  test('estimate seed prices a pest offer when profile and lookup carry nothing', async () => {
+    // The dimensions that priced the customer's live plan fill the gaps —
+    // prod audit 2026-08-11: without this, real reports never priced.
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'accepted',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.mode).toBe('priced');
+    expect(result.option.monthly).toBeGreaterThan(0);
+  });
+
+  test('a seed with guessed stories keeps the manual-review demotion (CTA, no price)', async () => {
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'accepted',
+        // No storiesSource on the old estimate → seed replays 'estimated' →
+        // stories_estimated manual review → the card refuses the price.
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.mode).toBe('quote_cta');
+  });
+
+  test('an estimate stamped at a different street never seeds this property', async () => {
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '9 Rental Way, Venice, FL 34285',
+        status: 'accepted',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.mode).toBe('quote_cta');
   });
 
   test('inactive customer gets no card', async () => {

@@ -354,7 +354,7 @@ const {
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
-async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
+async function resolvePropertyContext({ customer, turfProfile, propertyLookup, propertySeed = null }) {
   let source = 'customer_profile';
   const address = addressForCustomer(customer);
   // customers.property_sqft is TREATED LAWN AREA by schema (initial_schema
@@ -598,6 +598,31 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     }
   }
 
+  // Gap-fill from the customer's own PRICED-ESTIMATE inputs (service-report
+  // cross-sell): a dimension that already priced this property's live plan
+  // may fill a gap the profile and lookup both left — it is the number real
+  // money was quoted on. FILL ONLY, never override: a stored profile value,
+  // an adopted lookup read, and a measured-zero lawn all outrank the seed.
+  // Stories provenance replays the estimate's own storiesSource (default
+  // 'estimated', which correctly keeps the stories_estimated review marker
+  // for estimates that guessed).
+  let storiesFromSeed = false;
+  if (propertySeed) {
+    if (!homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
+    if (!lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
+    if (!lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) lawnSqFt = propertySeed.lawnSqFt;
+    if (!bedArea && propertySeed.bedArea > 0) {
+      bedArea = propertySeed.bedArea;
+      // An operator-measured bed area stays explicit; anything else prices
+      // as an estimate (the T&S pricer's density factor is measured-only).
+      bedAreaSource = propertySeed.bedAreaSource === 'explicit' ? 'explicit' : 'estimated';
+    }
+    if (!stories && propertySeed.stories > 0) {
+      stories = propertySeed.stories;
+      storiesFromSeed = true;
+    }
+  }
+
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
 
   const propertyInput = {
@@ -618,7 +643,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     // carries provenance without any verify flag, and a non-direct or
     // low-confidence inference must price as 'estimated', not 'lookup'.
     storiesSource: stories
-      ? storiesSourceForPricing({ stories, storiesEvidence })
+      ? (storiesFromSeed
+        ? (propertySeed?.storiesSource || 'estimated')
+        : storiesSourceForPricing({ stories, storiesEvidence }))
       : 'default',
     propertyType,
     features,
@@ -797,7 +824,7 @@ function ownedAndNotRepeatable(serviceKey, currentSet) {
   return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
 }
 
-async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup }) {
+async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup, propertySeed = null }) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
@@ -883,6 +910,7 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     customer,
     turfProfile,
     propertyLookup: lookupCanInformPricing ? lookupFn : null,
+    propertySeed,
   });
 
   // Measured AFTER the exclusion: an owned service missing a measurement must

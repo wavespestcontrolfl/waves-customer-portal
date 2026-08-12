@@ -39,6 +39,15 @@ const OFFER_PROMPTS = {
   termite: 'termite',
 };
 
+// Card display names — stable copy, independent of pricing-ai's internal
+// labels ('termite' would otherwise render as bare "Termite").
+const OFFER_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  tree_shrub: 'Tree & Shrub Care',
+  termite: 'Termite Protection',
+};
+
 // The single variant the card shows, matching the generic-prompt default the
 // pricing panel auto-selects for each family (quarterly pest, 9x lawn,
 // standard T&S; termite has exactly one variant).
@@ -78,6 +87,58 @@ function optionIsPriceable(option) {
   if (option.manualReview) return false;
   if (String(option.confidence || '').toLowerCase() === 'low') return false;
   return !!(option.monthly || option.perVisit || option.oneTime);
+}
+
+function parseJsonColumn(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function positiveOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Property-dimension seed from the customer's own estimate history: the
+// engineInputs blob that priced their live plan is the best evidence for the
+// dimensions the profile and cached lookup don't carry (prod audit 2026-08-11:
+// without it, effectively NO real report could price an offer). Accepted
+// estimates win, then the most recent priced one; an estimate stamped with a
+// DIFFERENT street never seeds this property. Fill-only semantics are
+// enforced downstream in resolvePropertyContext.
+async function loadEstimateSeed(database, customerId, primaryStreet) {
+  const rows = await database('estimates')
+    .where({ customer_id: customerId })
+    .orderBy('created_at', 'desc')
+    .limit(12)
+    .select('id', 'address', 'status', 'estimate_data');
+  const linkage = require('../estimate-property-linkage');
+  const candidates = [];
+  for (const row of rows) {
+    const estData = parseJsonColumn(row.estimate_data);
+    const inputs = estData?.engineInputs || estData?.inputs;
+    if (!inputs || typeof inputs !== 'object') continue;
+    if (primaryStreet) {
+      const street = linkage.normalizedEstimateStreet(row.address);
+      if (street && !linkage.sameScopeKey(street, primaryStreet)) continue;
+    }
+    candidates.push({ row, inputs });
+  }
+  const pick = candidates.find((c) => c.row.status === 'accepted') || candidates[0];
+  if (!pick) return null;
+  const inputs = pick.inputs;
+  const seed = {
+    homeSqFt: positiveOrNull(inputs.homeSqFt),
+    lotSqFt: positiveOrNull(inputs.lotSqFt),
+    lawnSqFt: positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf),
+    bedArea: positiveOrNull(inputs.bedArea),
+    bedAreaSource: typeof inputs.bedAreaSource === 'string' ? inputs.bedAreaSource : null,
+    stories: positiveOrNull(inputs.stories),
+    storiesSource: typeof inputs.storiesSource === 'string' ? inputs.storiesSource : null,
+  };
+  const hasAnyDimension = seed.homeSqFt || seed.lotSqFt || seed.lawnSqFt || seed.bedArea || seed.stories;
+  return hasAnyDimension ? seed : null;
 }
 
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup
@@ -127,16 +188,34 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // FAIL CLOSED on ownership: a thrown catalog join means we cannot know
     // what the customer already buys, so no recommendation may render (same
     // doctrine as customer-pricing-ai's PRICING_UNAVAILABLE).
-    const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
+    const { loadOwnedRecurringServiceKeys, ownershipKeysForRow } = require('../waveguard-existing-services');
     const streetScope = primaryStreet
       ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
       : null;
     const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
 
-    const targetKey = pickOfferTarget(ownedKeys);
+    // The report's OWN service identity counts as owned (prod audit
+    // 2026-08-11): a recurring customer whose next visit isn't seeded yet
+    // has zero upcoming rows, and without this a Quarterly Pest report would
+    // offer the customer the pest plan they were just serviced under.
+    // ownershipFamiliesFromText already refuses one-time and specialty
+    // wording, so a cockroach cleanout still resolves no family and keeps
+    // its offer-a-plan branch.
+    const reportFamilies = ownershipKeysForRow({ service_type: service.service_type });
+
+    const targetKey = pickOfferTarget([...ownedKeys, ...reportFamilies]);
     // Owns the whole ladder → nothing to offer; the report still shows the
     // referral card, which is client-side and needs no payload.
     if (!targetKey) return null;
+
+    // Best-effort seed — a failed estimate read must not kill the card, it
+    // just prices without the seed (and likely degrades to the CTA).
+    let propertySeed = null;
+    try {
+      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
+    } catch (err) {
+      logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
+    }
 
     const { buildCustomerPricingResponse } = require('../customer-pricing-ai');
     const result = await buildCustomerPricingResponse({
@@ -144,6 +223,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       prompt: OFFER_PROMPTS[targetKey],
       db: database,
       propertyLookup,
+      propertySeed,
     });
 
     // Ownership failed inside the pricer, or the prompt resolved to a
@@ -157,7 +237,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
 
     return {
       serviceKey: targetKey,
-      label: option?.serviceName || OFFER_PROMPTS[targetKey].replace(/\b\w/g, (c) => c.toUpperCase()),
+      label: OFFER_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
       currentServices: result.currentServices || [],
       option: priced ? {
