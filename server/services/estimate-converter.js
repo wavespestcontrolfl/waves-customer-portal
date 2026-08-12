@@ -3985,11 +3985,25 @@ const EstimateConverter = {
           // label-or-identity.
           const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';
           const alreadyReserved = reservedRows.some((row) => {
-            const identityMatch = !!unit.catalogServiceKey && (
-              reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey
-              || String(row.service_key_snapshot || '') === unit.catalogServiceKey
-            );
-            if (unitIsPalmInjection) return identityMatch;
+            const reservedKey = reservedServiceKeyById.get(row.service_id)
+              || String(row.service_key_snapshot || '')
+              || null;
+            const identityMatch = !!unit.catalogServiceKey && reservedKey === unit.catalogServiceKey;
+            if (unitIsPalmInjection) {
+              // The reserved PROGRAM row can still carry the ONE-TIME palm
+              // identity — commitReservation resolves engine keys to the
+              // one-time catalog row (the semiannual row has no engine_keys
+              // entry) and adoption preserves stale ids — or a bare
+              // injection label pre-relink (codex r22 P1). The reserved
+              // seeding branch relinks it to the semiannual identity, so it
+              // IS the program's first visit; promoting beside it would put
+              // two first visits in the same slot. Nutritional labels stay
+              // excluded (isPalmInjectionFamily), so a reserved nutritional
+              // visit still never suppresses the sold injection series.
+              return identityMatch
+                || reservedKey === 'palm_injection'
+                || isPalmInjectionFamily({}, { service_type: row.service_type });
+            }
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
           });
           if (alreadyReserved) continue;

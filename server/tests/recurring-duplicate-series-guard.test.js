@@ -665,13 +665,17 @@ describe('the series creators consume the guard (source guards)', () => {
     // CORRECT catalog id/snapshot — label-only matching promoted a
     // duplicate parent + series beside it.
     expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
-    expect(converterSrc).toContain('reservedServiceKeyById.get(row.service_id) === unit.catalogServiceKey');
-    expect(converterSrc).toContain("String(row.service_key_snapshot || '') === unit.catalogServiceKey");
+    expect(converterSrc).toContain('const identityMatch = !!unit.catalogServiceKey && reservedKey === unit.catalogServiceKey;');
+    expect(converterSrc).toContain("String(row.service_key_snapshot || '')");
     // PALM units match by identity ONLY (codex r21 pre-push P0): the label
     // key collapses one-time/nutritional/semiannual, and a reserved
     // one-time palm visit must never suppress the sold recurring series.
     expect(converterSrc).toContain("const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';");
-    expect(converterSrc).toContain('if (unitIsPalmInjection) return identityMatch;');
+    // …but the reserved PROGRAM row may still carry the one-time identity
+    // (commitReservation engine keys) or a bare injection label pre-relink
+    // (codex r22 P1) — those count as reserved; nutritional never does.
+    expect(converterSrc).toContain("|| reservedKey === 'palm_injection'");
+    expect(converterSrc).toContain("|| isPalmInjectionFamily({}, { service_type: row.service_type });");
     // And the promoted row's window_end reflects its OWN duration, not the
     // reserved visit's block.
     expect(converterSrc).toContain('function windowEndFromStart(');
