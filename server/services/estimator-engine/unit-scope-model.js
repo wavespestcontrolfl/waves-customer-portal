@@ -96,8 +96,11 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     'retail\\s+(?:space|unit|store|plaza)',
     '\\bflex\\s+(?:space|unit|building)\\b',
     // Suite identifiers are alphabetic as often as numeric ("Suite A",
-    // "Suite B-2") — a digit-only pattern missed them (codex r21 P1).
-    '\\bsuite\\s*#?\\s*[A-Za-z0-9][\\w-]*\\b',
+    // "Suite B-2") — a digit-only pattern missed them (codex r21 P1) — but
+    // the token must be IDENTIFIER-shaped, or "master suite bathroom" and
+    // "en-suite bathroom" read as commercial (codex r24 P2). A bare letter
+    // counts only when the phrase ends there or a separator follows.
+    '\\bsuite\\s*#?\\s*(?:\\d{1,5}[A-Za-z]?|[A-Za-z]-?\\d{1,4}|[A-Za-z](?=\\s*(?:$|[,.;])))',
     // Direct business-service wording — "pest control at my business",
     // "commercial pest control" (codex r2 P1: the premises nouns above
     // don't cover the caller naming the RELATIONSHIP instead of the

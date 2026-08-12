@@ -74,6 +74,10 @@ describe('commercialTextSignal', () => {
     expect(commercialTextSignal('pest control for a warehouse')).toBe(true);
     // …but a residential HOME office is still not a commercial premises.
     expect(commercialTextSignal('need pest control for the home office')).toBe(false);
+    // "suite" as a ROOM word is residential (codex r24 P2).
+    expect(commercialTextSignal('ants in the master suite bathroom')).toBe(false);
+    expect(commercialTextSignal('our en-suite bathroom has ants')).toBe(false);
+    expect(commercialTextSignal('Suite A, Bradenton — roaches')).toBe(true);
   });
   test('stays quiet on residential prose that mentions work', () => {
     expect(commercialTextSignal('ants in my home office and the kitchen')).toBe(false);
