@@ -764,6 +764,14 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // reps, older callers) fail closed exactly like the miner's uncovered
     // candidates: unreachable here, demand stays with the family.
     if (!service) continue;
+    // mineNoContentYet is HUB-ONLY, so the mirror must clear the floor on
+    // HUB impressions — cross-domain totals would declare a spoke-carried
+    // variant reachable through a bucket that will never emit it, and the
+    // family would be excluded for nothing (audit P2). Tuples without hub
+    // provenance fall back to the aggregate (older callers / fabricated
+    // test tuples), which only ever errs toward keeping the family.
+    const hubImpressions = t.hubImpressions != null ? t.hubImpressions : (t.impressions || 0);
+    if (hubImpressions < thresholds.minImpressionsToScore) continue;
     if (!queryDomainsCovered(t.domains, mapCoveredDomains || new Set())) continue;
     const tupleDomainPositions = (Array.isArray(t.domains) ? t.domains : [])
       .map((d) => (mappedPositions instanceof Map
@@ -1131,6 +1139,16 @@ function queryDigest(query) {
 function persistFloorFor(o) {
   const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
   if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
+    return minScoreToActFor('new_supporting_blog');
+  }
+  // no_content_yet caps out at 73 (gscOpportunity 23 + localRevenue 20 +
+  // conversionIntent 15 + contentGap 15) and the facts boost is scoped to
+  // refresh actions — so a candidate that resolves BOTH city and service,
+  // and is therefore routed to create_or_refresh_city_service_page at the
+  // 75 floor, could never persist (audit P1). Same exception, same
+  // reasoning as listicle_family above: identical demand must not be
+  // discarded for taking the SAFER page route instead of a blog post.
+  if (o.bucket === 'no_content_yet' && o.action_type === 'create_or_refresh_city_service_page') {
     return minScoreToActFor('new_supporting_blog');
   }
   if (o.bucket === 'link_boost' && o.signal_metadata?.source_bucket === 'ctr_rewrite') {
@@ -1554,10 +1572,15 @@ class GscOpportunityMiner {
         logger.warn('[gsc-opp-miner] link_boost: seo_actions fence unavailable — no companions derived this run');
         buckets.link_boost = [];
       } else {
+        // Legacy-owned pages are dropped BEFORE the cap, not after: a
+        // post-cap filter lets them consume LINK_BOOST_MAX_PER_RUN slots
+        // and then vanish, starving eligible lower-scoring pages (audit
+        // P2 — same class as the persistability filter below).
         buckets.link_boost = deriveLinkBoost(
-          [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
+          [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])]
+            .filter((o) => !linkOwned.has(routeIdentity(o.page_url))),
           { excludeKeys: occupied }
-        ).filter((o) => !linkOwned.has(routeIdentity(o.page_url)));
+        );
       }
     } catch (err) {
       logger.warn(`[gsc-opp-miner] link_boost failed: ${err.message}`);
@@ -1817,16 +1840,17 @@ class GscOpportunityMiner {
   async _pagesOwnedByOpenSeoActions(actionTypes = ['rewrite_title_meta']) {
     try {
       // status stays 'open' after execution — completion is recorded in
-      // execution_status ('done' / 'failed' / 'manual_required'), so
-      // filtering on status alone would exclude a page FOREVER once it had
-      // ever been rewritten, even after its CTR regressed (audit P1). Only
-      // UNFINISHED work owns a page. 'failed' and 'manual_required' are
-      // finished for this purpose too: nothing is in flight, and the page
-      // needs someone to act, which is exactly what this bucket does.
+      // execution_status — so filtering on status alone would exclude a
+      // page FOREVER once it had ever been actioned, even after its CTR
+      // regressed (audit P1). Only 'done' is finished: admin-seo-actions
+      // still permits /execute for every open approved action whose
+      // execution_status is not 'done', so 'failed' and 'manual_required'
+      // remain independently executable and therefore still OWN the page
+      // (audit P1).
       const rows = await db('seo_actions')
         .whereIn('action_type', actionTypes)
         .where({ status: 'open' })
-        .whereNotIn('execution_status', ['done', 'failed', 'manual_required'])
+        .whereNot('execution_status', 'done')
         .select('url');
       const out = new Set();
       for (const r of rows) {
@@ -1894,6 +1918,13 @@ class GscOpportunityMiner {
       // (queryDomainsCovered).
       .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('impressions as impressions')
+      // HUB-ONLY impressions alongside the cross-domain total: the
+      // no_content_yet mirror must judge the rep by what THAT bucket
+      // sees, and it is hub-scoped (blog publishes are hub-only). A
+      // variant with sub-threshold hub demand plus enough spoke traffic
+      // to clear the floor would otherwise read as reachable and exclude
+      // its family from BOTH buckets (audit P2).
+      .select(db.raw("sum(impressions) FILTER (WHERE domain = 'wavespestcontrol.com') as hub_impressions"))
       .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type');
     const map = new Map();
@@ -1901,6 +1932,7 @@ class GscOpportunityMiner {
       const list = map.get(r.query) || [];
       list.push({
         impressions: parseInt(r.impressions, 10) || 0,
+        hubImpressions: parseInt(r.hub_impressions, 10) || 0,
         plainPosition: Number(r.plain_avg_position) || 0,
         service_category: r.service_category || null,
         city_target: r.city_target || null,

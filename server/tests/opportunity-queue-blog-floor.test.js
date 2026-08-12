@@ -91,7 +91,7 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
+    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket = 'no_content_yet' AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
     // bindings: [claimed_at, maxAttempts, blogFloor, rewriteFloor,
     // minScore] — the lifetime-claim-budget filter binds between the claim
     // timestamp and the score floors.
@@ -157,7 +157,7 @@ describe('peek action-aware floor', () => {
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
     expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/),
+      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket = 'no_content_yet' AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/),
       [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct, THRESHOLDS.minScoreToAct],
     );
   });

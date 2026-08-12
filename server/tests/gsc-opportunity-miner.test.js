@@ -1375,6 +1375,27 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyRepReachable(rep({ position: 0 }), new Map())).toBe(false);
   });
 
+  test('the no_content_yet mirror judges HUB impressions, matching that bucket hub-only scope', () => {
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
+    const mapped = new Map([['drought tolerant plants florida\u0000wavespestcontrol.com', 45]]);
+    const base = {
+      query: 'drought tolerant plants florida',
+      impressions: 120,
+      position: 20,
+    };
+    // 120 impressions cross-domain but only 30 on the hub: mineNoContentYet
+    // (hub-only) will never emit it, so the family must keep the demand.
+    expect(listicleFamilyRepReachable(
+      { ...base, tuples: [{ impressions: 120, hubImpressions: 30, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }] },
+      new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped }
+    )).toBe(false);
+    // Same tuple with the demand actually on the hub → reachable.
+    expect(listicleFamilyRepReachable(
+      { ...base, tuples: [{ impressions: 120, hubImpressions: 120, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }] },
+      new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped }
+    )).toBe(true);
+  });
+
   test('reachability judges tuples by the QUERY MINERS aggregation, not the family weighting (Codex r14)', () => {
     // 100 imps at plain-avg 54 (volatile daily rankings): the family's
     // weighted position may sit near 8, but mineStrikingDistance uses
