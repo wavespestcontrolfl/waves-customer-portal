@@ -138,6 +138,19 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // unrelated out-of-band payment (annual-prepay-renewals' own
   // annualPrepayCoversVisit keys on it first).
   if (cols.prepaid_method) selectCols.push('prepaid_method');
+  // Appointment decomposition: estimated_price is the whole visit NET
+  // (primary + add-ons − appointment discount), so the primary line's own
+  // price and discount are what a per-application figure for the recurring
+  // service must be built from.
+  if (cols.primary_line_price) selectCols.push('primary_line_price');
+  if (cols.line_discount_dollars) selectCols.push('line_discount_dollars');
+  // Appointment-LEVEL discount signal (distinct from the primary line's own
+  // discount above): it spans the primary and every add-on with no recorded
+  // apportionment, so a composite row carrying one cannot honestly quote its
+  // primary line as a per-application price and must withhold instead.
+  if (cols.discount_id) selectCols.push('discount_id');
+  if (cols.discount_type) selectCols.push('discount_type');
+  if (cols.discount_dollars) selectCols.push('discount_dollars');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
@@ -231,7 +244,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+// opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
+// identity (the spend panel) passes its already-loaded map — including a
+// null from a failed load — so qualification and that caller's own
+// classification are guaranteed to see the SAME catalog snapshot (codex
+// #3359 r4: two sequential loads meant one could transiently fail while the
+// other succeeded, splitting tier and spend onto different identities).
+// Omitted (every other caller), the loader fetches its own.
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
@@ -248,7 +268,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+  const catalogById = (catalogFieldsByRowId !== undefined
+    ? catalogFieldsByRowId
+    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -486,6 +508,7 @@ module.exports = {
   toQualifyingKeys,
   filterRowsToStreet,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
