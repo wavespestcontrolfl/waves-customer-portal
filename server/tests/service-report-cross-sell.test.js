@@ -110,7 +110,7 @@ describe('buildReportCrossSell', () => {
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('lawn_care');
     expect(result.mode).toBe('priced');
-    expect(result.option.monthly).toBeGreaterThan(0);
+    expect(result.option.perVisit).toBeGreaterThan(0);
     expect(result.option.cadence).toMatch(/applications/);
   });
 
@@ -142,7 +142,7 @@ describe('buildReportCrossSell', () => {
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('pest_control');
     expect(result.mode).toBe('priced');
-    expect(result.option.monthly).toBeGreaterThan(0);
+    expect(result.option.perVisit).toBeGreaterThan(0);
   });
 
   test('pest + lawn customer is offered tree & shrub', async () => {
@@ -259,7 +259,7 @@ describe('buildReportCrossSell', () => {
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('pest_control');
     expect(result.mode).toBe('priced');
-    expect(result.option.monthly).toBeGreaterThan(0);
+    expect(result.option.perVisit).toBeGreaterThan(0);
   });
 
   test('a seed with guessed stories keeps the manual-review demotion (CTA, no price)', async () => {

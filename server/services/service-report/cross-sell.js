@@ -79,14 +79,16 @@ function pickOption(options = [], targetKey) {
 }
 
 // A price may only render when the engine stood behind it: no manual-review
-// flag, not low-confidence, and an actual amount. Anything else demotes the
-// card to an unpriced request-a-quote CTA — a fallback-derived number on a
-// customer surface is the trap this check exists to close.
+// flag, not low-confidence, and a real PER-APPLICATION amount (the only
+// unit the card is allowed to show — AGENTS.md per-application rule).
+// Anything else demotes the card to an unpriced request-a-quote CTA — a
+// fallback-derived number on a customer surface is the trap this check
+// exists to close.
 function optionIsPriceable(option) {
   if (!option) return false;
   if (option.manualReview) return false;
   if (String(option.confidence || '').toLowerCase() === 'low') return false;
-  return !!(option.monthly || option.perVisit || option.oneTime);
+  return Number(option.perVisit) > 0;
 }
 
 function parseJsonColumn(value) {
@@ -266,21 +268,17 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       label: OFFER_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
       currentServices: result.currentServices || [],
+      // Card-only serialization (codex #3367 r7): this rides a PUBLIC
+      // customer payload governed by the per-application rule, so monthly/
+      // annual/plan-total figures and the panel's "$X/mo" request prose
+      // never leave the server — per-application is the only price field.
       option: priced ? {
         id: option.id,
         label: option.label,
         cadence: option.cadence || '',
-        monthly: option.monthly || null,
-        annual: option.annual || null,
         perVisit: option.perVisit || null,
-        oneTime: option.oneTime || null,
-        dueAtStart: option.dueAtStart || null,
-        estimatedPlanMonthly: option.estimatedPlanMonthly || null,
-        estimatedAdditionalMonthly: option.estimatedAdditionalMonthly || null,
         waveguardTier: option.waveguardTier || null,
         confidence: option.confidence || null,
-        requestSubject: option.requestSubject || '',
-        requestDescription: option.requestDescription || '',
       } : null,
     };
   } catch (err) {

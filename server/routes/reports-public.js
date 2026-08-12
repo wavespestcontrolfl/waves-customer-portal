@@ -264,10 +264,10 @@ function hashPublicIp(value) {
 // ignore the return (fire-and-forget as ever); the cross-sell request path
 // MUST check it — its UI contract is "confirmed means recorded" (codex
 // #3367 r5).
-async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}) {
+async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}, dbConn = db) {
   if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return false;
   try {
-    await db('service_report_events').insert({
+    await dbConn('service_report_events').insert({
       service_record_id: service.id,
       customer_id: service.customer_id || null,
       event_name: eventName,
@@ -989,13 +989,13 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Event metadata too large' });
     }
 
-    const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata);
-    // The cross-sell CTA's confirmation copy promises a recorded request —
-    // a failed insert must surface as failure so the card offers a retry
-    // (codex #3367 r5). Every other event keeps its fire-and-forget
-    // analytics contract.
-    if (eventName === 'cross_sell_requested' && !recorded) {
-      return res.status(503).json({ error: 'Could not record the request — please try again' });
+    // Every event except the cross-sell request keeps its fire-and-forget
+    // analytics contract. cross_sell_requested is handled below with
+    // validate-first + a single transaction, so an event row can never
+    // exist without its actionable service_requests row (codex #3367 r7).
+    if (eventName !== 'cross_sell_requested') {
+      await recordServiceReportEvent(service, eventName, channel, req, metadata);
+      return res.json({ ok: true });
     }
 
     // Cross-sell CTA → durable service_requests row + office bell (codex
@@ -1056,11 +1056,22 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
             // idempotent (the estimate flow's partial-unique index only
             // covers estimate-linked rows; this path has estimate_id NULL).
             await trx('customers').where({ id: joined.customer_id }).forUpdate().first('id');
+            // The event row commits WITH the request row (or with the
+            // dedupe resolution to the existing open row) — one
+            // transaction, so analytics can never claim a request that has
+            // no actionable record.
+            const recordEvent = async () => {
+              const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
+              if (!recorded) throw new Error('event insert failed');
+            };
             const existing = await trx('service_requests')
               .where({ customer_id: joined.customer_id, requested_service: requestedService, source: 'service_report' })
               .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
               .first();
-            if (existing) return { deduped: true };
+            if (existing) {
+              await recordEvent();
+              return { deduped: true };
+            }
             const [request] = await trx('service_requests').insert({
               customer_id: joined.customer_id,
               requested_service: requestedService,
@@ -1074,6 +1085,7 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               // honored price (sent-quote price-lock doctrine).
               pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
             }).returning('*');
+            await recordEvent();
             return { request };
           });
           if (!outcome.deduped) {
