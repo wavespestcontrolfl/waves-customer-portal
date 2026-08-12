@@ -135,20 +135,51 @@ async function customerHasOnlyPrimaryPremises(database, customerId, customer, pr
   for (const col of ['service_address_line2', 'service_address_city', 'service_address_zip']) {
     if (cols[col]) stampCols.push(col);
   }
-  const stamped = await database('scheduled_services')
+  // property_id / source_estimate_id ride along so an UNSTAMPED row can be
+  // resolved rather than waved through (codex #3367 PR r13): dispatch's own
+  // order is stamp → property row → creating estimate → primary, and only
+  // the property_id leg is covered by the customer_properties witness above.
+  // A row that links to a secondary address through its creating ESTIMATE
+  // would otherwise certify a multi-property account as single-premises.
+  if (cols.property_id) stampCols.push('property_id');
+  if (cols.source_estimate_id) stampCols.push('source_estimate_id');
+  const rows = await database('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNotNull('service_address_line1')
     .distinct(stampCols);
-  return stamped.every((row) => {
-    // An UNSTAMPED row is not evidence of a second premises — it is the
-    // absence of evidence, and its property_id/creating-estimate resolution
-    // is already covered by the customer_properties witness above. Only a
-    // row that actually names a premises can contradict.
-    if (!String(row.service_address_line1 || '').trim()) return true;
-    return provablyPrimary(linkage.normalizedStampedStreet(
-      row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip
-    ));
-  });
+  for (const row of rows) {
+    if (String(row.service_address_line1 || '').trim()) {
+      if (!provablyPrimary(linkage.normalizedStampedStreet(
+        row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip
+      ))) return false;
+      continue;
+    }
+    // Unstamped: resolve the same way the linked-report branch does.
+    if (row.property_id) {
+      const prop = await database('customer_properties')
+        .where({ id: row.property_id })
+        .first('address_line1', 'address_line2', 'city', 'zip');
+      // An unresolvable property link names no premises — the row is not
+      // evidence of a second one (the linked-report branch suppresses on
+      // it because THAT report is the one being priced; here the row is
+      // just another visit on the account).
+      if (!prop) continue;
+      if (!provablyPrimary(linkage.normalizedStampedStreet(
+        prop.address_line1, prop.address_line2, prop.city, prop.zip
+      ))) return false;
+      continue;
+    }
+    if (row.source_estimate_id) {
+      const src = await database('estimates')
+        .where({ id: row.source_estimate_id })
+        .first('address');
+      if (!src?.address) continue;
+      if (!provablyPrimary(linkage.normalizedEstimateStreet(src.address))) return false;
+      continue;
+    }
+    // Neither stamped nor linked → the absence of evidence, not evidence of
+    // a second premises.
+  }
+  return true;
 }
 
 // Stable digest of every field the card RENDERS. Key order is fixed by
@@ -186,6 +217,29 @@ function parseJsonColumn(value) {
 function positiveOrNull(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Did the estimate this seed came from carry its own review markers (codex
+// #3367 PR r13)? engineInputs is not the whole evidence: an estimate whose
+// estimator flagged fields for on-site verification (fieldVerify — weak or
+// conflicting property sources, turf flags), or that priced at low
+// confidence, was sent as a number a human agreed to CHECK. Replaying its
+// dimensions into a DIFFERENT service's price would launder that into an
+// unqualified exact per-application figure, since the new price is graded
+// on its own inputs and knows nothing about the original's caveat.
+// Shape-tolerant on purpose: the stored blob has carried v1 and v2 result
+// shapes, and a missed marker would read as "clean" — anything that looks
+// like a verification flag demotes the offer to the quote CTA.
+function estimateRequiresFieldVerification(estData) {
+  if (!estData || typeof estData !== 'object') return false;
+  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
+  return containers.some((c) => {
+    if (!c || typeof c !== 'object') return false;
+    if (Array.isArray(c.fieldVerify) && c.fieldVerify.length) return true;
+    if (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length) return true;
+    if (c.requiresManualReview === true || c.customQuoteFlag === true) return true;
+    return String(c.pricingConfidence || '').toLowerCase() === 'low';
+  });
 }
 
 // Property-dimension seed from the customer's own estimate history: the
@@ -230,7 +284,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // Same shared-locality proof as the visit stamp (PR r6): disjoint
     // locality fields (city-only vs zip-only) must not match across cities.
     if (!scopeKeysShareLocality(street, scopeStreet)) continue;
-    candidates.push({ row, inputs });
+    candidates.push({ row, inputs, estData });
   }
   // Rows arrive newest-first, so the first surviving candidate is the most
   // recently accepted same-property estimate.
@@ -267,6 +321,12 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // phantom trees when authoritative) is safe, so the seed carries the
     // ambiguity and a tree & shrub offer demotes to the quote CTA.
     zeroTreeCountAmbiguous,
+    // The source estimate's own review posture rides along (codex #3367 PR
+    // r13): a dimension that its estimator flagged for on-site verification
+    // must not be replayed into an exact price for a different service,
+    // which would be graded high-confidence on inputs that were never
+    // qualified. Demotes to the quote CTA; the offer itself still renders.
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
@@ -486,15 +546,29 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       const { planRateLedgerEnabled } = require('../plan-rate-ledger');
       const ownedVocab = offerVocabulary(ownedKeys);
       const billedVocab = planRateLedgerEnabled() ? offerVocabulary(planRateFamilies) : new Set();
+      // EVERY report-identity family needs corroboration (codex #3367 PR
+      // r13). A non-ladder identity (mosquito, rodent monitoring) selects
+      // no rung, so it was previously exempted — but it still lands in
+      // reportFamilies, and ladderEvidence being non-empty is what decides
+      // 'add' vs 'start'. An old mosquito report on a customer with nothing
+      // active therefore made the card, the stored request subject, and the
+      // staff bell all say "Add … to your plan" to a former customer who
+      // has no plan. Corroboration is required either way; only the
+      // CONSEQUENCE differs, below.
+      const familyUncorroborated = (fam, keys) => !keys.some(
+        (key) => ownedVocab.has(key) || billedVocab.has(key)
+      );
+      const ladderKeysFor = (fam) => [...offerVocabulary([fam])].filter((key) => OFFER_LADDER.includes(key));
       const uncorroborated = reportFamilies.filter((fam) => {
-        // Only families that can MOVE the ladder carry the ambiguity harm —
-        // a rodent/termite-monitoring identity occupies no rung, so it
-        // neither advances nor needs corroboration.
-        const ladderVocab = [...offerVocabulary([fam])].filter((key) => OFFER_LADDER.includes(key));
-        if (!ladderVocab.length) return false;
-        return !ladderVocab.some((key) => ownedVocab.has(key) || billedVocab.has(key));
+        const ladderVocab = ladderKeysFor(fam);
+        return familyUncorroborated(fam, ladderVocab.length ? ladderVocab : [...offerVocabulary([fam])]);
       });
-      if (uncorroborated.length) {
+      // Only a LADDER family carries the both-answers-wrong ambiguity that
+      // suppresses the whole card on a recent report: it would either be
+      // offered to someone who owns it or advanced past for someone who
+      // doesn't. A non-ladder family moves no rung, so it simply drops.
+      const uncorroboratedLadder = uncorroborated.filter((fam) => ladderKeysFor(fam).length > 0);
+      if (uncorroboratedLadder.length) {
         // ET calendar discipline (pre-push P1): service_date is a DATE —
         // compare ET calendar days, never UTC-midnight milliseconds, or
         // the suppress/offer boundary moves hours early around DST.
@@ -513,6 +587,12 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         const reportRecent = /^\d{4}-\d{2}-\d{2}$/.test(dayKey)
           && (toUtcNoonMs(etDateString()) - toUtcNoonMs(dayKey)) <= 90 * 24 * 3600 * 1000;
         if (reportRecent) return null;
+      }
+      // Drop EVERY uncorroborated family, ladder or not: an old identity is
+      // a historical record, never current ownership, and leaving one in
+      // reportFamilies is what put "add to your plan" copy on a card for a
+      // customer with no plan.
+      if (uncorroborated.length) {
         reportFamilies = reportFamilies.filter((fam) => !uncorroborated.includes(fam));
       }
     }
@@ -628,8 +708,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // may have been an operator-confirmed zero the fallback would
     // contradict, or a synthetic zero the replay would price at nothing.
     const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+    // A seed whose own estimate required field verification never prices
+    // (codex #3367 PR r13). Conservative by design: the flag demotes even
+    // when the seed only partly filled the profile, because the estimate's
+    // caveat attached to the property evidence as a whole and the fill is
+    // per-field — proving the flagged dimension did not reach this price
+    // would need provenance the stored blob does not carry.
+    const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence
-      && !correctionsUnapplied;
+      && !correctionsUnapplied && !seedRequiresVerification;
 
     const payload = {
       serviceKey: targetKey,

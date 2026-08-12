@@ -189,6 +189,54 @@ describe('buildReportCrossSell', () => {
     });
   });
 
+  test('a seed whose own estimate required field verification never prices (PR r13 P1)', async () => {
+    // An accepted estimate sent despite fallback or low-confidence property
+    // evidence was a number a human agreed to CHECK. Replaying its
+    // dimensions into a DIFFERENT service's price would grade that price
+    // high-confidence on inputs the original estimator never qualified.
+    const args = (extra) => ({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-seed',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'accepted',
+        estimate_data: { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 }, ...extra },
+      }],
+    });
+
+    const clean = await buildReportCrossSell(SERVICE(), dbFor(args({})), { propertyLookup: missLookup });
+    expect(clean.mode).toBe('priced');
+
+    // Each marker shape the stored blob has carried demotes.
+    for (const marker of [
+      { fieldVerify: ['lotSize'] },
+      { result: { fieldVerify: ['squareFootage'] } },
+      { estimate: { fieldVerifyFlags: [{ field: 'lotSize' }] } },
+      { result: { requiresManualReview: true } },
+      { result: { pricingConfidence: 'low' } },
+    ]) {
+      const flagged = await buildReportCrossSell(SERVICE(), dbFor(args(marker)), { propertyLookup: missLookup });
+      expect(flagged).not.toBeNull();
+      expect(flagged.mode).toBe('quote_cta');
+      expect(flagged.option).toBeNull();
+    }
+  });
+
+  test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {
+    // Mosquito occupies no ladder rung, so it was exempt from
+    // corroboration — but it still landed in the evidence list, and a
+    // non-empty list is what selects "add to your plan". A former customer
+    // with nothing active was told to add to a plan they do not have.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const result = await buildReportCrossSell(SERVICE({ service_type: 'Mosquito Control' }), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.relationship).toBe('start');
+  });
+
   test('the offer fingerprint covers every rendered field', () => {
     const { offerFingerprint } = _private;
     const base = {
@@ -549,6 +597,27 @@ describe('buildReportCrossSell', () => {
         properties: [{ id: 'prop-partial', address_line1: '123 Gulf Dr' }],
       });
       expect(await buildReportCrossSell(SERVICE(), propertyRow, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('an UNSTAMPED row linking to a secondary address via its creating estimate suppresses it (PR r13 P1)', async () => {
+      // Dispatch resolves stamp → property row → creating estimate →
+      // primary. Only the property_id leg is covered by the
+      // customer_properties witness, so an estimate-linked row at another
+      // address would otherwise certify this account as single-premises.
+      const db = singlePremisesDb({
+        stampRows: [{ id: 'v-unstamped', status: 'completed', source_estimate_id: 'est-secondary' }],
+        estimates: [{ id: 'est-secondary', address: '88 Palm Ave, Venice, FL 34285', status: 'accepted' }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('an unstamped row with no property or estimate link is not evidence of a second premises', async () => {
+      const db = singlePremisesDb({
+        stampRows: [{ id: 'v-bare', status: 'completed' }],
+      });
+      const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+      expect(result).not.toBeNull();
+      expect(result.serviceKey).toBe('lawn_care');
     });
 
     test('a same-street stamp in a DIFFERENT city suppresses it', async () => {
