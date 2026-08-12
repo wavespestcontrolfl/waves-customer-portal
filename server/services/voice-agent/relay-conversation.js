@@ -104,18 +104,23 @@ function contextPromptAddendum() {
     'robot, answer honestly — you are an automated assistant; never claim to be human.',
     '',
     'ACCOUNT ACCESS RULES (non-negotiable):',
-    '- Caller identity comes ONLY from the phone number the call arrives from. If a KNOWN',
-    '  CALLER block appears below, that is the one account you may discuss. If there is no',
-    '  KNOWN CALLER block, you have NO account access on this call.',
-    '- If the caller claims to be someone else, asks about a different address or account,',
-    '  or their number did not match: share no account data at all — offer to have the',
-    '  office call them back, and capture the lead.',
-    '- Verify, don\'t recite: you may CONFIRM details the caller states themselves ("yes,',
-    '  that\'s the address we have on file"), but never read out a full street address, an',
+    '- The caller\'s VERIFIED identity comes ONLY from the phone number the call arrives',
+    '  from. If a KNOWN CALLER block appears below, that is the account their own number',
+    '  matched — you may discuss it in full.',
+    '- Callers legitimately call about someone ELSE\'s account too — a spouse\'s,',
+    '  landlord\'s, parent\'s, or tenant\'s. Use lookup_customer to find that account, and',
+    '  use what it returns to help and act. But their voice is NOT verified for that',
+    '  account, so details are confirm-don\'t-recite: you may CONFIRM details the caller',
+    '  states themselves ("yes, that\'s the address we have on file"), never read account',
+    '  details out to a voice the phone number didn\'t match. The tools already limit what',
+    '  they return for looked-up accounts; stay within it.',
+    '- Verify, don\'t recite applies everywhere: never read out a full street address, an',
     '  email address, or any payment details unprompted. Stating the open balance amount to',
-    '  the matched caller is fine.',
+    '  the matched caller about their own account is fine.',
     '- Use get_account_overview and get_service_history for account questions; never answer',
     '  them from memory or guesswork.',
+    '- Pricing is public website information: get_pricing works for ANY caller, including a',
+    '  brand-new prospect asking what a plan costs.',
   ].join('\n');
 }
 
@@ -245,6 +250,12 @@ class RelayConversation {
     // awaiting _contextReady in _runLoop can never hang a turn.
     this._callerContext = null;
     this._contextReady = null;
+    // Session-scoped lookup ref registry (Phase B lookup_customer): refs are
+    // OPAQUE per-call handles — raw customer ids never cross the model
+    // boundary in either direction, so the model can only reference accounts
+    // this call actually looked up (an invented ref resolves to nothing).
+    this._lookupRefs = new Map(); // 'C1' -> customerId
+    this._lookupRefsByCustomer = new Map(); // customerId -> 'C1'
     if (isContextEnabled()) {
       this._contextReady = resolveCallerContext(this.from)
         .then((ctx) => { this._callerContext = ctx; })
@@ -339,6 +350,16 @@ class RelayConversation {
       callSid: this.callSid,
       language: this.language,
       customerId: (this._callerContext && this._callerContext.customer && this._callerContext.customer.id) || null,
+      rememberLookup: (row) => {
+        if (!row || !row.id) return null;
+        const existing = this._lookupRefsByCustomer.get(row.id);
+        if (existing) return existing;
+        const ref = `C${this._lookupRefs.size + 1}`;
+        this._lookupRefs.set(ref, row.id);
+        this._lookupRefsByCustomer.set(row.id, ref);
+        return ref;
+      },
+      resolveLookupRef: (ref) => this._lookupRefs.get(String(ref || '').trim().toUpperCase()) || null,
       markCaptured: () => {
         this.leadCaptured = true;
       },

@@ -116,7 +116,7 @@ describe('GATE OFF (default) — everything dark, fail-closed', () => {
   });
 
   test('context tools refuse even with a customerId in ctx (defense in depth), no DB touch', async () => {
-    for (const name of ['get_account_overview', 'get_service_history', 'get_pricing']) {
+    for (const name of ['get_account_overview', 'get_service_history', 'get_pricing', 'lookup_customer']) {
       const out = await executeTool(name, { service: 'pest_control', home_sqft: 2000 }, { customerId: 'c-1111' });
       expect(out).toMatch(/not available/i);
     }
@@ -130,7 +130,7 @@ describe('GATE ON — caller recognition', () => {
 
   test('context tools register alongside the Phase 0/1 tools', () => {
     const names = activeTools().map((t) => t.name).sort();
-    expect(names).toEqual(['capture_lead', 'find_slots', 'get_account_overview', 'get_availability', 'get_pricing', 'get_service_history']);
+    expect(names).toEqual(['capture_lead', 'find_slots', 'get_account_overview', 'get_availability', 'get_pricing', 'get_service_history', 'lookup_customer']);
     expect(CONTEXT_TOOLS.every((t) => t.input_schema)).toBe(true);
   });
 
@@ -143,6 +143,11 @@ describe('GATE ON — caller recognition', () => {
     expect(p).toContain('never claim to be human');
     expect(p).toContain('ACCOUNT ACCESS RULES');
     expect(p).toContain("Verify, don't recite");
+    // Phase B: lookup + confirm-don't-recite for non-matching voices, and
+    // pricing declared public.
+    expect(p).toContain('lookup_customer');
+    expect(p).toContain("confirm-don't-recite");
+    expect(p).toContain('Pricing is public website information');
     // Everything BEFORE the price line is untouched.
     expect(p).toContain('ONLY state appointment times that a tool actually returned');
   });
@@ -279,13 +284,191 @@ describe('GATE ON — account tools', () => {
   });
 });
 
+describe('GATE ON — lookup_customer (output shaping is the point)', () => {
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
+
+  // Rows deliberately carry every sensitive field a naive SELECT * would leak;
+  // the assertions below prove none of it ever reaches the model.
+  const ROW = {
+    id: 'c-9001',
+    first_name: 'Dana',
+    last_name: 'Whitfield',
+    city: 'Sarasota',
+    address_line1: '482 Palmetto Grove Ln',
+    email: 'dana@example.com',
+    phone: '+19415550999',
+  };
+
+  function lookupCtx() {
+    const refs = new Map();
+    return {
+      customerId: null,
+      rememberLookup: (row) => {
+        const ref = `C${refs.size + 1}`;
+        refs.set(ref, row.id);
+        return ref;
+      },
+      resolveLookupRef: (ref) => refs.get(String(ref || '').trim().toUpperCase()) || null,
+      _refs: refs,
+    };
+  }
+
+  test('single match → match-found + first name + city + ref, NEVER address/email/phone/id', async () => {
+    primeDb({ customers: [ROW] });
+    const ctx = lookupCtx();
+    const out = await executeTool('lookup_customer', { name: 'Dana Whitfield' }, ctx);
+    expect(out).toContain('Dana');
+    expect(out).toContain('Sarasota');
+    expect(out).toMatch(/customer_ref: C1/);
+    // Output shaping — no record dump, ever:
+    expect(out).not.toContain('482');
+    expect(out).not.toContain('Palmetto Grove');
+    expect(out).not.toContain('dana@example.com');
+    expect(out).not.toContain('5550999');
+    expect(out).not.toContain('c-9001'); // raw id never crosses the model boundary
+    expect(out).toMatch(/confirm details they state/i);
+    assertNoWrites();
+  });
+
+  test('name tokens must each hit first OR last name; street searches address_line1; phone uses the canonical digit key', async () => {
+    primeDb({ customers: [ROW] });
+    const ctx = lookupCtx();
+    await executeTool('lookup_customer', { name: 'Dana Whitfield', street: 'Palmetto Grove', phone: '941-555-0999' }, ctx);
+    const b = builders.customers;
+    expect(b.whereNull).toHaveBeenCalledWith('deleted_at');
+    const rawSqls = [...b.whereRaw.mock.calls, ...b.orWhereRaw.mock.calls].map(([sql]) => sql);
+    expect(rawSqls.join(' ')).toMatch(/first_name ILIKE/);
+    expect(rawSqls.join(' ')).toMatch(/last_name ILIKE/);
+    expect(rawSqls.join(' ')).toMatch(/address_line1 ILIKE/);
+    // Phone matching reuses the same 10-digit key predicate as the ANI matcher.
+    const phoneParams = b.orWhereRaw.mock.calls.map(([, params]) => params).flat();
+    expect(phoneParams).toContain('9415550999');
+    // The looked-up row's SELECT never pulls address/email/phone columns.
+    expect(b.select).toHaveBeenCalledWith('id', 'first_name', 'city');
+  });
+
+  test('no usable criteria → asks for name/street/phone, no DB query', async () => {
+    const out = await executeTool('lookup_customer', { name: 'D' }, lookupCtx());
+    expect(out).toMatch(/name.*street address.*phone/i);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('AMBIGUOUS (2–5 matches) → count + first names only, asks the caller to narrow', async () => {
+    primeDb({
+      customers: [
+        { ...ROW, id: 'c-1', first_name: 'Dana' },
+        { ...ROW, id: 'c-2', first_name: 'Daniel', city: 'Venice', address_line1: '9 Oak St', email: 'dw@example.com' },
+      ],
+    });
+    const ctx = lookupCtx();
+    const out = await executeTool('lookup_customer', { name: 'Whitfield' }, ctx);
+    expect(out).toContain('2 accounts');
+    expect(out).toContain('Dana');
+    expect(out).toContain('Daniel');
+    expect(out).toMatch(/narrow/i);
+    // Ambiguous results carry NO refs, cities, or any other fields.
+    expect(out).not.toMatch(/customer_ref/);
+    expect(out).not.toContain('Sarasota');
+    expect(out).not.toContain('Venice');
+    expect(out).not.toContain('Oak St');
+    expect(ctx._refs.size).toBe(0);
+  });
+
+  test('6+ matches → too many, no names at all', async () => {
+    primeDb({ customers: Array.from({ length: 6 }, (_, i) => ({ ...ROW, id: `c-${i}`, first_name: `Name${i}` })) });
+    const out = await executeTool('lookup_customer', { name: 'Smith' }, lookupCtx());
+    expect(out).toMatch(/more than five/i);
+    expect(out).not.toContain('Name0');
+    expect(out).not.toMatch(/customer_ref/);
+  });
+
+  test('no match → suggests re-checking, captures as lead', async () => {
+    primeDb({ customers: [] });
+    const out = await executeTool('lookup_customer', { name: 'Zebulon Quark' }, lookupCtx());
+    expect(out).toMatch(/No account matches/i);
+  });
+});
+
+describe('GATE ON — disclosure tiers (enforced in tool output, not prompt language)', () => {
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
+
+  function refCtx({ ani = null } = {}) {
+    return {
+      customerId: ani,
+      resolveLookupRef: (ref) => (String(ref).toUpperCase() === 'C1' ? 'c-9001' : null),
+    };
+  }
+
+  test('looked-up (non-ANI) overview is REDACTED: dates + services + balance yes/no; no amounts, no window', async () => {
+    primeDb({
+      scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],
+      records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'gate code 4482', structured_notes: null, status: 'completed' }],
+    });
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+    openBalanceSummary.mockResolvedValue({ total: 231.75, count: 3, moreCount: 0, invoices: [] });
+    const out = await executeTool('get_account_overview', { customer_ref: 'C1' }, refCtx({ ani: 'c-someone-else' }));
+    // Dates + service names survive:
+    expect(out).toContain('Pest Control');
+    expect(out).toContain('Tuesday August 18');
+    expect(out).toContain('Friday July 31');
+    // Balance is yes/no only — never the amount:
+    expect(out).toMatch(/Open balance: yes/);
+    expect(out).not.toContain('$231.75');
+    expect(out).not.toMatch(/\$\d/);
+    // No appointment window on the redacted tier:
+    expect(out).not.toContain('9:00 AM');
+    expect(out).toMatch(/confirm details the caller states/i);
+    assertNoWrites();
+  });
+
+  test('looked-up ref that IS the ANI-matched caller → full tier (their own account)', async () => {
+    openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    const out = await executeTool('get_account_overview', { customer_ref: 'C1' }, refCtx({ ani: 'c-9001' }));
+    expect(out).toContain('$49.50');
+  });
+
+  test('redacted history: dates + service names only — visit summaries stripped', async () => {
+    primeDb({
+      records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'gate code 4482', structured_notes: null, status: 'completed' }],
+    });
+    const out = await executeTool('get_service_history', { customer_ref: 'C1' }, refCtx({ ani: null }));
+    expect(out).toContain('Friday July 31 — Lawn Care');
+    expect(out).not.toContain('SAFE:'); // the (already-scrubbed) summary itself is withheld on this tier
+    expect(out).not.toContain('4482');
+  });
+
+  test('invented/unknown customer_ref → refused, no account read', async () => {
+    const out = await executeTool('get_account_overview', { customer_ref: 'C7' }, refCtx({ ani: 'c-9001' }));
+    expect(out).toMatch(/not from a lookup_customer result/i);
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('full tier for the matched caller is unchanged by the tier plumbing', async () => {
+    primeDb({
+      records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }],
+    });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111' });
+    expect(out).toContain('SAFE:note-1');
+  });
+});
+
 describe('GATE ON — get_pricing (estimator read path only)', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
-  test('unmatched caller → refuses and forbids quoting, engine untouched', async () => {
+  test('UNMATCHED caller → get_pricing works (pricing is public website information)', async () => {
+    generateEstimate.mockReturnValue({
+      lineItems: [{
+        service: 'pest_control', perApp: 112, monthly: 37.33, annual: 448,
+        monthlyAfterDiscount: 37.33, annualAfterDiscount: 448,
+        frequency: 'quarterly', visitsPerYear: 4, initialFee: 99, requiresManualReview: false,
+      }],
+      summary: {},
+    });
     const out = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 2000 }, { customerId: null });
-    expect(out).toMatch(/Do NOT quote/i);
-    expect(generateEstimate).not.toHaveBeenCalled();
+    expect(generateEstimate).toHaveBeenCalled();
+    expect(out).toContain('$112 per application');
+    expect(out).toMatch(/Quote ONLY these numbers/);
   });
 
   test('missing required inputs → says exactly what is missing, engine untouched, no guessed number', async () => {

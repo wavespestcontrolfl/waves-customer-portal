@@ -107,29 +107,64 @@ const TOOLS = [
 // (activeTools below) and useful only for an ANI-matched caller.
 const CONTEXT_TOOLS = [
   {
+    name: 'lookup_customer',
+    description:
+      'Find a Waves customer account by the account holder\'s name and/or the ' +
+      'street address of the property and/or a phone number. Use it when the ' +
+      'caller is asking about an account that is not their own matched one — a ' +
+      'spouse\'s, landlord\'s, parent\'s, or tenant\'s account. READ-ONLY. It ' +
+      'returns at most a first name, city, and a customer_ref you can pass to ' +
+      'get_account_overview / get_service_history — never full details. If it ' +
+      'reports multiple matches, ask the caller to narrow it down and call again.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Account holder\'s name (first, last, or both), as the caller gives it' },
+        street: { type: 'string', description: 'Street address (or a distinctive part of it) of the service property' },
+        phone: { type: 'string', description: 'A phone number that may be on the account (10-digit US or E.164)' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'get_account_overview',
     description:
-      'Look up the MATCHED caller\'s Waves account: active recurring services, ' +
-      'next scheduled appointment, last completed visit, and open balance. ' +
-      'READ-ONLY. Only works when the caller\'s phone number matched exactly one ' +
-      'customer account — it returns nothing for unknown callers, and you must ' +
-      'never guess account details.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+      'Look up a Waves account: active recurring services, next scheduled ' +
+      'appointment, last completed visit, and open balance. READ-ONLY. With no ' +
+      'input it reads the MATCHED caller\'s own account (full detail). Pass a ' +
+      'customer_ref from lookup_customer to read a looked-up account instead — ' +
+      'those return limited detail (no amounts). Never guess account details.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ref: { type: 'string', description: 'A customer_ref returned by lookup_customer on THIS call. Omit for the matched caller\'s own account.' },
+      },
+      required: [],
+    },
   },
   {
     name: 'get_service_history',
     description:
-      'Look up the MATCHED caller\'s recent service history: the last few ' +
-      'completed visits with date, service name, and the customer-facing visit ' +
-      'summary. READ-ONLY, matched callers only.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+      'Look up recent service history: the last few completed visits with date ' +
+      'and service name (plus the customer-facing visit summary on the matched ' +
+      'caller\'s own account). READ-ONLY. With no input it reads the MATCHED ' +
+      'caller\'s own account; pass a customer_ref from lookup_customer for a ' +
+      'looked-up account (dates and service names only).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ref: { type: 'string', description: 'A customer_ref returned by lookup_customer on THIS call. Omit for the matched caller\'s own account.' },
+      },
+      required: [],
+    },
   },
   {
     name: 'get_pricing',
     description:
       'Look up standard recurring-plan pricing from the live Waves pricing ' +
-      'engine (the same engine the website quote calculator uses). READ-ONLY, ' +
-      'matched callers only. If it reports information is still needed, ask the ' +
+      'engine (the same engine the website quote calculator uses). READ-ONLY. ' +
+      'Pricing is public website information — use it for ANY caller, including ' +
+      'brand-new prospects. If it reports information is still needed, ask the ' +
       'caller for it and call again. You may quote ONLY the numbers this tool ' +
       'returns — never negotiate, discount, or estimate a price yourself.',
     input_schema: {
@@ -273,21 +308,46 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (!relayContext.isContextEnabled()) {
         return 'That lookup is not available. Tell the caller a Waves team member will follow up with the details.';
       }
+      // Pricing is PUBLIC website information (owner ruling, Phase B): any
+      // caller — including a brand-new prospect — may be quoted engine output.
       if (name === 'get_pricing') {
-        if (!ctx.customerId) {
-          return 'Pricing lookups are only available for recognized customer numbers on this line. '
-            + 'Do NOT quote or estimate any price — say a team member will go over pricing on the callback, and capture the lead.';
-        }
         return await relayContext.pricingText(input);
       }
-      // Account tools: identity is the ANI match made at session start — never
-      // a caller's claim. No match → no account data, offer an office callback.
-      if (!ctx.customerId) {
-        return 'No customer account matches the number this call is coming from. Do NOT share, confirm, or '
-          + 'guess any account details. Offer to have the office call them back, and capture the lead.';
+      // lookup_customer: find any account (spouse/landlord/parent calling
+      // about a shared one). Output shaping + the session ref registry
+      // (ctx.rememberLookup) keep this from ever dumping a record.
+      if (name === 'lookup_customer') {
+        return await relayContext.lookupCustomersText(input, ctx.rememberLookup);
       }
-      if (name === 'get_account_overview') return await relayContext.accountOverviewText(ctx.customerId);
-      if (name === 'get_service_history') return await relayContext.serviceHistoryText(ctx.customerId);
+      // Account tools — two disclosure tiers, enforced HERE, not in prompt
+      // language:
+      //   - no customer_ref → the ANI-matched caller's own account, full
+      //     detail (Phase A). Identity is the ANI match made at session
+      //     start — never a caller's claim. No match → no account data.
+      //   - customer_ref → an account looked up on THIS call. If it happens
+      //     to BE the matched caller's own account, full tier; otherwise the
+      //     redacted tier (dates + service names + balance yes/no).
+      let targetCustomerId = null;
+      let tier = 'full';
+      const ref = String(input.customer_ref || '').trim();
+      if (ref) {
+        const looked = typeof ctx.resolveLookupRef === 'function' ? ctx.resolveLookupRef(ref) : null;
+        if (!looked) {
+          return 'That customer_ref is not from a lookup_customer result on this call. Call lookup_customer '
+            + 'first; never invent or reuse a reference. Do not share or guess any account details.';
+        }
+        targetCustomerId = looked;
+        tier = ctx.customerId && looked === ctx.customerId ? 'full' : 'redacted';
+      } else {
+        if (!ctx.customerId) {
+          return 'No customer account matches the number this call is coming from. Do NOT share, confirm, or '
+            + 'guess any account details. If they are calling about someone else\'s account, use lookup_customer; '
+            + 'otherwise offer to have the office call them back, and capture the lead.';
+        }
+        targetCustomerId = ctx.customerId;
+      }
+      if (name === 'get_account_overview') return await relayContext.accountOverviewText(targetCustomerId, { tier });
+      if (name === 'get_service_history') return await relayContext.serviceHistoryText(targetCustomerId, { tier });
     }
     if (name === 'capture_lead') {
       // Robocall/spam: do NOT write it to the lead pipeline (createLeadFromExtraction

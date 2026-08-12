@@ -310,7 +310,20 @@ async function resolveCallerContext(from) {
 // ── Tool bodies (all READ-ONLY; called from relay-tools executeTool after
 //    the gate + matched-customer checks) ────────────────────────────────────
 
-async function accountOverviewText(customerId) {
+/**
+ * Disclosure tiers (Phase B, owner ruling: "full receptionist access"):
+ *   - 'full'     — the caller's OWN ANI-matched account (Phase A behavior):
+ *                  appointment window, visit summaries, balance AMOUNT.
+ *   - 'redacted' — an account reached via lookup_customer that the caller's
+ *                  phone did NOT match (spouse/landlord/tenant calling about a
+ *                  shared account): service DATES + service NAMES + open
+ *                  balance YES/NO only. No dollar amounts, no visit summaries,
+ *                  no appointment window, and (as everywhere in this module)
+ *                  never a street address or email. Enforced HERE in the tool
+ *                  output — never left to prompt language.
+ */
+async function accountOverviewText(customerId, { tier = 'full' } = {}) {
+  const redacted = tier !== 'full';
   const [services, nextAppointment, visits, balance] = await Promise.all([
     loadRecurringServiceNames(customerId).catch(() => []),
     loadNextAppointment(customerId).catch(() => null),
@@ -321,12 +334,24 @@ async function accountOverviewText(customerId) {
   const parts = [
     `Active recurring services: ${services.length ? services.join('; ') : 'none on file'}.`,
     nextAppointment && nextAppointment.date
-      ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointment.window ? `, window starting ${nextAppointment.window}` : ''}.`
+      ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${!redacted && nextAppointment.window ? `, window starting ${nextAppointment.window}` : ''}.`
       : 'No upcoming appointment on the schedule.',
     lastVisit && lastVisit.date
       ? `Last completed visit: ${lastVisit.date}${lastVisit.service ? ` (${lastVisit.service})` : ''}.`
       : 'No completed visits on file.',
   ];
+  if (redacted) {
+    // Yes/no ONLY — the amount belongs to the account holder's own matched line.
+    if (balance && Number(balance.total) > 0) {
+      parts.push('Open balance: yes — there is an open balance on this account. Do NOT state or estimate the amount; the account holder can see it in the portal, or the office can go over it with them directly.');
+    } else if (balance) {
+      parts.push('Open balance: none.');
+    } else {
+      parts.push('Balance could not be checked right now — do not guess; a team member can confirm.');
+    }
+    parts.push('This is a LOOKED-UP account (the caller\'s phone did not match it): confirm details the caller states themselves, don\'t recite account details to them.');
+    return parts.join(' ');
+  }
   if (balance && Number(balance.total) > 0) {
     parts.push(`Open balance: ${fmtMoney(balance.total)} across ${balance.count} open invoice${balance.count === 1 ? '' : 's'}. You may state this amount to the caller; never read card or bank details (we do not have them to read).`);
   } else if (balance) {
@@ -337,14 +362,115 @@ async function accountOverviewText(customerId) {
   return parts.join(' ');
 }
 
-async function serviceHistoryText(customerId) {
+async function serviceHistoryText(customerId, { tier = 'full' } = {}) {
+  const redacted = tier !== 'full';
   const visits = await loadCompletedVisits(customerId, 5);
   if (!visits.length) return 'No completed visits on file for this account.';
   const lines = visits.map((v) => {
     const head = [v.date, v.service].filter(Boolean).join(' — ');
-    return v.summary ? `${head}: ${v.summary}` : head;
+    // Redacted tier: dates + service names ONLY — no visit summaries (they can
+    // carry property-specific detail that belongs to the account holder).
+    return !redacted && v.summary ? `${head}: ${v.summary}` : head;
   }).filter(Boolean);
-  return `Last ${lines.length} completed visit${lines.length === 1 ? '' : 's'} (newest first): ${lines.join(' | ')}`;
+  const tail = redacted
+    ? ' (Looked-up account: dates and service names only — confirm, don\'t recite further detail.)'
+    : '';
+  return `Last ${lines.length} completed visit${lines.length === 1 ? '' : 's'} (newest first): ${lines.join(' | ')}${tail}`;
+}
+
+// ── lookup_customer — find ANY customer/lead account, output-shaped ────────
+
+// Minimum useful criteria lengths — a 1-letter name or 2-char street fragment
+// would match half the book and read as a fishing expedition.
+const LOOKUP_MIN_NAME_LEN = 2;
+const LOOKUP_MIN_STREET_LEN = 3;
+// 2..5 matches → ambiguous (count + first names, ask to narrow). 6+ → too
+// broad to even list.
+const LOOKUP_AMBIGUOUS_MAX = 5;
+
+function escapeLike(value) {
+  return String(value || '').replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Find customers by name and/or street and/or phone. READ-ONLY, and the
+ * output is SHAPED on purpose: match-found + first name + city + an opaque
+ * session ref the account tools accept — never a record dump. No street
+ * address, no email, no phone read-back, ever.
+ *
+ * `rememberLookup(customer)` comes from the session (relay-conversation): it
+ * stores the row under an opaque ref so the model can only reference accounts
+ * THIS call actually looked up — raw customer ids never cross the model
+ * boundary in either direction.
+ */
+async function lookupCustomersText(input = {}, rememberLookup) {
+  if (typeof rememberLookup !== 'function') {
+    return 'Account lookup is not available on this call. Offer to have the office call them back, and capture the lead.';
+  }
+  const name = promptSafe(input.name, 80);
+  const street = promptSafe(input.street, 80);
+  const phoneKey = aniDigitKey(input.phone);
+
+  const criteria = [];
+  if (name.length >= LOOKUP_MIN_NAME_LEN) criteria.push('name');
+  if (street.length >= LOOKUP_MIN_STREET_LEN) criteria.push('street');
+  if (phoneKey) criteria.push('phone');
+  if (!criteria.length) {
+    return 'Not enough to search on yet — ask the caller for the account holder\'s name, the street address of the property, or the phone number on the account, then call lookup_customer again.';
+  }
+
+  const db = require('../../models/db');
+  const query = db('customers')
+    .whereNull('deleted_at')
+    .select('id', 'first_name', 'city')
+    .orderBy('created_at', 'desc')
+    .limit(LOOKUP_AMBIGUOUS_MAX + 1);
+
+  if (phoneKey) {
+    const { CONTACT_MATCH_PHONE_COLS } = require('../call-recording-processor');
+    if (!Array.isArray(CONTACT_MATCH_PHONE_COLS) || !CONTACT_MATCH_PHONE_COLS.length) {
+      return 'Account lookup is not available right now. Offer to have the office call them back.';
+    }
+    query.where(function orPhones() {
+      for (const col of CONTACT_MATCH_PHONE_COLS) {
+        this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [phoneKey]);
+      }
+    });
+  }
+  if (name.length >= LOOKUP_MIN_NAME_LEN) {
+    // Every token must hit first OR last name — "Pat Smith" matches Pat Smith,
+    // not every Pat plus every Smith.
+    const tokens = name.split(/\s+/).filter((t) => t.length >= LOOKUP_MIN_NAME_LEN).slice(0, 4);
+    for (const token of tokens) {
+      const like = `%${escapeLike(token)}%`;
+      query.where(function nameToken() {
+        this.whereRaw('first_name ILIKE ?', [like]).orWhereRaw('last_name ILIKE ?', [like]);
+      });
+    }
+  }
+  if (street.length >= LOOKUP_MIN_STREET_LEN) {
+    query.whereRaw('address_line1 ILIKE ?', [`%${escapeLike(street)}%`]);
+  }
+
+  const rows = await query;
+  if (!rows.length) {
+    return 'No account matches that. Double-check the spelling or try another detail (name, street address, or phone number). If it still doesn\'t match, capture the lead and a team member will follow up.';
+  }
+  if (rows.length === 1) {
+    const row = rows[0];
+    const ref = rememberLookup(row);
+    const first = promptSafe(row.first_name, 40) || 'the account holder';
+    const city = promptSafe(row.city, 40);
+    return `Found one matching account: ${first}${city ? ` in ${city}` : ''} (customer_ref: ${ref}). `
+      + 'You may use this ref with get_account_overview / get_service_history to help the caller. '
+      + 'Remember: this account did not match the caller\'s phone number — confirm details they state, don\'t recite details to them.';
+  }
+  const firstNames = [...new Set(rows.map((r) => promptSafe(r.first_name, 40)).filter(Boolean))];
+  if (rows.length > LOOKUP_AMBIGUOUS_MAX) {
+    return 'That matches more than five accounts — too many to pick from. Ask the caller for another detail (last name, street address, or the phone number on the account) and call lookup_customer again with more to go on.';
+  }
+  return `That matches ${rows.length} accounts (first names: ${firstNames.join(', ')}). `
+    + 'Ask the caller to narrow it down — a last name, the street address, or the phone number on the account — then call lookup_customer again. Do not guess which one they mean.';
 }
 
 // ── get_pricing — the estimator's own engine, nothing else ────────────────
@@ -454,7 +580,9 @@ module.exports = {
   buildKnownCallerBlock,
   accountOverviewText,
   serviceHistoryText,
+  lookupCustomersText,
   pricingText,
+  aniDigitKey,
   promptSafe,
   speakDate,
   fmtMoney,

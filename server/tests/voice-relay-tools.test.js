@@ -62,12 +62,12 @@ describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)'
     expect(activeTools()).toEqual(TOOLS);
   });
 
-  test('gate on → the three read-only context tools register too', () => {
+  test('gate on → the four read-only context tools register too', () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
     expect(activeTools().map((t) => t.name).sort()).toEqual(
-      ['capture_lead', 'find_slots', 'get_account_overview', 'get_availability', 'get_pricing', 'get_service_history']
+      ['capture_lead', 'find_slots', 'get_account_overview', 'get_availability', 'get_pricing', 'get_service_history', 'lookup_customer']
     );
-    expect(CONTEXT_TOOLS).toHaveLength(3);
+    expect(CONTEXT_TOOLS).toHaveLength(4);
   });
 
   test('gate off → executeTool refuses context tools outright', async () => {
