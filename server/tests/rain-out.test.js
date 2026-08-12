@@ -1753,7 +1753,7 @@ describe('rain-out service', () => {
         findConflictingVisits.mockImplementation(async ({ windowStart }) => (
           windowStart === '11:00'
             ? [{
-              id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+              id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed', service_type: 'Mosquito Treatment',
               window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
             }]
             : []
@@ -1789,6 +1789,51 @@ describe('rain-out service', () => {
         // Day options arrive conflict-free from the rebooker's own candidate
         // probe — no annotation, no extra queries.
         expect(options.days[0].conflicts).toBeUndefined();
+      } finally {
+        jest.useRealTimers();
+        findConflictingVisits.mockReset();
+        findConflictingVisits.mockResolvedValue([]);
+      }
+    });
+
+    test('another technician\'s stop is never named on the tech-reachable payload', async () => {
+      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        // getOptions is served by GET /api/tech/services/:id/rain-out-options,
+        // so a globally-probed row belonging to ANOTHER tech must come back
+        // window-only — names stay on the admin-only checkTarget path.
+        findConflictingVisits.mockImplementation(async ({ windowStart }) => (
+          windowStart === '11:00'
+            ? [{
+              id: 'svc-8', customer_id: 'cust-8', technician_id: 'tech-OTHER', status: 'confirmed',
+              service_type: 'Mosquito Treatment', window_start: '11:00:00', window_end: '12:00:00',
+              estimated_duration_minutes: 60, reservation_expires_at: null,
+            }]
+            : []
+        ));
+        const customersQuery = chain({ rows: [{ id: 'cust-8', first_name: 'cust-8a', last_name: 'cust-8b' }] });
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+          customers: [customersQuery],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.sameDay[0].conflicts).toEqual([{
+          windowStart: '11:00',
+          windowEnd: '12:00',
+          customerName: null,
+          serviceType: null,
+          isHold: false,
+          isRouteSibling: false,
+        }]);
+        // Not just scrubbed from the response — never looked up at all.
+        expect(customersQuery.whereIn).not.toHaveBeenCalled();
       } finally {
         jest.useRealTimers();
         findConflictingVisits.mockReset();

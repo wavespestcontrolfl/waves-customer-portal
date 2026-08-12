@@ -622,8 +622,18 @@ function sameDayOptions(now = new Date()) {
 // locked probe stays the enforcer, this only makes the rejection visible
 // BEFORE the Move tap. Warn-only by design: the sheets never disable Move
 // on this data (it can be seconds stale in either direction).
+// nameScope gates WHO gets identified, and defaults to nobody (fail
+// closed). The probe is tech-blind by design — it must see every
+// technician's rows to mirror commit — but the payload rides two very
+// different trust levels: `checkTarget` is admin-only (requireAdmin) and
+// passes NAME_ALL, while `getOptions` is reachable by an assigned tech
+// (GET /api/tech/services/:id/rain-out-options), so it passes its own
+// technician id and every other tech's row degrades to the sheets'
+// "another appointment" fallback. Window + hold status stay on every row:
+// non-identifying, and they're what makes the warning actionable.
 const TARGET_CONFLICT_LIMIT = 3;
-async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = null } = {}) {
+const NAME_ALL = Symbol('rain-out:name-all');
+async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = null, nameScope = null } = {}) {
   const { findConflictingVisits } = require('./scheduling/occupancy');
   const rows = await findConflictingVisits({
     date,
@@ -643,7 +653,10 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
   const isSibling = (row) => !!routeSiblingIds?.has(String(row.id));
   const kept = [...rows.filter((r) => !isSibling(r)), ...rows.filter(isSibling)]
     .slice(0, TARGET_CONFLICT_LIMIT);
-  const customerIds = [...new Set(kept.map((r) => r.customer_id).filter(Boolean))];
+  const canName = (row) => (nameScope === NAME_ALL
+    ? true
+    : !!nameScope && String(row.technician_id) === String(nameScope));
+  const customerIds = [...new Set(kept.filter(canName).map((r) => r.customer_id).filter(Boolean))];
   const customers = customerIds.length
     ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
     : [];
@@ -666,8 +679,10 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
     return {
       windowStart: toHHMM(row.window_start),
       windowEnd,
-      customerName: row.customer_id ? (nameById.get(String(row.customer_id)) || null) : null,
-      serviceType: row.service_type || null,
+      customerName: (canName(row) && row.customer_id)
+        ? (nameById.get(String(row.customer_id)) || null)
+        : null,
+      serviceType: canName(row) ? (row.service_type || null) : null,
       // customer-NULL rows with a live reservation stamp are estimate-slot
       // holds — real occupancy, but there's no customer name to show.
       isHold: !row.customer_id && !!row.reservation_expires_at,
@@ -701,6 +716,9 @@ async function checkTarget({ serviceId, target }) {
   const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
   const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window, {
     routeSiblingIds: new Set(route.map((j) => String(j.id))),
+    // Admin-only route (requireAdmin) — the dispatcher needs the name to
+    // decide, and this is the ONLY path that resolves names globally.
+    nameScope: NAME_ALL,
   });
   return { ok: true, conflicts };
 }
@@ -765,7 +783,12 @@ async function getOptions(serviceId) {
   const routeSiblingIds = new Set(route.map((j) => String(j.id)));
   for (const opt of sameDay) {
     try {
-      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window, { routeSiblingIds });
+      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window, {
+        routeSiblingIds,
+        // Tech-reachable payload: only THIS technician's own stops are
+        // named; another tech's customer stays "another appointment".
+        nameScope: service.technician_id || null,
+      });
     } catch (err) {
       logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
       opt.conflicts = [];
