@@ -697,7 +697,7 @@ function buildListicleFamilyRefreshOpp(entries) {
 // resolution alone is not enough (Codex r12): striking_distance takes any
 // ≥50-imp query ranking 4-15 regardless of the own-page map, while
 // no_content_yet takes >15 ONLY when no owned page usefully ranks for the
-// query (noContentYetMapServed over gsc_query_page_map) — a rep at
+// query (noContentYetMapEmittable over gsc_query_page_map) — a rep at
 // position 20 that a mapped page serves at ≤ answerGapPositionMax is
 // emitted by NEITHER, so excluding its family would lose the demand to
 // no bucket at all. Top-3 reps are irrelevant here: family admission drops
@@ -749,7 +749,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     if (pos <= thresholds.strikingDistancePositionMax) continue;
     // no_content_yet mirror — MUST match mineNoContentYet's admission
     // exactly (the reachability contract). Its served-ness test is
-    // noContentYetMapServed over true query→page rows, gated on map
+    // noContentYetMapEmittable over true query→page rows, gated on map
     // coverage judged PER TUPLE from that tuple's own contributing
     // domains — the miner checks each (query, service, city, intent)
     // candidate's domains individually, so a union across tuples would
@@ -760,7 +760,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // candidates: unreachable here, demand stays with the family.
     if (!service) continue;
     if (!queryDomainsCovered(t.domains, mapCoveredDomains || new Set())) continue;
-    if (noContentYetMapServed(mappedBestPos, thresholds)) continue;
+    if (!noContentYetMapEmittable(mappedBestPos, thresholds)) continue;
     const cand = {
       bucket: 'no_content_yet',
       query: rep.query,
@@ -842,25 +842,28 @@ function ownPageKey(service, city) {
   return `${service || ''}::${city || ''}`;
 }
 
-// no_content_yet served-ness, judged on TRUE query→page evidence: an owned
-// page mapped at ≤ answerGapPositionMax means the query is
-// refresh/answer-gap territory (mineAnswerGap's own window), so minting new
-// content beside it would be a competing asset; unmapped demand or a best
-// page beyond that window is a genuine content gap. Mere map-row existence
-// is deliberately NOT the test (same doctrine as the listicle_family served
-// check): every GSC impression maps to whatever owned page happened to
-// show, so existence alone would keep the bucket inert — which is exactly
-// what the previous service+city coverage check did (any page sharing the
-// service classification marked the whole segment "covered"; zero rows
-// ever persisted, verified against prod 2026-08-11).
+// no_content_yet admission, judged on TRUE query→page evidence: emit only
+// when the query IS mapped and its best owned page ranks beyond
+// answerGapPositionMax. Both failure directions close:
+//  - mapped at ≤ answerGapPositionMax → refresh/answer-gap territory
+//    (mineAnswerGap's own window); new content beside it would compete.
+//    Mere map-row existence is deliberately NOT the served test (same
+//    doctrine as the listicle_family served check) — existence alone kept
+//    the bucket inert, like the retired service+city coverage check did
+//    (zero rows ever persisted, verified against prod 2026-08-11).
+//  - UNMAPPED → missing evidence, not proof of absence (audit P1 #4):
+//    every gsc_queries impression originated from SOME owned URL, and the
+//    query+page breakdown omits low-volume rows — emitting on absence
+//    could mint content beside an unseen ranking page. At current prod
+//    data this costs nothing: every real candidate carries a mapping.
 //
 // SHARED by mineNoContentYet admission and listicleFamilyRepReachable's
 // no_content_yet mirror — the two must stay in lockstep or family demand
 // double-emits / strands (the reachability contract).
-function noContentYetMapServed(bestMappedPosition, thresholds = THRESHOLDS) {
+function noContentYetMapEmittable(bestMappedPosition, thresholds = THRESHOLDS) {
   return bestMappedPosition != null
     && Number.isFinite(bestMappedPosition)
-    && bestMappedPosition <= thresholds.answerGapPositionMax;
+    && bestMappedPosition > thresholds.answerGapPositionMax;
 }
 
 // Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
@@ -2912,7 +2915,7 @@ class GscOpportunityMiner {
     // whole segment covered when ANY page shared the classification —
     // with 28d of cross-property data every segment has some page, so the
     // bucket emitted ZERO rows all-time (verified prod 2026-08-11).
-    // noContentYetMapServed is the corrected test; the reachability mirror
+    // noContentYetMapEmittable is the corrected test; the reachability mirror
     // in listicleFamilyRepReachable applies the same one.
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
@@ -2955,7 +2958,7 @@ class GscOpportunityMiner {
     const out = [];
     for (const { q, service, city } of candidates) {
       if (!queryDomainsCovered(q.domains, covered)) { uncovered += 1; continue; }
-      if (noContentYetMapServed(bestMapped.get(q.query))) continue;
+      if (!noContentYetMapEmittable(bestMapped.get(q.query))) continue;
 
       const opp = {
         bucket: 'no_content_yet',
@@ -3194,7 +3197,7 @@ module.exports._internals = {
   extractSpecialtyTopic,
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
-  noContentYetMapServed,
+  noContentYetMapEmittable,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
