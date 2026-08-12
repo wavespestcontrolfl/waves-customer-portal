@@ -227,15 +227,13 @@ async function mineSmsPairs({ since, until, skipped }) {
   return rows;
 }
 
-async function mineCallTranscripts({ since, skipped }) {
-  const consentColumnPresent = await hasCallConsentColumn();
-  if (!consentColumnPresent) {
-    logger.warn('[voice-corpus] call_log.call_recording_consent_disclaimer_played missing — all calls excluded');
-    skipped.consent_column_missing = (skipped.consent_column_missing || 0) + 1;
-    return [];
-  }
-
-  const calls = await db('call_log')
+/**
+ * Base eligibility for CALL transcripts entering the brand-voice corpus.
+ * Exported (like call-research-miner's eligibleCallsQuery) so the filter set is
+ * directly assertable in SQL rather than only reachable through a live run.
+ */
+function eligibleCallTranscriptsQuery({ since }) {
+  return db('call_log')
     .where('direction', 'inbound')
     // Recency = the call happened in the window OR its recording was just
     // re-transcribed by the backfill (old calls upgraded to diarized
@@ -249,6 +247,26 @@ async function mineCallTranscripts({ since, skipped }) {
     // The live processor marks spam/voicemail on processing_status WITHOUT
     // stamping call_outcome — those transcripts must not train the voice.
     .where((q) => q.whereNull('processing_status').orWhereNotIn('processing_status', ['spam', 'voicemail']))
+    // ⭐ SELF-TRAINING LOOP CUT. relay-transcript.js writes `Agent:` / `Caller:`
+    // labels, so an AI-agent call satisfies hasAgentCallerLabels and every other
+    // filter here — and this corpus feeds voice-profile-distiller, whose
+    // approved output is injected straight back into the agent's own system
+    // prompt. Sandy would be learning to sound like Sandy. `transcription_provider
+    // = 'conversation_relay'` is the discriminator the relay already stamps.
+    // NULL-safe: the column post-dates most rows, and a bare whereNot would
+    // evaluate UNKNOWN on NULL and silently drop every legacy human call.
+    .where((q) => q.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay'));
+}
+
+async function mineCallTranscripts({ since, skipped }) {
+  const consentColumnPresent = await hasCallConsentColumn();
+  if (!consentColumnPresent) {
+    logger.warn('[voice-corpus] call_log.call_recording_consent_disclaimer_played missing — all calls excluded');
+    skipped.consent_column_missing = (skipped.consent_column_missing || 0) + 1;
+    return [];
+  }
+
+  const calls = await eligibleCallTranscriptsQuery({ since })
     .select('id', 'customer_id', 'transcription', 'call_outcome', 'created_at',
       'retranscribed_at', 'call_recording_consent_disclaimer_played');
 
@@ -337,6 +355,7 @@ async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
 
 module.exports = {
   mineVoiceCorpus,
+  eligibleCallTranscriptsQuery,
   SCHEMA_VERSION,
   // Production contract shared with the re-transcription backfill: a
   // transcript only enters the corpus with BOTH speaker labels present.

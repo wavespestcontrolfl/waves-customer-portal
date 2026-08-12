@@ -14,6 +14,15 @@
  *   - admin-triage (routes/admin-triage.js) renders `call_log.call_summary`
  *     next to `lead_synopsis` on any triage card the call raised.
  *
+ * ⚠️ THE RELAY NEVER WRITES `processing_status`. See buildTranscriptUpdate's
+ * note: stamping it 'processed' made a relay-failure row unclaimable, so the
+ * voicemail the caller then left on the SAME CallSid was never transcribed and
+ * never produced a lead. The relay also writes nothing fenced on the
+ * processor's `processing_token` claim mutex — the columns it does write
+ * (transcription*, call_summary) are written once, at session close, before any
+ * voicemail recording can exist, and processRecording legitimately overwrites
+ * them if a real voicemail follows.
+ *
  * COLUMN CONTRACT is the call pipeline's own, not a new one
  * (call-recording-processor.js transcript write, ~line 5913): `transcription`
  * (text), `transcription_status` 'completed', `transcription_provider`,
@@ -148,12 +157,33 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
         ended_at: new Date().toISOString(),
       }),
       call_summary: buildCallSummary({ modelSummary, turns, reason, leadCaptured }),
-      // Terminal for the recording pipeline: this call has no recording to
-      // download and nothing for processRecording to do, so it must not sit in
-      // an unprocessed sweep forever. (ai_extraction is deliberately left NULL
-      // — the relay runs no extraction, and a synthesized one would enter the
-      // extraction eval cohorts under false pretenses.)
-      processing_status: 'processed',
+      // ⚠️ `processing_status` IS DELIBERATELY NOT WRITTEN HERE.
+      //
+      // It used to be stamped 'processed' ("this call has no recording, so it
+      // must not sit in an unprocessed sweep forever"). That silently ate the
+      // caller's voicemail in the exact failure ordering this lane is most
+      // likely to hit:
+      //   WS drops → end() writes 'processed' (the voicemail-clobber fence
+      //   passes, because call_outcome is still NULL at that moment) → Twilio
+      //   POSTs /relay-complete with an ErrorCode → the caller is sent to
+      //   voicemail on the SAME CallSid → they leave a real message →
+      //   call-recording-processor refuses the row at BOTH gates
+      //   (the `processing_status === 'processed'` early return, and the atomic
+      //   claim's `processing_status IS DISTINCT FROM 'processed'` predicate).
+      // Result: the voicemail was never transcribed, no lead was created, the
+      // row was invisible to processAllPending, and it READ as a successfully
+      // AI-handled call.
+      //
+      // Leaving it NULL keeps the row claimable, so a subsequent real voicemail
+      // still processes normally. It does not resurrect the original concern:
+      // processAllPending additionally requires a recording (recording_url
+      // non-empty, or the PAN-quarantine branch) plus >10s of audio, and a relay
+      // call with no voicemail has neither — so a NULL status alone never puts
+      // it in the sweep.
+      //
+      // (ai_extraction is likewise deliberately left NULL — the relay runs no
+      // extraction, and a synthesized one would enter the extraction eval
+      // cohorts under false pretenses.)
     };
   } catch (err) {
     logger.error(`[voice-relay-transcript] transcript composition FAILED callSid=${callSid || 'n/a'}: ${err.message}`);

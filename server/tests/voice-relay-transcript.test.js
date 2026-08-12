@@ -117,7 +117,7 @@ describe('transcript composition (pure)', () => {
 });
 
 describe('end() persists the transcript on the SAME call_log row', () => {
-  test('normal close → pipeline column contract, model summary, processed status', async () => {
+  test('normal close → pipeline column contract, model summary, and NO processing_status', async () => {
     const { update, guardQ, builder } = primeCallLog();
     const convo = conversationWithTurns();
     convo.leadCaptured = true;
@@ -133,9 +133,13 @@ describe('end() persists the transcript on the SAME call_log row', () => {
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
       transcription_status: 'completed',
       transcription_provider: 'conversation_relay',
-      processing_status: 'processed',
       call_summary: 'Ants in the kitchen; wants someone out this week.',
     });
+    // ⚠️ THE VOICEMAIL-EATER. Stamping 'processed' here made the row
+    // unclaimable by call-recording-processor, so a voicemail left on the SAME
+    // CallSid after a relay failure was never transcribed and never became a
+    // lead. The relay must leave the status alone.
+    expect(row).not.toHaveProperty('processing_status');
     expect(row.transcription).toContain('Caller: Hi, I have ants in the kitchen');
     expect(row.transcription).toContain('Agent: I can help with that.');
     expect(row.transcription).toContain('[tool] get_availability');
@@ -151,6 +155,39 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     // The guard is still in place around the whole update.
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+  });
+
+  // ⭐ THE VOICEMAIL-EATING ORDERING, end to end.
+  //   WS drops → end() runs while call_outcome is still NULL (so the
+  //   voicemail-clobber fence PASSES and the row is written) → Twilio POSTs
+  //   /relay-complete with an ErrorCode → the caller is sent to voicemail on the
+  //   SAME CallSid → they leave a real message.
+  // If end() stamped processing_status='processed', call-recording-processor
+  // refuses that row at BOTH gates and the voicemail is never transcribed, never
+  // becomes a lead, and is invisible to processAllPending — while the row reads
+  // as a successfully AI-handled call.
+  test('relay-failure ordering: end() leaves the row CLAIMABLE for the voicemail that follows', async () => {
+    const { update } = primeCallLog({ rows: 1 }); // fence passes: call_outcome still NULL
+    const convo = conversationWithTurns('CA-drop-then-voicemail');
+    await convo.end('ws_close'); // WS dropped mid-call
+
+    const row = update.mock.calls[0][0];
+    expect(row.transcription).toBeTruthy(); // the audit trail is still written
+    // Statuses call-recording-processor REFUSES to claim (processRecording's
+    // early return + the atomic claim's IS DISTINCT FROM predicates).
+    const UNCLAIMABLE = ['processed', 'processing'];
+    expect(row).not.toHaveProperty('processing_status');
+    expect(UNCLAIMABLE).not.toContain(row.processing_status);
+  });
+
+  // #2177 voicemail-clobber guard: unchanged, and still fences the transcript.
+  test('#2177 guard still holds — the transcript rides the SAME fenced UPDATE', async () => {
+    const { update, guardQ } = primeCallLog({ rows: 0 }); // 0 rows: /relay-complete won the race
+    const convo = conversationWithTurns('CA-already-voicemail');
+    await convo.end('ws_close');
+    expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
+    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(update).toHaveBeenCalledTimes(1); // one statement, not two
   });
 
   test('HANGUP with no capture_lead → transcript still written, fallback summary, floor lead still runs', async () => {

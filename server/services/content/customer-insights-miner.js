@@ -126,6 +126,13 @@ function normalizePhone(raw) {
 
 function gateCallRecord(row, { consentColumnPresent }) {
   if (!consentColumnPresent) return { ok: false, reason: 'consent_column_missing' };
+  // ⭐ NEVER MINE THE AI AGENT'S OWN CALLS. A ConversationRelay transcript is
+  // Waves' own generated dialogue; admitting it as "customer insight" feeds the
+  // content engine the agent's words as if a customer had said them.
+  // Gated here rather than in the query so the run summary counts it, and so a
+  // pre-migration DB (the query is wrapped in a warn-only try/catch) cannot
+  // silently zero out the whole call source.
+  if (row.transcription_provider === 'conversation_relay') return { ok: false, reason: 'ai_agent_call' };
   if (row.call_recording_consent_disclaimer_played !== true) return { ok: false, reason: 'consent_not_played' };
   if (['wrong_number', 'spam'].includes(row.call_outcome)) return { ok: false, reason: 'non_service_call' };
   const text = row.lead_synopsis || row.transcription;
@@ -215,7 +222,7 @@ class CustomerInsightsMiner {
         .modify((qb) => {
           // Pluck whichever text columns exist; both are nullable so a
           // record may have neither and get gated out as no_text.
-          qb.select('id', 'lead_synopsis', 'transcription', 'call_outcome', 'created_at');
+          qb.select('id', 'lead_synopsis', 'transcription', 'call_outcome', 'created_at', 'transcription_provider');
           if (consentColumnPresent) qb.select('call_recording_consent_disclaimer_played');
         });
       for (const row of calls) {
