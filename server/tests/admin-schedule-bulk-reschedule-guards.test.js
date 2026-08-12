@@ -84,6 +84,8 @@ function chain(overrides = {}) {
   Object.assign(builder, {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue(),
@@ -555,12 +557,17 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
     reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
   }]);
 
-  // The CAS carried the full observed snapshot — status AND the complete
-  // schedule triple (date + start + END).
+  // The CAS carried the full observed snapshot — status, the complete
+  // schedule triple (date + start + END), and the tracker state (a
+  // concurrent En Route flip advances track_state without touching status).
   expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
   expect(updateChain.where).toHaveBeenCalledWith({
     scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
   });
+  // applyTrackLifecycleCas: track_state via where, null stamps via whereNull.
+  expect(updateChain.where).toHaveBeenCalledWith({ track_state: null });
+  expect(updateChain.whereNull).toHaveBeenCalledWith('en_route_at');
+  expect(updateChain.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
   // No audit row for a move that did not happen.
   expect(trx).not.toHaveBeenCalledWith('reschedule_log');
 });
