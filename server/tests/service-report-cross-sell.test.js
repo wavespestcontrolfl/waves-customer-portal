@@ -69,11 +69,14 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], catalogRows = [], failCatalogJoin = false } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], catalogRows = [], stampRows = [], failCatalogJoin = false } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
-    scheduled_services: scheduled,
+    // stampRows go FIRST so the builder's raw-stamp first() read sees them
+    // (the fake's first() returns rows[0]); completed stamp rows carry no
+    // upcoming lifecycle so the ownership loader ignores them.
+    scheduled_services: [...stampRows, ...scheduled],
     // Catalog join returns the same rows: service_key/service_name stay
     // undefined, so classification falls to service_type text — the plain-row
     // legacy path the classifier documents. catalogRows adds rows visible to
@@ -233,6 +236,47 @@ describe('buildReportCrossSell', () => {
       serviceTypes: ['Pest Control'],
     });
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('a line1-only raw stamp (no stamped city or zip) suppresses the card — locality unprovable', async () => {
+    // The route COALESCEs stamped city/zip to the customer mirror, which
+    // makes a line1-only stamp masquerade as the primary locality; the raw
+    // stamp is the truth and an unlocalized one cannot rule out a
+    // same-street property in another city.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{ id: 'stamp-1', status: 'completed', service_address_line1: '123 Gulf Dr' }],
+    });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'stamp-1' }), db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('a fully-localized raw stamp at the primary property keeps the card', async () => {
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'stamp-1', status: 'completed',
+        service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236',
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'stamp-1' }), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('lawn_care');
+  });
+
+  test('a raw stamp on the same street in a DIFFERENT city suppresses the card', async () => {
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'stamp-1', status: 'completed',
+        service_address_line1: '123 Gulf Dr', service_address_city: 'Venice', service_address_zip: '34285',
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE({ scheduled_service_id: 'stamp-1' }), db, { propertyLookup: missLookup });
     expect(result).toBeNull();
   });
 

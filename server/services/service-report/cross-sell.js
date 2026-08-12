@@ -222,11 +222,35 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // describe ONE property (a multi-property customer could earn an
     // unearned combined tier or another property's price), so no card.
     if (!primaryStreet) return null;
-    const reportStreet = linkage.normalizedStampedStreet(
-      service.address_line1, service.address_line2, service.city, service.zip
-    );
-    if (reportStreet && !linkage.sameScopeKey(reportStreet, primaryStreet)) {
-      return null;
+    // The joined row COALESCEs stamped city/zip to the customer mirror, so
+    // a stamp carrying ONLY line1 masquerades as the primary locality
+    // (codex #3367 PR r4): a multi-property customer with the same street
+    // and unit in two cities would price the wrong premises. When the
+    // linked scheduled row is available, the RAW stamp is the truth: a
+    // stamped line1 with no stamped city or zip is unprovable — no card;
+    // a raw-localized stamp compares strictly. Rows without a linked visit
+    // keep the joined-row comparison (a divergent line1 there is still a
+    // genuinely stamped divergence).
+    if (service.scheduled_service_id) {
+      const rawStamp = await database('scheduled_services')
+        .where({ id: service.scheduled_service_id })
+        .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+      if (rawStamp && rawStamp.service_address_line1) {
+        const rawKey = linkage.normalizedStampedStreet(
+          rawStamp.service_address_line1, rawStamp.service_address_line2,
+          rawStamp.service_address_city, rawStamp.service_address_zip
+        );
+        if (!rawKey || linkage.scopeKeyLacksLocality(rawKey)) return null;
+        if (!linkage.sameScopeKey(rawKey, primaryStreet)) return null;
+      }
+      // No raw stamped line1 → the visit ran at the primary property.
+    } else {
+      const reportStreet = linkage.normalizedStampedStreet(
+        service.address_line1, service.address_line2, service.city, service.zip
+      );
+      if (reportStreet && !linkage.sameScopeKey(reportStreet, primaryStreet)) {
+        return null;
+      }
     }
 
     // FAIL CLOSED on ownership: a thrown catalog join means we cannot know
