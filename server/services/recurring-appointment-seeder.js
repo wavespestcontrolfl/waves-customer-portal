@@ -179,7 +179,9 @@ function patternFromVisitsPerYear(value) {
 
 function serviceKeyFor(value = {}) {
   const raw = String(
-    value.service || value.service_key || value.key || value.kind
+    // serviceKey (camel) joined the vocabulary with service_key (codex r22
+    // pre-push P1) — the admin/estimate line spelling.
+    value.service || value.serviceKey || value.service_key || value.key || value.kind
     || value.name || value.label || value.displayName || value.service_type || ''
   ).toLowerCase();
   // Multi-service composite bookings ('mosquito+pest_control' keys or

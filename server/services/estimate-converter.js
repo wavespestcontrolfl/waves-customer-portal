@@ -186,7 +186,10 @@ function determineTier(serviceCount, hasRecurringServices = false) {
 }
 
 function recurringServiceKey(svc = {}) {
-  const raw = String(svc.service || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
+  // serviceKey/service_key joined the vocabulary (codex r22 pre-push P1):
+  // a persisted { service_key: 'palm_injection' } line otherwise resolved
+  // through its LABEL alone and could misclassify.
+  const raw = String(svc.service || svc.serviceKey || svc.service_key || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
   const words = raw.replace(/[_-]+/g, ' ');
   if (
     raw.includes('palm_injection')
@@ -2654,10 +2657,13 @@ const PALM_INJECTION_TOKEN_RE = /injection/i;
 function isPalmInjectionFamily(svc = {}, parentRow = {}) {
   if (seedingFamilyKey(svc, parentRow) !== 'palm_injection') return false;
   const labels = [
-    svc.service, svc.serviceKey, svc.key,
+    svc.service, svc.serviceKey, svc.service_key, svc.key,
     svc.name, svc.serviceName, svc.service_name, svc.displayName, svc.label,
     parentRow?.service_type,
   ].map((value) => String(value || ''));
+  // An explicit palm_treatment identity (or any nutritional spelling)
+  // outranks injection-looking labels on the same line (codex r22
+  // pre-push P1).
   if (labels.some((value) => value === 'palm_treatment' || PALM_NUTRITIONAL_RE.test(value))) return false;
   // POSITIVE injection evidence required (codex r21 P0): legacy prepay
   // terms and service rows store the bare historical labels 'Palm' /

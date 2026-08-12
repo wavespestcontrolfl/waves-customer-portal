@@ -305,6 +305,14 @@ describe('supportsConverterFollowUpSeeding — palm injection series (owner ruli
     expect(isPalmInjectionFamily({ name: 'Palm Treatment' })).toBe(false);
     expect(isPalmInjectionFamily({ name: 'Palm' })).toBe(false);
     expect(isPalmInjectionFamily({ name: 'Semiannual Palm Injection Service' })).toBe(true);
+    // Key spellings count in every resolver (codex r22 pre-push P1): a
+    // persisted snake/camel key line classifies by its KEY, not its label.
+    expect(isPalmInjectionFamily({ service_key: 'palm_injection', visits_per_year: 2 })).toBe(true);
+    expect(isPalmInjectionFamily({ serviceKey: 'palm_injection_semiannual' })).toBe(true);
+    expect(isPalmInjectionFamily({ service_key: 'palm_treatment', name: 'Palm Injection Add-On' })).toBe(false);
+    const { recurringServiceKey } = EstimateConverter;
+    expect(recurringServiceKey({ service_key: 'palm_injection' })).toBe('palm_injection');
+    expect(recurringServiceKey({ serviceKey: 'palm_treatment' })).toBe('palm_injection');
   });
 
   test('two-visit nutritional/bare palm lines never seed or link the INJECTION program (codex r21 pre-push P0)', () => {
