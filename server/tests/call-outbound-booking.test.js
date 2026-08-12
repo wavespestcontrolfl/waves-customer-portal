@@ -30,6 +30,16 @@ const {
 } = require('../services/outbound-review-confirm');
 const { transitionJobStatus } = require('../services/job-status');
 const AppointmentReminders = require('../services/appointment-reminders');
+const { parseETDateTime } = require('../utils/datetime-et');
+
+// The persisted reminder row the shared post-registration verify reads —
+// armed at exactly the composed service slot (r27 pre-push P1: a MISSING
+// row now fails verification, so activation mocks must persist one).
+const reminderRowFor = (row) => ({
+  id: 'rem1',
+  appointment_time: parseETDateTime(`${row.scheduled_date}T${row.window_start || '09:00'}`),
+  windows_preclosed: !row.window_start,
+});
 const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor');
 const { requestCardForAppointment } = require('../services/appointment-card-request');
 
@@ -112,6 +122,7 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
       q.select = jest.fn(async () => []);
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return { ...legacyRow };
+        if (table === 'appointment_reminders') return reminderRowFor(legacyRow);
         if (table === 'scheduled_services as s') {
           return {
             job_id: 'svc1', customer_id: 'cust1', tech_id: null, service_type: 'pest_control',
@@ -181,6 +192,7 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
       q.select = jest.fn(async () => []);
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return { ...legacyRow };
+        if (table === 'appointment_reminders') return reminderRowFor(legacyRow);
         if (table === 'scheduled_services as s') {
           return {
             job_id: 'svc1', customer_id: 'cust1', tech_id: null, service_type: 'pest_control',
@@ -282,12 +294,18 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
   // The reschedule writers (SmartRebooker, update-details, the shared
   // notice sender) bypass transitionJobStatus — this helper is their
   // activation seam for legacy pending review rows (Codex #3361 r2 P0).
-  const makeDb = (row, { stampRows = 1 } = {}) => {
+  const makeDb = (row, { stampRows = 1, reminderRow } = {}) => {
     const state = { updates: [] };
     const fn = (table) => {
       const q = {};
       ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
-      q.first = jest.fn(async () => (table === 'scheduled_services' ? row : null));
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services') return row;
+        if (table === 'appointment_reminders') {
+          return reminderRow === undefined ? reminderRowFor(row) : reminderRow;
+        }
+        return null;
+      });
       q.select = jest.fn(async () => []);
       q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return table === 'scheduled_services' ? stampRows : 1; });
       return q;
@@ -324,6 +342,17 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     );
   });
 
+  test('a silently-lost reminder row fails verification — activation stays unstamped and retryable (r27 pre-push P1)', async () => {
+    // registerAppointment's mock "succeeds", but the persisted-row read
+    // finds nothing (the fail-soft insert did not land): the verify must
+    // fail the core leg, or the stamp would mark reminders armed that
+    // never exist and the self-heal would recreate them pre-confirmed.
+    const db = makeDb({ ...legacyRow }, { reminderRow: null });
+    const activated = await activateLegacyOutboundReviewRowIfNeeded(db, 'svc1', 'test');
+    expect(activated).toBe(false);
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(false);
+  });
+
   test('no-ops for a non-review row and for an already-confirmed row', async () => {
     expect(await activateLegacyOutboundReviewRowIfNeeded(
       makeDb({ ...legacyRow, source_action: 'ai_call_pipeline' }), 'svc1', 'test',
@@ -351,7 +380,11 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
       ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
         'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' ? [{ id: 'svc1' }] : []));
-      q.first = jest.fn(async () => (table === 'scheduled_services' ? { ...workedRow } : null));
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services') return { ...workedRow };
+        if (table === 'appointment_reminders') return reminderRowFor(workedRow);
+        return null;
+      });
       q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return 1; });
       q.insert = jest.fn(async () => 1);
       q.del = jest.fn(async () => 1);

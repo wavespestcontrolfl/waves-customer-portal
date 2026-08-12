@@ -373,15 +373,26 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
       persisted = await dbh('appointment_reminders')
         .where({ scheduled_service_id: serviceId, cancelled: false })
         .first('id', 'appointment_time', 'windows_preclosed');
+      if (!persisted) {
+        // NO persisted row after a registration attempt is a verification
+        // FAILURE, never a pass (pre-push P1 on r27): both rails register
+        // fail-soft (registerScheduleSideEffects swallows; registration's
+        // every success path — placeholder inserts included — returns the
+        // record), so a missing row here means the reminder insert did not
+        // persist. Returning true would let the replay's confirmation
+        // repairs proceed rowlessly while the later self-heal recreates the
+        // row confirmation_sent=true — the booking confirmation would be
+        // permanently lost. False = the caller's rail retries; the
+        // re-registration dedupes if a concurrent actor won.
+        logger.warn(`[${routeTag}] post-registration verify found NO reminder row for ${serviceId} — leaving retryable`);
+        return false;
+      }
     }
-    const registeredSlotMoved = !!postSlot
-      && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
-        || String(postSlot.window_start || '') !== String(slotStart || ''));
     // Windowless service ⇒ the persisted row must be the pre-closed
     // placeholder — an ARMED row (whatever slot it holds, including a stale
-    // A the args comparison could never see) converts below.
+    // A an args-only comparison could never see) converts below.
     const needsWindowlessConversion = !!postSlot && !postSlot.window_start
-      && (persisted ? persisted.windows_preclosed !== true : !!slotStart);
+      && persisted.windows_preclosed !== true;
     // Windowed service ⇒ the persisted row must be ARMED at exactly the
     // composed current slot instant (the same parseETDateTime composition
     // registration and the DB sync trigger build appointment_time with). A
@@ -389,14 +400,10 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
     // uncomposable slot all resync below.
     let persistedSlotStale = false;
     if (postSlot && postSlot.window_start) {
-      if (persisted) {
-        const expected = parseETDateTime(`${dateOnly(postSlot.scheduled_date)}T${String(postSlot.window_start).slice(0, 8)}`);
-        persistedSlotStale = persisted.windows_preclosed === true
-          || Number.isNaN(expected.getTime())
-          || new Date(persisted.appointment_time).getTime() !== expected.getTime();
-      } else {
-        persistedSlotStale = registeredSlotMoved;
-      }
+      const expected = parseETDateTime(`${dateOnly(postSlot.scheduled_date)}T${String(postSlot.window_start).slice(0, 8)}`);
+      persistedSlotStale = persisted.windows_preclosed === true
+        || Number.isNaN(expected.getTime())
+        || new Date(persisted.appointment_time).getTime() !== expected.getTime();
     }
     if (needsWindowlessConversion) {
       // The verified slot went WINDOWLESS (a concurrent edit cleared
