@@ -1617,6 +1617,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           commercialSubtype: effectiveSignals.enriched?.commercialSubtype,
           commercialDetectionSource: effectiveSignals.enriched?.commercialDetectionSource,
           serviceScope: unitScope.serviceScope,
+          // Positive unit-OCCUPANCY evidence (not merely a condo/apartment
+          // property type): tenancy, or a Unit/Apt subpremise on the
+          // service address.
+          unitOccupantEvidence: unitScope.subpremiseSignal === true
+            || unitScope.customerRelationship === 'tenant',
         })
         : null;
       propertyFacts.categoryConflict = crossPropertyRegather

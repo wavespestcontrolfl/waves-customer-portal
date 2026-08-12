@@ -213,16 +213,18 @@ describe('lookupCategoryConflict — the lookup verdict vs a residential intent'
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'multifamily_common_area_residential', serviceScope: 'residential_unit',
+      unitOccupantEvidence: true,
     })).toBeNull();
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'hoa_common_area_residential', serviceScope: 'residential_unit',
+      unitOccupantEvidence: true,
     })).toBeNull();
     // The ≥5-unit stacked aggregate is a unit count, not a commercial use.
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'other', commercialDetectionSource: 'property_record_unit_count',
-      serviceScope: 'residential_unit',
+      serviceScope: 'residential_unit', unitOccupantEvidence: true,
     })).toBeNull();
   });
 
@@ -230,7 +232,7 @@ describe('lookupCategoryConflict — the lookup verdict vs a residential intent'
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'office_retail', commercialDetectionSource: 'property_record_unit_count',
-      serviceScope: 'residential_unit',
+      serviceScope: 'residential_unit', unitOccupantEvidence: true,
     })).toBe('lookup_category:commercial');
   });
 
@@ -240,10 +242,22 @@ describe('lookupCategoryConflict — the lookup verdict vs a residential intent'
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'office_retail', serviceScope: 'residential_unit',
+      unitOccupantEvidence: true,
     })).toBe('lookup_category:commercial');
     expect(lookupCategoryConflict({
       isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
       commercialSubtype: 'warehouse_light', serviceScope: 'entire_residential_structure',
+    })).toBe('lookup_category:commercial');
+  });
+
+  test('without unit-OCCUPANCY evidence a multifamily verdict still conflicts (r19)', () => {
+    // inferServiceScope labels every condo/apartment-typed job
+    // 'residential_unit'; an association or whole-building request must not
+    // be exempted and priced as one unit.
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'multifamily_common_area_residential',
+      serviceScope: 'residential_unit', unitOccupantEvidence: false,
     })).toBe('lookup_category:commercial');
   });
 

@@ -299,10 +299,17 @@ const NEUTRAL_COMMERCIAL_SUBTYPES = new Set(['', 'other']);
  */
 function lookupCategoryConflict({
   isCommercialIntent, enrichedCategory, commercialSubtype,
-  commercialDetectionSource, serviceScope,
+  commercialDetectionSource, serviceScope, unitOccupantEvidence = false,
 }) {
   if (isCommercialIntent === true) return null;
   if (String(enrichedCategory || '').toUpperCase() !== 'COMMERCIAL') return null;
+  // inferServiceScope labels EVERY condo/apartment-typed job
+  // 'residential_unit' without needing occupancy evidence, so the
+  // exemption additionally requires positive unit-occupant evidence
+  // (tenancy or a Unit/Apt subpremise). Without it, an association or
+  // whole-building request on a complex would be exempted and priced as
+  // one residential unit (codex r19 P1).
+  if (!unitOccupantEvidence) return 'lookup_category:commercial';
   const subtype = String(commercialSubtype || '');
   const residentialMultifamilyVerdict =
     RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
