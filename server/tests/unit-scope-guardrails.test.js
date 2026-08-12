@@ -273,6 +273,26 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     expect(ownerFacts.lot.source).toBe('unresolved');
   });
 
+  test('an OWNER-occupied commercial unit still classifies as a suite with a master-parcel lot (r8)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: {
+        caller: { relationship_to_property: 'owner' },
+        property: { property_type: 'industrial' },
+      },
+      intent: { is_commercial: true, address: '4801 Industrial Way, Unit 7, Parrish, FL 34219' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '4801 Industrial Way, Unit 7, Parrish, FL 34219',
+    });
+    expect(model.serviceScope).toBe('commercial_suite');
+    // Owner of one unit ≠ owner of the parcel: lot-driven services must not
+    // price the whole complex.
+    const facts = { lot: { value: 87000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.lot.value).toBeNull();
+    expect(facts.lot.source).toMatch(/^not_applicable:/);
+  });
+
   test('commercial tenant classifies as a suite', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
@@ -280,9 +300,9 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
         caller: { relationship_to_property: 'tenant' },
         property: { property_type: 'industrial' },
       },
-      intent: { is_commercial: true, address: '4801 Industrial Way, Unit 7, Parrish FL' },
+      intent: { is_commercial: true, address: '4801 Industrial Way, Unit 7, Parrish, FL 34219' },
       propertyFacts: { tenant: true, home: { source: 'unresolved' } },
-      address: '4801 Industrial Way, Unit 7, Parrish FL',
+      address: '4801 Industrial Way, Unit 7, Parrish, FL 34219',
     });
     expect(model.serviceScope).toBe('commercial_suite');
     expect(model.propertyUse).toBe('industrial_flex');

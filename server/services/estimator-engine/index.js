@@ -1585,8 +1585,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // one (commercial primary, residential secondary) nor is it evidence
       // about it; the re-gathered lookup's own signals carry the quoted
       // property's category. classifyLane consumes the stamp.
+      // On a cross-property re-gather the primary extraction is not
+      // evidence — but the re-gathered lookup's OWN classification is: a
+      // residential intent quoting a property the lookup typed COMMERCIAL
+      // must still conflict (codex r8 P1: the unconditional null let a
+      // residential intent survive for a secondary office/warehouse).
       propertyFacts.categoryConflict = crossPropertyRegather
-        ? null
+        ? ((intent.is_commercial !== true && effectiveParcelOk
+          && String(effectiveSignals.enriched?.category || '').toUpperCase() === 'COMMERCIAL')
+          ? 'lookup_category:commercial' : null)
         : commercialCategoryConflict({ extraction: context.extraction, intent });
       // The lot-clearing mutation also stays off on a cross-property
       // re-gather — a scope inferred without the quoted property's own
@@ -1866,7 +1873,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         if (!dryRun) {
           try {
             const missing = [];
-            if (!intent.address) missing.push('street_address');
+            // A NONEMPTY but numberless address (incomplete_address red)
+            // needs the same ask as a missing one — without this the
+            // machine-readable cause stalled with only an operator bell
+            // (codex r8 P1).
+            if (!intent.address || causes.includes('incomplete_address')) missing.push('street_address');
             if (!Object.keys(intent.services || {}).length) missing.push('specific_service');
             // Scope guards: a skip with nothing to clarify must not text
             // the customer a which-service question — out-of-scope work

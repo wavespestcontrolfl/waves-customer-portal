@@ -1579,10 +1579,14 @@ function buildLeadWebhookIntake(body = {}) {
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial
     // premises must park, not auto-price).
+    // EXACT prose key names only — a substring pattern swept attribution
+    // and address metadata ('lead_source_detail', an address-detail field)
+    // into the commercial-signal scan, where "Commercial Pest Control
+    // campaign" wrongly blocked a residential lead (codex r8 P2).
     message: firstNonEmpty(
       body.message,
       body['Message'],
-      findField(body, /message|comment|note|detail|describ/i),
+      findField(body, /^(?:message|comments?|notes?|description|details)$/i),
     ),
   };
 }

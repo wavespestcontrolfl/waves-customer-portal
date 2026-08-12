@@ -50,7 +50,12 @@ function hasUnitSignal({ tenant, address, extraction }) {
 
 function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
   if (isCommercial) {
-    if (tenant) return 'commercial_suite';
+    // Positive unit evidence (a Unit/Suite subpremise) makes this a SUITE
+    // whether the caller rents or OWNS it — an owner-occupied commercial
+    // condo/flex unit is still one unit of a larger parcel, and building
+    // scope would let lot-driven services price the whole complex
+    // (codex r8 P1). Tenancy alone still implies a suite.
+    if (tenant || unitSignal) return 'commercial_suite';
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
     return 'entire_commercial_building';
   }
@@ -70,6 +75,10 @@ function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, uni
 
 function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
   if (tenant) return isCommercial ? 'leased_suite' : 'leased_land';
+  // Owner-occupied commercial UNIT (positive unit evidence, no tenancy):
+  // a commercial condominium — its lot is the development's master parcel,
+  // never a private lot (pairs with the suite scope above, codex r8 P1).
+  if (isCommercial && unitSignal) return 'commercial_condominium';
   if (aggregated) return 'association_common_property';
   const type = String(propertyType || '');
   // Multifamily without positive unit evidence is an OWNED whole-property
