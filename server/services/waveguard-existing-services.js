@@ -422,7 +422,12 @@ function ownershipKeysForRow(row = {}) {
     // no family tokens at all ("Premium Home Plan") defers to service_type.
     const s = catalogText.toLowerCase();
     const informative = /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?)\b/.test(s)
-      || RODENT_TOKEN_RE.test(s);
+      || RODENT_TOKEN_RE.test(s)
+      // foam_recurring is an informative termite identity despite carrying
+      // no termite token — without this, a foam row under a stale generic
+      // 'Pest Control' service_type would fall through to the joined text
+      // and claim pest coverage on top of termite_foam.
+      || /recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s);
     if (informative) return ownershipFamiliesFromText(catalogText);
   }
   return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());
