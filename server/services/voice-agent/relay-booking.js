@@ -592,6 +592,9 @@ async function requestBookingText(input = {}, ctx = {}) {
   // a human calls back. Single-property and legacy accounts resolve through the
   // call pipeline's own linkage helper, and the visit carries the stamp.
   let propertyLinkage = null;
+  // True once we know the account HAS at least one property row — after which a
+  // linkage failure may never degrade to the mirror address.
+  let linkageAttemptedWithProperties = false;
   try {
     const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
     // `active`, not a soft-delete column — customer_properties has no
@@ -617,6 +620,7 @@ async function requestBookingText(input = {}, ctx = {}) {
         + 'so nothing was booked. Capture the lead with the property they mean and their preferred time, and '
         + 'tell the caller a Waves team member will call to confirm which address.';
     }
+    linkageAttemptedWithProperties = propertyCount >= 1;
     // Empty extraction ⇒ the helper falls back to the on-file address, matches
     // it against the property rows, and returns its geocode.
     propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {}, db);
@@ -635,7 +639,16 @@ async function requestBookingText(input = {}, ctx = {}) {
         + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
     }
   } catch (err) {
+    // ⭐ AND AN ERROR IS NOT A LEGACY ACCOUNT. Falling through here after a
+    // property WAS found sends the visit to the customer's mirror address with
+    // no property_id — the same wrong-premise dispatch the guard above refuses
+    // when it can see the ambiguity. Only an account with zero property rows
+    // may use the on-file address, and a failed COUNT already refused above.
     logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
+    if (linkageAttemptedWithProperties) {
+      return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
+        + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
+    }
   }
 
   // ⭐ RE-VALIDATE AT THE ADDRESS THE TECH WILL ACTUALLY DRIVE TO.

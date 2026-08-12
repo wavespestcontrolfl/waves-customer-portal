@@ -853,6 +853,21 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoCreateWrites();
   });
 
+  test('a linkage ERROR on an account WITH a property refuses (never the mirror address)', async () => {
+    resolveCallBookingPropertyLinkage.mockRejectedValue(new Error('geocoder down'));
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/could not confirm the service address/i);
+    assertNoCreateWrites();
+  });
+
+  test('a linkage error on a LEGACY account (no properties) still books off the on-file address', async () => {
+    primeDb({ propertyCount: 0 });
+    resolveCallBookingPropertyLinkage.mockRejectedValue(new Error('geocoder down'));
+    booking.resolveBookingCoords.mockResolvedValue({ lat: 27.9, lng: -82.1 });
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Booking REQUEST submitted/);
+  });
+
   test('a property count that cannot be answered refuses too (the guard fails CLOSED)', async () => {
     builders.customer_properties.first = jest.fn(() => Promise.reject(new Error('column does not exist')));
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());

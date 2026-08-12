@@ -178,6 +178,18 @@ function attachVoiceRelay(httpServer) {
       }
       switch (msg && msg.type) {
         case 'setup': {
+          // ⭐ ONE SETUP PER SOCKET. A second setup frame used to REPLACE the
+          // live conversation: both instances then raced the atomic CallSid
+          // claim, so the retained one could be the instance that LOST
+          // verification (a stranger's session for a recognised caller), while
+          // the orphaned winner never persisted its transcript and never ran
+          // its capture floor — the call's whole record lost to a duplicate
+          // frame. Frame handling on this endpoint is security-critical
+          // (AGENTS.md); a duplicate is ignored, not honoured.
+          if (convo) {
+            logger.warn(`[voice-relay] duplicate setup frame IGNORED on an established session callSid=${convo.callSid}`);
+            return;
+          }
           const p = msg.customParameters || {};
           convo = new RelayConversation({
             callSid: msg.callSid || p.callSid || null,
