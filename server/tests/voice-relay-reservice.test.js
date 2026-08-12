@@ -318,6 +318,23 @@ describe('GATE ON', () => {
     expect(out).toMatch(/never read out a link or a code/i);
   });
 
+  // ⭐ "SOMEBODY WILL BE AT THIS PROPERTY ON THURSDAY MORNING" IS THE
+  // DISCLOSURE THE REDACTED TIER EXISTS TO WITHHOLD. A service-contact slot
+  // holds spouses, tenants and prior occupants; matching one recognises the
+  // account and authenticates nobody, so the dedupe answer must lose its date
+  // and window — the same line every READ path in the lane already draws.
+  test('a REDACTED-tier caller is told it is booked, but never when', async () => {
+    reserviceScheduler.openReserviceCallbacks.mockResolvedValue({
+      pest: { date: '2026-08-20', windowStart: '09:00', serviceType: 'Re-Service' },
+    });
+    const out = await executeTool('request_reservice', GOOD, { ...CTX, customerTier: 'redacted' });
+    expect(out).toMatch(/ALREADY on the schedule/i);
+    expect(out).toMatch(/do NOT state the date or the arrival window/i);
+    expect(out).not.toMatch(/August 20/i);
+    expect(out).not.toContain('09:00');
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+  });
+
   test('coverage is stated only when the plan actually grants the lane', async () => {
     reserviceScheduler.reserviceLanesForCustomer.mockResolvedValue([]);
     const out = await executeTool('request_reservice', GOOD, CTX);

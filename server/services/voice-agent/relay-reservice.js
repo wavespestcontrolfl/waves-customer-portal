@@ -166,6 +166,20 @@ async function requestReserviceText(input = {}, ctx = {}) {
       + 'about it shortly, and do NOT state a date, a time, a link, or a code.';
   }
   if (booked) {
+    // ⭐ THE DATE AND WINDOW ARE FULL-TIER ONLY. This branch answers with a
+    // visit's schedule, and "somebody will be at this property on Thursday
+    // morning" is the physical-security disclosure the redacted tier exists to
+    // withhold — a service-contact slot holds spouses, tenants and PRIOR
+    // OCCUPANTS, and matching one authenticates nobody. Every read path in the
+    // lane already draws that line (get_today_eta gives existence only); this
+    // WRITE path was speaking past it. Redacted callers still get the honest
+    // answer — do not file another — with no date and no window.
+    if (unverifiedRequester) {
+      return 'A free re-service visit is ALREADY on the schedule for this account. Do NOT file another '
+        + 'request, and do NOT state the date or the arrival window — this caller\'s number is not the '
+        + 'account\'s own. Tell them it is already booked and that a Waves team member can go over the '
+        + 'details with the account holder. Never read out a link or a code.';
+    }
     const when = speakDate(booked.date);
     return `A free re-service visit is ALREADY on the schedule for this account${when ? ` on ${when}` : ''}`
       + `${booked.windowStart ? ` (window starts ${booked.windowStart})` : ''}. Do NOT file another request. `

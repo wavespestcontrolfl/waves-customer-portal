@@ -102,7 +102,16 @@ async function quotedLines(estimateRow) {
   const annualTotal = Number(estimateRow.annual_total);
   const matches = (f) => (Number.isFinite(monthlyTotal) && monthlyTotal > 0 && Math.abs(Number(f.monthly) - monthlyTotal) < 0.01)
     || (Number.isFinite(annualTotal) && annualTotal > 0 && Math.abs(Number(f.annual) - annualTotal) < 0.01);
-  const chosen = frequencies.find(matches) || frequencies[0];
+  // ⭐ NO MATCH ⇒ NO LINES. The fallback used to be `|| frequencies[0]`, which
+  // quotes A cadence rather than THE cadence: buildPricingBundle returns the
+  // whole ladder, and when it rejects a mismatched snapshot and re-derives, the
+  // first entry can easily be terms this estimate was never sent with — a
+  // quarterly customer told a monthly price, on the one number they can check
+  // us against. A one-time-only estimate lands here too, and its real charge is
+  // the onetime total the caller prints separately. Failing closed costs a
+  // "the office can go over it" line; guessing costs a wrong price.
+  const chosen = frequencies.find(matches);
+  if (!chosen) return [];
   // The frequency-level flag the customer's own estimate card reads
   // (client/src/components/estimate/PriceCard.jsx `showBilledMonthlyNote`): a
   // FLAGGED per-application row bills exactly its per-application headline and

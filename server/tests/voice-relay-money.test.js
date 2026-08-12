@@ -337,6 +337,27 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(out).not.toContain('$149');
   });
 
+  // ⭐ A CADENCE IS NOT THE CADENCE. The bundle returns the whole ladder; only
+  // the entry matching the estimate's own persisted totals is the one it was
+  // SENT at. Quoting the first entry instead tells a quarterly customer a
+  // monthly price — on the one number they can check us against.
+  test('no frequency matching the estimate totals → no price stated, never the first entry', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [
+        { key: 'monthly', monthly: 99, annual: 1188, perServiceTreatments: [{ service: 'pest_control', label: 'Monthly pest control', perTreatment: 99, displayPrice: 99 }] },
+        { key: 'annual', monthly: 20, annual: 240, perServiceTreatments: [{ service: 'pest_control', label: 'Annual pest control', perTreatment: 240, displayPrice: 240 }] },
+      ],
+    });
+    primeDb({ estimates: [SENT_ESTIMATE] }); // totals 41.5 / 498 — matches neither
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toMatch(/do NOT state a price for this one/i);
+    expect(out).not.toMatch(/quoted lines:/i); // no quoted line at all…
+    expect(out).not.toMatch(/\$99 per application/);
+    expect(out).not.toContain('$240');
+    // …while the one-time charge, which IS on the row, still prints.
+    expect(out).toMatch(/one-time work totalling \$99/);
+  });
+
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
