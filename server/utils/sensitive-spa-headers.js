@@ -51,12 +51,14 @@ function isCardPath(reqPath = '') {
   return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
-// Public "secure your appointment" card-capture page — 64-hex bearer token
+// Public "secure your appointment" card-capture page — bearer token
 // (appointment_card_requests.token) on a payment-adjacent surface, so the
 // shell must never be indexed/archived and must not leak the token via
-// Referer (matches the API route's headers in secure-card-public.js).
+// Referer (matches the API route's headers in secure-card-public.js). Two
+// minted shapes, same as secure-card-public's TOKEN_RE: 22-char base64url
+// (current) and 64-hex (legacy links already texted).
 function isSecureCardPath(reqPath = '') {
-  return /^\/secure\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+  return /^\/secure\/(?:[A-Za-z0-9_-]{22}|[a-f0-9]{64})\/?$/.test(String(reqPath || ''));
 }
 
 // Public tokened price-change notice page — 32-hex bearer token
