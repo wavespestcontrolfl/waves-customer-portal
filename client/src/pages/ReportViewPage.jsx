@@ -9055,7 +9055,18 @@ export default function ReportViewPage() {
       .then((d) => {
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
-        if (d && d.staffViewer) staffViewTokens.add(token);
+        // Mirrors THIS response in both directions. The set used to be
+        // append-only, so once staff opened a token, a later unauthenticated
+        // load of the same token in the same SPA session (admin JWT cleared or
+        // expired, no full reload — the module global outlives it) kept the
+        // suppression: submitReportEvent then returned a fake success and the
+        // customer saw "Request received" with no durable request row written.
+        // Error sentinels (404/410) never carry the flag, so they decide
+        // nothing either way.
+        if (d && !d.error) {
+          if (d.staffViewer) staffViewTokens.add(token);
+          else staffViewTokens.delete(token);
+        }
         if (!cancelled) setData(d);
       })
       .catch(() => {

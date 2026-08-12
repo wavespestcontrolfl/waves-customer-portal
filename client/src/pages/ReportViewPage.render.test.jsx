@@ -379,3 +379,51 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(container.querySelector('.lawn-assessment-layout-no-trend')).toBeNull();
   });
 });
+
+describe('ReportViewPage — staff-view event suppression tracks the CURRENT load', () => {
+  // The suppression set is a module global and used to be append-only, so a
+  // staff read poisoned the token for the rest of the SPA session. That is not
+  // only an analytics gap: submitReportEvent short-circuits to a FAKE
+  // { ok: true }, so the cross-sell CTA would render "Request received" while
+  // writing no service_requests row — a lead silently dropped. These two run in
+  // order on purpose; the second depends on the first having marked the token.
+  const TOKEN = 'staff-then-customer-token';
+
+  function renderToken(payload, { staffToken = null } = {}) {
+    if (staffToken) localStorage.setItem('waves_admin_token', staffToken);
+    else localStorage.removeItem('waves_admin_token');
+    const posts = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init && init.method === 'POST') {
+        posts.push({ url: String(url), body: JSON.parse(init.body) });
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, status: 200, json: async () => payload };
+    }));
+    render(
+      <MemoryRouter initialEntries={[`/report/${TOKEN}`]}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    return posts;
+  }
+
+  it('posts no events while staff is viewing', async () => {
+    const posts = renderToken({ ...legacyLawnReport, staffViewer: true }, { staffToken: 'admin-jwt' });
+    await screen.findByText('Visit Summary');
+
+    await waitFor(() => expect(screen.queryByText('Visit Summary')).toBeInTheDocument());
+    expect(posts).toHaveLength(0);
+  });
+
+  it('resumes posting when the same token is later loaded without staff auth', async () => {
+    // Same browser, same SPA session, admin JWT gone — the payload comes back
+    // with no staffViewer field at all (the server omits it for customers).
+    const posts = renderToken(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+
+    await waitFor(() => expect(posts.length).toBeGreaterThan(0));
+    expect(posts.map((p) => p.body.eventName)).toContain('service_report_viewed');
+    expect(posts[0].url).toContain(`/reports/${TOKEN}/events`);
+  });
+});
