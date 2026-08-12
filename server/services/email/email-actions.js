@@ -79,18 +79,49 @@ function parseExtractedAddress(raw) {
 // the first reply/signature marker. Conservative — an unrecognized
 // signature style just means extra text reaches the scan, which the
 // commercial patterns already require strong premises wording to match.
+// A `From:` line OPENING the body is usually an automated form
+// notification's own payload ("From: Jane Doe" / "Phone: …" / "Message: our
+// warehouse needs quarterly service"), not a reply header — breaking there
+// discarded the entire request and left a residential-priced draft eligible
+// for auto-send (codex r48 P1). A leading `From:` ends the sender's text
+// only inside a recognizable quoted block: after a forwarded/original-
+// message separator, or when the following lines form an RFC header block
+// (`To:` plus `Sent:`/`Date:`), which a form payload does not carry.
+const FORWARD_SEPARATOR_RE = /^\s*(?:[-_]{2,}\s*)?(?:begin\s+)?(?:forwarded message|original message)/i;
+function looksLikeQuotedHeaderBlock(lines, index) {
+  const window = lines.slice(index + 1, index + 6);
+  // `To:` is the tell — a form notification is addressed TO us and does not
+  // echo a recipient field; a quoted header block always carries one, plus a
+  // timestamp (Gmail `Date:`, Outlook `Sent:`) or the original `Subject:`.
+  const hasTo = window.some((l) => /^\s*to:\s/i.test(l));
+  const hasHeaderMate = window.some((l) => /^\s*(?:sent|date|subject|cc):\s/i.test(l));
+  return hasTo && hasHeaderMate;
+}
+
 function emailProseForScan(body) {
   const lines = String(body || '').split('\n');
   const out = [];
   const hasContent = () => out.some((l) => l.trim());
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     if (/^\s*>/.test(line)) continue; // quoted history
+    // A forwarded/original-message separator ends the sender's own text
+    // wherever it appears (its `From:`/`To:` header block follows).
+    if (FORWARD_SEPARATOR_RE.test(line)) break;
+    if (/^\s*From:\s/i.test(line)) {
+      if (hasContent() || looksLikeQuotedHeaderBlock(lines, i)) break;
+      // Form-payload field: keep scanning for the request text below it, but
+      // never scan the FIELD itself — a sender line carrying an employer
+      // ("Sarasota Warehouse Supply") is not a statement about the premises
+      // being treated (same rule as the work-signature strip, codex r9 P2).
+      continue;
+    }
     // Structural markers (separator, reply header, forwarded header) end
     // the sender's own text wherever they appear. "Sent from" counts only
     // in its DEVICE-signature form — "Sent from our warehouse, where we
     // need pest control" is request prose (codex r29 P1); any other
     // "Sent from …" is handled by the content-gated group below.
-    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$|From:\s)/i.test(line)) break;
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$)/i.test(line)) break;
     if (/^\s*Sent from (?:my |an |the )?(?:iphone|ipad|ipod|android|samsung|galaxy|pixel|blackberry|windows|outlook|gmail|yahoo|mail|mobile|phone|tablet|device)\b/i.test(line)) break;
     // Courtesy signoffs count only as WHOLE lines AND only once request
     // content precedes them — "Thanks!" can OPEN a reply ("Thanks!\nWe

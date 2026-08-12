@@ -176,6 +176,111 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     expect(mockState.inserts).toHaveLength(0);
   });
 
+  // A `From:` line is a reply header in a reply and a PAYLOAD FIELD in an
+  // automated form notification. Cutting the body at the first `From:`
+  // discarded the whole request when the notification opened with one, and
+  // the premises wording in its `Message:` field never reached the scan.
+  describe('form-notification bodies that open with a From: field', () => {
+    const scannedMessage = () => mockReadiness.mock.calls[0][0].intake.message;
+
+    test('a leading From: field keeps the request text that follows it', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'From: Jane Doe',
+            'Phone: 941-555-0184',
+            'Service: Pest Control',
+            'Message: We need quarterly service for our warehouse on 48th Ave E.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
+    test('the sender field itself is never scanned as premises wording', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'From: Jane Doe, Sarasota Warehouse Supply',
+            'Message: quarterly service for my house please.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      // An employer in the sender line says nothing about the treated
+      // premises (codex r9 P2) — only the request text below it counts.
+      expect(scannedMessage()).not.toContain('Warehouse Supply');
+      expect(scannedMessage()).toContain('my house');
+    });
+
+    test('a real reply header still ends the sender\'s own text', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Re: quote',
+          body_text: [
+            'Sounds good, my number is below.',
+            '',
+            'From: Jane Doe <jane@example.com>',
+            'Sent: Tuesday, August 11, 2026 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('Sounds good');
+      expect(scannedMessage()).not.toContain('Original ask');
+    });
+
+    test('a top-quoted header block with no prose above it is still quoted history', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Fwd: quote',
+          body_text: [
+            'From: Jane Doe <jane@example.com>',
+            'Date: Tue, Aug 11, 2026 at 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).not.toContain('Original ask');
+    });
+
+    test('a forwarded-message separator ends the scan before its header block', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Fwd: quote',
+          body_text: [
+            '---------- Forwarded message ---------',
+            'From: Jane Doe <jane@example.com>',
+            'Message: our warehouse needs service.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+  });
+
   // The premises wording that decides residential-vs-commercial usually
   // arrives in the FIRST message of a thread; the reply that finally supplies
   // a phone often says nothing about the property. The lead row cannot carry

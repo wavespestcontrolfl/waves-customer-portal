@@ -1231,3 +1231,78 @@ describe('requireNamedUnit — authenticating a unit needs an actual unit (r20)'
     )).toBe(false);
   });
 });
+
+describe('a whole-building-classified tenant keeps their own stated area (r48)', () => {
+  const factsV2 = require('../services/property-lookup/property-facts-v2');
+  const ev = (overrides) => ({
+    units: 'sqft',
+    directness: 'direct',
+    exactAddressMatch: true,
+    exactSubpremiseMatch: false,
+    extractionConfidence: 'high',
+    warnings: [],
+    ...overrides,
+  });
+  // The Anita-adjacent shape: a suite tenant whose address carries no
+  // Suite/Unit suffix and whose county record reads a generic 'Commercial'
+  // has NO part-building evidence, so the lane classifies the job
+  // entire_commercial_building / leased_whole_building to protect their
+  // parcel (r38/r39/r40). Their stated area must still price the job.
+  const tenantEvidence = [
+    ev({
+      id: 'stated', field: 'commercial_suite_area_sqft', value: 1800, scope: 'suite',
+      sourceType: 'caller', sourceName: 'caller-stated', extractionConfidence: 'medium',
+      exactSubpremiseMatch: true,
+    }),
+    ev({
+      id: 'county', field: 'building_area_sqft', value: 8400, scope: 'building',
+      sourceType: 'county', sourceName: 'Manatee PAO',
+      sourceUrl: 'https://www.manateepao.gov/parcel/?parid=1',
+    }),
+  ];
+  const select = (input) => factsV2.selectPropertyFactsV2({
+    normalizedAddress: '48th Avenue East, Bradenton, FL',
+    propertySubtype: 'commercial',
+    serviceScope: 'entire_commercial_building',
+    evidence: tenantEvidence,
+    ...input,
+  });
+
+  test('the tenant-stated area outranks the county building figure', () => {
+    const facts = select({ ownershipType: 'leased_whole_building' });
+    expect(facts.structureArea.value).toBe(1800);
+    expect(facts.structureArea.kind).toBe('commercial_suite_area_sqft');
+    // The whole-building number stays visible as evidence, never priced.
+    expect(facts.evidence.some((e) => e.value === 8400)).toBe(true);
+  });
+
+  test('the stated area satisfies the scope — no spurious confirmation demand', () => {
+    const facts = select({ ownershipType: 'leased_whole_building' });
+    expect(facts.requiresConfirmation).toBe(false);
+    // ...and the legacy bridge carries the tenant-safe number, so
+    // applyV2ToPropertyFacts cannot overwrite V1's arbitration with the
+    // building figure.
+    expect(factsV2.deriveLegacyFields(facts).squareFootage).toBe(1800);
+  });
+
+  test('a tenant who stated nothing still keeps the building measurement (r38)', () => {
+    const facts = select({
+      ownershipType: 'leased_whole_building',
+      evidence: [tenantEvidence[1]],
+    });
+    expect(facts.structureArea.value).toBe(8400);
+    expect(facts.structureArea.kind).toBe('building_area_sqft');
+    // The lot survives too — that was r40's whole point.
+    expect(factsV2.lotApplicabilityFor({
+      propertySubtype: 'warehouse', ownershipType: 'leased_whole_building',
+    })).toBe('private_parcel');
+  });
+
+  test('an OWNER of a whole commercial building still prices the building', () => {
+    // leased_whole_building exists only under the unit-scope gate, so every
+    // other ownership — including the gate-off path — is untouched.
+    const facts = select({ ownershipType: 'fee_simple' });
+    expect(facts.structureArea.value).toBe(8400);
+    expect(facts.structureArea.kind).toBe('building_area_sqft');
+  });
+});
