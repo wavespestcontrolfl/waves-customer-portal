@@ -106,11 +106,14 @@ async function customerHasOnlyPrimaryPremises(database, customerId, customer, pr
     if (!linkage.sameScopeKey(key, primaryStreet)) return false;
     // Same street, but disjoint locality evidence (city-only vs zip-only)
     // matches across cities under sameScopeKey's per-field wildcard — the
-    // r6/r7 rule. A key with NO locality at all is the legacy partial stamp:
-    // it names the primary street and nothing contradicts it, so it does not
-    // count as a second premises (the branch above already treats the
-    // report's own partial street that way).
-    if (linkage.scopeKeyLacksLocality(key)) return true;
+    // r6/r7 rule. A key with NO locality at all is the legacy partial stamp,
+    // and it is UNPROVEN, not benign (codex #3367 PR r12): a secondary
+    // property with the same street and unit in another city produces
+    // exactly that key, so accepting it would declare the wrong premises
+    // primary and publish an exact price from the wrong profile — the hole
+    // the linked-report and estimate-seed guards already close by rejecting
+    // scopeKeyLacksLocality outright. Same rejection here.
+    if (linkage.scopeKeyLacksLocality(key)) return false;
     return scopeKeysShareLocality(key, primaryStreet);
   };
   const properties = await database('customer_properties')
@@ -558,12 +561,36 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
     }
 
+    // A cache MISS has two meanings and they price differently (codex #3367
+    // PR r12). An ordinary miss (no row, expired) just means we price from
+    // the stored profile and the seed. But getCachedLookup also rejects a
+    // row whose data PREDATES a verified override — a technician corrected
+    // a pricing fact (square footage, hasPool) after the row was written,
+    // and that correction supersedes the accepted-estimate seed too, since
+    // the seed is older still. Filling the gap from the seed there publishes
+    // an exact per-application price on a fact staff already fixed, so the
+    // offer demotes to the unpriced CTA until a live lookup folds the
+    // correction in. Probed only on a miss, and never fatal.
+    let overrideInvalidatedMiss = false;
+    const trackedPropertyLookup = async (address) => {
+      const found = await propertyLookup(address);
+      if (!found) {
+        try {
+          const { cachedDataPredatesVerifiedOverride } = require('../property-lookup/lookup-cache');
+          if (await cachedDataPredatesVerifiedOverride(address)) overrideInvalidatedMiss = true;
+        } catch (err) {
+          logger.warn(`[report-cross-sell] override-invalidation probe skipped (${err.message})`);
+        }
+      }
+      return found;
+    };
+
     const { buildCustomerPricingResponse } = require('../customer-pricing-ai');
     const result = await buildCustomerPricingResponse({
       customer,
       prompt: OFFER_PROMPTS[targetKey],
       db: database,
-      propertyLookup,
+      propertyLookup: trackedPropertyLookup,
       propertySeed,
     });
 
@@ -600,7 +627,8 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // may have been an operator-confirmed zero the fallback would
     // contradict, or a synthetic zero the replay would price at nothing.
     const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
-    const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence;
+    const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence
+      && !overrideInvalidatedMiss;
 
     const payload = {
       serviceKey: targetKey,

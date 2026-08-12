@@ -393,7 +393,13 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: p.bundled
         ? `Bundle self-applied: ${p.customerName || 'Customer'}`
-        : `Bundle inquiry: ${p.customerName || 'Customer'}`,
+        // A refresh replaced the terms on an OPEN request (codex #3367 PR
+        // r12): staff who already triaged the old one need to see that the
+        // customer price-locked something different, not a repeat of the
+        // inquiry they've already read.
+        : p.refreshed
+          ? `Bundle inquiry updated: ${p.customerName || 'Customer'}`
+          : `Bundle inquiry: ${p.customerName || 'Customer'}`,
       body: p.bundled
         ? `Added ${p.suggestedService || 'service'} → ${p.newTier || p.tier || 'new tier'} @ $${Number(p.newMonthly || 0).toFixed(2)}/mo`
         // start-vs-add mirrors the request row (codex #3367 PR r3): a

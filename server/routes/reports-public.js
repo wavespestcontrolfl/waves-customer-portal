@@ -1210,13 +1210,21 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               // the customer just saw — an older revision (or a quote-mode
               // row that has since become priced) must not stand as the
               // recorded quote while the card confirms the new one.
+              // A refresh is a MATERIAL change, not a no-op (codex #3367 PR
+              // r12): the customer just price-locked a different offer —
+              // another report, another price, quote→priced, start→add. The
+              // no-notification path is reserved for the identical-snapshot
+              // branch above; here the bell fires so staff who already saw
+              // the old request learn the terms moved, and updated_at is
+              // stamped so the row does not sit frozen at its created_at.
               await trx('service_requests').where({ id: existing.id }).update({
                 subject: requestSubject,
                 description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
                 pricing_revision: JSON.stringify(revisionSnapshot),
+                updated_at: new Date(),
               });
               await recordEvent();
-              return { deduped: true };
+              return { request: existing, refreshed: true };
             }
             const [request] = await trx('service_requests').insert({
               customer_id: joined.customer_id,
@@ -1246,6 +1254,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               // Start-vs-add rides to the bell too (codex #3367 PR r3): the
               // builder's add-to-plan copy contradicts a start-plan request.
               relationship: crossSell.relationship,
+              // Distinguishes "the terms on an open request just changed"
+              // from a first-time inquiry (codex #3367 PR r12).
+              refreshed: !!outcome.refreshed,
             }).catch((err) => {
               logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
             });

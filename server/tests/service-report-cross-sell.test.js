@@ -1,4 +1,13 @@
+// The builder lazily probes this on a cache MISS to tell an ordinary miss
+// from one caused by a verified override that postdates the cached data.
+// Nothing else in this suite loads the cache module (the property lookup is
+// injected), so a single-export stub is enough.
+jest.mock('../services/property-lookup/lookup-cache', () => ({
+  cachedDataPredatesVerifiedOverride: jest.fn(async () => false),
+}));
+
 const { buildReportCrossSell, _private } = require('../services/service-report/cross-sell');
+const { cachedDataPredatesVerifiedOverride } = require('../services/property-lookup/lookup-cache');
 
 // Recurring rows must be UPCOMING to count as live obligations (the ownership
 // loader applies the lifecycle evidence unconditionally) — compute the date so
@@ -144,6 +153,29 @@ describe('buildReportCrossSell', () => {
     // The modeled current-service inventory must never ride the public
     // bearer-token payload (codex #3367 PR r2).
     expect(result.currentServices).toBeUndefined();
+  });
+
+  test('a cache miss caused by a newer verified override demotes to the CTA (PR r12 P1)', async () => {
+    // getCachedLookup rejects a row whose data predates a technician's
+    // correction, and the caller sees an ordinary miss. Pricing on through
+    // the accepted-estimate seed would publish an exact per-application
+    // price built on the fact staff already fixed — the seed is older than
+    // the correction too. The offer stays, unpriced, until a live lookup
+    // folds the correction in.
+    const args = {
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    };
+    cachedDataPredatesVerifiedOverride.mockResolvedValueOnce(true);
+    const demoted = await buildReportCrossSell(SERVICE(), dbFor(args), { propertyLookup: missLookup });
+    expect(demoted).not.toBeNull();
+    expect(demoted.serviceKey).toBe('lawn_care');
+    expect(demoted.mode).toBe('quote_cta');
+    expect(demoted.option).toBeNull();
+
+    // An ORDINARY miss (no row, expired, no overrides) still prices.
+    const priced = await buildReportCrossSell(SERVICE(), dbFor(args), { propertyLookup: missLookup });
+    expect(priced.mode).toBe('priced');
   });
 
   test('the offer fingerprint covers every rendered field', () => {
@@ -490,6 +522,22 @@ describe('buildReportCrossSell', () => {
       const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
       expect(result).not.toBeNull();
       expect(result.serviceKey).toBe('lawn_care');
+    });
+
+    test('a locality-less witness is UNPROVEN, not benign (PR r12 P1)', async () => {
+      // A secondary property with the same street and unit in another city
+      // produces exactly this key, so accepting it would declare the wrong
+      // premises primary and price from the wrong profile. Same rejection
+      // the linked-report and estimate-seed guards already apply.
+      const stamped = singlePremisesDb({
+        stampRows: [{ id: 'v-partial', status: 'completed', service_address_line1: '123 Gulf Dr' }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), stamped, { propertyLookup: missLookup })).toBeNull();
+
+      const propertyRow = singlePremisesDb({
+        properties: [{ id: 'prop-partial', address_line1: '123 Gulf Dr' }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), propertyRow, { propertyLookup: missLookup })).toBeNull();
     });
 
     test('a same-street stamp in a DIFFERENT city suppresses it', async () => {

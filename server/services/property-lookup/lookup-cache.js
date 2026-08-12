@@ -190,6 +190,30 @@ function overridesNewerThanData(row) {
   });
 }
 
+// Was a cache miss caused by a verified override that POSTDATES the cached
+// data? getCachedLookup rejects such a row (the stored analysis was derived
+// from the pre-correction facts) and the caller sees an ordinary miss.
+// A cache-only consumer that would otherwise fall back to OLDER evidence —
+// the service-report cross-sell prices from an accepted estimate's
+// engineInputs — has to tell the two apart (codex #3367 PR r12): the
+// technician's correction supersedes that estimate too, so pricing from it
+// would publish an exact price on a fact staff already fixed. A normal miss
+// (no row, expired, no overrides) is not this and stays priceable.
+// Never throws: an unreadable cache is reported as "not override-invalidated"
+// and the consumer's own evidence rules still apply.
+async function cachedDataPredatesVerifiedOverride(address) {
+  if (isCacheDisabled()) return false;
+  try {
+    const { hash } = addressKey(address);
+    const row = await db('property_lookups').where({ address_hash: hash }).first();
+    if (!row) return false;
+    return overridesNewerThanData(row);
+  } catch (err) {
+    logger.warn(`[lookup-cache] override-invalidation probe failed: ${err.message}`);
+    return false;
+  }
+}
+
 // Cached lookup data — null when the cache is disabled, the row is missing,
 // the data slot is empty (override-only stub row), or the row expired.
 async function getCachedLookup(address) {
@@ -496,6 +520,7 @@ function applyVerifiedOverrides(record, overrides) {
 module.exports = {
   addressKey,
   applyVerifiedOverrides,
+  cachedDataPredatesVerifiedOverride,
   getCachedLookup,
   getVerifiedOverrides,
   isCacheDisabled,
