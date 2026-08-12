@@ -88,7 +88,14 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         .whereNull('call_sms_cleared_at')
         .update({ call_sms_cleared_at: new Date() });
     } catch (stampErr) {
-      logger.warn(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id}: ${stampErr.message}`);
+      // ⭐ AND A FAILED CLEARANCE STAMP IS A FAILED CORE LEG. This stamp is what
+      // the pre-visit card sweep keys on, so a row that is stamped
+      // customer_confirmed WITHOUT it falls between both rails: the legacy
+      // activation sweep skips it (already confirmed) and the pre-visit sweep
+      // excludes it (no clearance). Reporting failure here keeps
+      // customer_confirmed unstamped, which is exactly the retry rail.
+      coreLegsOk = false;
+      logger.error(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id} — reporting retryable: ${stampErr.message}`);
     }
   }
   // 1. Arm the 72h/24h reminders that were deferred at booking time.

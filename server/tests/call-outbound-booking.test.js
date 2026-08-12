@@ -739,6 +739,28 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       expect(stampOf(db).vals.confirmed_at).toBeInstanceOf(Date);
     });
 
+    // ⭐ THE CLEARANCE STAMP IS A CORE LEG. A row stamped confirmed WITHOUT it
+    // falls between both rails: the legacy sweep skips it (already confirmed)
+    // and the pre-visit card sweep excludes it (no clearance).
+    test('a failed clearance stamp leaves the row unstamped too', async () => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.call_sms_cleared_at) throw new Error('clearance write failed');
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
+
     test('a failed core leg leaves the row UNSTAMPED so the sweep retries it', async () => {
       AppointmentReminders.registerAppointment.mockResolvedValueOnce(null);
       const db = confirmHookDb({ fallbackLeads: [] });
