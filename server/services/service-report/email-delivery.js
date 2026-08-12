@@ -14,7 +14,7 @@ const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { dateOnlyStamp, formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
-const { inspectionCreditMemoForVisit } = require('../inspection-credit');
+const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
@@ -497,9 +497,23 @@ async function sendServiceReportV1Email(recordId, {
   // report reaches every inspection customer — including comped and
   // payer-billed visits that never see a receipt — so the written
   // deadline always lands. The persisted offer row is the authority and
-  // the shared memo helper carries the FROZEN amount + expiry; it never
-  // throws, and an empty string drops the template block entirely.
-  const inspectionCreditNote = await inspectionCreditMemoForVisit(service.scheduled_service_id);
+  // carries the FROZEN amount + expiry; an empty note drops the template
+  // block entirely. This send is idempotency-keyed — once delivered it
+  // never re-renders — so a credit-marked visit whose offer cannot be
+  // read DEFERS retryably (pre-push P1 2026-08-12) instead of shipping
+  // the customer's only written deadline stripped; the delivery queue
+  // retries and the hourly recovery sweep supplies the missing offer.
+  // Placed before the PDF render so a defer costs no wasted render.
+  const creditVerdict = await inspectionCreditReportNote(service);
+  if (creditVerdict.retryable) {
+    logger.warn(`[service-report-v1-email] deferring send for ${recordId}: ${creditVerdict.reason}`);
+    return {
+      ok: false,
+      error: `Inspection-credit terms unavailable — deferring send: ${creditVerdict.reason}`,
+      retryable: true,
+    };
+  }
+  const inspectionCreditNote = creditVerdict.note;
 
   let pdf = null;
   try {

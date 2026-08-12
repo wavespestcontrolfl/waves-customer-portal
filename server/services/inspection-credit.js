@@ -1653,6 +1653,69 @@ async function inspectionCreditMemoForVisit(scheduledServiceId) {
   }
 }
 
+/**
+ * Report-email variant with a DELIVERY VERDICT, not just copy (pre-push
+ * P1 2026-08-12). The report send is idempotency-keyed — once delivered
+ * it never re-renders — so a credit-MARKED visit whose offer cannot be
+ * read must DEFER the send retryably rather than ship without the
+ * promised terms: a transient query fault, or the closeout-crash window
+ * where the durable opt-in marker committed but the offer row waits on
+ * the hourly recovery sweep, would otherwise permanently strip the one
+ * written notice a comped/payer-billed customer gets.
+ *
+ * Verdicts:
+ *   { note: '<memo>' }                    — send with the line
+ *   { note: '' }                          — send without it (unmarked
+ *     visit; or the offer is already settled/lapsed, where announcing
+ *     terms would be false)
+ *   { note: '', retryable: true, reason } — defer; the delivery queue
+ *     retries and the recovery sweep supplies the missing offer
+ *
+ * Unmarked visits return immediately with NO query — the committed
+ * marker is authoritative (offers only exist for marked closeouts), so
+ * ordinary reports take zero extra reads.
+ */
+async function inspectionCreditReportNote(service) {
+  let marked = false;
+  try {
+    const raw = service?.service_data;
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    marked = !!data && data.inspectionCreditOptIn === true;
+  } catch {
+    // Unreadable service_data reads as unmarked — same posture as the
+    // recovery sweep, which matches on the raw column and would not see
+    // this row either.
+    marked = false;
+  }
+  if (!marked || !service?.scheduled_service_id) return { note: '' };
+
+  let offer;
+  try {
+    offer = await db('inspection_credit_offers')
+      .where({ source_scheduled_service_id: service.scheduled_service_id })
+      .first('amount', 'expires_at', 'status');
+  } catch (err) {
+    return {
+      note: '',
+      retryable: true,
+      reason: `inspection-credit offer lookup failed: ${err.message}`,
+    };
+  }
+  if (!offer) {
+    return {
+      note: '',
+      retryable: true,
+      reason: 'inspection-credit offer not yet recorded for a marked visit — recovery sweep pending',
+    };
+  }
+  // A settled offer (redeemed/expired/void) or one already lapsed by send
+  // time is nothing to promise — send clean, don't defer.
+  if (offer.status !== 'offered') return { note: '' };
+  const when = offer.expires_at ? new Date(offer.expires_at) : null;
+  if (!when || Number.isNaN(when.getTime()) || when < new Date()) return { note: '' };
+  return { note: inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '' };
+}
+
 module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
@@ -1667,6 +1730,7 @@ module.exports = {
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   inspectionCreditMemoForVisit,
+  inspectionCreditReportNote,
   queueCreditReceiptResend,
   creditWindowDaysForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,

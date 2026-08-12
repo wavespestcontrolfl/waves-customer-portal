@@ -100,6 +100,7 @@ const {
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   inspectionCreditMemoForVisit,
+  inspectionCreditReportNote,
   etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
   configuredCreditAmountForServiceKey,
@@ -1342,7 +1343,7 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
     expect(await inspectionCreditMemoForVisit('svc-1')).toContain('service credit');
   });
 
-  it('source contract: receipt and report email share this ONE lookup', () => {
+  it('source contract: receipt and report email share ONE copy, and the report defers on a retryable verdict', () => {
     const fs = require('fs');
     const path = require('path');
     // The receipt memo delegates — the two surfaces can never state
@@ -1350,13 +1351,56 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
     const invoiceEmail = fs.readFileSync(path.join(__dirname, '../services/invoice-email.js'), 'utf8');
     expect(invoiceEmail).toContain('inspectionCreditMemoForVisit(visitId)');
     expect(invoiceEmail).not.toContain("db('inspection_credit_offers')");
-    // The report email computes the note off the loaded service row and
-    // feeds BOTH the template payload and the legacy fallback renderer.
+    // The report email takes the VERDICT off the loaded service row,
+    // defers retryably when a marked visit's offer cannot be read, and
+    // feeds the note to BOTH the template payload and the legacy
+    // fallback renderer.
     const emailDelivery = fs.readFileSync(path.join(__dirname, '../services/service-report/email-delivery.js'), 'utf8');
-    expect(emailDelivery).toContain('inspectionCreditMemoForVisit(service.scheduled_service_id)');
+    expect(emailDelivery).toContain('inspectionCreditReportNote(service)');
+    expect(emailDelivery).toContain('if (creditVerdict.retryable)');
+    expect(emailDelivery).toContain('retryable: true');
     expect(emailDelivery).toContain("inspection_credit_note: inspectionCreditNote || ''");
     const legacyCallSite = emailDelivery.indexOf('buildServiceReportV1Email({');
     expect(emailDelivery.indexOf('inspectionCreditNote,', legacyCallSite)).toBeGreaterThan(-1);
+  });
+
+  it('report verdict: unmarked visits send clean with ZERO queries', async () => {
+    const verdict = await inspectionCreditReportNote({ scheduled_service_id: 'svc-1', service_data: '{}' });
+    expect(verdict).toEqual({ note: '' });
+    expect(mockChainCalls.length).toBe(0);
+  });
+
+  it('report verdict: a marked visit with an open offer sends the frozen terms', async () => {
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z', status: 'offered' }];
+    const verdict = await inspectionCreditReportNote({
+      scheduled_service_id: 'svc-1',
+      service_data: JSON.stringify({ inspectionCreditOptIn: true }),
+    });
+    expect(verdict.retryable).toBeUndefined();
+    expect(verdict.note).toContain('$125.00 service credit');
+    expect(verdict.note).toContain('August 25, 2026');
+  });
+
+  it('report verdict: marked but offer missing or unreadable DEFERS — the send is once-ever (pre-push P1)', async () => {
+    // Closeout-crash window: marker committed, offer waits on the hourly
+    // recovery sweep. Sending now would permanently strip the terms.
+    const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
+    const missing = await inspectionCreditReportNote(marked);
+    expect(missing.retryable).toBe(true);
+    expect(missing.note).toBe('');
+    // Transient lookup fault — same verdict.
+    mockOffers = null; // pickRows()[0] throws
+    const faulted = await inspectionCreditReportNote(marked);
+    expect(faulted.retryable).toBe(true);
+    expect(faulted.reason).toContain('lookup failed');
+  });
+
+  it('report verdict: a settled or lapsed offer sends clean — announcing it would be false', async () => {
+    const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z', status: 'redeemed' }];
+    expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
+    mockOffers = [{ amount: '125.00', expires_at: '2020-01-01T05:00:00Z', status: 'offered' }];
+    expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
   });
 
   it('migration registers the optional template variable both-sided', () => {
