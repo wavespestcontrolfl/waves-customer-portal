@@ -615,6 +615,21 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // stand instead. Records-sourced facts below (year built, construction,
       // foundation, roof) are county data, not vision, so they are unaffected.
       const featuresTrusted = lookupFeaturesAreTrustworthy(p);
+      // An attached garage is COUNTY data, not an imagery guess
+      // (detectAttachedGarage reads the record's garageType), so it is
+      // adopted at either grade — same standing as the record-backed
+      // pool/cage below. Pest pricing charges a real adjustment for it and
+      // the customers table has no column to fall back on, so a cached
+      // lookup that KNOWS the property has one but never mapped it into the
+      // features would price and lock a per-application amount BELOW the
+      // true one (codex #3367 PR r16). Positive-only: detectAttachedGarage
+      // returns false both for "no garage" and for "no garageType on file",
+      // so a false is absence of evidence and must leave the seed's own
+      // replay free to fill it.
+      if (p.hasAttachedGarage === true) {
+        features.attachedGarage = true;
+        lookupFeatureKeys.add('attachedGarage');
+      }
       // Record-backed pool/cage survive a low AI grade — assessor data, not
       // an imagery guess. Quoting a county-confirmed pool property as
       // pool-less because a photo was obstructed is the wrong failure.

@@ -372,6 +372,50 @@ describe('customer pricing AI helpers', () => {
 
   });
 
+  test('a county-confirmed attached garage prices even with no seed (PR r16 P1)', async () => {
+    // detectAttachedGarage reads the county record's garageType, so this is
+    // assessor data, not an imagery guess — it must price at either vision
+    // grade. Pest charges a real adjustment for it and the customers table
+    // has no column to fall back on, so a cached lookup that knows about
+    // the garage but never mapped it into the features would price BELOW
+    // the true amount.
+    const run = ({ garage, aiConfidence = 0.9, flags = [] }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2100, lotSqFt: 8000, stories: 1,
+          aiConfidence, fieldVerifyFlags: flags,
+          ...(garage === undefined ? {} : { hasAttachedGarage: garage }),
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-garage' }),
+      // No seed at all — the lookup is the only evidence.
+      propertySeed: null,
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const withGarage = await run({ garage: true });
+    const without = await run({ garage: false });
+    expect(price(withGarage)).toBeGreaterThan(price(without));
+
+    // County data survives a LOW vision grade, like the record-backed
+    // pool/cage.
+    const lowGrade = await run({ garage: true, aiConfidence: 0.1 });
+    expect(price(lowGrade)).toBe(price(withGarage));
+
+    // A wrong-premises flag adopts NOTHING from the lookup — the garage
+    // included. With no home size left to price on, the request fails
+    // closed rather than quoting: no option at all, which is a stronger
+    // guarantee than "priced without the garage".
+    const wrongPremises = await run({ garage: true, flags: [{ field: 'address', priority: 'high' }] });
+    expect(price(wrongPremises)).toBeUndefined();
+
+    // Absent field is absence of evidence, not a negative.
+    expect(price(await run({ garage: undefined }))).toBe(price(without));
+  });
+
   test('a flagged bed-area read keeps the seed out of the Tree & Shrub price (PR r15 P1)', async () => {
     // The response's property block does not surface bedArea, so the price
     // itself is the observable: a seeded bed area and the lot inference the
