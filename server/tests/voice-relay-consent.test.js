@@ -439,6 +439,17 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).not.toHaveBeenCalled();
   });
 
+  // ⭐ THE MIRROR CASE. Same words, different clauses, opposite meanings — an
+  // explicit text withdrawal must survive whatever replacement channel follows.
+  test('"stop texting me; call my husband instead" DOES suppress SMS', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting and call the husband.',
+      contact_preference: 'stop texting me; call my husband Dave instead',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   test('an explicitly STATED "stop texting me" does suppress SMS', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop texting.',

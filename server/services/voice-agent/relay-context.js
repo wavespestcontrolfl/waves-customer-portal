@@ -179,6 +179,14 @@ function systemBlockSafe(value, max = 160) {
 }
 
 function fmtMoney(value) {
+  // ⭐ ABSENT IS NOT ZERO. `Number(null)`, `Number('')` and `Number(false)` are
+  // all 0, so a nullable column — `onetime_total`, an engine line with no
+  // price — rendered as a confident "$0" and got read out as a quote: a price
+  // invented outside the estimator, which is the one thing this lane may never
+  // do. A missing number has no spoken form; callers already degrade to "the
+  // office can go over it" on null.
+  if (value === null || value === undefined || value === false) return null;
+  if (typeof value === 'string' && !value.trim()) return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
   const rounded = Math.round(n * 100) / 100;

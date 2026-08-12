@@ -358,6 +358,16 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(out).toMatch(/one-time work totalling \$99/);
   });
 
+  // ⭐ ABSENT IS NOT ZERO. Number(null) is 0, so a nullable total rendered as a
+  // confident "$0" and got read out as a quote — a price invented outside the
+  // estimator, which this lane may never do.
+  test('a NULL one-time total is never spoken as $0', async () => {
+    primeDb({ estimates: [{ ...SENT_ESTIMATE, onetime_total: null }] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).not.toMatch(/\$0\b/);
+    expect(out).not.toMatch(/one-time work totalling/);
+  });
+
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };

@@ -749,35 +749,39 @@ async function executeTool(name, input = {}, ctx = {}) {
       // same over-application as the email case. Only a text/SMS request — or a
       // genuinely broad "stop contacting me at all" — writes the phone-keyed
       // messaging suppression.
-      // ⭐ THE CHANNEL THEY ASKED TO STOP — never the one they asked FOR.
-      // `preferred_contact_method: 'sms'` means "text me instead", so reading it
-      // as an SMS opt-out silenced the exact channel the caller chose. Generic
-      // words did the same: "stop emailing me, contact me by text" contains
-      // "contact". So the SMS opt-out must be STATED — stop/no/don't next to a
-      // texting word — or the request must be an unmistakably TOTAL one. A bare
-      // flag with no words at all is the total case (the model set the boolean
-      // and quoted nothing). Anything else writes nothing and goes to a human.
-      const STOP = '(?:stop|no more|no|don\'?t|do not|quit|cease|remove|unsubscribe|take me off)';
-      const TEXTY = '(?:text|texts|texting|sms|message|messages|messaging)';
-      const statedSmsStop = new RegExp(`\\b${STOP}\\b[^.!?]{0,40}\\b${TEXTY}\\b`, 'i').test(preferenceText)
-        || new RegExp(`\\b${TEXTY}\\b[^.!?]{0,20}\\b${STOP}\\b`, 'i').test(preferenceText);
-      const totalStop = /\b(?:stop|no|don'?t|do not)\b[^.!?]{0,30}\b(?:contact|contacting|reach|reaching)\b/i.test(preferenceText)
+      // ⭐ THE CHANNEL THEY ASKED TO STOP — read from the STOP CLAUSE ALONE.
+      //
+      // Two sentences with the same words in different clauses mean opposite
+      // things: "stop texting me; call my husband instead" IS an SMS
+      // withdrawal, and "stop emailing me, contact me by text instead" is not.
+      // Proximity matching cannot tell them apart (both put a stop word within
+      // a few words of a texting word), and a blanket "names a wanted channel"
+      // veto silenced the first one — dropping an explicit withdrawal of
+      // consent. So the stop verb's OWN clause is what decides: everything from
+      // the stop word to the next clause boundary, with the replacement channel
+      // that follows deliberately out of scope.
+      const STOP = '(?:stop|no more|don\'?t|do not|quit|cease|remove|unsubscribe|take me off)';
+      const stopClause = (() => {
+        const m = new RegExp(`\\b${STOP}\\b`, 'i').exec(preferenceText);
+        if (!m) return '';
+        const rest = preferenceText.slice(m.index);
+        // First clause boundary after the stop word: punctuation, a dash, or a
+        // coordinating word that introduces the replacement.
+        const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b/i);
+        return cut === -1 ? rest : rest.slice(0, cut);
+      })();
+      const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
+      const statedSmsStop = TEXTY.test(stopClause);
+      const totalStop = /\b(?:contact|contacting|reach|reaching)\b/i.test(stopClause)
         || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText)
-        || !preferenceText.trim();
-      // …and if the caller named a channel they WANT, the sentence is a routing
-      // preference wearing an opt-out's words ("stop emailing me, contact me by
-      // text instead") — both patterns above match it on proximity alone. That
-      // is ambiguous, and ambiguous writes nothing: it is recorded for a human,
-      // which is this lane's default for every stated preference.
-      const namesWantedChannel = /\b(instead|prefer|rather)\b/i.test(preferenceText)
-        || /\b(?:contact|reach|call|text|message|email)\s+me\s+(?:by|on|at|via)\b/i.test(preferenceText);
-      const smsOptOut = (statedSmsStop || totalStop) && !namesWantedChannel;
+        || !preferenceText.trim(); // a bare flag with no words = the total request
+      const smsOptOut = statedSmsStop || totalStop;
       const emailOnlyRequest = !smsOptOut;
       if (input.do_not_contact_request === true && emailOnlyRequest) {
         logger.warn(
           `[voice-relay] verbal do-not-contact is NOT an unambiguous SMS stop callSid=${ctx.callSid || 'n/a'} `
-          + `(${namesWantedChannel ? 'names a channel the caller WANTS' : 'names another channel'}) — no messaging `
-          + 'suppression written (that would stop texts they did not ask to stop); recorded on the lead for a human'
+          + `(stop clause: "${stopClause.trim().slice(0, 60) || 'none'}") — no messaging suppression written `
+          + '(that would stop texts they did not ask to stop); recorded on the lead for a human'
         );
       }
       if (input.do_not_contact_request === true && !emailOnlyRequest) {
