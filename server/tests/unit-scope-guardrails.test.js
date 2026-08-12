@@ -1081,3 +1081,32 @@ describe('lead webhook engine-input property type', () => {
     });
   });
 });
+
+describe('lookup propertyType trust — an unresolved label is not a classification (r47)', () => {
+  const { lookupPropertyTypeIsTrustworthy } = require('../services/lookup-confidence');
+
+  test("the guard's own 'Unknown' label never overrides a saved type", () => {
+    // Gate ON, no record and no confident vision read: property-lookup-v2
+    // surfaces 'Unknown' instead of a plausible-but-wrong 'Single Family'.
+    // That string is TRUTHY, and customer-pricing-ai adopts a trusted lookup
+    // type over the customer's stored one — so trusting it would replace a
+    // saved Condo with 'Unknown' and price the unit as single-family.
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: 'Unknown' })).toBe(false);
+    // Property records normalize a missing type to the literal 'UNKNOWN'.
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: 'UNKNOWN' })).toBe(false);
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: '  unknown  ' })).toBe(false);
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: '' })).toBe(false);
+    expect(lookupPropertyTypeIsTrustworthy({})).toBe(false);
+  });
+
+  test('a real resolved type still prices, and a flagged one still does not', () => {
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: 'Condo' })).toBe(true);
+    expect(lookupPropertyTypeIsTrustworthy({ propertyType: 'Townhome' })).toBe(true);
+    // Unchanged pre-existing rule: a satellite reclassification ships a
+    // propertyType verify flag and must not move a price.
+    expect(lookupPropertyTypeIsTrustworthy({
+      propertyType: 'Townhome',
+      fieldVerifyFlags: [{ field: 'propertyType', priority: 'HIGH' }],
+    })).toBe(false);
+  });
+});

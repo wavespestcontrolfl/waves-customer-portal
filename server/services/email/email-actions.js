@@ -104,6 +104,50 @@ function emailProseForScan(body) {
   return out.join('\n').slice(0, 2000);
 }
 
+// The EARLIEST messages carry the ask; a later reply usually only supplies
+// the missing contact detail. Bounded so a long thread can't unbound the
+// scan text.
+const PRIOR_THREAD_SCAN_MESSAGES = 5;
+
+// Scope evidence routinely lives in an EARLIER message of the thread: an
+// initial "pest control for our warehouse" email that lacks a phone becomes
+// a plain lead, and the reply that supplies the phone carries no premises
+// wording at all. The LEAD ROW cannot carry that prose forward — `leads` has
+// no `description` column, and the email lead insert writes neither it nor
+// `transcript_summary` (the subject goes to lead_activities.description) —
+// so read the thread's earlier messages directly (codex r47 P1).
+// Only CLASSIFIED inbound rows count: Waves' own drafts and sent replies
+// land in `emails` with a null classification (email-sync 'outbound_skipped'),
+// and our own reply prose is not the customer's ask; blocked-sender spam is
+// excluded for the same reason.
+async function priorThreadProseForScan(email) {
+  const threadId = String(email?.gmail_thread_id || '').trim();
+  if (!threadId) return '';
+  try {
+    const priors = await db('emails')
+      .where('gmail_thread_id', threadId)
+      .whereNot('id', email.id)
+      .whereNotNull('classification')
+      .whereNot('classification', 'spam')
+      .orderBy('received_at', 'asc')
+      .limit(PRIOR_THREAD_SCAN_MESSAGES)
+      .select('subject', 'body_text', 'snippet');
+    return (Array.isArray(priors) ? priors : [])
+      .map((prior) => [
+        String(prior?.subject || '').trim(),
+        emailProseForScan(prior?.body_text || prior?.snippet || ''),
+      ].filter(Boolean).join('\n'))
+      .filter((text) => text.trim())
+      .join('\n');
+  } catch (e) {
+    // Fail-soft: the scan degrades to THIS message's own prose — the
+    // behavior before the carry-forward existed. A DB hiccup reading old
+    // thread mail must never cost the lead in hand.
+    logger.warn(`[email-actions] prior-thread scope scan unavailable: ${e.message}`);
+    return '';
+  }
+}
+
 async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
   const {
     buildAutomatedLeadDraftEstimate,
@@ -123,6 +167,7 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     return { created: false, skipped: 'no_usable_phone' };
   }
   const addr = parseExtractedAddress(extracted.address);
+  const priorThreadProse = await priorThreadProseForScan(email);
   const intake = {
     email: lead.email || null,
     rawPhone: phone,
@@ -138,15 +183,15 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     // it — excluding it here let that inquiry pass readiness as residential
     // (codex r40 P1).
     // The commercial-scope evidence can live in an EARLIER message of the
-    // thread: an initial "pest control for our warehouse" email that lacked
-    // a phone becomes a lead, and the reply that supplies the phone carries
-    // no premises wording. The lead row persists the original prose
-    // (description holds its subject; transcript_summary the classifier's
-    // summary), so the follow-up scan reads those too (codex r43 P1).
+    // thread (codex r43 P1) — read from the thread's own stored mail rather
+    // than from the lead row, which never persists that prose (see
+    // priorThreadProseForScan, codex r47 P1). transcript_summary stays in
+    // the scan for a lead that ORIGINATED on a call and is being completed
+    // by email — that column is populated on the call path.
     message: [
       String(email?.subject || '').trim(),
       emailProseForScan(email?.body_text || email?.snippet || ''),
-      String(lead?.description || '').trim(),
+      priorThreadProse,
       String(lead?.transcript_summary || '').trim(),
     ].filter(Boolean).join('\n'),
     normalizedAddress: {

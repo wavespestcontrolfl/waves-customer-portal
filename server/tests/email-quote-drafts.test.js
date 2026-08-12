@@ -24,6 +24,13 @@ jest.mock('../models/db', () => {
   const builderFor = (table) => {
     const chain = {
       where: () => chain,
+      whereNot: () => chain,
+      whereNotNull: () => chain,
+      orderBy: () => chain,
+      limit: () => chain,
+      // The prior-thread scope scan is the only reader here; anything else
+      // selecting from a table this mock doesn't stage gets an empty set.
+      select: async () => (table === 'emails' ? mockState.threadEmails : []),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
         return 1;
@@ -86,7 +93,7 @@ const EXTRACTED = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { inserts: [], updates: [] };
+  mockState = { inserts: [], updates: [], threadEmails: [] };
   mockReadiness.mockReturnValue({ ready: true, serviceInterest: 'Pest Control', missing: [] });
   mockBuilder.mockReturnValue({
     monthly: 62, annual: 744, oneTimeTotal: 0,
@@ -167,6 +174,53 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     expect(result.created).toBe(false);
     expect(result.skipped).toBe('duplicate');
     expect(mockState.inserts).toHaveLength(0);
+  });
+
+  // The premises wording that decides residential-vs-commercial usually
+  // arrives in the FIRST message of a thread; the reply that finally supplies
+  // a phone often says nothing about the property. The lead row cannot carry
+  // it (leads has no description column and the email insert writes no
+  // transcript_summary), so the scan reads the thread's own stored mail.
+  describe('prior-thread scope evidence', () => {
+    const scannedMessage = () => mockReadiness.mock.calls[0][0].intake.message;
+
+    test('an earlier commercial email in the thread reaches the readiness scan', async () => {
+      mockState.threadEmails = [{
+        subject: 'Pest control for our warehouse',
+        body_text: 'We need quarterly service for our 12,000 sq ft warehouse.\n\nThanks',
+        snippet: null,
+      }];
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Re: following up', body_text: 'Here is my number.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+      expect(scannedMessage()).toContain('12,000 sq ft');
+    });
+
+    test('a thread with no earlier mail scans this message alone', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toBe('Quote please\nFor my house.');
+    });
+
+    test('a failed thread read degrades to this message, never losing the lead', async () => {
+      const db = require('../models/db');
+      db.mockImplementationOnce(() => ({
+        where: () => { throw new Error('connection reset'); },
+      }));
+      const result = await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toBe('Quote please\nFor my house.');
+      expect(result.created).toBe(true);
+    });
   });
 
   test('ready extraction inserts a priced email_inquiry draft and links the lead', async () => {
