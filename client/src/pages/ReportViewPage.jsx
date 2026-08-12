@@ -2964,7 +2964,9 @@ function CrossSellCard({ data, token, mode }) {
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
       <div className="section-eyebrow">{priced ? 'Complete your protection' : 'One more layer available'}</div>
-      <h2>{`Add ${offer.label} to your plan`}</h2>
+      {/* start-vs-add is SERVER-decided (codex #3367 PR r2): a customer with
+          no plan (one-time treatment) must not be told to add to one. */}
+      <h2>{offer.relationship === 'start' ? `Start ${offer.label}` : `Add ${offer.label} to your plan`}</h2>
       {priced && (
         <div className="cross-sell-price">
           <span className="cross-sell-amount">{perApplication}</span>
@@ -2988,7 +2990,9 @@ function CrossSellCard({ data, token, mode }) {
           >
             {requestState === 'sending'
               ? 'Sending…'
-              : priced ? `Add ${offer.label}` : `Get my ${offer.label.toLowerCase()} quote`}
+              : priced
+                ? `${offer.relationship === 'start' ? 'Start' : 'Add'} ${offer.label}`
+                : `Get my ${offer.label.toLowerCase()} quote`}
           </button>
         )}
       </div>

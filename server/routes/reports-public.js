@@ -528,9 +528,13 @@ async function buildServiceReportV1ResponseData(service, token, {
       // the reward promise softens to match what the settings actually
       // grant — template copy must never advertise a benefit the referee
       // won't receive. Best-effort: unreadable settings suppress the card.
+      // STRICT read (codex #3367 PR r2): getSettings() falls back to
+      // program-active $25/$25 defaults on a failed or absent row, which
+      // would advertise rewards a broken or unconfigured environment
+      // cannot honor — no live row, no card.
       try {
         const referralEngine = require('../services/referral-engine');
-        const settings = await referralEngine.getSettings();
+        const settings = await referralEngine.getLiveSettings();
         if (settings?.program_active) {
           const referrerCents = Number(settings.referrer_reward_cents || 0);
           const refereeCents = Number(settings.referee_discount_cents || 0);
@@ -1110,7 +1114,7 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               requested_service: requestedService,
               source: 'service_report',
               category: 'add_service',
-              subject: `Add ${crossSell.label} — requested from service report`,
+              subject: `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`,
               description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
               urgency: 'routine',
               status: 'new',

@@ -6,7 +6,7 @@ const { buildReportCrossSell, _private } = require('../services/service-report/c
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
 function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
-  return (table) => {
+  const dbFn = (table) => {
     if (failCatalogJoin && table === 'scheduled_services as s') {
       const boom = () => { throw new Error('join failed'); };
       return { leftJoin: boom, where: boom, select: boom };
@@ -30,6 +30,9 @@ function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
     };
     return q;
   };
+  // plan-rate-ledger's loadComponents probes schema.hasTable before reading.
+  dbFn.schema = { hasTable: async (name) => Object.prototype.hasOwnProperty.call(tables, name) };
+  return dbFn;
 }
 
 const CUSTOMER = (overrides = {}) => ({
@@ -113,6 +116,26 @@ describe('buildReportCrossSell', () => {
     expect(result.mode).toBe('priced');
     expect(result.option.perVisit).toBeGreaterThan(0);
     expect(result.option.cadence).toMatch(/applications/);
+    // Plan owner → "add to your plan" copy stance, decided server-side.
+    expect(result.relationship).toBe('add');
+    // The modeled current-service inventory must never ride the public
+    // bearer-token payload (codex #3367 PR r2).
+    expect(result.currentServices).toBeUndefined();
+  });
+
+  test('customer with no recurring ownership at all gets the start-relationship copy stance', async () => {
+    // One-time-treatment customer: no upcoming recurring rows, a report
+    // identity that resolves no ownership family, no plan-rate rows. There
+    // is no plan to "add" to — the server marks the offer as a start.
+    const db = dbFor({ serviceTypes: [] });
+    const result = await buildReportCrossSell(
+      SERVICE({ service_type: 'German Cockroach Cleanout' }),
+      db,
+      { propertyLookup: missLookup },
+    );
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.relationship).toBe('start');
   });
 
   test('lawn-only customer is offered pest control; no cached footprint demotes to quote CTA', async () => {
@@ -241,19 +264,34 @@ describe('buildReportCrossSell', () => {
     expect(result.option).toBeNull();
   });
 
-  test('plan-rate ledger evidence: a family billed but not yet seeded advances the ladder and demotes to CTA', async () => {
-    // Pest via upcoming rows; lawn ONLY via a live plan rate (next lawn
-    // visit not seeded). The card must NOT offer lawn — and because the
-    // pricing baseline can't model the lawn plan, the tree & shrub offer
-    // must not show a standalone-priced number either.
+  test('plan-rate ledger evidence on the target rung suppresses the card — it never advances the ladder', async () => {
+    // Pest via upcoming rows; lawn ONLY via a plan-rate row (next lawn visit
+    // not seeded). Ledger rows are advisory-capable and never
+    // property-scoped, so lawn must not be offered (may be owned) AND the
+    // ladder must not advance to tree & shrub (the row may be stale or
+    // billed at another property): no card at all.
     const db = dbFor({
       serviceTypes: ['Pest Control'],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
       planRates: [{ family_key: 'lawn_care', monthly_rate: 45 }],
     });
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
+  test('plan-rate ledger evidence above the target rung demotes to CTA without moving the target', async () => {
+    // Pest via upcoming rows, termite ONLY via a plan-rate row. The ladder
+    // still offers lawn care (its rung carries no ledger evidence), but the
+    // pricing baseline cannot model the termite plan, so no standalone
+    // price may render.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      planRates: [{ family_key: 'termite', monthly_rate: 80 }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
     expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('tree_shrub');
+    expect(result.serviceKey).toBe('lawn_care');
     expect(result.mode).toBe('quote_cta');
   });
 

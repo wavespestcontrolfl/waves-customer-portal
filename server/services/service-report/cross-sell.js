@@ -239,25 +239,36 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // its offer-a-plan branch.
     const reportFamilies = ownershipKeysForRow({ service_type: service.service_type });
 
-    // Plan-rate ledger evidence (codex #3367 PR r1): a family carrying a
-    // live monthly rate is owned even when its next visit row isn't seeded
-    // yet — the unseeded gap the report-identity guard closes for the
-    // report's OWN family exists for every other family too (a pest+lawn
-    // customer with only the pest row seeded must not be offered lawn).
-    // Runs inside the outer try, so an unreadable ledger fails closed to
-    // no card, same as ownership.
-    const planRateFamilies = (await database('customer_plan_rates')
-      .where({ customer_id: customerId })
-      .select('family_key', 'monthly_rate'))
-      .filter((row) => Number(row.monthly_rate) > 0)
-      .map((row) => String(row.family_key || ''))
-      .filter((key) => key && key !== 'unattributed');
-
-    const evidencedOwnedKeys = [...ownedKeys, ...reportFamilies, ...planRateFamilies];
-    const targetKey = pickOfferTarget(evidencedOwnedKeys);
+    // Plan-rate ledger evidence (codex #3367 PR r1, reworked PR r2): a
+    // family carrying a live monthly rate blocks offering that family even
+    // when its next visit row isn't seeded (a pest+lawn customer with only
+    // the pest row seeded must not be offered lawn). But ledger rows are
+    // ADVISORY while GATE_PLAN_RATE_LEDGER is off (sync failures are
+    // tolerated) and are never property-scoped, so this evidence may only
+    // SUPPRESS or DEMOTE — never ADVANCE the ladder. The ladder walks on
+    // property-scoped ownership + report identity alone; if the picked rung
+    // itself carries ledger evidence we cannot tell "owned here" from
+    // "stale row / billed at another property", and either answer makes the
+    // card wrong: no card. Reads via the ledger's own loadComponents (the
+    // one authority; absent table = no ledger anywhere = nothing to
+    // suppress). A component-read failure hits the outer try — no card;
+    // the module's advisory-mode table-probe swallow (its ruled #3245
+    // policy) is bounded here because the ownership reads on this same
+    // connection succeeded milliseconds earlier.
+    const ladderEvidence = [...ownedKeys, ...reportFamilies];
+    const targetKey = pickOfferTarget(ladderEvidence);
     // Owns the whole ladder → nothing to offer; the report still shows the
     // referral card, which is client-side and needs no payload.
     if (!targetKey) return null;
+
+    const { loadComponents } = require('../plan-rate-ledger');
+    const planRateFamilies = (await loadComponents(database, customerId))
+      .filter((row) => Number(row.monthly_rate) > 0)
+      .map((row) => String(row.family_key || ''))
+      .filter((key) => key && key !== 'unattributed');
+    if (offerVocabulary(planRateFamilies).has(targetKey)) return null;
+
+    const evidencedOwnedKeys = [...ladderEvidence, ...planRateFamilies];
 
     // Best-effort seed — a failed estimate read must not kill the card, it
     // just prices without the seed (and likely degrades to the CTA). The
@@ -314,7 +325,14 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       serviceKey: targetKey,
       label: OFFER_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
-      currentServices: result.currentServices || [],
+      // Server-trusted copy stance (codex #3367 PR r2): a customer with no
+      // recurring ownership at all (one-time treatment, nothing seeded, no
+      // plan-rate row) has no plan to "add" to — the card, CTA, and stored
+      // request subject all say "Start" instead. NOTE: the modeled
+      // current-service inventory (result.currentServices) deliberately
+      // never rides this payload — it's a public bearer-token surface and
+      // the card has no use for it.
+      relationship: evidencedOwnedKeys.length ? 'add' : 'start',
       // Card-only serialization (codex #3367 r7): this rides a PUBLIC
       // customer payload governed by the per-application rule, so monthly/
       // annual/plan-total figures and the panel's "$X/mo" request prose
