@@ -66,7 +66,7 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], failCatalogJoin = false } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], failCatalogJoin = false } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
@@ -77,6 +77,7 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, e
     'scheduled_services as s': scheduled,
     customer_turf_profiles: turfProfile ? [turfProfile] : [],
     estimates,
+    customer_plan_rates: planRates,
   }, { failCatalogJoin });
 }
 
@@ -238,6 +239,44 @@ describe('buildReportCrossSell', () => {
     // combined WaveGuard tier would be missing from it (codex r8 P0).
     expect(result.mode).toBe('quote_cta');
     expect(result.option).toBeNull();
+  });
+
+  test('plan-rate ledger evidence: a family billed but not yet seeded advances the ladder and demotes to CTA', async () => {
+    // Pest via upcoming rows; lawn ONLY via a live plan rate (next lawn
+    // visit not seeded). The card must NOT offer lawn — and because the
+    // pricing baseline can't model the lawn plan, the tree & shrub offer
+    // must not show a standalone-priced number either.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      planRates: [{ family_key: 'lawn_care', monthly_rate: 45 }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('tree_shrub');
+    expect(result.mode).toBe('quote_cta');
+  });
+
+  test('recurring-but-tierless customer: owned rows dropped by the membership gate demote to CTA', async () => {
+    // The documented transition: upcoming recurring lawn rows but no tier
+    // and no monthly rate — ownership sees lawn, the membership-gated
+    // pricing baseline does not, so a priced standalone pest offer would
+    // miss the combined tier.
+    const db = dbFor({
+      customer: CUSTOMER({ waveguard_tier: 'none', monthly_rate: 0 }),
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'accepted',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.mode).toBe('quote_cta');
   });
 
   test('an explicitly commercial report identity suppresses the card even with a blank property type', async () => {

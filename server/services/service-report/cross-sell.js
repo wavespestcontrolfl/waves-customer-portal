@@ -140,14 +140,26 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   const pick = candidates[0];
   if (!pick) return null;
   const inputs = pick.inputs;
+  const cleanString = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null);
   const seed = {
     homeSqFt: positiveOrNull(inputs.homeSqFt),
     lotSqFt: positiveOrNull(inputs.lotSqFt),
     lawnSqFt: positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf),
     bedArea: positiveOrNull(inputs.bedArea),
-    bedAreaSource: typeof inputs.bedAreaSource === 'string' ? inputs.bedAreaSource : null,
+    bedAreaSource: cleanString(inputs.bedAreaSource),
     stories: positiveOrNull(inputs.stories),
-    storiesSource: typeof inputs.storiesSource === 'string' ? inputs.storiesSource : null,
+    storiesSource: cleanString(inputs.storiesSource),
+    // Non-dimensional pricing evidence rides with the dimensions (codex
+    // #3367 PR r1): a pool-cage home whose accepted estimate carried the
+    // modifiers must not price as a bare property on a lookup cache miss.
+    features: inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
+      ? inputs.features
+      : null,
+    propertyType: cleanString(inputs.propertyType),
+    yearBuilt: positiveOrNull(inputs.yearBuilt),
+    constructionMaterial: cleanString(inputs.constructionMaterial),
+    foundationType: cleanString(inputs.foundationType),
+    roofType: cleanString(inputs.roofType),
   };
   const hasAnyDimension = seed.homeSqFt || seed.lotSqFt || seed.lawnSqFt || seed.bedArea || seed.stories;
   return hasAnyDimension ? seed : null;
@@ -227,15 +239,22 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // its offer-a-plan branch.
     const reportFamilies = ownershipKeysForRow({ service_type: service.service_type });
 
-    const targetKey = pickOfferTarget([...ownedKeys, ...reportFamilies]);
-    // When a family is owned ONLY through the report's identity (no upcoming
-    // rows yet), the pricing panel's own baseline reload won't see it — the
-    // engine would price the offer STANDALONE instead of at the combined
-    // WaveGuard tier, and that wrong per-application number would be shown
-    // and price-locked (codex #3367 r8 P0). The ladder still advances past
-    // the family, but the offer demotes to the unpriced CTA.
-    const ownedSet = offerVocabulary(ownedKeys);
-    const baselineIncomplete = [...offerVocabulary(reportFamilies)].some((key) => !ownedSet.has(key));
+    // Plan-rate ledger evidence (codex #3367 PR r1): a family carrying a
+    // live monthly rate is owned even when its next visit row isn't seeded
+    // yet — the unseeded gap the report-identity guard closes for the
+    // report's OWN family exists for every other family too (a pest+lawn
+    // customer with only the pest row seeded must not be offered lawn).
+    // Runs inside the outer try, so an unreadable ledger fails closed to
+    // no card, same as ownership.
+    const planRateFamilies = (await database('customer_plan_rates')
+      .where({ customer_id: customerId })
+      .select('family_key', 'monthly_rate'))
+      .filter((row) => Number(row.monthly_rate) > 0)
+      .map((row) => String(row.family_key || ''))
+      .filter((key) => key && key !== 'unattributed');
+
+    const evidencedOwnedKeys = [...ownedKeys, ...reportFamilies, ...planRateFamilies];
+    const targetKey = pickOfferTarget(evidencedOwnedKeys);
     // Owns the whole ladder → nothing to offer; the report still shows the
     // referral card, which is client-side and needs no payload.
     if (!targetKey) return null;
@@ -272,6 +291,21 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // commercial cached-lookup classification would otherwise degrade to a
     // quote CTA instead of the ruled no-card-at-all.
     if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
+
+    // A price may only render when the PRICED BASELINE modeled every
+    // evidenced owned qualifying family (codex #3367 r8 P0 + PR r1): the
+    // panel reloads ownership itself (upcoming rows, membership-gated), so
+    // a family evidenced only by the report identity or the plan-rate
+    // ledger — or dropped by the membership gate in the documented
+    // recurring-but-tierless transition — is missing from the modeled
+    // baseline, and the engine would price the offer STANDALONE instead of
+    // at the combined WaveGuard tier. The ladder still advances past those
+    // families; the offer just demotes to the unpriced CTA.
+    const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite']);
+    const modeledBaseline = new Set(result.currentServiceKeys || []);
+    const baselineIncomplete = [...offerVocabulary(evidencedOwnedKeys)]
+      .filter((key) => QUALIFYING_BASELINE.has(key))
+      .some((key) => !modeledBaseline.has(key));
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
     const priced = optionIsPriceable(option) && !baselineIncomplete;

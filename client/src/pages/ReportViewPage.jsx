@@ -3009,17 +3009,19 @@ function CrossSellCard({ data, token, mode }) {
 }
 
 // Referral card (owner-approved 2026-08-11): rides the gated server payload
-// (data.referralCard — same GATE_REPORT_CROSS_SELL as the offer, so a dark
-// gate keeps reports byte-identical). Links to the authenticated portal's
-// existing referral program — no referral mechanics live on this public
-// bearer-token surface.
+// (data.referral — same GATE_REPORT_CROSS_SELL as the offer, so a dark gate
+// keeps reports byte-identical), and the reward line is COMPOSED SERVER-SIDE
+// from live referral program settings so the card never promises a benefit
+// the program no longer grants. Links to the authenticated portal's existing
+// referral program — no referral mechanics live on this public bearer-token
+// surface.
 function ReferralCard({ data, token, mode }) {
-  if (mode !== 'live' || !data?.referralCard) return null;
+  if (mode !== 'live' || !data?.referral?.line) return null;
   return (
     <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
       <div className="section-eyebrow">Share the protection</div>
       <h2>Know someone with a bug or lawn problem?</h2>
-      <p className="cross-sell-cadence">Refer a friend — you both get rewarded when they start service.</p>
+      <p className="cross-sell-cadence">{data.referral.line}</p>
       <div className="cross-sell-cta-row">
         <a
           data-glass-accent=""

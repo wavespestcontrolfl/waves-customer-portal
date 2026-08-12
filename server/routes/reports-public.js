@@ -516,16 +516,35 @@ async function buildServiceReportV1ResponseData(service, token, {
   // gate direction. Best-effort by contract: the builder returns null on any
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
-  let referralCard = false;
+  let referral = null;
   if (mode === 'live') {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
-      // The referral card rides the SAME gate + payload (codex #3367 r5:
-      // client-only rendering would break the "byte-identical while dark"
-      // contract and its click event would 400 against the gated endpoint).
-      referralCard = true;
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
       crossSell = await buildReportCrossSell(service, db);
+      // The referral card rides the SAME gate + payload (codex #3367 r5),
+      // and its copy is composed from the LIVE referral program settings
+      // (codex PR r1): a disabled program suppresses the card entirely, and
+      // the reward promise softens to match what the settings actually
+      // grant — template copy must never advertise a benefit the referee
+      // won't receive. Best-effort: unreadable settings suppress the card.
+      try {
+        const referralEngine = require('../services/referral-engine');
+        const settings = await referralEngine.getSettings();
+        if (settings?.program_active) {
+          const referrerCents = Number(settings.referrer_reward_cents || 0);
+          const refereeCents = Number(settings.referee_discount_cents || 0);
+          referral = {
+            line: referrerCents > 0 && refereeCents > 0
+              ? 'Refer a friend — you both get rewarded when they start service.'
+              : referrerCents > 0
+                ? 'Refer a friend — you get rewarded when they start service.'
+                : 'Refer a friend — we’ll take just as good care of them.',
+          };
+        }
+      } catch (err) {
+        logger.warn(`[reports-public] referral card suppressed: ${err.message}`);
+      }
     }
   }
 
@@ -533,7 +552,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     ...data,
     dynamicContext,
     ...(crossSell ? { crossSell } : {}),
-    ...(referralCard ? { referralCard: true } : {}),
+    ...(referral ? { referral } : {}),
     ...(staffViewer ? { staffViewer: true } : {}),
   };
 }
@@ -1074,6 +1093,15 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
               .first();
             if (existing) {
+              // Refresh the stored snapshot to THIS click's validated offer
+              // (codex #3367 PR r1): the shown-price lock must reflect what
+              // the customer just saw — an older revision (or a quote-mode
+              // row that has since become priced) must not stand as the
+              // recorded quote while the card confirms the new one.
+              await trx('service_requests').where({ id: existing.id }).update({
+                description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
+                pricing_revision: JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell }),
+              });
               await recordEvent();
               return { deduped: true };
             }

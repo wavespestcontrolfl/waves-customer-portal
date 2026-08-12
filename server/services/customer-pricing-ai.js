@@ -408,6 +408,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     complexity: 'moderate',
     irrigation: false,
   };
+  // Whether ANY feature evidence was adopted from the lookup (trusted vision
+  // read or record-backed pool/cage). Read by the seed block below: seeded
+  // feature evidence may only stand in when the lookup provided none.
+  let featuresFromLookup = false;
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -559,11 +563,17 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // an imagery guess. Quoting a county-confirmed pool property as
       // pool-less because a photo was obstructed is the wrong failure.
       if (!featuresTrusted) {
-        if (poolFeaturesAreRecordBacked(p)) features.pool = p.pool === 'YES' || features.pool;
+        if (poolFeaturesAreRecordBacked(p)) {
+          features.pool = p.pool === 'YES' || features.pool;
+          featuresFromLookup = true;
+        }
         if (poolCageIsRecordBacked(p)) {
           features.poolCage = true;
           if (p.poolCageSize) features.poolCageSize = String(p.poolCageSize).toLowerCase();
+          featuresFromLookup = true;
         }
+      } else {
+        featuresFromLookup = true;
       }
       features = !featuresTrusted ? features : {
         ...features,
@@ -621,6 +631,24 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       stories = propertySeed.stories;
       storiesFromSeed = true;
     }
+    // Non-dimensional pricing evidence replays too (codex #3367 PR r1):
+    // features (pool/cage/densities), property type, and structural facts
+    // all move money — pricing a seeded property against the resolver's
+    // non-observational defaults would price-lock a bare-property rate for
+    // a home whose accepted estimate carried the modifiers. Same fill-only
+    // doctrine: lookup/profile evidence always wins.
+    if (!featuresFromLookup && propertySeed.features
+      && typeof propertySeed.features === 'object' && !Array.isArray(propertySeed.features)) {
+      features = { ...features, ...propertySeed.features };
+    }
+    if (!customer.property_type && propertyType === 'single_family'
+      && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
+      propertyType = propertySeed.propertyType;
+    }
+    yearBuilt = yearBuilt || propertySeed.yearBuilt || null;
+    constructionMaterial = constructionMaterial || propertySeed.constructionMaterial || null;
+    foundationType = foundationType || propertySeed.foundationType || null;
+    roofType = roofType || propertySeed.roofType || null;
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
@@ -1002,6 +1030,10 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     ok: true,
     message,
     currentServices: currentServiceKeys.map(toKeyLabel),
+    // Raw modeled-baseline keys (mapKey'd, e.g. termite_bait → termite) —
+    // the report cross-sell reads these to prove every evidenced owned
+    // family actually made it into the priced baseline (codex #3367 PR r1).
+    currentServiceKeys: [...currentServiceKeys],
     requestedServices: requestedServices.map(toKeyLabel),
     alreadyIncluded: alreadyIncluded.map(toKeyLabel),
     property: summarizeProperty(propertyContext),
