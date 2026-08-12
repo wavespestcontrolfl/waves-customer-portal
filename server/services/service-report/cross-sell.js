@@ -71,6 +71,31 @@ function pickOfferTarget(ownedKeys) {
   return OFFER_LADDER.find((key) => !owned.has(key)) || null;
 }
 
+// Does the price the pricer just built rest on the SAME qualifying-service
+// baseline this module proved? The pricer reloads ownership itself, through
+// its own membership-gated, default-scoped query — so the two can disagree
+// in both directions, and each direction moves money the wrong way:
+//   - MISSING: a family evidenced here but absent from the model means the
+//     engine priced the offer STANDALONE instead of at the combined
+//     WaveGuard tier (codex #3367 r8 P0) — the price comes out too high.
+//   - UNEXPECTED: a family the model carries but the STRICT scope rejected
+//     (a past or locality-less legacy row the outer load discarded before
+//     scoping — reachable with GATE_AUTO_WAVEGUARD_TIER off) grants an
+//     unearned combined-tier DISCOUNT (codex #3367 PR r19) — too low.
+// A subset check catches only the first, so equality is the requirement.
+// Compared over the QUALIFYING families alone: those are the ones that move
+// the tier, and ownership is deliberately broader than qualification.
+const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite']);
+
+function qualifyingBaselineMismatch(evidencedOwnedKeys = [], modeledKeys = []) {
+  const evidenced = [...offerVocabulary(evidencedOwnedKeys)].filter((key) => QUALIFYING_BASELINE.has(key));
+  const modeled = [...new Set(modeledKeys || [])].filter((key) => QUALIFYING_BASELINE.has(key));
+  return {
+    incomplete: evidenced.some((key) => !modeled.includes(key)),
+    unexpected: modeled.some((key) => !evidenced.includes(key)),
+  };
+}
+
 function pickOption(options = [], targetKey) {
   if (!options.length) return null;
   return options.find((option) => option.id === PREFERRED_OPTION_IDS[targetKey])
@@ -792,11 +817,9 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // baseline, and the engine would price the offer STANDALONE instead of
     // at the combined WaveGuard tier. The ladder still advances past those
     // families; the offer just demotes to the unpriced CTA.
-    const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite']);
-    const modeledBaseline = new Set(result.currentServiceKeys || []);
-    const baselineIncomplete = [...offerVocabulary(evidencedOwnedKeys)]
-      .filter((key) => QUALIFYING_BASELINE.has(key))
-      .some((key) => !modeledBaseline.has(key));
+    const { incomplete: baselineIncomplete, unexpected: baselineUnexpected } = qualifyingBaselineMismatch(
+      evidencedOwnedKeys, result.currentServiceKeys
+    );
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
     // A tree & shrub offer built on a seed whose zero tree count was
@@ -811,8 +834,8 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // per-field — proving the flagged dimension did not reach this price
     // would need provenance the stored blob does not carry.
     const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
-    const priced = optionIsPriceable(option) && !baselineIncomplete && !ambiguousTreeEvidence
-      && !correctionsUnapplied && !seedRequiresVerification;
+    const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
+      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
 
     const payload = {
       serviceKey: targetKey,
@@ -862,6 +885,6 @@ module.exports = {
     // Test hook: what the seed actually carries out of an accepted estimate
     // is the money-bearing contract here — every modifier it drops prices
     // as if the property did not have it.
-    loadEstimateSeed, estimateRequiresFieldVerification,
+    loadEstimateSeed, estimateRequiresFieldVerification, qualifyingBaselineMismatch,
   },
 };

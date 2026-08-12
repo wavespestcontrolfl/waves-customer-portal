@@ -362,6 +362,52 @@ describe('buildReportCrossSell', () => {
     expect(result.relationship).toBe('start');
   });
 
+  describe('qualifyingBaselineMismatch (PR r19 P1)', () => {
+    // The pricer reloads ownership through its own membership-gated,
+    // default-scoped query, so it can disagree with the strictly scoped
+    // evidence in BOTH directions — and each moves money the wrong way.
+    // Unit-tested directly: the suite's db fake cannot produce a divergence
+    // between the two loaders (they read the same fixture rows), so an
+    // end-to-end fixture here would assert nothing.
+    const { qualifyingBaselineMismatch } = _private;
+
+    test('an exact match is neither incomplete nor unexpected', () => {
+      expect(qualifyingBaselineMismatch(['pest_control'], ['pest_control']))
+        .toEqual({ incomplete: false, unexpected: false });
+    });
+
+    test('a family evidenced but NOT modeled is incomplete (priced standalone, too high)', () => {
+      expect(qualifyingBaselineMismatch(['pest_control', 'lawn_care'], ['pest_control']))
+        .toEqual({ incomplete: true, unexpected: false });
+    });
+
+    test('a family modeled but NOT evidenced is unexpected (unearned tier discount, too low)', () => {
+      expect(qualifyingBaselineMismatch(['pest_control'], ['pest_control', 'lawn_care']))
+        .toEqual({ incomplete: false, unexpected: true });
+    });
+
+    test('non-qualifying families are ignored on both sides', () => {
+      // Ownership is broader than qualification: rodent monitoring never
+      // moves the tier, so it cannot make the baselines disagree.
+      expect(qualifyingBaselineMismatch(['pest_control', 'rodent'], ['pest_control']))
+        .toEqual({ incomplete: false, unexpected: false });
+      expect(qualifyingBaselineMismatch(['pest_control'], ['pest_control', 'rodent']))
+        .toEqual({ incomplete: false, unexpected: false });
+    });
+
+    test('the termite vocabularies are reconciled before comparing', () => {
+      // Ownership spells it termite_bait; the pricer spells it termite.
+      expect(qualifyingBaselineMismatch(['termite_bait'], ['termite']))
+        .toEqual({ incomplete: false, unexpected: false });
+    });
+
+    test('empty on both sides is a match; duplicates do not create a mismatch', () => {
+      expect(qualifyingBaselineMismatch([], [])).toEqual({ incomplete: false, unexpected: false });
+      expect(qualifyingBaselineMismatch(['pest_control'], ['pest_control', 'pest_control']))
+        .toEqual({ incomplete: false, unexpected: false });
+    });
+  });
+
   test('the offer fingerprint covers every rendered field', () => {
     const { offerFingerprint } = _private;
     const base = {
