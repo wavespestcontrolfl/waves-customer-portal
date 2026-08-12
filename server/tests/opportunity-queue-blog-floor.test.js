@@ -272,51 +272,131 @@ describe('miner persistAll action-aware gate', () => {
     expect(persistedKeys).not.toContain('lb-from-decay-69');
   });
 
-  test('a moved ctr_rewrite target retires the superseded row and its link-boost companion', async () => {
-    // The ranking URL for a query moves A → B between mines. B queues
-    // under a new dedupe key (page_url is in the key), so A's pending row
-    // would stay claimable for 14 days and rewrite a page the current
-    // evidence no longer selects.
+  // Reconciliation harness: records every where/whereNotIn/whereIn/update
+  // so the tests can assert exactly which rows a run would retire.
+  function reconcileHarness(staleRows) {
     const updates = [];
     db.mockImplementation((table) => {
       const q = {
-        _filters: null, _not: null, _in: null, _raw: null,
+        _filters: null, _notIn: null, _in: null,
         where: jest.fn((f) => { q._filters = f; return q; }),
-        whereNot: jest.fn((c, v) => { q._not = [c, v]; return q; }),
+        whereNot: jest.fn(() => q),
+        whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
-        whereRaw: jest.fn((s, b) => { q._raw = [s, b]; return q; }),
-        select: jest.fn(() => Promise.resolve([{ page_url: 'https://x/old-page/' }])),
+        whereRaw: jest.fn(() => q),
+        select: jest.fn(() => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite' ? staleRows : []
+        )),
         update: jest.fn((u) => {
-          updates.push({ table, filters: q._filters, not: q._not, in: q._in, raw: q._raw, updates: u });
+          updates.push({ table, filters: q._filters, notIn: q._notIn, in: q._in, updates: u });
           return Promise.resolve(1);
         }),
       };
       return q;
     });
     db.raw.mockResolvedValue({ rowCount: 1 });
+    return updates;
+  }
 
-    const persisted = await miner.persistAll([
+  const staleRow = {
+    dedupe_key: 'ctr_rewrite::pest::_::https://x/old-page/',
+    page_url: 'https://x/old-page/',
+    service: 'pest',
+    city: null,
+  };
+
+  test('a moved ctr_rewrite target retires the superseded row and its companion by EXACT key', async () => {
+    // The ranking URL for a query moves A → B between mines. B queues
+    // under a new dedupe key (page_url is in the key), so A's pending row
+    // would stay claimable for 14 days and rewrite a page the current
+    // evidence no longer selects.
+    const updates = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
       opp({
         score: 87,
         bucket: 'ctr_rewrite',
         action_type: 'rewrite_title_meta',
         query: 'plaster bagworm',
+        service: 'pest',
+        city: null,
         page_url: 'https://x/new-page/',
         dedupe_key: 'ctr::new-page',
       }),
     ]);
 
-    expect(persisted).toBe(1);
     const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
     expect(retirements).toHaveLength(2);
-    // 1. the superseded ctr_rewrite row for the same query, other key
+    // 1. pending rows for the query that are NOT the current target
     expect(retirements[0].filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
-    expect(retirements[0].not).toEqual(['dedupe_key', 'ctr::new-page']);
+    expect(retirements[0].notIn).toEqual(['dedupe_key', ['ctr::new-page']]);
     expect(retirements[0].updates.status).toBe('expired'); // revivable, not sticky-skipped
-    // 2. its derived link-boost companion, matched on the stale page
+    // 2. the companion by EXACT dedupe key — never by page, since a
+    //    link_boost key carries no query and is shared across queries.
     expect(retirements[1].filters).toMatchObject({ bucket: 'link_boost', status: 'pending' });
-    expect(retirements[1].in).toEqual(['page_url', ['https://x/old-page/']]);
-    expect(retirements[1].raw[1]).toEqual(['ctr_rewrite']);
+    expect(retirements[1].in[0]).toBe('dedupe_key');
+    expect(retirements[1].in[1]).toEqual(['link_boost::pest::_::https://x/old-page/']);
+  });
+
+  test('a query with NO actionable target this run retires all of its pending rewrites', async () => {
+    // Coverage vanished / CTR recovered / materiality failed → page_url
+    // null. The previous target must not stay claimable just because the
+    // new candidate is non-actionable.
+    const updates = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'do_not_publish',
+        query: 'plaster bagworm',
+        page_url: null,
+        dedupe_key: 'ctr::no-target',
+      }),
+    ]);
+
+    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
+    expect(retirements.length).toBeGreaterThanOrEqual(1);
+    // No active key to exclude — every pending row for the query goes.
+    expect(retirements[0].filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
+    expect(retirements[0].notIn).toBe(null);
+  });
+
+  test('a companion still referenced by another live candidate is preserved', async () => {
+    // Two queries legitimately target the same page; the companion key
+    // carries no query, so retiring it for one query would delete the
+    // other's still-valid work. The protection covers candidates whose
+    // companion the per-run cap omitted, hence it is derived from the
+    // rewrite candidates themselves.
+    const updates = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/new-page/',
+        dedupe_key: 'ctr::new-page',
+      }),
+      // Another query still points at the OLD page → its companion lives.
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'bagworms florida',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/old-page/',
+        dedupe_key: 'ctr::old-page-other-query',
+      }),
+    ]);
+
+    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
+      && u.filters?.bucket === 'link_boost');
+    expect(companionRetirements).toHaveLength(0);
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {

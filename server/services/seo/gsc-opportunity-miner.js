@@ -3352,46 +3352,96 @@ class GscOpportunityMiner {
       );
       // ?? not || — a frozen-row conflict legitimately reports rowCount 0
       // (the WHERE guard skipped the update) and must not count as persisted.
-      const persisted = result.rowCount ?? 0;
-      count += persisted;
+      count += result.rowCount ?? 0;
+    }
+    await this._reconcileCtrRewriteTargets(runner, opportunities);
+    return count;
+  }
 
-      // The ranking URL a query lands on MOVES between mines, and a
-      // ctr_rewrite dedupe key embeds page_url — so the new target queues
-      // under a fresh key while the previous page's row stays pending and
-      // claimable for its full 14 days, pointing the rewrite at a page the
-      // current evidence no longer selects (audit P2). Retire the
-      // superseded target and the link-boost companion derived from it.
-      // Only pending rows: claimed/review work is in flight and the
-      // upsert's own guard leaves those alone. 'expired' (not 'skipped')
-      // keeps it revivable by contract if the target moves back.
-      if (persisted && o.bucket === 'ctr_rewrite' && o.query && o.page_url) {
-        try {
-          const superseded = await runner('opportunity_queue')
-            .where({ bucket: 'ctr_rewrite', query: o.query, status: 'pending' })
-            .whereNot('dedupe_key', o.dedupe_key)
-            .select('page_url');
-          const stalePages = superseded.map((r) => r.page_url).filter((u) => u && u !== o.page_url);
-          if (superseded.length) {
-            await runner('opportunity_queue')
-              .where({ bucket: 'ctr_rewrite', query: o.query, status: 'pending' })
-              .whereNot('dedupe_key', o.dedupe_key)
-              .update({ status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date() });
-          }
-          if (stalePages.length) {
-            await runner('opportunity_queue')
-              .where({ bucket: 'link_boost', status: 'pending' })
-              .whereIn('page_url', stalePages)
-              .whereRaw("signal_metadata->>'source_bucket' = ?", ['ctr_rewrite'])
-              .update({ status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date() });
-          }
-        } catch (err) {
-          // Fail-soft like the near-me cleanup: a reconciliation error
-          // must never abort the mining pass.
-          logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (${o.query}): ${err.message}`);
-        }
+  /**
+   * The ranking URL a query lands on MOVES between mines, and a ctr_rewrite
+   * dedupe key embeds page_url — so a new target queues under a fresh key
+   * while the previous page's row stays pending and claimable for its full
+   * 14 days, pointing an automated rewrite at a page the current evidence
+   * no longer selects (audit P2).
+   *
+   * Reconciliation is by QUERY against the batch's currently-actionable
+   * keys, which covers the moved-target case AND the case where the query
+   * produced no actionable target at all this run — map coverage vanished,
+   * the selected page's CTR recovered, materiality failed. A "only when the
+   * new candidate has a page" cleanup would leave the stale row claimable
+   * in exactly those fail-closed situations (audit P1).
+   *
+   * Companions are retired by EXACT dedupe key, never by page: a link_boost
+   * key is (bucket, service, city, page) with no query in it, so several
+   * queries legitimately share one companion. Any page still referenced by
+   * a live candidate in this batch is protected — including candidates
+   * whose companion the per-run cap omitted (audit P1).
+   *
+   * 'expired' rather than 'skipped': revivable by contract if the target
+   * moves back. Pending rows only — claimed/in-review work is in flight.
+   * Fail-soft: reconciliation must never abort the mining pass.
+   */
+  async _reconcileCtrRewriteTargets(runner, opportunities = []) {
+    const activeKeysByQuery = new Map();
+    for (const o of opportunities) {
+      if (o.bucket !== 'ctr_rewrite' || !o.query) continue;
+      if (!activeKeysByQuery.has(o.query)) activeKeysByQuery.set(o.query, new Set());
+      // Only an actionable rewrite defends its row; a demoted candidate
+      // (no resolvable/material target) leaves an empty set, retiring
+      // every pending row for the query.
+      if (o.page_url && o.action_type === 'rewrite_title_meta') {
+        activeKeysByQuery.get(o.query).add(o.dedupe_key);
       }
     }
-    return count;
+    if (!activeKeysByQuery.size) return;
+
+    // Companion keys the CURRENT batch still stands behind — derived from
+    // live rewrite candidates (not just emitted link_boost rows, which the
+    // per-run cap may have dropped) plus any link_boost in the batch.
+    const protectedCompanionKeys = new Set();
+    for (const o of opportunities) {
+      if (o.bucket === 'link_boost' && o.dedupe_key) protectedCompanionKeys.add(o.dedupe_key);
+      if (o.bucket === 'ctr_rewrite' && o.page_url && o.action_type === 'rewrite_title_meta') {
+        protectedCompanionKeys.add(dedupeKey({
+          bucket: 'link_boost', service: o.service, city: o.city, page_url: o.page_url,
+        }));
+      }
+    }
+
+    for (const [query, activeKeys] of activeKeysByQuery) {
+      try {
+        let staleQ = runner('opportunity_queue')
+          .where({ bucket: 'ctr_rewrite', query, status: 'pending' });
+        if (activeKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(activeKeys));
+        const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+        if (!stale.length) continue;
+
+        let expireQ = runner('opportunity_queue')
+          .where({ bucket: 'ctr_rewrite', query, status: 'pending' });
+        if (activeKeys.size) expireQ = expireQ.whereNotIn('dedupe_key', Array.from(activeKeys));
+        await expireQ.update({
+          status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
+        });
+
+        const companionKeys = stale
+          .filter((r) => r.page_url)
+          .map((r) => dedupeKey({
+            bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+          }))
+          .filter((k) => !protectedCompanionKeys.has(k));
+        if (companionKeys.length) {
+          await runner('opportunity_queue')
+            .where({ bucket: 'link_boost', status: 'pending' })
+            .whereIn('dedupe_key', companionKeys)
+            .update({
+              status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
+            });
+        }
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (${query}): ${err.message}`);
+      }
+    }
   }
 
   async expireStale() {
