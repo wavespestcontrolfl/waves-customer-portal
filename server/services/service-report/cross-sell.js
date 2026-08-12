@@ -116,8 +116,16 @@ async function customerHasOnlyPrimaryPremises(database, customerId, customer, pr
     if (linkage.scopeKeyLacksLocality(key)) return false;
     return scopeKeysShareLocality(key, primaryStreet);
   };
+  // EVERY property row, active or not (pre-push P0): report tokens are
+  // permanent, so the report being priced is frequently older than the
+  // account's current shape. A secondary property that has since been
+  // deactivated is exactly the premises a legacy unlinked record is likely
+  // to belong to, and filtering it out makes the COALESCEd primary address
+  // look proven. This proof asks "has this account EVER had a second
+  // premises", not "does it have one today" — the live-count question that
+  // refreshHasMultiHome answers is a different one.
   const properties = await database('customer_properties')
-    .where({ customer_id: customerId, active: true })
+    .where({ customer_id: customerId })
     .select('address_line1', 'address_line2', 'city', 'zip');
   if (properties.length >= 2) return false;
   for (const row of properties) {
@@ -641,32 +649,31 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
     }
 
-    // On a cache MISS the price falls back to the accepted-estimate seed —
-    // but a technician's verified correction (square footage, hasPool)
-    // supersedes that estimate too, since the seed is older still. Pricing
-    // through it would publish an exact per-application price on a fact
-    // staff already fixed, so any correction on file demotes the offer to
-    // the unpriced CTA (codex #3367 PR r12, tightened by the pre-push P0 on
-    // its first form). Self-healing: a live lookup folds the correction in
-    // and re-saves, cache hits resume, and there is no miss left to demote.
-    // Probed only on a miss, and FAIL CLOSED — an unreadable probe is not
-    // evidence that no corrections exist.
-    let correctionsUnapplied = false;
+    // Without a lookup RESULT the price falls back to the accepted-estimate
+    // seed — but a technician's verified correction (square footage,
+    // hasPool) supersedes that estimate too, since the seed is older still.
+    // Pricing through it publishes an exact per-application price on a fact
+    // staff already fixed, so a correction on file demotes the offer to the
+    // unpriced CTA (codex #3367 PR r12).
+    //
+    // The probe runs INDEPENDENTLY of the lookup, not inside it (pre-push
+    // P0 on the first form): hooking it to a miss meant a lookup that
+    // REJECTED skipped it — the pricer catches that and prices from the
+    // seed anyway — and CUSTOMER_PRICING_AI_LOOKUP=false skipped it too,
+    // because the wrapper was never invoked at all. Both are exactly the
+    // "no lookup result, seed decides the price" case the guard exists for.
+    // The wrapper now only records whether a usable result came back; a
+    // successful result already has the corrections applied (getCachedLookup
+    // rejects rows older than an override, and every result path folds the
+    // overrides in), so it is the ABSENCE of one that needs the probe.
+    let lookupProducedResult = false;
     const trackedPropertyLookup = async (address) => {
       const found = await propertyLookup(address);
-      if (!found) {
-        try {
-          const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
-          if (await hasVerifiedOverrides(address)) correctionsUnapplied = true;
-        } catch (err) {
-          correctionsUnapplied = true;
-          logger.warn(`[report-cross-sell] verified-override probe failed, demoting to CTA (${err.message})`);
-        }
-      }
+      if (found) lookupProducedResult = true;
       return found;
     };
 
-    const { buildCustomerPricingResponse } = require('../customer-pricing-ai');
+    const { buildCustomerPricingResponse, addressForCustomer } = require('../customer-pricing-ai');
     const result = await buildCustomerPricingResponse({
       customer,
       prompt: OFFER_PROMPTS[targetKey],
@@ -674,6 +681,22 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       propertyLookup: trackedPropertyLookup,
       propertySeed,
     });
+
+    // No lookup result — a miss, a rejected lookup, or the lookup switched
+    // off entirely — means any verified correction on this address was NOT
+    // applied to the price. FAIL CLOSED: an unreadable probe is not evidence
+    // that no corrections exist. Self-healing either way, since a live
+    // lookup folds the correction in and re-saves.
+    let correctionsUnapplied = false;
+    if (!lookupProducedResult) {
+      try {
+        const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
+        correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
+      } catch (err) {
+        correctionsUnapplied = true;
+        logger.warn(`[report-cross-sell] verified-override probe failed, demoting to CTA (${err.message})`);
+      }
+    }
 
     // Ownership failed inside the pricer, or the prompt resolved to a
     // service the account already holds (a race with the ladder read above)

@@ -1137,6 +1137,11 @@ function summarizeProperty(context) {
 
 module.exports = {
   buildCustomerPricingResponse,
+  // The exact address string this module hands the property lookup — a
+  // consumer that must reason about that lookup independently (the
+  // service-report cross-sell probes for verified corrections whether or
+  // not the lookup ran) has to key on the same string, not its own guess.
+  addressForCustomer,
   inferRequestedServices,
   serviceKeyFromText,
   variantsForService,

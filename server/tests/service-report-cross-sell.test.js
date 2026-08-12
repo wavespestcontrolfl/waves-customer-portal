@@ -21,20 +21,36 @@ function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
       return { leftJoin: boom, where: boom, select: boom };
     }
     const rows = tables[table] || [];
+    // where() is a no-op for most tables on purpose — fixtures omit
+    // customer_id, and honoring it globally would filter every row out.
+    // customer_properties is the exception: whether a query restricts to
+    // active rows is load-bearing there (a deactivated secondary property
+    // is exactly what a permanent historical report token can belong to),
+    // and a fake that ignores the filter cannot tell the two queries apart.
+    const filtered = [];
+    const applyFilter = (criteria) => {
+      if (table !== 'customer_properties' || !criteria || typeof criteria !== 'object') return;
+      filtered.push(criteria);
+    };
+    const visible = () => rows.filter((row) => filtered.every(
+      (criteria) => Object.entries(criteria).every(([key, value]) => (
+        key === 'customer_id' ? true : row[key] === value
+      ))
+    ));
     const q = {
-      where() { return q; },
+      where(criteria) { applyFilter(criteria); return q; },
       whereNotIn() { return q; },
       orWhereNull() { return q; },
       leftJoin() { return q; },
       orderBy() { return q; },
-      select() { return rows; },
+      select() { return visible(); },
       limit() { return q; },
       first(col) {
         void col;
-        return rows[0] || null;
+        return visible()[0] || null;
       },
       whereNotNull() { return q; },
-      distinct() { return rows; },
+      distinct() { return visible(); },
       columnInfo() {
         // Mirror the live scheduled_services shape: the stamped service
         // address columns are what the ownership loader scopes on and what
@@ -177,6 +193,20 @@ describe('buildReportCrossSell', () => {
     test('an unreadable probe FAILS CLOSED — it is not evidence of no corrections', async () => {
       hasVerifiedOverrides.mockRejectedValueOnce(new Error('property_lookups unreadable'));
       const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      expect(demoted).not.toBeNull();
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.option).toBeNull();
+    });
+
+    test('a REJECTED lookup still runs the probe and demotes (pre-push P0)', async () => {
+      // The pricer catches a lookup rejection and prices from the seed
+      // anyway. Hooking the probe to a cache MISS meant a throw skipped it
+      // entirely — the same bypass CUSTOMER_PRICING_AI_LOOKUP=false opens,
+      // where the wrapper is never invoked at all. The probe is independent
+      // of the lookup now, keyed on "no lookup result".
+      hasVerifiedOverrides.mockResolvedValueOnce(true);
+      const boomLookup = async () => { throw new Error('lookup exploded'); };
+      const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: boomLookup });
       expect(demoted).not.toBeNull();
       expect(demoted.mode).toBe('quote_cta');
       expect(demoted.option).toBeNull();
@@ -545,6 +575,20 @@ describe('buildReportCrossSell', () => {
     test('a lone property row that is NOT the primary suppresses it', async () => {
       const db = singlePremisesDb({
         properties: [{ id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' }],
+      });
+      expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+    });
+
+    test('a DEACTIVATED secondary property still suppresses it (pre-push P0)', async () => {
+      // Report tokens are permanent, so the report being priced is often
+      // older than the account's current shape — a since-deactivated
+      // secondary property is exactly the premises a legacy unlinked record
+      // is likely to belong to. Restricting the proof to active rows made
+      // the COALESCEd primary address look proven.
+      const db = singlePremisesDb({
+        properties: [{
+          id: 'prop-old', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285', active: false,
+        }],
       });
       expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
     });
