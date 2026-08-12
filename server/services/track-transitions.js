@@ -291,11 +291,15 @@ async function markEnRoute(serviceId, opts = {}) {
   if (!opts._afterStaleHeal
     && staleEvidence
     && ['en_route', 'on_property'].includes(svc.track_state)) {
-    // A legacy move can also have left the OPERATIONAL status live
-    // (en_route/on_site). The re-entry cannot sync it backward, so the heal
-    // rewinds it to 'confirmed' in the same write, with the history entry
-    // the movers' own live rewind records.
-    const liveOpStatus = ['en_route', 'on_site'].includes(String(svc.status));
+    // A legacy move can also have left the OPERATIONAL status live. Only a
+    // stale 'on_site' is rewound here (to 'confirmed', with the movers'
+    // history entry) — the re-entry cannot sync that shape backward. A
+    // status of 'en_route' is NEVER rewound: the tech/admin en-route routes
+    // legitimately transition status to en_route right before calling this
+    // function, and after the heal's re-entry flips track_state the two
+    // sides agree — rewriting it would undo the caller's own transition
+    // and fabricate an en_route→confirmed history row.
+    const liveOpStatus = String(svc.status) === 'on_site';
     const healed = await db('scheduled_services')
       .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
       .update({

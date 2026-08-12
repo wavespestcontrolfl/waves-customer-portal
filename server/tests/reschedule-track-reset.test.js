@@ -469,6 +469,48 @@ describe('markEnRoute stale-attempt self-heal', () => {
     }));
   });
 
+  test('caller-set en_route status is preserved through the heal (status-first route sequence)', async () => {
+    // tech-track/admin routes transition status to en_route BEFORE calling
+    // markEnRoute. The heal must not rewrite that fresh transition to
+    // 'confirmed' — no status key in the write, no history row; after the
+    // re-entry flips track_state, both sides read en_route.
+    const routeSequenceSvc = {
+      id: 'job-route-seq',
+      customer_id: 'cust-14',
+      technician_id: null,
+      status: 'en_route',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      actual_start_time: isoDaysAgo(7),
+      track_sms_sent_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const healedSvc = {
+      ...routeSequenceSvc,
+      track_state: 'scheduled',
+      arrived_at: null,
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    };
+    const healUpdate = query(1);
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(routeSequenceSvc)) // loadService
+      .mockReturnValueOnce(healUpdate) // heal UPDATE (no history insert follows)
+      .mockReturnValueOnce(query(healedSvc)) // recursed loadService
+      .mockReturnValueOnce(flipUpdate); // flip UPDATE
+
+    const result = await trackTransitions.markEnRoute('job-route-seq');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    const healPayload = healUpdate.update.mock.calls[0][0];
+    expect(healPayload).toMatchObject({ track_state: 'scheduled', arrived_at: null });
+    expect(healPayload).not.toHaveProperty('status');
+    expect(db).toHaveBeenCalledTimes(4); // no job_status_history insert
+  });
+
   test('one fresh timestamp does not validate stale siblings — only stale fields clear', async () => {
     // Partial-reset residue next to a genuine current-day en-route: the
     // stale start is cleared, the fresh en_route_at and today's SMS guard
