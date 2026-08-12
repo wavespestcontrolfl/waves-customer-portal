@@ -702,7 +702,7 @@ function buildListicleFamilyRefreshOpp(entries) {
 // emitted by NEITHER, so excluding its family would lose the demand to
 // no bucket at all. Top-3 reps are irrelevant here: family admission drops
 // them as won intent regardless.
-function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false, mappedBestPos = null, mapCoveredDomains = null } = {}) {
+function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false, mappedPositions = null, mapCoveredDomains = null } = {}) {
   if (!rep) return false;
   // mineSeasonalRising emits the rep independently of position and the
   // own-page map — a seasonal-emittable rep must count as reachable or the
@@ -760,7 +760,11 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // candidates: unreachable here, demand stays with the family.
     if (!service) continue;
     if (!queryDomainsCovered(t.domains, mapCoveredDomains || new Set())) continue;
-    if (!noContentYetMapEmittable(mappedBestPos, thresholds)) continue;
+    const tupleDomainPositions = (Array.isArray(t.domains) ? t.domains : [])
+      .map((d) => (mappedPositions instanceof Map
+        ? mappedPositions.get(mappedPositionKey(rep.query, d)) ?? null
+        : null));
+    if (!noContentYetEmittable(tupleDomainPositions, thresholds)) continue;
     const cand = {
       bucket: 'no_content_yet',
       query: rep.query,
@@ -866,6 +870,42 @@ function noContentYetMapEmittable(bestMappedPosition, thresholds = THRESHOLDS) {
     && bestMappedPosition > thresholds.answerGapPositionMax;
 }
 
+// A candidate aggregates impressions across domains, so the evidence must
+// hold for EVERY contributing domain: positions are resolved per
+// (query, domain) and each one must be mapped AND weak. A query-wide
+// lookup would let one domain's weak mapping vouch for another domain
+// where the query is unmapped (missing evidence) or strongly served —
+// both directions mint competing content (audit P1 #5). Empty list =
+// no provenance = fail closed.
+function noContentYetEmittable(domainPositions, thresholds = THRESHOLDS) {
+  const list = Array.isArray(domainPositions) ? domainPositions : [];
+  if (!list.length) return false;
+  return list.every((p) => noContentYetMapEmittable(p, thresholds));
+}
+
+// The page a low-CTR query ACTUALLY ranks with, from true query→page rows:
+// the most-impressed page is the one Google showed and users didn't click,
+// which is what a title/meta rewrite must target. The service+city
+// own-page heuristic picks the segment's biggest page instead, which on a
+// multi-page segment aims the rewrite PR at an unrelated URL (audit P1
+// #6). Ties break on the better (lower) position. No rows → null →
+// actionForOpportunity falls through to do_not_publish (fail closed).
+function pickCtrRewriteTargetPage(rows = []) {
+  let best = null;
+  for (const r of rows) {
+    const impressions = parseInt(r.impressions, 10) || 0;
+    const position = Number(r.page_position);
+    if (!r.page_url) continue;
+    if (!best
+      || impressions > best.impressions
+      || (impressions === best.impressions && Number.isFinite(position)
+        && (!Number.isFinite(best.position) || position < best.position))) {
+      best = { page_url: r.page_url, impressions, position };
+    }
+  }
+  return best ? best.page_url : null;
+}
+
 // Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
 // possibly a sync hole? Map syncs run and fail independently per domain
 // (and stale rows linger), while candidates aggregate gsc_queries across
@@ -874,6 +914,12 @@ function noContentYetMapEmittable(bestMappedPosition, thresholds = THRESHOLDS) {
 // synced. A candidate is checkable only when EVERY domain contributing its
 // impressions has in-window map rows; unknown/empty domain lists fail
 // closed (pre-push audit P1, 2026-08-12).
+// Key for per-(query, domain) mapped positions — domains compare
+// case-insensitively, matching queryDomainsCovered.
+function mappedPositionKey(query, domain) {
+  return `${String(query || '')}\x00${String(domain || '').toLowerCase()}`;
+}
+
 function queryDomainsCovered(domains, coveredDomains) {
   const list = Array.isArray(domains) ? domains : [];
   if (!list.length) return false;
@@ -1171,7 +1217,7 @@ class GscOpportunityMiner {
 
     const runs = [
       ['striking_distance', () => this.mineStrikingDistance(since, ownPagesByServiceCity)],
-      ['ctr_rewrite', () => this.mineCtrRewrite(since, ownPagesByServiceCity)],
+      ['ctr_rewrite', () => this.mineCtrRewrite(since)],
       ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
       // cannibalization + page_type_mismatch retired 2026-08-12 — see the
       // header's RETIRED note for the canonical mechanisms.
@@ -1497,31 +1543,59 @@ class GscOpportunityMiner {
     return covered;
   }
 
-  // Best (lowest) owned-page position per query from TRUE query→page rows,
-  // cross-domain (matching the query miners' scope — they don't filter
-  // domain). Per-page position is impression-weighted like mineAnswerGap's
-  // aggregation (each stored position is already an impression-level
-  // average, so a plain avg() lets a one-impression day at position 1 mask
-  // a 100-impression day at 50); the best page across domains represents
-  // the query's served-ness.
-  async _bestMappedPositionByQuery(queries, since) {
+  // Best (lowest) owned-page position per (query, DOMAIN) from TRUE
+  // query→page rows. Keyed per domain, not per query: a candidate's
+  // evidence must hold for every domain contributing its impressions
+  // (noContentYetEmittable), and a query-wide best would let one domain
+  // vouch for another. Per-page position is impression-weighted like
+  // mineAnswerGap's aggregation (each stored position is already an
+  // impression-level average, so a plain avg() lets a one-impression day
+  // at position 1 mask a 100-impression day at 50).
+  async _bestMappedPositionByQueryDomain(queries, since) {
+    if (!queries.length) return new Map();
+    const rows = await db('gsc_query_page_map')
+      .where('date_from', '>=', since)
+      .whereIn('query', queries)
+      .select('query', 'domain')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
+      .groupBy('query', 'domain')
+      .groupByRaw(CANON_URL_SQL);
+    const map = new Map();
+    for (const r of rows) {
+      const pos = parseFloat(r.page_position);
+      if (!Number.isFinite(pos) || !r.domain) continue;
+      const key = mappedPositionKey(r.query, r.domain);
+      const prev = map.get(key);
+      if (prev == null || pos < prev) map.set(key, pos);
+    }
+    return map;
+  }
+
+  // The mapped page a low-CTR query actually ranks with, per query — see
+  // pickCtrRewriteTargetPage for the selection rule.
+  async _rankingPageByQuery(queries, since) {
     if (!queries.length) return new Map();
     const rows = await db('gsc_query_page_map')
       .where('date_from', '>=', since)
       .whereIn('query', queries)
       .select('query')
       .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .sum('impressions as impressions')
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
       .groupBy('query')
       .groupByRaw(CANON_URL_SQL);
-    const map = new Map();
+    const byQuery = new Map();
     for (const r of rows) {
-      const pos = parseFloat(r.page_position);
-      if (!Number.isFinite(pos)) continue;
-      const prev = map.get(r.query);
-      if (prev == null || pos < prev) map.set(r.query, pos);
+      if (!byQuery.has(r.query)) byQuery.set(r.query, []);
+      byQuery.get(r.query).push(r);
     }
-    return map;
+    const out = new Map();
+    for (const [query, list] of byQuery) {
+      const page = pickCtrRewriteTargetPage(list);
+      if (page) out.set(query, page);
+    }
+    return out;
   }
 
   // Cross-domain tuple aggregation for representative reachability. The
@@ -1663,7 +1737,7 @@ class GscOpportunityMiner {
     });
   }
 
-  async mineCtrRewrite(since, ownPagesByServiceCity = new Map()) {
+  async mineCtrRewrite(since) {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
@@ -1678,16 +1752,21 @@ class GscOpportunityMiner {
     const filtered = rows.filter(
       (r) => recomputeCtr(r.clicks, r.impressions) < THRESHOLDS.ctrRewriteMaxCtr
     );
+    if (!filtered.length) return [];
+
+    // Target the page the query ACTUALLY ranks with (true query→page
+    // rows), not the service+city segment's biggest page: a rewrite PR
+    // must edit the URL whose snippet is losing the clicks. Unmapped
+    // query → null page → do_not_publish (fail closed, nothing to
+    // rewrite).
+    const rankingPages = await this._rankingPageByQuery(
+      filtered.map((r) => r.query), since
+    );
 
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
-      // ctr_rewrite REQUIRES a target page (we're rewriting its title/meta).
-      // If no matching own page exists, actionForOpportunity falls through
-      // to do_not_publish for that opportunity — which is the right outcome
-      // when there's nothing to rewrite. Use normalized values to match
-      // the map keys built in _loadOwnPagesByServiceCity.
-      const pageUrl = ownPagesByServiceCity.get(ownPageKey(service, city)) || null;
+      const pageUrl = rankingPages.get(r.query) || null;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
@@ -2248,7 +2327,7 @@ class GscOpportunityMiner {
     // — same map, same aggregation, same per-domain coverage rule
     // mineNoContentYet uses.
     const reachBestMapped = reachCoveredDomains.size && reachQueries.length
-      ? await this._bestMappedPositionByQuery(reachQueries, since)
+      ? await this._bestMappedPositionByQueryDomain(reachQueries, since)
       : new Map();
     const fams = allFams.filter((f) => {
       const anyVariantReachable = f.variants.some((v) => listicleFamilyRepReachable(
@@ -2257,7 +2336,7 @@ class GscOpportunityMiner {
         THRESHOLDS,
         {
           seasonalEmittable: seasonalEmittable.has(v.query),
-          mappedBestPos: reachBestMapped.get(v.query) ?? null,
+          mappedPositions: reachBestMapped,
           mapCoveredDomains: reachCoveredDomains,
         }
       ));
@@ -2950,7 +3029,7 @@ class GscOpportunityMiner {
       logger.warn('[gsc-opp-miner] no_content_yet: gsc_query_page_map empty for window — bucket skipped this run');
       return [];
     }
-    const bestMapped = await this._bestMappedPositionByQuery(
+    const bestMapped = await this._bestMappedPositionByQueryDomain(
       candidates.map((c) => c.q.query), since
     );
 
@@ -2958,7 +3037,11 @@ class GscOpportunityMiner {
     const out = [];
     for (const { q, service, city } of candidates) {
       if (!queryDomainsCovered(q.domains, covered)) { uncovered += 1; continue; }
-      if (!noContentYetMapEmittable(bestMapped.get(q.query))) continue;
+      // Evidence per CONTRIBUTING DOMAIN — every one must map this query
+      // to a weakly-ranking page (see noContentYetEmittable).
+      const domainPositions = (Array.isArray(q.domains) ? q.domains : [])
+        .map((d) => bestMapped.get(mappedPositionKey(q.query, d)) ?? null);
+      if (!noContentYetEmittable(domainPositions)) continue;
 
       const opp = {
         bucket: 'no_content_yet',
@@ -3198,6 +3281,8 @@ module.exports._internals = {
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   noContentYetMapEmittable,
+  noContentYetEmittable,
+  pickCtrRewriteTargetPage,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
