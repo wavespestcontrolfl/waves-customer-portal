@@ -2050,8 +2050,11 @@ class GscOpportunityMiner {
     // current target.
     const ownedBySeoActions = await this._pagesOwnedByOpenSeoActions();
     if (ownedBySeoActions === null) {
-      logger.warn('[gsc-opp-miner] ctr_rewrite: seo_actions fence unavailable — bucket skipped this run');
-      return [];
+      // THROW, never return []: mineAll records the bucket as errored,
+      // which suppresses its sweep. Returning an empty array would read as
+      // "ran fine, no signal" and the sweep would expire every pending
+      // rewrite on a transient dependency failure (audit P1).
+      throw new Error('seo_actions ownership fence unavailable — cannot rule out duplicate rewrite work');
     }
 
     return filtered.map((r) => {
@@ -3326,8 +3329,10 @@ class GscOpportunityMiner {
     // for another domain's absences.
     const covered = await this._queryPageMapCoveredDomains(since);
     if (!covered.size) {
-      logger.warn('[gsc-opp-miner] no_content_yet: gsc_query_page_map empty for window — bucket skipped this run');
-      return [];
+      // Same contract as the ctr_rewrite fence: throw so mineAll marks the
+      // bucket errored and its sweep is suppressed. An empty return would
+      // let a sync outage retire every pending content-gap row (audit P1).
+      throw new Error('gsc_query_page_map has no fresh coverage for the window');
     }
     const bestMapped = await this._bestMappedPositionByQueryDomain(
       candidates.map((c) => c.q.query), since
@@ -3366,6 +3371,11 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     if (uncovered) {
+      // Per-candidate evidence decisions, NOT an infrastructure failure —
+      // the bucket ran. A skipped candidate's pending row is retired by
+      // the sweep, which is acceptable because retirement is 'expired'
+      // (revivable): the next mine with restored coverage re-emits it and
+      // the upsert revives the row.
       logger.warn(`[gsc-opp-miner] no_content_yet: ${uncovered} candidate(s) skipped — a contributing domain has no in-window query→page map rows`);
     }
     return out;

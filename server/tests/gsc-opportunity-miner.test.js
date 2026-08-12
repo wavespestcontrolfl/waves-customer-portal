@@ -446,6 +446,26 @@ describe('pickCtrRewriteTargetPage', () => {
   });
 });
 
+describe('degraded buckets THROW so mineAll suppresses their sweep', () => {
+  // The sweep retires every pending row the mine did not re-emit, so an
+  // "unavailable dependency" path that returns [] would look like "ran
+  // fine, nothing qualifies" and wipe the lane. Both hard-unavailable
+  // guards must throw instead — mineAll then records errors[bucket] and
+  // skips that bucket's sweep.
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('the seo_actions fence throws rather than returning empty', () => {
+    expect(src).toMatch(/ownedBySeoActions === null\) \{[\s\S]{0,600}throw new Error\('seo_actions ownership fence unavailable/);
+  });
+  test('the empty query-page map path throws rather than returning empty', () => {
+    expect(src).toMatch(/!covered\.size\) \{[\s\S]{0,500}throw new Error\('gsc_query_page_map has no fresh coverage/);
+  });
+  test('mineAll skips the sweep for any bucket that errored', () => {
+    expect(src).toMatch(/for \(const bucket of \['ctr_rewrite', 'no_content_yet'\]\) \{[\s\S]{0,120}if \(errors\[bucket\]\) continue;/);
+  });
+});
+
 describe('seoActionRouteIdentity (cross-queue fence key)', () => {
   test('scheme-less seo_actions urls normalize to the same identity as page urls', () => {
     // seo_actions stores "wavespestcontrol.com/path"; gsc_query_page_map
