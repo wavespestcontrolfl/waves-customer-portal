@@ -79,7 +79,13 @@ function needsLifecycleRewind(service = {}) {
     service.en_route_at
     || service.arrived_at
     || service.actual_start_time
-    || service.check_in_time,
+    || service.check_in_time
+    // Leftover SMS guards count too: a partial reset can clear the
+    // timestamps but keep track_sms_sent_at / arrival_sms_sent_at, and a
+    // moved row keeping them silently suppresses the new day's en-route
+    // and arrival texts.
+    || service.track_sms_sent_at
+    || service.arrival_sms_sent_at,
   );
 }
 
@@ -757,9 +763,10 @@ class SmartRebooker {
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
           // Rewind evidence for needsLifecycleRewind below — a pending
-          // sibling can still carry stale tracker stamps from an aborted
-          // attempt that a partial reset left behind.
+          // sibling can still carry stale tracker stamps (or SMS guards)
+          // from an aborted attempt that a partial reset left behind.
           'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+          'track_sms_sent_at', 'arrival_sms_sent_at',
         );
 
       // Anchor cadence at the dropped service's position so siblings
@@ -915,14 +922,20 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
         };
-        // Non-anchor siblings whose tracker was rewound need the same
-        // post-commit cleanup the anchor gets (tech pointer release +
-        // customer tracker refresh) — collected here, applied after the
-        // trx commits. The sibling SELECT is column-limited, so carry the
-        // series' customer_id for the refresh payload. The anchor itself
-        // is handled by the existing block below.
-        if (sibRewound && !isLiveAnchor && String(sib.id) !== String(serviceId)) {
-          rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
+        // Rewound rows need the post-commit cleanup (tech pointer release +
+        // customer tracker refresh) — collected here, applied after the trx
+        // commits. The sibling SELECT is column-limited, so carry the
+        // series' customer_id for the refresh payload. The anchor is
+        // normally handled by the block below keyed on the OUTER read —
+        // but if a concurrent En Route tap advanced the anchor between
+        // that read and this trx's fresh sibling read, only THIS row shows
+        // the evidence, so the anchor must ride along here too.
+        if (sibRewound) {
+          const isAnchorRow = String(sib.id) === String(serviceId);
+          const outerCleanupCovers = wasLive || needsLifecycleRewind(service);
+          if (!isAnchorRow || !outerCleanupCovers) {
+            rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
+          }
         }
         // The ANCHOR may carry a caller-chosen technician (the customer
         // self-serve path validated its slot against a specific tech's

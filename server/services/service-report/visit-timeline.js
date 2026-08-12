@@ -278,6 +278,22 @@ function scheduledDayString(...values) {
   return null;
 }
 
+// Bounds for the staleness test. The scheduled day is the attempt boundary
+// ONLY when the visit ran on (or after) it — a deliberate early closeout
+// (markComplete allowFutureDate: project visits completed ahead of a future
+// scheduled_date) carries stamps legitimately BEFORE the scheduled day, so
+// there the completion instant anchors the gap fallback instead.
+function staleTimestampBounds(completedAt, ...scheduledDateCandidates) {
+  const scheduledDay = scheduledDayString(...scheduledDateCandidates);
+  const completedDayEt = completedAt ? etDateString(new Date(Date.parse(completedAt))) : null;
+  return {
+    completedAt: completedAt || null,
+    scheduledDay: scheduledDay && (!completedDayEt || completedDayEt >= scheduledDay)
+      ? scheduledDay
+      : null,
+  };
+}
+
 function isStaleTimestamp(timestamp, { completedAt, scheduledDay }) {
   if (!timestamp) return false;
   const tsMs = Date.parse(timestamp);
@@ -339,19 +355,7 @@ function buildVisitTimeline({
     serviceData.service_completed_at,
     workflowEventTimestamp(workflowEvents, 'service_completed'),
   );
-  // The scheduled day is the attempt boundary ONLY when the visit ran on
-  // (or after) it. A deliberate early closeout (markComplete allowFutureDate
-  // — project visits completed ahead of a future scheduled_date) carries
-  // stamps legitimately BEFORE the scheduled day; there the completion
-  // instant anchors the gap fallback instead.
-  const scheduledDay = scheduledDayString(service.scheduled_date, scheduledService.scheduled_date);
-  const completedDayEt = completedAt ? etDateString(new Date(Date.parse(completedAt))) : null;
-  const staleBounds = {
-    completedAt,
-    scheduledDay: scheduledDay && (!completedDayEt || completedDayEt >= scheduledDay)
-      ? scheduledDay
-      : null,
-  };
+  const staleBounds = staleTimestampBounds(completedAt, service.scheduled_date, scheduledService.scheduled_date);
   const enRouteAt = firstPlausibleTimestamp(staleBounds, [
     service.en_route_at,
     service.scheduled_en_route_at,
@@ -539,4 +543,6 @@ module.exports = {
   loadVisitTimelineConfig,
   normalizeTimelineServiceLine,
   buildVisitTimeline,
+  staleTimestampBounds,
+  isStaleTimestamp,
 };

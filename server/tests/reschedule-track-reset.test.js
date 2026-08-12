@@ -50,6 +50,7 @@ function query(result) {
     whereIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
+    insert: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
   q.modify = jest.fn((fn) => { fn(q); return q; });
@@ -78,6 +79,11 @@ describe('needsLifecycleRewind', () => {
     expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', en_route_at: isoDaysAgo(1) })).toBe(true);
     expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', arrived_at: isoDaysAgo(1) })).toBe(true);
     expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', check_in_time: isoDaysAgo(1) })).toBe(true);
+  });
+
+  test('leftover SMS guards alone rewind (they would suppress the new day\'s texts)', () => {
+    expect(needsLifecycleRewind({ status: 'confirmed', track_state: 'scheduled', track_sms_sent_at: isoDaysAgo(7) })).toBe(true);
+    expect(needsLifecycleRewind({ status: 'pending', track_state: 'scheduled', arrival_sms_sent_at: isoDaysAgo(7) })).toBe(true);
   });
 
   test('clean scheduled row does not rewind', () => {
@@ -128,9 +134,17 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(result.state).toBe('en_route');
     expect(result.alreadyEnRoute).toBe(false);
     expect(result.enRouteAt).toEqual(expect.any(Date));
-    // The heal wrote the full lifecycle rewind, guarded on the observed state.
+    // The heal rewound the tracker and cleared exactly the STALE fields,
+    // guarded on the observed state. (Per-field: null columns are not
+    // "stale", so they are simply absent from the write.)
     expect(healUpdate.where).toHaveBeenCalledWith({ id: 'job-stale', track_state: 'on_property', status: 'pending' });
-    expect(healUpdate.update.mock.calls[0][0]).toMatchObject(LIVE_LIFECYCLE_RESET);
+    const healPayload = healUpdate.update.mock.calls[0][0];
+    expect(healPayload).toMatchObject({
+      track_state: 'scheduled',
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    });
+    expect(healPayload).not.toHaveProperty('status');
     // The fresh flip stamped en_route_at.
     expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
       track_state: 'en_route',
@@ -327,15 +341,15 @@ describe('markEnRoute stale-attempt self-heal', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('en_route');
-    expect(flipUpdate.update.mock.calls[0][0]).toMatchObject({
+    const flipPayload = flipUpdate.update.mock.calls[0][0];
+    expect(flipPayload).toMatchObject({
       track_state: 'en_route',
       en_route_at: expect.any(Date),
-      arrived_at: null,
       actual_start_time: null,
-      check_in_time: null,
       track_sms_sent_at: null,
-      arrival_sms_sent_at: null,
     });
+    // Per-field: columns that were already null are not re-written.
+    expect(flipPayload).not.toHaveProperty('arrived_at');
     // The stale guard did not suppress the send attempt.
     const { sendTechEnRoute } = require('../services/twilio');
     expect(sendTechEnRoute).toHaveBeenCalled();
@@ -397,7 +411,99 @@ describe('markEnRoute stale-attempt self-heal', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('en_route');
-    expect(healUpdate.update.mock.calls[0][0]).toMatchObject(LIVE_LIFECYCLE_RESET);
+    expect(healUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'scheduled',
+      check_in_time: null,
+    });
+  });
+
+  test('heal rewinds a stale live OPERATIONAL status to confirmed with a history row', async () => {
+    // Legacy move shape: both status AND track_state stayed live. The
+    // re-entry cannot sync status backward, so the heal itself lands it on
+    // 'confirmed' and appends the same history entry the movers record.
+    const liveStatusSvc = {
+      id: 'job-live-status',
+      customer_id: 'cust-12',
+      technician_id: null,
+      status: 'on_site',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      actual_start_time: isoDaysAgo(7),
+      track_sms_sent_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const healedSvc = {
+      ...liveStatusSvc,
+      status: 'confirmed',
+      track_state: 'scheduled',
+      arrived_at: null,
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    };
+    const healUpdate = query(1);
+    const historyInsert = query(1);
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(liveStatusSvc)) // loadService
+      .mockReturnValueOnce(healUpdate) // heal UPDATE
+      .mockReturnValueOnce(historyInsert) // job_status_history insert
+      .mockReturnValueOnce(query(healedSvc)) // recursed loadService
+      .mockReturnValueOnce(flipUpdate); // flip UPDATE
+
+    const result = await trackTransitions.markEnRoute('job-live-status');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(healUpdate.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'scheduled',
+      status: 'confirmed',
+      arrived_at: null,
+      actual_start_time: null,
+      track_sms_sent_at: null,
+    });
+    expect(historyInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      job_id: 'job-live-status',
+      from_status: 'on_site',
+      to_status: 'confirmed',
+    }));
+  });
+
+  test('one fresh timestamp does not validate stale siblings — only stale fields clear', async () => {
+    // Partial-reset residue next to a genuine current-day en-route: the
+    // stale start is cleared, the fresh en_route_at and today's SMS guard
+    // survive, and the customer is NOT double-texted.
+    const mixedSvc = {
+      id: 'job-mixed',
+      customer_id: 'cust-13',
+      technician_id: null,
+      status: 'confirmed',
+      track_state: 'en_route',
+      scheduled_date: todayStr,
+      en_route_at: isoDaysAgo(0, 'T08:05'),
+      actual_start_time: isoDaysAgo(7),
+      track_sms_sent_at: isoDaysAgo(0, 'T08:05'),
+      cancelled_at: null,
+    };
+    const healedSvc = { ...mixedSvc, track_state: 'scheduled', actual_start_time: null };
+    const healUpdate = query(1);
+    const flipUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(mixedSvc))
+      .mockReturnValueOnce(healUpdate)
+      .mockReturnValueOnce(query(healedSvc))
+      .mockReturnValueOnce(flipUpdate);
+
+    const result = await trackTransitions.markEnRoute('job-mixed');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    const healPayload = healUpdate.update.mock.calls[0][0];
+    expect(healPayload).toMatchObject({ track_state: 'scheduled', actual_start_time: null });
+    expect(healPayload).not.toHaveProperty('track_sms_sent_at');
+    // Today's guard survived the heal, so no duplicate track SMS.
+    const { sendTechEnRoute } = require('../services/twilio');
+    expect(sendTechEnRoute).not.toHaveBeenCalled();
   });
 });
 

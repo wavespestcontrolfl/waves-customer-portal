@@ -267,25 +267,53 @@ async function markEnRoute(serviceId, opts = {}) {
   // qualify, and the observed status joins the UPDATE predicate below so a
   // completion landing between this read and the write makes the heal miss.
   const healableStatus = !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status));
-  // Shared by the advanced-state heal AND the normal flip below: does this
-  // row carry lifecycle evidence from before its own scheduled day?
-  const staleEvidence = healableStatus
-    && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr)
-    && (() => {
-      const evidenceMs = [svc.en_route_at, svc.arrived_at, svc.actual_start_time, svc.check_in_time]
-        .map((v) => (v ? new Date(v).getTime() : NaN))
-        .filter((ms) => Number.isFinite(ms));
-      return evidenceMs.length > 0 && etDateString(new Date(Math.max(...evidenceMs))) < scheduledDayStr;
-    })();
+  // Staleness is judged PER FIELD (one fresh timestamp must not validate
+  // the rest — a partially reset row can hold a current-day en_route_at
+  // next to a week-old actual_start_time, and that stale start would feed
+  // buildCompletionLifecycleUpdates a multi-day duration). Every stale
+  // column, SMS guards included, is queued for clearing; fresh columns are
+  // kept — so a same-day SMS guard survives and the customer is not
+  // double-texted.
+  const validScheduledDay = /^\d{4}-\d{2}-\d{2}$/.test(scheduledDayStr);
+  const isStaleField = (value) => {
+    if (!healableStatus || !validScheduledDay || !value) return false;
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) && etDateString(new Date(ms)) < scheduledDayStr;
+  };
+  const staleFieldClears = {};
+  for (const col of ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time', 'track_sms_sent_at', 'arrival_sms_sent_at']) {
+    if (isStaleField(svc[col])) staleFieldClears[col] = null;
+  }
+  // The heal keys off stale LIFECYCLE evidence (a stale SMS guard alone is
+  // cleaned by the flip below but does not prove an aborted attempt).
+  const staleEvidence = ['en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time']
+    .some((col) => col in staleFieldClears);
   if (!opts._afterStaleHeal
     && staleEvidence
     && ['en_route', 'on_property'].includes(svc.track_state)) {
-    const { LIVE_LIFECYCLE_RESET } = require('./rebooker');
+    // A legacy move can also have left the OPERATIONAL status live
+    // (en_route/on_site). The re-entry cannot sync it backward, so the heal
+    // rewinds it to 'confirmed' in the same write, with the history entry
+    // the movers' own live rewind records.
+    const liveOpStatus = ['en_route', 'on_site'].includes(String(svc.status));
     const healed = await db('scheduled_services')
       .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
-      .update({ ...LIVE_LIFECYCLE_RESET, updated_at: new Date() });
+      .update({
+        track_state: 'scheduled',
+        ...staleFieldClears,
+        ...(liveOpStatus ? { status: 'confirmed' } : {}),
+        updated_at: new Date(),
+      });
     if (healed > 0) {
       logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
+      if (liveOpStatus) {
+        try {
+          const { applyLiveMoveHistory } = require('./rebooker');
+          await applyLiveMoveHistory(db, svc, { actor: opts.actorId || null });
+        } catch (err) {
+          logger.error(`[track-transitions] stale-heal status-rewind history append failed for ${serviceId}: ${err.message}`);
+        }
+      }
     } else {
       logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; re-entering on fresh state`);
     }
@@ -336,15 +364,9 @@ async function markEnRoute(serviceId, opts = {}) {
   // today's track SMS on the stale guard. When the evidence predates the
   // row's own scheduled day, clear those columns in the SAME atomic write.
   const now = new Date();
-  const staleFlipClears = staleEvidence
-    ? {
-      arrived_at: null,
-      actual_start_time: null,
-      check_in_time: null,
-      track_sms_sent_at: null,
-      arrival_sms_sent_at: null,
-    }
-    : {};
+  // Per-field: only the columns whose values predate the scheduled day are
+  // cleared (en_route_at is being overwritten by this flip regardless).
+  const { en_route_at: _overwritten, ...staleFlipClears } = staleFieldClears;
   // The CAS matches the status + schedule tuple this read observed, not
   // just track_state: completion persists operational status BEFORE its
   // best-effort tracker flip, so a completion (or a concurrent move)
@@ -358,7 +380,7 @@ async function markEnRoute(serviceId, opts = {}) {
     .where('status', svc.status)
     .where('scheduled_date', svc.scheduled_date)
     .update({
-      track_state: 'en_route', en_route_at: now, updated_at: now, ...staleFlipClears,
+      ...staleFlipClears, track_state: 'en_route', en_route_at: now, updated_at: now,
     });
 
   if (updated === 0) {
@@ -416,9 +438,10 @@ async function markEnRoute(serviceId, opts = {}) {
   // SMS — guarded by track_sms_sent_at. A retap that won the UPDATE race
   // above still can't re-send because this check runs after the write.
   // A stale guard from the aborted earlier attempt was cleared in the flip
-  // write above, so it must not suppress today's send.
+  // write above, so it must not suppress today's send. A same-day guard
+  // (SMS already sent for THIS attempt) still suppresses.
   let smsSent = false;
-  if (!svc.track_sms_sent_at || staleEvidence) {
+  if (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears) {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')

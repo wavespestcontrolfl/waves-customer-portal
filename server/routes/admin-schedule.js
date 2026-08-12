@@ -4506,8 +4506,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // contract for non-live rows. No history row either (no
                 // status transition happened), but the post-commit tracker
                 // cleanup below still runs.
+                // Gated on the date actually changing: the list UI submits
+                // one target date for every selected row without excluding
+                // rows already on it, and rewinding an unmoved visit would
+                // erase its genuine current-attempt state.
                 const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
-                if (needsLifecycleRewind(svc)) {
+                const bulkDateChanged = normalizeDateOnly(svc.scheduled_date) !== normalizeDateOnly(bulkTargetDate);
+                if (bulkDateChanged && needsLifecycleRewind(svc)) {
                   Object.assign(updates, LIVE_LIFECYCLE_RESET);
                   trackRewound = true;
                 }
@@ -5849,6 +5854,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // carry those onto the new date.
           const seriesEvidenceCols = [
             'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+            'track_sms_sent_at', 'arrival_sms_sent_at',
             // For the post-commit cleanup payload (tech release + refresh).
             'technician_id', 'customer_id',
           ];
