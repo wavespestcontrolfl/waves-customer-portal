@@ -763,7 +763,13 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // Uncovered tuples (and tuples without domain provenance — fallback
     // reps, older callers) fail closed exactly like the miner's uncovered
     // candidates: unreachable here, demand stays with the family.
-    if (!service) continue;
+    // Canonicalized exactly as mineNoContentYet resolves it: a raw
+    // classifier value that canonicalizes to null makes the MINER skip,
+    // so the mirror must skip too, or it calls the rep reachable through
+    // a bucket that will never emit it.
+    const ncyService = canonicalizeServiceCategory(t.service_category)
+      || inferServiceFromQuery(rep.query);
+    if (!ncyService) continue;
     // mineNoContentYet is HUB-ONLY, so the mirror must clear the floor on
     // HUB impressions — cross-domain totals would declare a spoke-carried
     // variant reachable through a bucket that will never emit it, and the
@@ -794,7 +800,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
       bucket: 'no_content_yet',
       query: rep.query,
       page_url: null,
-      service,
+      service: ncyService,
       city,
     };
     cand.action_type = actionForOpportunity(cand);
@@ -2112,6 +2118,15 @@ class GscOpportunityMiner {
     const filtered = rows.filter(
       (r) => recomputeCtr(r.clicks, r.impressions) < THRESHOLDS.ctrRewriteMaxCtr
     );
+    // Freshness is validated BEFORE the empty early-return. If the sync
+    // has failed long enough that nothing remains in the window, an early
+    // `return []` would bypass the guard entirely: mineAll records no
+    // error and the sweep expires every pending rewrite (audit P1). An
+    // empty mine is only trustworthy when the SOURCE is fresh.
+    const covered = await this._queryPageMapCoveredDomains(since);
+    if (!covered.size) {
+      throw new Error('gsc_query_page_map has no fresh coverage for the window');
+    }
     if (!filtered.length) return [];
 
     // Target the page the query ACTUALLY ranks with (true query→page
@@ -2124,7 +2139,6 @@ class GscOpportunityMiner {
     // page must not stand in for it); or a selected page whose own CTR is
     // healthy (the query-level aggregate can be dragged under the
     // threshold by a weak sibling page).
-    const covered = await this._queryPageMapCoveredDomains(since);
     const rankingPages = await this._rankingPageByQuery(
       filtered.map((r) => r.query), since, covered
     );
@@ -3466,7 +3480,14 @@ class GscOpportunityMiner {
     const byQuery = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target) || inferCityFromQuery(q.query);
-      const service = q.service_category || inferServiceFromQuery(q.query);
+      // CANONICALIZE, don't store the raw classifier value. The sync
+      // writes snake_case ('tree_shrub') and a 'specialty' bucket with no
+      // facts identity of its own; facts-sufficiency maps only the
+      // hyphenated coarse ids, so a raw value reaches the runner as
+      // facts_unmappable and parks instead of drafting (audit P2). Same
+      // helper the listicle lane uses for the same reason.
+      const service = canonicalizeServiceCategory(q.service_category)
+        || inferServiceFromQuery(q.query);
       if (!service) continue;
       const impressions = parseInt(q.impressions, 10) || 0;
       const existing = byQuery.get(q.query);
@@ -3475,6 +3496,12 @@ class GscOpportunityMiner {
       }
     }
     const candidates = Array.from(byQuery.values());
+    // Same ordering rule as ctr_rewrite: prove the source is fresh before
+    // an empty result is allowed to mean "no signal" (audit P1).
+    const covered = await this._queryPageMapCoveredDomains(since);
+    if (!covered.has(HUB_DOMAIN)) {
+      throw new Error(`gsc_query_page_map has no fresh coverage for ${HUB_DOMAIN}`);
+    }
     if (!candidates.length) return [];
 
     // Fail CLOSED on missing map coverage: "empty means the check didn't
@@ -3483,16 +3510,6 @@ class GscOpportunityMiner {
     // is judged PER CONTRIBUTING DOMAIN (queryDomainsCovered): map syncs
     // fail independently per domain, so one domain's rows must not vouch
     // for another domain's absences.
-    const covered = await this._queryPageMapCoveredDomains(since);
-    if (!covered.has(HUB_DOMAIN)) {
-      // This bucket is HUB-ONLY, so hub coverage is the only coverage
-      // that matters: a fresh SPOKE would otherwise satisfy a bare
-      // "any domain covered" test, every hub candidate would be skipped,
-      // and the bucket would look successful-but-empty — letting the
-      // canonical sweep expire the whole content-gap lane (audit P1).
-      // Throw so mineAll marks the bucket errored and suppresses it.
-      throw new Error(`gsc_query_page_map has no fresh coverage for ${HUB_DOMAIN}`);
-    }
     const bestMapped = await this._bestMappedPositionByQueryDomain(
       candidates.map((c) => c.q.query), since
     );

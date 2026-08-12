@@ -463,7 +463,24 @@ describe('freshness + split-collapse contracts (source shape)', () => {
   test('no_content_yet collapses classification splits to ONE candidate per query', () => {
     // dedupeKey embeds service+city, so two splits of one query would both
     // persist and draft two posts for one intent.
-    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,700}byQuery\.set\(q\.query, \{ q, service, city, impressions \}\)/);
+    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,1600}byQuery\.set\(q\.query, \{ q, service, city, impressions \}\)/);
+  });
+
+  test('freshness is proven BEFORE an empty mine is accepted as "no signal"', () => {
+    // A long enough sync outage empties the 28-day window entirely; an
+    // early `return []` before the coverage guard would look like a clean
+    // empty mine and let the sweep expire the lane.
+    const ctr = src.slice(src.indexOf('async mineCtrRewrite'), src.indexOf('async mineDecayRefresh'));
+    expect(ctr.indexOf('_queryPageMapCoveredDomains')).toBeLessThan(ctr.indexOf('if (!filtered.length) return []'));
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    expect(ncy.indexOf('_queryPageMapCoveredDomains')).toBeLessThan(ncy.indexOf('if (!candidates.length) return []'));
+  });
+
+  test('no_content_yet canonicalizes the service before queueing', () => {
+    // Raw 'tree_shrub'/'specialty' reach the runner as facts_unmappable
+    // and park instead of drafting.
+    expect(src).toMatch(/const service = canonicalizeServiceCategory\(q\.service_category\)\s*\n\s*\|\| inferServiceFromQuery\(q\.query\);/);
+    expect(src).toMatch(/const ncyService = canonicalizeServiceCategory\(t\.service_category\)/);
   });
 
   test('a ctr_rewrite page is claimed only by a PERSISTABLE candidate', () => {
