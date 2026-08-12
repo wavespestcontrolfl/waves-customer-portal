@@ -24,10 +24,12 @@
  *   - never a callback/re-service visit (free with the plan — a card ask
  *     on a free visit reads as a bill), never an unpriced/zero-price visit
  *     (the funnel's own owner rule — mirrored so they can't burn the cap);
- *   - never an outbound-review row still pending office confirmation
- *     (confirmed ones re-admit: the human confirm is the clearance);
- *   - call-linked rows need the processor's durable call_sms_cleared_at
- *     stamp — a call-level SMS hold honored at booking stays honored here;
+ *   - call-linked rows (outbound-review rows included) need the durable
+ *     call_sms_cleared_at stamp — a call-level SMS hold honored at booking
+ *     stays honored here. An office confirmation of an outbound-review row
+ *     IS a clearance decision and stamps it (runOutboundReviewConfirmHook);
+ *     a lazily-activated legacy row (silent reschedule) is NOT and never
+ *     re-admits on status alone (Codex #3361 r27 P1);
  *   - one visit per customer per run (the soonest), and ONLY for customers
  *     the funnel has never invited anywhere (no appointment_card_requests
  *     row, no card_link_sent_at stamp on any visit) — repeat nudges are a
@@ -69,13 +71,13 @@ function previsitCardInviteEligible({
   status,
   isCallback = false,
   reServiceLabel = false,
-  outboundReviewPending = false,
+  outboundReviewUncleared = false,
   cardLinkSentAt = null,
   customerEverInvited = false,
 } = {}) {
   if (!LIVE_VISIT_STATUSES.includes(String(status || ''))) return { send: false, reason: 'not_live' };
   if (isCallback || reServiceLabel) return { send: false, reason: 'callback_visit' };
-  if (outboundReviewPending) return { send: false, reason: 'outbound_review_pending' };
+  if (outboundReviewUncleared) return { send: false, reason: 'outbound_review_uncleared' };
   if (cardLinkSentAt) return { send: false, reason: 'already_texted' };
   if (customerEverInvited) return { send: false, reason: 'customer_already_invited' };
   return { send: true };
@@ -142,27 +144,29 @@ async function runSweep(dbh = db) {
     .where('s.estimated_price', '>', 0)
     // Call-level TCPA holds survive into the sweep (codex r2/r3): ANY
     // call-linked row — phone_call booking_source, a source_call_log_id
-    // linkage (attached manual bookings included), or an outbound-review
-    // row — needs a durable clearance record before the sweep may text:
-    //   - call_sms_cleared_at, stamped by the processor at the exact
-    //     decision point that releases the call's SMS legs (no proxy:
-    //     reminder rows register regardless of holds, and
-    //     confirmation_sent_at stamps even on skipped sends);
-    //   - or an outbound-review row the OFFICE CONFIRMED (the human
-    //     confirmation is the clearance decision — and re-admits confirmed
-    //     outbound rows the one-shot confirm-hook funnel missed, codex r3
-    //     P2, instead of excluding them forever).
-    // Pending outbound rows stay excluded; held or pre-feature call-linked
-    // history stays office-only (the admin send button).
+    // linkage (attached manual bookings included), or an office-review row
+    // (outbound-callback OR voice-agent — OFFICE_REVIEW_SOURCE_ACTIONS)
+    // — needs the ONE durable clearance record before the sweep may
+    // text: call_sms_cleared_at, stamped at the exact decision point that
+    // releases the call's SMS legs (no proxy: reminder rows register
+    // regardless of holds, and confirmation_sent_at stamps even on skipped
+    // sends). For outbound-review rows the stamping decision point is the
+    // OFFICE confirmation — runOutboundReviewConfirmHook stamps it on the
+    // office-confirm path, and ONLY there. status='confirmed' is no
+    // clearance evidence anymore (Codex #3361 r27 P1): after the review-
+    // hold removal a silent reschedule of a legacy pending row also lands
+    // on 'confirmed' via lazy activation, and that is not a customer trust
+    // point. Pre-removal office-confirmed rows without the stamp stay
+    // office-only (the admin send button) — fail closed on a
+    // payment-adjacent text.
     .where((qb) => qb
       .where((nonCall) => nonCall
         .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
         .whereNull('s.source_call_log_id')
+        // NULL-safe by construction: SQL `NULL <> 'x'` is NULL, so a row with
+        // no source_action only survives via the explicit whereNull leg.
         .where((sa) => sa.whereNull('s.source_action').orWhereNotIn('s.source_action', OFFICE_REVIEW_SOURCE_ACTIONS)))
-      .orWhereNotNull('s.call_sms_cleared_at')
-      .orWhere((outboundConfirmed) => outboundConfirmed
-        .whereIn('s.source_action', OFFICE_REVIEW_SOURCE_ACTIONS)
-        .where('s.status', 'confirmed')))
+      .orWhereNotNull('s.call_sms_cleared_at'))
     // Freshly created visits are excluded for one run (codex r2 P2): the
     // realistic cross-path double-invite is a booking-time trigger still in
     // flight for a visit created moments before the 10:26 sweep touches the
@@ -198,7 +202,7 @@ async function runSweep(dbh = db) {
         .whereNotNull('v2.card_link_sent_at');
     })
     .orderBy([{ column: 's.scheduled_date', order: 'asc' }, { column: 's.window_start', order: 'asc' }])
-    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at', 's.call_sms_cleared_recipient')
+    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at', 's.call_sms_cleared_at', 's.call_sms_cleared_recipient')
     .limit(500);
 
   const seenCustomers = new Set();
@@ -222,7 +226,11 @@ async function runSweep(dbh = db) {
       status: visit.status,
       isCallback: visit.is_callback === true,
       reServiceLabel: isAlwaysFreeServiceType(visit.service_type),
-      outboundReviewPending: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && visit.status !== 'confirmed',
+      // Clearance-stamped or not at all (Codex #3361 r27 P1) — mirrors the
+      // query's call-linked clause; status is deliberately not consulted.
+      // Membership, not a single marker: voice-agent bookings share the
+      // office-review lifecycle (OFFICE_REVIEW_SOURCE_ACTIONS).
+      outboundReviewUncleared: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && !visit.call_sms_cleared_at,
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
     });

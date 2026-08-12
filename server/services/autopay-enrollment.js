@@ -43,16 +43,29 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   DELAYED completion paths (ACH micro-deposits verify days later): an
  *   explicit Auto Pay disable recorded AFTER that moment wins — the stale
  *   authorization must not silently re-enroll the customer.
- * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string }}
+ * @param {object} [opts.dbh] Knex handle to open the enrollment transaction
+ *   on — pass an OUTER transaction to run the enrollment as a savepoint
+ *   inside it (the appointment auto-secure serializes enrollment with its
+ *   visit-row lock this way, Codex #3361 r26 P1). In that mode the side
+ *   effects honor the outer transaction's fate (Codex #3361 r27 P1): the
+ *   autopay_log audit row is written THROUGH the outer handle (required —
+ *   an audit failure rolls the enrollment back with it, all-or-nothing),
+ *   and the gated confirmation email is NOT sent here — it is returned as
+ *   `sendEnrollmentConfirmation` for the caller to fire after its actual
+ *   commit, so a rolled-back enrollment can never have already told the
+ *   customer "Auto Pay enabled". Default: the global pool, the existing
+ *   standalone behavior (immediate warn-only log + immediate email) for
+ *   every other caller.
+ * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string, sendEnrollmentConfirmation?: Function }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
 
   let target;
   let inChargeMethodId;
-  const outcome = await db.transaction(async (trx) => {
+  const outcome = await dbh.transaction(async (trx) => {
     // Serialize per customer: FOR UPDATE on the customer row makes the
     // read → unset-defaults → set-target → customer-pointer sequence below
     // atomic against a concurrent enrollment. Without it, two completions
@@ -136,13 +149,32 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     return null; // enrolled — post-commit side effects run below
   });
   if (outcome) return outcome;
-  try {
+  // Savepoint mode (dbh is a caller's open transaction): every side effect
+  // must share the OUTER transaction's fate (Codex #3361 r27 P1) — after
+  // the savepoint releases the enrollment is not committed yet, so a
+  // global-pool audit write or an immediate email here would survive an
+  // outer rollback that undoes the Auto Pay flags themselves.
+  const runningInCallerTrx = dbh.isTransaction === true;
+  if (runningInCallerTrx) {
+    // Audit through the outer handle, REQUIRED: inside an open Postgres
+    // transaction a failed insert poisons the transaction anyway, so
+    // swallowing it would only produce a confusing later failure — surface
+    // it and let the whole enrollment roll back atomically with its audit.
     await require('./autopay-log').logAutopay(customerId, 'autopay_enabled', {
       paymentMethodId: inChargeMethodId,
       details: { source, ...details },
+      db: dbh,
+      required: true,
     });
-  } catch (logErr) {
-    logger.warn(`[autopay-enrollment] log failed for customer ${customerId}: ${logErr.message}`);
+  } else {
+    try {
+      await require('./autopay-log').logAutopay(customerId, 'autopay_enabled', {
+        paymentMethodId: inChargeMethodId,
+        details: { source, ...details },
+      });
+    } catch (logErr) {
+      logger.warn(`[autopay-enrollment] log failed for customer ${customerId}: ${logErr.message}`);
+    }
   }
   logger.info(`[autopay-enrollment] customer ${customerId} enrolled (source=${source}, method=${inChargeMethodId})`);
   // Enrollment-confirmation email (owner 2026-07-13; GATED OFF until
@@ -153,13 +185,26 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
   // target IS the method in charge (Codex #2698 r1): with a healthy
   // incumbent kept in the default role, the email's "your card is
   // charged after each completed service" would describe the WRONG card.
-  if (String(target.id) === String(inChargeMethodId)) {
-    try {
-      const { sendAutopayEnrollmentConfirmation } = require('./card-enrollment-email');
-      void sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId: target.id });
-    } catch { /* best-effort */ }
+  // In savepoint mode the send is DEFERRED to the caller's post-commit
+  // (returned below, never fired here) — an email announcing an enrollment
+  // the outer transaction then rolls back is a customer-facing lie.
+  const sendEnrollmentConfirmation = String(target.id) === String(inChargeMethodId)
+    ? () => {
+      try {
+        const { sendAutopayEnrollmentConfirmation } = require('./card-enrollment-email');
+        void sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId: target.id });
+      } catch { /* best-effort */ }
+    }
+    : null;
+  if (sendEnrollmentConfirmation && !runningInCallerTrx) {
+    sendEnrollmentConfirmation();
   }
-  return { enrolled: true, methodId: target.id, inChargeMethodId };
+  return {
+    enrolled: true,
+    methodId: target.id,
+    inChargeMethodId,
+    ...(runningInCallerTrx && sendEnrollmentConfirmation ? { sendEnrollmentConfirmation } : {}),
+  };
 }
 
 module.exports = { enrollConsentedMethod };

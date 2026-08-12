@@ -636,6 +636,19 @@ class SmartRebooker {
         .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
     }
 
+    // This writer moves the visit with a direct UPDATE, not
+    // transitionJobStatus — a LEGACY outbound-review row (pending before the
+    // 2026-08-11 review-hold removal) rescheduled here would otherwise move
+    // and message the customer while still unactivated: reminders unarmed,
+    // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
+    // post-commit, at-most-once via the helper's guarded stamp.
+    try {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
+    } catch (activateErr) {
+      logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+    }
+
     return { success: true, originalDate, newDate };
   }
 
@@ -1254,6 +1267,18 @@ class SmartRebooker {
       }
     } catch (err) {
       logger.warn(`[rebooker] series escalation check failed for ${serviceId}: ${err.message}`);
+    }
+
+    // Same legacy-activation seam as the single-visit path (Codex #3361 r5
+    // P0): the series update writes scheduled_services directly — a LEGACY
+    // outbound-review anchor moved (and possibly texted) here would stay
+    // customer_confirmed=false with its reminders, lead, and review card
+    // stranded. Best-effort post-commit, at-most-once via the helper.
+    try {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
+    } catch (activateErr) {
+      logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
     }
 
     return {

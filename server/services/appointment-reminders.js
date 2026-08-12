@@ -395,13 +395,54 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
 // preference routes through the channel-aware deliverAppointmentNotice (which
 // adds the email send and the both-failed admin alert). Best-effort: a
 // prefs-lookup failure falls back to the plain SMS send.
-async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+//
+// `smsPermanentlyBlocked`: the caller already knows its SMS leg CANNOT deliver
+// — not a transient failure or a send-window deferral some sweep will retry,
+// but a consent gate that suppresses the text outright (the call pipeline's v2
+// TCPA gate). On the default 'sms' channel that would otherwise leave the
+// customer with no confirmation at all despite a usable email on file, so the
+// blocked text falls back to the confirmation email (Codex #3361 r21 P1).
+// Never for an opted-out account — the email path bypasses the
+// sendCustomerMessage validator that suppresses their SMS. The email/both
+// branches ignore the flag: deliverAppointmentNotice already runs its own
+// email leg, and a second send here would double-deliver.
+//
+// `requireLiveVisitStatus`: repair/replay callers set this — their visit
+// snapshot can be arbitrarily stale by the time this send runs, and a
+// cancellation committed in that gap must win: a booking confirmation
+// after a cancellation reads as a re-booking (Codex #3361 r27 P2). The
+// status is re-read immediately before each delivery leg and the send is
+// skipped (false) unless the visit is still pre-visit live; a failed read
+// also skips — fail closed, the caller's repair rail retries. Booking-time
+// callers omit it: they just created/confirmed the row in-flow.
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false, requireLiveVisitStatus = false }) {
+  const visitStillLive = async () => {
+    if (!requireLiveVisitStatus || !scheduledServiceId) return true;
+    try {
+      const row = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('status');
+      return !!row && ['pending', 'confirmed', 'rescheduled'].includes(String(row.status || ''));
+    } catch (liveErr) {
+      logger.warn(`[appt-remind] confirmation live-status recheck failed for ${scheduledServiceId} — skipping send: ${liveErr.message}`);
+      return false;
+    }
+  };
   let channel = 'sms';
   let confirmationOn = true;
+  // Fail-closed marker for the email fallback below: getReminderPrefs
+  // swallows a failed prefs LOOKUP into open defaults (confirmationOn=true),
+  // so a transient DB error would otherwise read as "not opted out" and the
+  // fallback would email a customer whose stored toggle may be false — the
+  // email path bypasses the sendCustomerMessage validator that suppresses
+  // the SMS for them (Codex #3361 r22 P1). The SMS legs stay fail-open as
+  // before: their sends re-check the opt-out at the validator.
+  let prefsKnown = false;
   try {
     const prefs = await getReminderPrefs(customerId);
     channel = prefs.confirmationChannel;
     confirmationOn = prefs.appointmentConfirmation;
+    prefsKnown = !prefs.unavailable;
   } catch (err) {
     logger.warn(`[appt-remind] confirmation channel lookup failed for ${customerId}: ${err.message} — sending SMS`);
   }
@@ -410,7 +451,28 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // which already enforces the appointment_confirmation opt-out (suppressing it
   // for opted-out customers) — and we must NOT email them, because the email
   // path bypasses that validator.
-  if (channel === 'sms' || !confirmationOn) return smsAttempt();
+  if (channel === 'sms' || !confirmationOn) {
+    if (!(await visitStillLive())) return false;
+    const smsOk = await smsAttempt();
+    if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
+    // Consent-blocked text on the default channel: reach them by email.
+    // deliverAppointmentEmailFallback raises the no-channel human alert
+    // itself when the email is missing/suppressed.
+    let resolvedApptTime = apptTime;
+    if (!resolvedApptTime && scheduledServiceId) {
+      resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
+    }
+    // Re-checked HERE, immediately before the email leg — the apptTime
+    // resolution above widens the gap after the pre-SMS check.
+    if (!(await visitStillLive())) return false;
+    return deliverAppointmentEmailFallback({
+      kind: 'confirmation',
+      customerId,
+      scheduledServiceId,
+      apptTime: resolvedApptTime,
+      serviceLabel,
+    });
+  }
 
   // email / both — resolve the appointment time for the email body when the
   // caller didn't pass one, so the confirmation email shows the right ET slot.
@@ -418,6 +480,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   if (!resolvedApptTime && scheduledServiceId) {
     resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
   }
+  if (!(await visitStillLive())) return false;
   return deliverAppointmentNotice({
     channel,
     kind: 'confirmation',
@@ -1223,18 +1286,32 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 // skip the extra query. Falls back to the passed `prefs` row on any miss.
 async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
   let channelPrefs = prefs;
+  // A FAILED owner-resolution read (as distinct from "no row") must surface
+  // on the returned row (Codex #3361 r28 P1): the fallback prefs below are
+  // then the CHILD/default toggles, not the account owner's stored choices,
+  // and getReminderPrefs' `unavailable` only covered the initial child-row
+  // query — a swallowed failure here left prefsKnown=true and let the
+  // consent-blocked email fallback mail past an owner opt-out it never read.
+  // The sentinel rides the row itself (same __prefsUnavailable shape the
+  // PREFS_UNAVAILABLE marker uses) so every consumer of this resolver sees
+  // it; channel readers ignore the extra key.
+  let resolutionFailed = false;
+  const swallow = () => { resolutionFailed = true; return null; };
   const customer = (customerRow && customerRow.account_id !== undefined)
     ? customerRow
-    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
     const primary = await db('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
       .first('id')
-      .catch(() => null);
+      .catch(swallow);
     if (primary && String(primary.id) !== String(customerId)) {
-      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(() => null);
+      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
+  }
+  if (resolutionFailed) {
+    channelPrefs = { ...(channelPrefs || {}), __prefsUnavailable: true };
   }
   return channelPrefs;
 }
@@ -1245,6 +1322,17 @@ async function getReminderPrefs(customerId) {
 
   return {
     raw: prefs || {},
+    // The prefs LOOKUP failed (as distinct from "no row") — the toggles
+    // below are fail-open defaults, not stored choices. Paths that would
+    // bypass the sendCustomerMessage opt-out validator (the confirmation
+    // email fallback) must fail CLOSED on this (Codex #3361 r22 P1).
+    // Sentinel marker checked directly (same shape customer-contact's
+    // prefsUnavailable() accepts) so partial test doubles of that module
+    // don't have to carry the helper. Covers BOTH the child-row query and
+    // the owner-profile channel resolution (Codex #3361 r28 P1): a
+    // secondary-profile appointment whose owner lookup failed is equally
+    // unknowable.
+    unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
     smsEnabled: prefs?.sms_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
@@ -2455,6 +2543,15 @@ const AppointmentReminders = {
       // stomping the winner's reminder state.
       const expectGuard = (query) => {
         if (!(options.expectSchedule && options.expectSchedule.date)) return query;
+        // A caller that passes the windowStart key is asserting the FULL
+        // observed slot — including "no window". An explicitly-null start
+        // must therefore require window_start IS NULL, not silently drop to
+        // a date-only check: a date-only guard lets a resync built on a
+        // windowless read pass after a concurrent move assigned a real
+        // window on the same date, overwriting that move's reminder state
+        // with a fabricated fallback time (Codex #3361 r21 P2). Callers
+        // that omit the key entirely keep the date-only guard.
+        const hasStartAssertion = Object.prototype.hasOwnProperty.call(options.expectSchedule, 'windowStart');
         const expectStart = options.expectSchedule.windowStart
           ? String(options.expectSchedule.windowStart).slice(0, 5)
           : null;
@@ -2465,6 +2562,7 @@ const AppointmentReminders = {
             .whereRaw('scheduled_services.scheduled_date = ?::date', [String(options.expectSchedule.date)])
             .modify((q) => {
               if (expectStart) q.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [expectStart]);
+              else if (hasStartAssertion) q.whereNull('scheduled_services.window_start');
             });
         });
       };

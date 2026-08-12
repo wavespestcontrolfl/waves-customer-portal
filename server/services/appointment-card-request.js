@@ -292,67 +292,111 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
 // trigger re-attempts; enrollment is idempotent, so a concurrent double
 // run resolves as already_enrolled.
 async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
+  // ONE transaction, visit row locked first (Codex #3361 r26 P1,
+  // superseding the r9 read-only re-check): the live-status check, the
+  // enrollment (a savepoint via enrollConsentedMethod's dbh param), and
+  // the satisfied row commit atomically while FOR UPDATE on the visit row
+  // serializes against a concurrent cancellation's status CAS. A cancel
+  // that commits first is seen here (non-live → skip, nothing written); a
+  // cancel that waits on our lock finds the committed satisfied row and
+  // its follow-through releases the fee rail exactly as it does for any
+  // pre-existing row. The r9 read-only re-check was a TOCTOU: a cancel
+  // landing between the read and enrollment enrolled Auto Pay + wrote a
+  // satisfied row AFTER the follow-through had already looked. Lock order
+  // (visit row → customer row inside the enrollment savepoint) is safe:
+  // the customers lock is only ever taken by enrollment transactions,
+  // which touch no scheduled_services rows. All-or-nothing also means a
+  // failed row write rolls the enrollment back with it — strictly safer
+  // than the old enrollment-first ordering (no satisfied row without
+  // enrollment, no enrollment without its row). Fail toward skip
+  // (retryable on the next trigger).
   try {
-    const { enrollConsentedMethod } = require('./autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: visit.customer_id,
-      paymentMethodId: savedMethod.id,
-      source: 'save_card_consent',
-      details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
+    // The enrollment-confirmation email is handed back by
+    // enrollConsentedMethod in savepoint mode instead of being sent when
+    // the savepoint releases (Codex #3361 r27 P1): nothing customer-facing
+    // may fire until the transaction below actually COMMITS — a satisfied-
+    // row failure after the savepoint rolls the Auto Pay flags back, and an
+    // email announcing that rolled-back enrollment would be a lie.
+    let deferredEnrollmentEmail = null;
+    const secured = await db.transaction(async (trx) => {
+      const live = await trx('scheduled_services')
+        .where({ id: visit.id })
+        .forUpdate()
+        .first('status');
+      if (!live || !LIVE_VISIT_STATUSES.includes(live.status)) {
+        return skip(`visit_not_live_at_secure:${live ? live.status : 'missing'}`);
+      }
+      const { enrollConsentedMethod } = require('./autopay-enrollment');
+      const enrollment = await enrollConsentedMethod({
+        customerId: visit.customer_id,
+        paymentMethodId: savedMethod.id,
+        source: 'save_card_consent',
+        details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
+        dbh: trx,
+      });
+      if (!enrollment?.enrolled && enrollment?.reason !== 'already_enrolled') {
+        logger.warn(`[appt-card-request] auto-secure enrollment refused (${enrollment?.reason || 'unknown'}) for visit ${visit.id} — left retryable`);
+        return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
+      }
+      deferredEnrollmentEmail = enrollment.sendEnrollmentConfirmation || null;
+      const inserted = await trx('appointment_card_requests')
+        .insert({
+          scheduled_service_id: visit.id,
+          customer_id: visit.customer_id,
+          status: 'satisfied',
+          trigger,
+          payment_method_id: savedMethod.id,
+          stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+          // Completion-charge cap, frozen at the auto-secure moment (Codex
+          // #3153 r1 P1): later price edits must never widen what the saved
+          // consent covers. Fee terms are deliberately NOT stamped — a
+          // satisfied row never saw the fee disclosure.
+          accepted_amount: visit.estimated_price != null && Number(visit.estimated_price) > 0
+            ? Number(visit.estimated_price) : null,
+          completed_at: new Date(),
+        })
+        .onConflict('scheduled_service_id')
+        .ignore()
+        .returning('id');
+      if (!inserted || !inserted.length) {
+        // A pending row already exists (abandoned inline/SMS link) — flip it
+        // to satisfied (Codex #2771 r4) or the /secure page keeps rendering a
+        // live card form for a visit the saved method already covers.
+        // Pending-only: a completed/satisfied row is already terminal.
+        await trx('appointment_card_requests')
+          .where({ scheduled_service_id: visit.id, status: 'pending' })
+          .update({
+            status: 'satisfied',
+            payment_method_id: savedMethod.id,
+            stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+            // The heal targets a PENDING page row that may carry a lower cap or
+            // the sticky 0 sentinel from an earlier render — monotonic-down,
+            // never a plain overwrite (Codex #3153 r6 P1). (The fresh-row
+            // INSERT above stamps the value directly: no prior disclosure.)
+            ...(visit.estimated_price != null && Number(visit.estimated_price) > 0 ? {
+              accepted_amount: db.raw(
+                'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+                [Number(visit.estimated_price), Number(visit.estimated_price)],
+              ),
+            } : {}),
+            completed_at: new Date(),
+            updated_at: new Date(),
+          });
+      }
+      return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
     });
-    if (!enrollment?.enrolled && enrollment?.reason !== 'already_enrolled') {
-      logger.warn(`[appt-card-request] auto-secure enrollment refused (${enrollment?.reason || 'unknown'}) for visit ${visit.id} — left retryable`);
-      return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
+    // Post-COMMIT only: reaching here means the transaction resolved, and
+    // deferredEnrollmentEmail is only ever assigned on the path that
+    // commits the auto_secured result (a refused enrollment returned skip
+    // before the assignment; a throw skipped this block entirely).
+    if (secured?.action === 'auto_secured' && deferredEnrollmentEmail) {
+      try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
     }
+    return secured;
   } catch (err) {
     logger.warn(`[appt-card-request] auto-secure enrollment failed for visit ${visit.id} — left retryable: ${err.message}`);
     return skip('enrollment_failed');
   }
-  const inserted = await db('appointment_card_requests')
-    .insert({
-      scheduled_service_id: visit.id,
-      customer_id: visit.customer_id,
-      status: 'satisfied',
-      trigger,
-      payment_method_id: savedMethod.id,
-      stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
-      // Completion-charge cap, frozen at the auto-secure moment (Codex
-      // #3153 r1 P1): later price edits must never widen what the saved
-      // consent covers. Fee terms are deliberately NOT stamped — a
-      // satisfied row never saw the fee disclosure.
-      accepted_amount: visit.estimated_price != null && Number(visit.estimated_price) > 0
-        ? Number(visit.estimated_price) : null,
-      completed_at: new Date(),
-    })
-    .onConflict('scheduled_service_id')
-    .ignore()
-    .returning('id');
-  if (!inserted || !inserted.length) {
-    // A pending row already exists (abandoned inline/SMS link) — flip it
-    // to satisfied (Codex #2771 r4) or the /secure page keeps rendering a
-    // live card form for a visit the saved method already covers.
-    // Pending-only: a completed/satisfied row is already terminal.
-    await db('appointment_card_requests')
-      .where({ scheduled_service_id: visit.id, status: 'pending' })
-      .update({
-        status: 'satisfied',
-        payment_method_id: savedMethod.id,
-        stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
-        // The heal targets a PENDING page row that may carry a lower cap or
-        // the sticky 0 sentinel from an earlier render — monotonic-down,
-        // never a plain overwrite (Codex #3153 r6 P1). (The fresh-row
-        // INSERT above stamps the value directly: no prior disclosure.)
-        ...(visit.estimated_price != null && Number(visit.estimated_price) > 0 ? {
-          accepted_amount: db.raw(
-            'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
-            [Number(visit.estimated_price), Number(visit.estimated_price)],
-          ),
-        } : {}),
-        completed_at: new Date(),
-        updated_at: new Date(),
-      });
-  }
-  return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
 }
 
 /**
@@ -411,6 +455,14 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       logger.warn(`[appt-card-request] saved-method check failed — proceeding to request: ${err.message}`);
     }
     if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
+
+    // delivery 'none' = the caller wanted ONLY the non-messaging work above
+    // (policy exemption + saved-card auto-secure) — the AI call pipeline
+    // uses it when the call-level TCPA verdict blocked messaging, so this
+    // path must never mint a token or send a card link on stored consent
+    // (Codex #3361 r3 P1). The pre-visit sweep and a later cleared trigger
+    // remain the ask's delivery surfaces.
+    if (delivery === 'none') return skip('delivery_suppressed');
 
     // Owner rule 2026-07-30: the card ask is for FIRST-TIME customers only.
     // An existing customer with completed service history has an established

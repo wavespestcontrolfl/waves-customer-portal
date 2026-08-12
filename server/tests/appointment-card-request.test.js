@@ -48,6 +48,10 @@ jest.mock('../models/db', () => {
   // Raw SQL fragments (the monotonic disclosure stamp) — returned as an
   // inspectable token so tests can pin the SQL contract and its bindings.
   db.raw = (sql, bindings = []) => ({ __raw: sql, bindings });
+  // The auto-secure path runs live-check + enrollment + satisfied row in one
+  // transaction (Codex #3361 r26 P1) — the mock trx is the db itself, so
+  // every table touch stays visible to the touches() helper.
+  db.transaction = async (cb) => cb(db);
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

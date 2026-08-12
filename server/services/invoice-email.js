@@ -404,15 +404,14 @@ async function inspectionCreditMemoForInvoice(invoice) {
     // inspection would otherwise announce another inspection's terms.
     const visitId = invoice.scheduled_service_id || null;
     if (!visitId) return '';
-    const offer = await db('inspection_credit_offers')
-      .where({ source_scheduled_service_id: visitId, status: 'offered' })
-      .where('expires_at', '>=', new Date())
-      .first('amount', 'expires_at');
-    if (!offer) return '';
-    const { inspectionCreditReceiptMemo } = require('./inspection-credit');
-    // The FROZEN expiry rides through — a resend must state the same
-    // deadline, never a recomputed "N days left".
-    return inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '';
+    // Shared lookup + copy with the service-report email (owner ruling
+    // 2026-08-12) — one mechanism, so the receipt and the report can
+    // never state different terms. The FROZEN expiry rides through — a
+    // resend must state the same deadline, never a recomputed "N days
+    // left". Lazy require: this module and inspection-credit reference
+    // each other (queueCreditReceiptResend → sendReceiptEmail).
+    const { inspectionCreditMemoForVisit } = require('./inspection-credit');
+    return await inspectionCreditMemoForVisit(visitId);
   } catch (err) {
     logger.warn(`[invoice-email] inspection credit memo lookup failed: ${err.message}`);
     return '';

@@ -99,6 +99,8 @@ const {
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  inspectionCreditMemoForVisit,
+  inspectionCreditReportNote,
   etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
   configuredCreditAmountForServiceKey,
@@ -744,15 +746,13 @@ describe('booking + redemption wiring — source contracts (routes too large to 
     expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
   });
 
-  it('outbound-review phone bookings earn evidence at CONFIRMATION, never at AI insert (pre-push P0)', () => {
-    // A pending outbound-review row is not a closed deal until the office
-    // confirms — evidence at insert would let the sweep mint $75 for an
-    // appointment the customer never confirmed.
+  it('phone bookings earn evidence at the AI insert, in the booking transaction', () => {
+    // The outbound office-review hold was removed (owner directive
+    // 2026-08-11): every auto-booked phone sale writes durable evidence in
+    // the same transaction as the insert. The confirm hook keeps its own
+    // marker call for legacy pending rows created before the removal.
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const guardAt = callProc.indexOf('if (!outboundReviewBooking) {');
-    const markerAt = callProc.indexOf("markBookingForInspectionCredit(trx, {");
-    expect(guardAt).toBeGreaterThan(-1);
-    expect(markerAt).toBeGreaterThan(guardAt); // marker sits inside the guard
+    expect(callProc).toContain("markBookingForInspectionCredit(trx, {");
     const confirmHook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
     expect(confirmHook).toContain("markBookingForInspectionCredit(db, {");
   });
@@ -905,14 +905,16 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).not.toContain('no-show invoice void sweep failed');
   });
 
-  it('booking evidence freezes its moment at call time, not at retry time (r26 P2)', () => {
+  it('booking evidence freezes its moment at call time, not at retry time (r26 P2, r16 carry-through)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // The post-commit retry reuses eventRow; a DB-default created_at would
     // stamp the RETRY time and shift the ordering evidence past a deadline
-    // the booking actually beat.
+    // the booking actually beat. PR #3361 r16 lets an explicit RETRY caller
+    // pass the ORIGINAL instant (bookedAt) — same invariant, one level up:
+    // the moment is frozen once and every write carries it.
     const fnAt = source.indexOf('async function markBookingForInspectionCredit');
     const rowAt = source.indexOf('const eventRow = {', fnAt);
-    const frozenAt = source.indexOf('created_at: new Date(),', rowAt);
+    const frozenAt = source.indexOf('created_at: bookedAt ? new Date(bookedAt) : new Date(),', rowAt);
     const tryAt = source.indexOf('try {', fnAt);
     expect(frozenAt).toBeGreaterThan(rowAt);
     expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt
@@ -1058,9 +1060,13 @@ describe('closeout route wiring — source contracts (the completion route is to
     // without an event the redeemer falls back to that placeholder
     // created_at — a row opened in-window but confirmed after expiry would
     // mint a credit the booking did not earn. The sweep (event-only)
-    // recovers once the post-commit retry lands the event.
+    // recovers once the post-commit retry lands the event. The gate accepts
+    // an ALREADY-PRESENT event too (marked === 0 — e.g. the completion
+    // transition committed it in-trx, PR #3361 r13): redeeming from an
+    // existing event uses the true moment; only a THROWN write (no event)
+    // defers to the retry + sweep.
     const markedAt = confirm.indexOf('const marked = await');
-    const gateAt = confirm.indexOf('if (marked === 1) {');
+    const gateAt = confirm.indexOf('if (marked === 1 || marked === 0) {');
     const redeemAt = confirm.indexOf("createdBy: 'system:inspection_credit_outbound_confirm'");
     expect(markedAt).toBeGreaterThan(-1);
     expect(gateAt).toBeGreaterThan(markedAt);
@@ -1310,5 +1316,103 @@ describe('window + receipt copy', () => {
     expect(inspectionCreditReceiptMemo({ amount: 0, expiresAt: '2026-09-02' })).toBeNull();
     expect(inspectionCreditReceiptMemo({ amount: 75 })).toBeNull();
     expect(inspectionCreditReceiptMemo({})).toBeNull();
+  });
+});
+
+describe('inspectionCreditMemoForVisit — the report-email channel (owner ruling 2026-08-12)', () => {
+  it('announces an open unexpired offer with the frozen terms', async () => {
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z' }];
+    const memo = await inspectionCreditMemoForVisit('svc-1');
+    expect(memo).toContain('$125.00 service credit');
+    expect(memo).toContain('August 25, 2026');
+    // Scoped to THIS visit's offer, never "the customer's earliest".
+    expect(mockChainCalls.some(({ m, args }) => m === 'where'
+      && args[0] && typeof args[0] === 'object'
+      && args[0].source_scheduled_service_id === 'svc-1'
+      && args[0].status === 'offered')).toBe(true);
+  });
+
+  it('says nothing without an open offer, a visit id, or parseable terms', async () => {
+    expect(await inspectionCreditMemoForVisit('svc-1')).toBe('');
+    expect(await inspectionCreditMemoForVisit(null)).toBe('');
+    mockOffers = [{ amount: '125.00', expires_at: 'not-a-date' }];
+    expect(await inspectionCreditMemoForVisit('svc-1')).toBe('');
+  });
+
+  it('works while the gate is dark — the persisted offer row is the authority', async () => {
+    mockGateOn = false;
+    mockOffers = [{ amount: '75.00', expires_at: '2026-08-26T04:00:00Z' }];
+    expect(await inspectionCreditMemoForVisit('svc-1')).toContain('service credit');
+  });
+
+  it('source contract: receipt and report email share ONE copy, and the report defers on a retryable verdict', () => {
+    const fs = require('fs');
+    const path = require('path');
+    // The receipt memo delegates — the two surfaces can never state
+    // different terms for the same visit.
+    const invoiceEmail = fs.readFileSync(path.join(__dirname, '../services/invoice-email.js'), 'utf8');
+    expect(invoiceEmail).toContain('inspectionCreditMemoForVisit(visitId)');
+    expect(invoiceEmail).not.toContain("db('inspection_credit_offers')");
+    // The report email takes the VERDICT off the loaded service row,
+    // defers retryably when a marked visit's offer cannot be read, and
+    // feeds the note to BOTH the template payload and the legacy
+    // fallback renderer.
+    const emailDelivery = fs.readFileSync(path.join(__dirname, '../services/service-report/email-delivery.js'), 'utf8');
+    expect(emailDelivery).toContain('inspectionCreditReportNote(service)');
+    expect(emailDelivery).toContain('if (creditVerdict.retryable)');
+    expect(emailDelivery).toContain('retryable: true');
+    expect(emailDelivery).toContain("inspection_credit_note: inspectionCreditNote || ''");
+    const legacyCallSite = emailDelivery.indexOf('buildServiceReportV1Email({');
+    expect(emailDelivery.indexOf('inspectionCreditNote,', legacyCallSite)).toBeGreaterThan(-1);
+  });
+
+  it('report verdict: unmarked visits send clean with ZERO queries', async () => {
+    const verdict = await inspectionCreditReportNote({ scheduled_service_id: 'svc-1', service_data: '{}' });
+    expect(verdict).toEqual({ note: '' });
+    expect(mockChainCalls.length).toBe(0);
+  });
+
+  it('report verdict: a marked visit with an open offer sends the frozen terms', async () => {
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z', status: 'offered' }];
+    const verdict = await inspectionCreditReportNote({
+      scheduled_service_id: 'svc-1',
+      service_data: JSON.stringify({ inspectionCreditOptIn: true }),
+    });
+    expect(verdict.retryable).toBeUndefined();
+    expect(verdict.note).toContain('$125.00 service credit');
+    expect(verdict.note).toContain('August 25, 2026');
+  });
+
+  it('report verdict: marked but offer missing or unreadable DEFERS — the send is once-ever (pre-push P1)', async () => {
+    // Closeout-crash window: marker committed, offer waits on the hourly
+    // recovery sweep. Sending now would permanently strip the terms.
+    const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
+    const missing = await inspectionCreditReportNote(marked);
+    expect(missing.retryable).toBe(true);
+    expect(missing.note).toBe('');
+    // Transient lookup fault — same verdict.
+    mockOffers = null; // pickRows()[0] throws
+    const faulted = await inspectionCreditReportNote(marked);
+    expect(faulted.retryable).toBe(true);
+    expect(faulted.reason).toContain('lookup failed');
+  });
+
+  it('report verdict: a settled or lapsed offer sends clean — announcing it would be false', async () => {
+    const marked = { scheduled_service_id: 'svc-1', service_data: JSON.stringify({ inspectionCreditOptIn: true }) };
+    mockOffers = [{ amount: '125.00', expires_at: '2026-08-26T04:00:00Z', status: 'redeemed' }];
+    expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
+    mockOffers = [{ amount: '125.00', expires_at: '2020-01-01T05:00:00Z', status: 'offered' }];
+    expect(await inspectionCreditReportNote(marked)).toEqual({ note: '' });
+  });
+
+  it('migration registers the optional template variable both-sided', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260812000000_service_report_inspection_credit_note.js'), 'utf8');
+    // Allowlist + body must move together — a referenced-but-not-allowed
+    // variable fails the send at validation.
+    expect(migration).toContain('allowed_variables');
+    expect(migration).toContain('optional_variables');
+    expect(migration).toContain("'service.report_ready'");
   });
 });

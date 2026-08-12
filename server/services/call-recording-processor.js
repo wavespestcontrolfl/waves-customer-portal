@@ -96,7 +96,6 @@ const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -2099,7 +2098,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false }) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
     await AppointmentReminders.registerAppointment(
@@ -2108,7 +2107,12 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
       `${scheduledDate}T${windowStart || '08:00'}`,
       serviceType,
       'call_recording',
-      { sendConfirmation: false }
+      // closeReminderWindows: a WINDOWLESS visit registers the canonical
+      // pre-closed placeholder at the date+08:00 slot instead of an ARMED
+      // reminder at a fabricated start — the cron must never text a time
+      // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
+      // registration leg applies).
+      { sendConfirmation: false, closeReminderWindows }
     );
   } catch (err) {
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
@@ -3168,7 +3172,12 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
     });
   } catch (err) {
     logger.error(`[call-proc] Lead conversion on phone booking failed for ${callSid}: ${err.message}`);
-    return false;
+    // null = TRANSIENT FAILURE, distinct from the deliberate `false` no-ops
+    // above (quote kept open, lead already won/unowned, lost race) — the
+    // legacy-activation hook keys retryability on exactly this distinction
+    // (Codex #3361 r6 P1). Same falsiness for every truthiness-checking
+    // caller.
+    return null;
   }
 }
 
@@ -10431,20 +10440,48 @@ const CallRecordingProcessor = {
     // when the service was UNCLEAR (noMatch) under fail-open, so the existing
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
-    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
-    // confirmed booking on an OUTBOUND call still creates the appointment — but
-    // PENDING/needs-review (status/consent/SMS handled below). It requires a
-    // REAL resolved service (a catalog row, or ok on a non-generic service):
-    // the Waves-Assessment generic fallback is inbound-only (see above), so an
-    // unclear/generic outbound call stays unbooked for the office.
-    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    // Outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a confirmed
+    // booking on an OUTBOUND call creates the appointment live, same as an
+    // inbound one (owner directive 2026-08-11 — the office-review hold was
+    // removed). It requires a REAL resolved service (a catalog row, or ok on a
+    // non-generic service): the Waves-Assessment generic fallback is
+    // inbound-only (see above), so an unclear/generic outbound call stays
+    // unbooked for the office. It ALSO requires V2 routing to actually run in
+    // ENFORCE mode: outside enforce the confidence / address-validation /
+    // HOA-commercial gates never evaluate and v2RoutingBlocked stays false,
+    // so a call those gates would have vetoed books live — containment the
+    // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
+    // routing keeps the pre-gate behavior: outbound bookings stay manual.
+    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
+      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+    // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
+    // outbound consent is never implied, and the removed review hold used to
+    // be the backstop that kept a shadow/legacy-mode outbound booking from
+    // texting. Recompute the verdict for outbound bookings regardless of
+    // routing mode, fail-closed: with no extraction/consent data,
+    // checkTcpaConsent blocks SMS and keeps the email fallback (Codex #3361
+    // r2 P1). OR-composition only ever tightens — enforce-mode's own verdict
+    // is identical for outbound (implied consent is inbound-only).
+    if (outboundAutoBooking) {
+      try {
+        const outboundTcpa = checkTcpaConsent(
+          v2ApprovedExtraction || v2CanonicalExtraction || null,
+          { impliedConsent: false },
+        );
+        v2SmsBlocked = v2SmsBlocked || !outboundTcpa.canSms;
+        v2EmailBlocked = v2EmailBlocked || !outboundTcpa.canEmail;
+      } catch (tcpaErr) {
+        v2SmsBlocked = true;
+        logger.warn(`[call-proc] outbound TCPA recompute failed for ${maskSid(callSid)} — SMS blocked fail-closed: ${tcpaErr.message}`);
+      }
+    }
     const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     // Outbound requires a REAL catalog row (never a coarse ok-label with
     // service_id null) AND must respect a hard veto: resolveSchedulableCallService
     // returns ok:false WITHOUT noMatch for an unsupported/admin-only call, and
     // that must stay un-bookable even if a catalog keyword happened to match.
-    const outboundCanCreate = outboundReviewBooking
+    const outboundCanCreate = outboundAutoBooking
       && !!callBookingCatalogRow
       && (serviceResolution.ok || serviceResolution.noMatch === true);
     const canCreateAppointmentFromCall = !genericBookingUnbookable
@@ -11082,15 +11119,17 @@ const CallRecordingProcessor = {
                   // conversion failure) must not strand the lead as open. The
                   // helper's won/duplicate + ownership guards make this a no-op
                   // when the lead already converted.
-                  // Don't convert the lead for a pending outbound-review booking
-                  // (same as the fresh-insert path) — it closes from the office
-                  // confirmation, not a reused/reprocessed pending row.
                   // A covered re-service is a $0 callback, not a closed sale
                   // (codex #3222 follow-up): converting the lead would record
                   // a won deal and promote funnel metrics off a free visit —
                   // judged from the REUSED row's own identity (codex #3231:
                   // a reprocess may resolve differently than what booked).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  // A SKIPPED reused row was a REJECTED booking (the dispatch
+                  // Skip action — same rejection semantics the activation
+                  // helper honors): a replay must not close its lead as won
+                  // or spawn its follow-up visit (Codex #3361 r8 P1).
+                  const primaryRowSkipped = String(primaryRow.status || '') === 'skipped';
+                  if (!primaryRowSkipped && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11102,7 +11141,7 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
-                  } else {
+                  } else if (!primaryRowSkipped) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   }
@@ -11199,11 +11238,10 @@ const CallRecordingProcessor = {
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
-                  // conversion as the reuse path above, same outbound-review
-                  // exception (that lead closes from the office confirmation)
-                  // and the same re-service exception ($0 callback, not a sale
-                  // — judged from the ATTACHED row's own identity, codex #3231).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  // conversion as the reuse path above, same re-service
+                  // exception ($0 callback, not a sale — judged from the
+                  // ATTACHED row's own identity, codex #3231).
+                  if (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11443,12 +11481,9 @@ const CallRecordingProcessor = {
                     estimated_price: null,
                     create_invoice_on_complete: false,
                   } : {}),
-                  // Outbound-callback bookings land PENDING/needs-review (the
-                  // office confirms in dispatch, which arms reminders); inbound
-                  // confirmed bookings auto-confirm as before.
-                  status: outboundReviewBooking ? 'pending' : 'confirmed',
-                  customer_confirmed: !outboundReviewBooking,
-                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
+                  status: 'confirmed',
+                  customer_confirmed: true,
+                  confirmed_at: new Date(),
                   notes: [
                     // Customer-visible (GET /api/schedule returns notes verbatim):
                     // keep it customer-safe. The office review cue lives in
@@ -11466,9 +11501,6 @@ const CallRecordingProcessor = {
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
-                    outboundReviewBooking
-                      ? 'Outbound callback — CONFIRM with customer before dispatch (pending review).'
-                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
@@ -11489,11 +11521,7 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  // Distinct marker for a pending outbound-review booking so the
-                  // customer self-service routes (schedule.js) hide/refuse it
-                  // until the office confirms — same dispatch-owned treatment as
-                  // a call follow-up.
-                  source_action: outboundReviewBooking ? CALL_OUTBOUND_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
+                  source_action: 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -11511,60 +11539,28 @@ const CallRecordingProcessor = {
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
-                  // EXCEPT outbound-review rows (pre-push P0): those are
-                  // not a closed deal until the office confirms — the
-                  // evidence is written by runOutboundReviewConfirmHook at
-                  // confirmation, never for a booking the customer might
-                  // not have agreed to.
-                  if (!outboundReviewBooking) {
-                    await require('./inspection-credit').markBookingForInspectionCredit(trx, {
-                      customerId: created.customer_id,
+                  await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                    customerId: created.customer_id,
+                    scheduledServiceId: created.id,
+                    source: 'phone_call',
+                  });
+                  // A phone-booked appointment is the deal closing — convert the
+                  // call's lead to won in the SAME transaction (mirrors the
+                  // admin-leads schedule-appointment route), so the conversion
+                  // can't commit without the appointment row. Every other booking
+                  // path already converts; this one silently didn't, stranding
+                  // phone-booked callers as `new` in the pipeline. EXCEPT a
+                  // covered re-service: a $0 callback is not a closed sale
+                  // (codex #3222 follow-up) — the caller is already a plan
+                  // customer and the lead must not record a won deal.
+                  if (!isReServiceCatalogRow(callBookingCatalogRow) || callQuotePromised) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
                       scheduledServiceId: created.id,
-                      source: 'phone_call',
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
                     });
-                  }
-                  if (outboundReviewBooking) {
-                    // A pending outbound-callback booking is NOT a closed deal
-                    // yet — the office confirms it first. Do NOT convert the lead
-                    // to won (that would show a phantom closed sale in pipeline/
-                    // conversion metrics that reverts if staff reject the review).
-                    // The lead closes from the office confirmation path instead.
-                    // Surface the pending booking for that review — and carry
-                    // the ORIGINATING lead id (+ the booking-time quote flag)
-                    // on the card: the booking can reuse an existing unclaimed
-                    // phone lead that never gets customer_id stamped, so the
-                    // confirm hook's customer_id lookup alone would miss it.
-                    await trx('triage_items')
-                      .insert(buildTriageItem({
-                        callLogId: call.id,
-                        flag: 'outbound_booking_review',
-                        extraction: v2ApprovedExtraction || extracted,
-                        severity: 'advisory',
-                        extraPayload: {
-                          lead_id: leadId || null,
-                          keep_open_for_quote: !!callQuotePromised,
-                        },
-                      }))
-                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-                  } else {
-                    // A phone-booked appointment is the deal closing — convert the
-                    // call's lead to won in the SAME transaction (mirrors the
-                    // admin-leads schedule-appointment route), so the conversion
-                    // can't commit without the appointment row. Every other booking
-                    // path already converts; this one silently didn't, stranding
-                    // phone-booked callers as `new` in the pipeline. EXCEPT a
-                    // covered re-service: a $0 callback is not a closed sale
-                    // (codex #3222 follow-up) — the caller is already a plan
-                    // customer and the lead must not record a won deal.
-                    if (!isReServiceCatalogRow(callBookingCatalogRow) || callQuotePromised) {
-                      await convertCallLeadOnPhoneBooking(trx, {
-                        leadId,
-                        customerId,
-                        scheduledServiceId: created.id,
-                        callSid,
-                        keepOpenForQuote: callQuotePromised,
-                      });
-                    }
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
@@ -11594,11 +11590,13 @@ const CallRecordingProcessor = {
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
-                  // unless this is a pending outbound-review booking (closes from
-                  // the office confirmation path) or a covered re-service ($0
-                  // callback, not a sale — judged from the reused row's own
-                  // identity, codex #3231).
-                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised)) {
+                  // unless this is a covered re-service ($0 callback, not a
+                  // sale — judged from the reused row's own identity, codex
+                  // #3231) or a SKIPPED row (a rejected booking; a replay
+                  // must not close its lead or spawn its follow-up visit,
+                  // Codex #3361 r8 P1).
+                  const existingByKeySkipped = String(existingByKey.status || '') === 'skipped';
+                  if (!existingByKeySkipped && (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -11609,7 +11607,9 @@ const CallRecordingProcessor = {
                   }
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
-                  followUpCreated = await ensureCallFollowUpVisit(existingByKey);
+                  if (!existingByKeySkipped) {
+                    followUpCreated = await ensureCallFollowUpVisit(existingByKey);
+                  }
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -11659,6 +11659,19 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              if (scheduleWasReused) {
+                // The reused row can be a LEGACY outbound-review booking
+                // (created pending before the 2026-08-11 hold removal): the
+                // reuse branches convert its lead and the replay repair arms
+                // reminders, but nothing stamped customer_confirmed — leaving
+                // the row hidden from customer self-service with its review
+                // card open even though customer-facing side effects armed
+                // (Codex #3361 r4 P0). The shared helper activates it
+                // (hook-first, stamp-on-success); one indexed read and a
+                // no-op for every other reused row.
+                await require('./outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
+              }
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it
@@ -11668,13 +11681,7 @@ const CallRecordingProcessor = {
               // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused && outboundReviewBooking) {
-                // A pending outbound booking must NOT arm reminders yet — the
-                // reminder cron doesn't skip 'pending', so this would text the
-                // customer before the office confirms. Reminders are armed at
-                // the office-confirm transition (admin-schedule) instead.
-                logger.info(`[call-proc] Outbound review booking ${svc.id} PENDING — reminders armed on office confirm`);
-              } else if (!scheduleWasReused) {
+              if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -11683,14 +11690,12 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
-              } else if (!outboundReviewBooking) {
-                // Idempotency-conflict REPLAY of a call booking (Codex
-                // #3178 r37 P2): the first attempt committed the visit +
-                // evidence but may have died before its side-effects ran —
-                // this retry is the recovery path, and reminders are
-                // already registered, but the fast redemption must re-run
-                // or a Charge Now / pay link in the next hour collects the
-                // full amount. Best-effort; the sweep stays the guarantee.
+              } else if (attachedManualBookingId) {
+                // ATTACH reuse (call attached to a manually created booking):
+                // that booking owns its own reminder registration — only the
+                // fast redemption must re-run (Codex #3178 r37 P2) or a
+                // Charge Now / pay link in the next hour collects the full
+                // amount. Best-effort; the sweep stays the guarantee.
                 try {
                   await require('./inspection-credit').redeemInspectionCreditForBooking({
                     customerId,
@@ -11699,6 +11704,220 @@ const CallRecordingProcessor = {
                   });
                 } catch (replayErr) {
                   logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
+              } else if (!['pending', 'confirmed', 'rescheduled'].includes(String(svc.status || ''))) {
+                // Same-key replay reusing a row that is no longer pre-visit
+                // live (skipped / no_show / completed / mid-visit): arming
+                // reminders or re-arming a confirmation would message a
+                // customer about a visit that already resolved (Codex #3361
+                // r3 P1). Redemption stays — it is evidence-gated and the
+                // money seam must still settle.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
+              } else {
+                // Same-key REPLAY of this call's OWN still-live booking
+                // (idempotency conflict): the first attempt committed the
+                // visit but may have died before its side effects ran (Codex
+                // #3178 r37 P2; #3361 r2 P2) — repair BOTH rails, not just
+                // redemption. registerScheduleSideEffects is idempotent
+                // (registration dedupes by scheduled_service_id; redemption
+                // is evidence-gated), so a replay whose first attempt did
+                // complete is a no-op.
+                // Register against the CURRENT slot, not the reuse-trx
+                // snapshot (Codex #3361 r25 P2, same rule as the confirm
+                // hook's registration leg): an office edit clearing or
+                // moving the arrival time between the snapshot read and
+                // this post-commit repair fired its reminder sync before
+                // any reminder row existed — registering from the stale
+                // snapshot would then insert an ARMED reminder at a start
+                // the office already removed. An edit landing after this
+                // read finds the just-registered row and the DB sync
+                // trigger owns its state from there, the same contract
+                // every live booking's reminder row carries.
+                let replaySlotDate = svc.scheduled_date;
+                let replaySlotStart = svc.window_start;
+                try {
+                  const freshReplaySlot = await db('scheduled_services')
+                    .where({ id: svc.id })
+                    .first('scheduled_date', 'window_start');
+                  if (freshReplaySlot) {
+                    replaySlotDate = freshReplaySlot.scheduled_date;
+                    replaySlotStart = freshReplaySlot.window_start;
+                  }
+                } catch { /* fall back to the reuse snapshot */ }
+                const replayDate = replaySlotDate instanceof Date
+                  ? replaySlotDate.toISOString().split('T')[0]
+                  : String(replaySlotDate || '').split('T')[0];
+                await registerScheduleSideEffects({
+                  scheduledServiceId: svc.id,
+                  customerId,
+                  scheduledDate: replayDate,
+                  // A reused row whose arrival time was CLEARED after the
+                  // first attempt (window_start null) must register the
+                  // canonical windowless pre-closed placeholder, never an
+                  // armed reminder at a fabricated 09:00 — the office
+                  // explicitly removed that time (Codex #3361 r24 P1).
+                  windowStart: replaySlotStart ? String(replaySlotStart).slice(0, 5) : null,
+                  serviceType: svc.service_type,
+                  closeReminderWindows: !replaySlotStart,
+                });
+                // Post-registration slot verify (Codex #3361 r26 P2): the
+                // fresh read above still leaves a gap before the reminder
+                // insert — an edit landing inside it synced before the row
+                // existed, exactly the ordering the confirm hook's shared
+                // verify repairs (windowless → canonical placeholder
+                // conversion; moved slot → guarded resync). Best-effort on
+                // this rail: a failed repair logs, and a re-delivered
+                // replay (or the visit's own next edit) re-runs it.
+                let replaySlotVerified = false;
+                try {
+                  const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');
+                  replaySlotVerified = await verifyReminderSlotAfterRegistration(db, {
+                    serviceId: svc.id,
+                    slotDate: replaySlotDate,
+                    slotStart: replaySlotStart,
+                    routeTag: 'call-proc-replay',
+                  });
+                  if (!replaySlotVerified) {
+                    logger.warn(`[call-proc] replay slot verify left ${svc.id} unrepaired — confirmation repairs skipped; a later replay or the visit's own edits resync it`);
+                  }
+                } catch (slotVerifyErr) {
+                  logger.warn(`[call-proc] replay slot verify failed for ${svc.id} — confirmation repairs skipped: ${slotVerifyErr.message}`);
+                }
+                // Confirmation repair, evidence-gated: the reused-row branch
+                // below never re-sends inline, and selfHealMissingReminderRows
+                // marks recreated rows confirmation_sent=true — so a
+                // confirmation lost to the crash would stay lost. Re-arm onto
+                // the 15-min stranded-confirmation sweep ONLY when THIS run's
+                // call-level SMS verdict cleared on EXPLICIT consent (the
+                // sweep's sender has no v2SmsBlocked/clearance context of its
+                // own — a consent-blocked booking must stay off it, Codex
+                // #3361 r3 P1; and an implied-consent clearance is excluded
+                // outright because it is personal to the inbound ANI, a
+                // recipient decision the sweep cannot re-derive), no
+                // per-visit delivery evidence exists, and the visit is still
+                // in the future; the sweep's canonical send owns fan-out and
+                // cannot double-text a customer the first attempt reached.
+                // A WINDOWLESS reused row (arrival time cleared) skips both
+                // confirmation repairs outright: a windowless visit has no
+                // time to confirm — its registration above is the pre-closed
+                // placeholder, and any confirmation would render a time
+                // nobody chose (Codex #3361 r24 P1). A FAILED slot verify
+                // skips them too (Codex #3361 r27 P2): the repairs below are
+                // built on replaySlotStart, and with the verify unrepaired
+                // that slot may be stale — re-arming the sweep or emailing
+                // from it would send the customer an obsolete time. The
+                // retry rail is the same one the verify itself leans on: a
+                // later replay (or the visit's own next edit) re-runs both.
+                if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                  try {
+                    // ALL THREE delivery ledgers, not just messaging_audit_log
+                    // (Codex #3361 r7 P2): appointment EMAILS audit into
+                    // customer_interactions, and a Twilio-accepted SMS whose
+                    // final audit write failed still landed durably in
+                    // sms_log (no visit id there — key by customer + type
+                    // since THIS visit's row was created; a cross-visit match
+                    // skips the re-arm, failing toward silence).
+                    let confirmationDelivered = await db('messaging_audit_log')
+                      .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
+                      .whereNotNull('sent_at')
+                      .first('id');
+                    if (!confirmationDelivered) {
+                      confirmationDelivered = await db('customer_interactions')
+                        .where({ interaction_type: 'email_outbound' })
+                        .whereRaw("metadata->>'scheduled_service_id' = ?", [String(svc.id)])
+                        .whereRaw("metadata->>'status' = 'sent'")
+                        .first('id');
+                    }
+                    if (!confirmationDelivered) {
+                      confirmationDelivered = await db('sms_log')
+                        .where({ customer_id: customerId, message_type: 'confirmation', direction: 'outbound' })
+                        .where('created_at', '>=', svc.created_at || new Date(0))
+                        // Provider-ACCEPTED rows only (Codex #3361 r8 P2): the
+                        // quiet-hours rail inserts status='scheduled'
+                        // confirmation rows before Twilio ever accepts them —
+                        // a queued secondary copy is not evidence the primary
+                        // customer was reached. Same genuine-SID pattern the
+                        // cancellation-notice worker uses.
+                        .whereRaw("twilio_sid ~ '^(SM|MM)'")
+                        .first('id');
+                    }
+                    if (!confirmationDelivered) {
+                      const rearmed = await db('appointment_reminders')
+                        // windows_preclosed belt (write-time): a placeholder's
+                        // confirmation closed in its insert and must never
+                        // re-arm, even if the visit went windowless after the
+                        // svc snapshot above was read.
+                        .where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })
+                        .where('appointment_time', '>', new Date())
+                        // Live-status check at WRITE time, not the earlier
+                        // svc snapshot: a tech can complete the visit between
+                        // the reuse read and this update, and the stranded-
+                        // confirmation pass sends without a status guard of
+                        // its own (Codex #3361 r6 P1).
+                        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending','confirmed','rescheduled'))")
+                        .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                      if (rearmed > 0) {
+                        logger.info(`[call-proc] replay of ${svc.id}: no confirmation evidence — re-armed for the stranded-confirmation sweep`);
+                      }
+                    }
+                  } catch (confirmRepairErr) {
+                    logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
+                  }
+                } else if (replaySlotVerified && replaySlotStart && v2SmsBlocked && !v2EmailBlocked) {
+                  // Consent-blocked SMS with email still permitted: the
+                  // inline r21 fallback emails the confirmation, but a crash
+                  // between the committed insert and that send loses it — and
+                  // the sweep re-arm above is (correctly) skipped for a
+                  // consent-blocked booking, so nothing would ever retry the
+                  // email (Codex #3361 r23 P2). Repair the EMAIL leg only:
+                  // evidence-gated on the email audit ledger, idempotent at
+                  // the sender (per-occurrence keys), future visits only, and
+                  // never touching the stranded-confirmation sweep (its
+                  // canonical sender is an SMS rail).
+                  try {
+                    const emailEvidence = await db('customer_interactions')
+                      .where({ interaction_type: 'email_outbound' })
+                      .whereRaw("metadata->>'scheduled_service_id' = ?", [String(svc.id)])
+                      .whereRaw("metadata->>'status' = 'sent'")
+                      .first('id');
+                    const replayApptTime = parseETDateTime(
+                      `${replayDate}T${String(replaySlotStart).slice(0, 5)}`,
+                    );
+                    if (!emailEvidence && replayApptTime.getTime() > Date.now()) {
+                      const AppointmentReminders = require('./appointment-reminders');
+                      const reached = await AppointmentReminders.deliverConfirmationByChannel({
+                        customerId,
+                        scheduledServiceId: svc.id,
+                        serviceLabel: svc.service_type,
+                        smsPermanentlyBlocked: true,
+                        // Stub, no SMS side effects: the primary text is
+                        // consent-blocked on this run's verdict, and the
+                        // helper enforces the channel prefs, the
+                        // confirmation opt-out, and the prefs-unavailable
+                        // fail-closed rule before its email fallback runs.
+                        smsAttempt: async () => false,
+                        // The reused-row liveness snapshot above is stale by
+                        // now — a cancellation committed since must win, so
+                        // the sender re-reads the status immediately before
+                        // its email leg (Codex #3361 r27 P2). Fail-closed;
+                        // the evidence-gated retry re-runs on a later replay.
+                        requireLiveVisitStatus: true,
+                      });
+                      if (reached) {
+                        logger.info(`[call-proc] replay of ${svc.id}: consent-blocked SMS — confirmation email repaired`);
+                      }
+                    }
+                  } catch (emailRepairErr) {
+                    logger.warn(`[call-proc] replay email-confirmation repair failed for ${svc.id}: ${emailRepairErr.message}`);
+                  }
                 }
               }
               if (!svc.technician_id) {
@@ -11963,7 +12182,7 @@ const CallRecordingProcessor = {
           // saved-method auto-secure, dedup, one-text-ever, the email leg
           // riding a confirmed text) and is idempotent on reused/attached
           // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
-          if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          if (scheduledServiceId && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -11996,20 +12215,37 @@ const CallRecordingProcessor = {
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
+          } else if (scheduledServiceId) {
+            // No call-level SMS clearance (TCPA gate blocked, or the
+            // implied-consent leg is held): run ONLY the funnel's
+            // non-messaging side — the policy exemption + saved-card
+            // auto-secure (appointment-card-request step 2). delivery 'none'
+            // exits before any token mint or send, so the call-level verdict
+            // that just blocked messaging cannot be bypassed on stored
+            // consent (Codex #3361 r1+r3 P1). Deliberately NO
+            // call_sms_cleared_at stamp and NO call-recipient override:
+            // call-level clearance was not given, so the stamp the pre-visit
+            // backstop keys on must not assert it.
+            try {
+              const { requestCardForAppointment } = require('./appointment-card-request');
+              await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline', delivery: 'none' });
+            } catch (cardErr) {
+              logger.warn(`[call-proc] card-request funnel (auto-secure-only path) failed for visit ${scheduledServiceId}: ${cardErr.message}`);
+            }
           }
-          // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && outboundReviewBooking) {
-            // Pending outbound booking — never auto-text a "confirmed" appt the
-            // customer hasn't been re-confirmed on. Keep scheduledServiceId so
-            // the downstream audit doesn't treat this as a skipped booking.
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
-            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
-          } else if (scheduledServiceId && v2SmsBlocked) {
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            // Keep scheduledServiceId (same rule as the outbound branch
-            // above): the schedule row EXISTS — dropping the id made the
-            // downstream approved-but-unbooked audit read this as a skipped
-            // booking, and starves the assessment pre-draft hook.
+          // Only send the confirmation if the schedule row landed. A
+          // v2-TCPA-blocked call (SMS consent not captured) still routes
+          // through the channel-aware delivery below with its SMS leg HELD —
+          // an email/both-preference customer keeps the email confirmation
+          // (AGENTS: TCPA consent before any SMS, email fallback; Codex
+          // #3361 P1). Default-'sms' customers stay silent exactly as
+          // before. Only full do-not-contact (email blocked too) skips
+          // entirely — keeping scheduledServiceId either way: the schedule
+          // row EXISTS, and dropping the id made the downstream
+          // approved-but-unbooked audit read this as a skipped booking,
+          // starving the assessment pre-draft hook.
+          if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
+            logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (!scheduleWasReused) {
@@ -12096,14 +12332,32 @@ const CallRecordingProcessor = {
                 customerId,
                 scheduledServiceId,
                 serviceLabel: serviceType,
+                // The v2 TCPA gate blocks the text outright (the smsAttempt
+                // stub below returns blocked without sending) while email
+                // stays permitted: let the default-'sms' channel fall back to
+                // the confirmation email instead of leaving the newly live
+                // booking with no immediate confirmation at all (Codex #3361
+                // r21 P1). Deliberately NOT set for the implied-consent
+                // non-ANI hold — that path files its own Needs Review card so
+                // the office confirms the number first.
+                smsPermanentlyBlocked: v2SmsBlocked && !v2EmailBlocked,
                 smsAttempt: async () => {
                   smsRan = true;
                   let confirmationRearmed = false;
-                  // SMS leg held (implied consent, no consented recipient):
-                  // skip only the primary text — the channel email leg and
-                  // the gated fan-out/email-only legs below still run.
-                  const sendResult = holdImpliedSmsLeg
-                    ? { sent: false, blocked: true, code: 'implied_consent_non_ani_recipient' }
+                  // SMS leg held (implied consent with no consented
+                  // recipient, or the v2 TCPA gate blocked SMS): skip only
+                  // the primary text — the channel email leg and the gated
+                  // fan-out/email-only legs below still run (their own
+                  // consent gates: explicit-consent for SMS fan-out,
+                  // v2EmailBlocked for the email slots). The held codes
+                  // never match QUIET_HOURS_HOLD, so the 8 AM sweep re-arm
+                  // below cannot resurrect a consentless text.
+                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
+                    ? {
+                      sent: false,
+                      blocked: true,
+                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : 'v2_tcpa_gate',
+                    }
                     : await sendCustomerMessage({
                       to: smsRecipient,
                       body: smsBody,
@@ -12346,6 +12600,12 @@ const CallRecordingProcessor = {
                   return primaryOk;
                 },
               });
+              if (smsRan && confirmationReached && appointmentResult && appointmentResult.smsBlocked) {
+                // The blocked text was rescued by an email leg (the TCPA
+                // fallback above, or a 'both' channel's email) — record it so
+                // the route-decision log doesn't read as "never notified".
+                appointmentResult.emailSent = true;
+              }
               if (!smsRan) {
                 // Email-only confirmation channel: smsAttempt never runs, but the
                 // schedule row was created — record it so the route-decision log

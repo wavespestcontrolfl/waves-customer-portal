@@ -54,6 +54,12 @@ router.post('/native-subscribe', async (req, res, next) => {
         subscription_data: row.subscription_data,
         device_info: row.device_info,
         active: true,
+        // Heartbeat: registration re-fires on every app launch, so bumping
+        // updated_at here makes it a "customer recently opened the app"
+        // signal — push-channel-routing requires a FRESH heartbeat before a
+        // push may replace an SMS (provider acceptance alone cannot prove
+        // the OS will display the alert).
+        updated_at: db.fn.now(),
       })
       .returning('id');
 
@@ -64,10 +70,31 @@ router.post('/native-subscribe', async (req, res, next) => {
 router.post('/native-unsubscribe', async (req, res, next) => {
   try {
     const { token } = req.body || {};
-    const q = db('push_subscriptions').where({ customer_id: req.customerId }).whereIn('platform', ['ios', 'android']);
+    // Token-bearing releases are ACCOUNT-scoped: this device is presenting
+    // its own token, and after a failed property re-point the row can sit
+    // under a SIBLING profile of the same account — a release scoped to the
+    // current profile would zero-row forever while the orphan row keeps
+    // accepting invisible pushes. Never cross accounts. Token-less releases
+    // (deactivate all of MY devices) stay scoped to the current profile —
+    // account-wide would kill the household's other devices.
+    let customerScope = [req.customerId];
+    if (token) {
+      const accountId = req.accountId || req.customer?.account_id || null;
+      if (accountId) {
+        const siblings = await db('customers')
+          .where({ account_id: accountId })
+          .select('id')
+          .catch(() => []);
+        if (siblings.length) customerScope = siblings.map((r) => r.id);
+      }
+    }
+    const q = db('push_subscriptions').whereIn('customer_id', customerScope).whereIn('platform', ['ios', 'android']);
     if (token) q.andWhere({ device_token: token });
-    await q.update({ active: false });
-    res.json({ ok: true });
+    // deactivated count matters to the client: zero rows means this token
+    // is not held by any profile the session may release — keep local
+    // memory so a later re-point can supersede the row.
+    const deactivated = await q.update({ active: false });
+    res.json({ ok: true, deactivated: Number(deactivated) || 0 });
   } catch (err) { next(err); }
 });
 
