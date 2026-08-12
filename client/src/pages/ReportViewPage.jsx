@@ -2898,6 +2898,94 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   );
 }
 
+// Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
+// Server-driven: renders only when the LIVE payload carries `crossSell` — the
+// server computes the offer fail-closed (ownership, commercial, secondary-
+// property and pricing-confidence suppressions all live there), so a missing
+// key means no card, never a client-side guess. The CTA books nothing and
+// charges nothing: it records the request and the office follows up (owner
+// sends all customer communications).
+function CrossSellCard({ data, token, mode }) {
+  const [requested, setRequested] = useState(false);
+  const offer = data?.crossSell;
+  if (mode !== 'live' || !offer?.serviceKey) return null;
+  const priced = offer.mode === 'priced' && offer.option;
+  const option = offer.option || {};
+  const planChip = priced
+    ? [
+      option.estimatedPlanMonthly ? `Plan total ~$${Math.round(option.estimatedPlanMonthly)}/mo` : null,
+      option.waveguardTier ? `WaveGuard ${String(option.waveguardTier).replace(/^./, (c) => c.toUpperCase())}` : null,
+    ].filter(Boolean).join(' · ')
+    : null;
+  const handleRequest = () => {
+    if (requested) return;
+    setRequested(true);
+    trackReportEvent(token, 'cross_sell_requested', {
+      serviceKey: offer.serviceKey,
+      serviceLabel: offer.label,
+      optionId: option.id || null,
+      monthly: option.monthly || null,
+      offerMode: offer.mode,
+    });
+  };
+  return (
+    <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      <div className="section-eyebrow">{priced ? 'Complete your protection' : 'One more layer available'}</div>
+      <h2>{priced ? `Add ${offer.label} to your plan` : `Add ${offer.label.toLowerCase()} to your plan`}</h2>
+      {priced && (
+        <div className="cross-sell-price">
+          <span className="cross-sell-amount">${Math.round(option.monthly)}</span>
+          <span className="cross-sell-unit">/mo</span>
+        </div>
+      )}
+      {option.cadence ? <p className="cross-sell-cadence">{option.cadence}</p> : null}
+      {planChip ? <span className="cross-sell-chip">{planChip}</span> : null}
+      <div className="cross-sell-cta-row">
+        {requested ? (
+          <p className="cross-sell-confirm">
+            Request received — we&apos;ll confirm the details with you before anything is scheduled.
+          </p>
+        ) : (
+          <button type="button" data-glass-accent="" className="review-cta cross-sell-cta" onClick={handleRequest}>
+            {priced ? `Add ${offer.label}` : `Get my ${offer.label.toLowerCase()} quote`}
+          </button>
+        )}
+      </div>
+      {!requested && (
+        <p className="cross-sell-fine">
+          {priced
+            ? 'No charge today — we’ll confirm the details with you before anything is scheduled.'
+            : 'We’ll measure and confirm exact pricing — no obligation.'}
+        </p>
+      )}
+    </section>
+  );
+}
+
+// Referral card (owner-approved 2026-08-11): every live report, below the
+// offer. Links to the authenticated portal's existing referral program —
+// no referral mechanics live on this public bearer-token surface.
+function ReferralCard({ token, mode }) {
+  if (mode !== 'live') return null;
+  return (
+    <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
+      <div className="section-eyebrow">Share the protection</div>
+      <h2>Know someone with a bug or lawn problem?</h2>
+      <p className="cross-sell-cadence">Refer a friend — you both get rewarded when they start service.</p>
+      <div className="cross-sell-cta-row">
+        <a
+          data-glass-accent=""
+          className="review-cta cross-sell-cta"
+          href="/?tab=refer"
+          onClick={() => trackReportEvent(token, 'referral_cta_clicked', {})}
+        >
+          Refer a friend
+        </a>
+      </div>
+    </section>
+  );
+}
+
 export function customerActionItems({ data = {}, coverage, primaryMove, aiSummary, nowMs } = {}) {
   const actions = [];
   const add = (label, detail) => {
@@ -7280,6 +7368,90 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
+        .cross-sell-card h2 {
+          margin-bottom: 4px;
+        }
+        .cross-sell-price {
+          display: flex;
+          align-items: baseline;
+          gap: 8px;
+          margin: 10px 0 2px;
+        }
+        .cross-sell-amount {
+          font-family: ${FONTS.serif};
+          font-size: 34px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .cross-sell-unit {
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--muted);
+        }
+        .cross-sell-cadence {
+          margin: 0 0 4px;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .cross-sell-chip {
+          display: inline-block;
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          border: 1px solid rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.07);
+          color: ${B.glassNavy};
+          border-radius: 999px;
+          padding: 3px 10px;
+          margin-top: 10px;
+        }
+        .cross-sell-cta-row {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-top: 16px;
+          flex-wrap: wrap;
+        }
+        .cross-sell-card .cross-sell-cta {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 44px;
+          min-width: 210px;
+          padding: 12px 18px;
+          border: 1px solid ${B.glassNavy};
+          border-radius: 12px;
+          background: ${B.yellow};
+          color: ${B.glassNavy};
+          font: inherit;
+          font-size: 14px;
+          line-height: 1;
+          font-weight: 800;
+          text-decoration: none;
+          cursor: pointer;
+          box-shadow: 3px 3px 0 ${B.glassNavy};
+          transition: ${docTransition('transform', 'box-shadow')};
+        }
+        .cross-sell-card .cross-sell-cta:hover,
+        .cross-sell-card .cross-sell-cta:focus-visible {
+          transform: translate(-1px, -1px);
+          box-shadow: 4px 4px 0 ${B.glassNavy};
+          outline: none;
+        }
+        .cross-sell-confirm {
+          margin: 0;
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1.5;
+        }
+        .cross-sell-fine {
+          margin: 12px 0 0;
+          color: var(--muted);
+          font-size: 12.5px;
+          line-height: 1.5;
+        }
         .sr-muted {
           margin: 12px 0 0;
           color: var(--report-muted);
@@ -8309,6 +8481,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
+            through the report, not stacked at the bottom): after the visit
+            story (hero / re-entry / timeline), before the findings detail.
+            Live-only; renders nothing unless the payload carries crossSell. */}
+        <CrossSellCard data={data} token={token} mode={mode} />
+
         {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
             leads the pest report. Surfaces the premium-experience intelligence
             (protection status, next step, bug files, receipt) + the seasonal
@@ -8441,6 +8619,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {isV2LeadLayout && (
           <AppliedProductsSection data={data} mode={mode} />
         )}
+
+        {/* Referral — second interwoven slot, after the treatment record.
+            The two AppliedProductsSection mounts are mutually exclusive on
+            isV2LeadLayout, so exactly one ReferralCard renders per report. */}
+        {isV2LeadLayout && <ReferralCard token={token} mode={mode} />}
 
         {/* V2 lead layouts (lawn/tree-shrub reportV2) skip the lower coverage
             mount entirely, so a technician-traced map gets its own mount here —
@@ -8611,6 +8794,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Referral — standard-layout mount of the same interwoven slot (see
+            the isV2LeadLayout mount above; mutually exclusive). */}
+        {!isV2LeadLayout && <ReferralCard token={token} mode={mode} />}
+
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
@@ -8675,6 +8862,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+
+
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.

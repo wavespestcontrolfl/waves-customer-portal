@@ -235,6 +235,8 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'photo_opened',
   'followup_requested',
   'review_request_clicked',
+  'cross_sell_requested',
+  'referral_cta_clicked',
 ]);
 const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
 
@@ -962,6 +964,35 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     }
 
     await recordServiceReportEvent(service, eventName, channel, req, metadata);
+
+    // Cross-sell CTA → office bell (owner sends all customer comms, so the
+    // card's button only records the request; this bell is how it reaches
+    // staff). Reuses the existing bundle-inquiry trigger — same Customer-360
+    // deep link staff already work add-on requests from. Best-effort: the
+    // event row above is the durable record either way. Metadata is
+    // customer-controlled input — only whitelisted display fields ride into
+    // the bell, length-clamped.
+    if (eventName === 'cross_sell_requested') {
+      try {
+        const customer = service.customer_id
+          ? await db('customers').where({ id: service.customer_id }).first('id', 'first_name', 'last_name')
+          : null;
+        const { triggerNotification } = require('../services/notification-triggers');
+        const clean = (value, max = 60) => String(value || '').replace(/[<>]/g, '').trim().slice(0, max);
+        const monthly = Number(metadata.monthly);
+        await triggerNotification('bundle_quote_requested', {
+          bundled: false,
+          customerId: customer?.id || null,
+          customerName: customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null,
+          suggestedService: [
+            clean(metadata.serviceLabel) || clean(metadata.serviceKey) || 'a service',
+            Number.isFinite(monthly) && monthly > 0 ? `(shown $${monthly.toFixed(2)}/mo on report)` : '(quote requested from report)',
+          ].join(' '),
+        });
+      } catch (err) {
+        logger.warn(`[reports-public] cross-sell bell failed: ${err.message}`);
+      }
+    }
 
     return res.json({ ok: true });
   } catch (err) { next(err); }

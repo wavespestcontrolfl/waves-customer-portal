@@ -103,10 +103,16 @@ function positiveOrNull(value) {
 // Property-dimension seed from the customer's own estimate history: the
 // engineInputs blob that priced their live plan is the best evidence for the
 // dimensions the profile and cached lookup don't carry (prod audit 2026-08-11:
-// without it, effectively NO real report could price an offer). Accepted
-// estimates win, then the most recent priced one; an estimate stamped with a
-// DIFFERENT street never seeds this property. Fill-only semantics are
-// enforced downstream in resolvePropertyContext.
+// without it, effectively NO real report could price an offer). Two hard
+// rules (codex #3367 r-prepush ×2):
+//   - ACCEPTED estimates only — a draft/sent/expired estimate was never
+//     agreed to as money, and an engine auto-draft's fallback dimensions
+//     must not launder into a customer-facing price.
+//   - When the customer has a primary street, the estimate must RESOLVE to
+//     the same street — an addressless or unparsable estimate never seeds
+//     (a moved or multi-property customer's legacy estimate could otherwise
+//     price the wrong premises).
+// Fill-only semantics are enforced downstream in resolvePropertyContext.
 async function loadEstimateSeed(database, customerId, primaryStreet) {
   const rows = await database('estimates')
     .where({ customer_id: customerId })
@@ -116,16 +122,19 @@ async function loadEstimateSeed(database, customerId, primaryStreet) {
   const linkage = require('../estimate-property-linkage');
   const candidates = [];
   for (const row of rows) {
+    if (row.status !== 'accepted') continue;
     const estData = parseJsonColumn(row.estimate_data);
     const inputs = estData?.engineInputs || estData?.inputs;
     if (!inputs || typeof inputs !== 'object') continue;
     if (primaryStreet) {
       const street = linkage.normalizedEstimateStreet(row.address);
-      if (street && !linkage.sameScopeKey(street, primaryStreet)) continue;
+      if (!street || !linkage.sameScopeKey(street, primaryStreet)) continue;
     }
     candidates.push({ row, inputs });
   }
-  const pick = candidates.find((c) => c.row.status === 'accepted') || candidates[0];
+  // Rows arrive newest-first, so the first surviving candidate is the most
+  // recently accepted same-property estimate.
+  const pick = candidates[0];
   if (!pick) return null;
   const inputs = pick.inputs;
   const seed = {

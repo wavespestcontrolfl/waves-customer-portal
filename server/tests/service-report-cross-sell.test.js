@@ -270,6 +270,38 @@ describe('buildReportCrossSell', () => {
     expect(result.mode).toBe('quote_cta');
   });
 
+  test('non-accepted estimates never seed a price (drafts/sent/expired refused)', async () => {
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '123 Gulf Dr, Sarasota, FL 34236',
+        status: 'sent',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.mode).toBe('quote_cta');
+  });
+
+  test('an addressless estimate never seeds a customer with a primary street', async () => {
+    const db = dbFor({
+      serviceTypes: ['Lawn Care'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: [{
+        id: 'est-1',
+        address: '',
+        status: 'accepted',
+        estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+      }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.mode).toBe('quote_cta');
+  });
+
   test('an estimate stamped at a different street never seeds this property', async () => {
     const db = dbFor({
       serviceTypes: ['Lawn Care'],
