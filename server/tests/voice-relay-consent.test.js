@@ -507,12 +507,16 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }
   });
 
-  test('a bare flag with no words at all is treated as the TOTAL request', async () => {
+  // ⭐ A BARE FLAG NAMES NO CHANNEL. `contact_preference` is optional, so the
+  // boolean alone can be the model's shorthand for "stop emailing me" just as
+  // easily as for "stop everything" — and guessing costs the caller reminders
+  // they never withdrew. No words ⇒ no write, recorded for a human.
+  test('a bare flag with no words at all writes NOTHING (ambiguous → human)', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked to be left alone.',
       do_not_contact_request: true,
     }, CTX);
-    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+    expect(recordSuppression).not.toHaveBeenCalled();
   });
 
   // ⭐ AN UNVERIFIED SESSION CANNOT SILENCE ANYONE'S TEXTS. Suppression is
@@ -545,6 +549,7 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     recordSuppression.mockRejectedValueOnce(new Error('table gone'));
     const out = await executeTool('capture_lead', {
       call_summary: 'Stop texting me.',
+      contact_preference: 'stop texting me',
       do_not_contact_request: true,
     }, CTX);
     expect(out).toMatch(/Lead saved successfully/i);
@@ -559,6 +564,7 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     recordSuppression.mockResolvedValueOnce({ ok: false, error: 'relation does not exist' });
     const out = await executeTool('capture_lead', {
       call_summary: 'Stop texting me.',
+      contact_preference: 'stop texting me',
       do_not_contact_request: true,
     }, CTX);
     expect(out).toMatch(/Lead saved successfully/i); // the lead still lands…

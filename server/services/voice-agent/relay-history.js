@@ -106,7 +106,14 @@ async function callHistoryText(fromPhone) {
       [key, key],
     )
     .whereNotNull('ai_extraction')
-    .whereNotIn('processing_status', ['spam', 'voicemail'])
+    // ⭐ NULL-SAFE. `processing_status NOT IN (...)` is NULL — never true — for
+    // a row whose status was never set, so a bare NOT IN silently dropped every
+    // legacy processed call from the caller's history (the same SQL trap the
+    // #2177 voicemail-clobber guard hit). An extracted call with no status is
+    // processed history, not spam.
+    .where((qb) => qb
+      .whereNull('processing_status')
+      .orWhereNotIn('processing_status', ['spam', 'voicemail']))
     .orderBy('created_at', 'desc')
     // ⭐ OVERFETCH: the spam test below is a POST-PARSE guard, and it exists
     // precisely for rows whose `processing_status` was never updated to 'spam'

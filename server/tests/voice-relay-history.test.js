@@ -220,7 +220,10 @@ describe('GATE ON — get_call_history read shape', () => {
     expect(sql).toMatch(/to_phone/);
     expect(b.whereRaw.mock.calls[0][1]).toEqual(['9415550142', '9415550142']);
     expect(b.whereNotNull).toHaveBeenCalledWith('ai_extraction');
-    expect(b.whereNotIn).toHaveBeenCalledWith('processing_status', ['spam', 'voicemail']);
+    // NULL-safe: a legacy processed call with no status must not be dropped
+    // (SQL NOT IN is NULL, never true, for a NULL column).
+    expect(b.whereNull).toHaveBeenCalledWith('processing_status');
+    expect(b.orWhereNotIn).toHaveBeenCalledWith('processing_status', ['spam', 'voicemail']);
     expect(b.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     // The READ overfetches (the is_spam guard is a post-parse filter, so a page
     // of unflagged spam would otherwise hide real history); the SPOKEN list is
