@@ -1110,3 +1110,74 @@ describe('lookup propertyType trust — an unresolved label is not a classificat
     })).toBe(false);
   });
 });
+
+describe('a profile measurement cannot silence the unit no-lot review (r19)', () => {
+  const { classifyLane, buildEngineInput } = require('../services/estimator-engine/draft-builder');
+  // A unit/suite scope resolves NO individual lot by design, so a lot-driven
+  // service on it parks for review unless the treatable area was actually
+  // measured for THIS unit.
+  const unitLawnArgs = {
+    intent: {
+      decision: 'draft',
+      is_commercial: false,
+      confidence: 'high',
+      services: { lawn: { frequency: 'monthly' } },
+      address: '1400 Lakefront Dr Apt 5202, Sarasota, FL 34236',
+      evidence: [{ quote: 'lawn service for my place', speaker: 'caller' }],
+    },
+    propertyFacts: {
+      home: { value: 900, source: 'county_assessed' },
+      lot: { value: null, source: 'not_applicable:residential_unit' },
+      propertyType: 'condo_ground',
+    },
+    engineResult: { lineItems: [{ service: 'lawn', monthlyAfterDiscount: 60, annualAfterDiscount: 720, turfSf: 4000 }] },
+    totals: { monthly: 60, annual: 720, oneTime: 0 },
+    comps: null,
+    calibration: [],
+    context: { transcript: 'lawn service for my place', phone: '+19415550140' },
+  };
+  const noLotReason = (out) => (out.reasons || []).some((r) => r.includes('no individual lot exists'));
+
+  test('an unverified-unit profile area still parks the draft', () => {
+    withGate('true', () => {
+      const out = classifyLane({
+        ...unitLawnArgs,
+        engineInput: { measuredTurfSf: 4000, measuredTurfUnitVerified: false },
+      });
+      expect(noLotReason(out)).toBe(true);
+    });
+  });
+
+  test('a unit-verified profile area still suppresses it — no false review', () => {
+    withGate('true', () => {
+      const out = classifyLane({
+        ...unitLawnArgs,
+        engineInput: { measuredTurfSf: 4000, measuredTurfUnitVerified: true },
+      });
+      expect(noLotReason(out)).toBe(false);
+    });
+  });
+
+  test('a measured area from any other source carries no flag and still suppresses it', () => {
+    withGate('true', () => {
+      const out = classifyLane({ ...unitLawnArgs, engineInput: { measuredTurfSf: 4000 } });
+      expect(noLotReason(out)).toBe(false);
+    });
+  });
+
+  test('buildEngineInput stamps the profile area as unverified unless the unit matched exactly', () => {
+    const args = {
+      intent: { is_commercial: false, services: {} },
+      propertyFacts: { propertyType: 'condo_ground' },
+      context: { customer: { property_sqft: 4000, property_type: 'Condo' } },
+      profileDescribesQuotedProperty: true,
+    };
+    expect(buildEngineInput(args).measuredTurfSf).toBe(4000);
+    expect(buildEngineInput(args).measuredTurfUnitVerified).toBe(false);
+    expect(buildEngineInput({ ...args, profileMeasurementUnitExact: true }).measuredTurfUnitVerified).toBe(true);
+    // No profile match ⇒ no profile area at all, and nothing to qualify.
+    const unmatched = buildEngineInput({ ...args, profileDescribesQuotedProperty: false });
+    expect(unmatched.measuredTurfSf).toBeUndefined();
+    expect(unmatched.measuredTurfUnitVerified).toBeUndefined();
+  });
+});

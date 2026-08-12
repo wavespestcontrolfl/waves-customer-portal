@@ -1503,6 +1503,27 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const profileDescribesQuotedProperty = !addressRegathered
       && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
 
+    // A saved MEASUREMENT is a unit-scoped credential, and the match above
+    // cannot authenticate one: it compares address_line1 only (customers
+    // store the unit in address_line2 as often as in line1) and its default
+    // mode treats a known-vs-unknown unit as equal ON PURPOSE, so duplicate
+    // detection stays conservative. Apt A's saved turf would therefore look
+    // like Apt B's measurement and suppress the unit-scope no-lot review
+    // (codex pre-push r19 P1). Computed separately — unit-aware and exact —
+    // and consumed ONLY where a measurement can SUPPRESS review;
+    // profileDescribesQuotedProperty keeps its existing tolerant semantics
+    // for everything else, so no pricing input changes here.
+    const customerSavedUnitAddress = trustedCustomer?.address_line1
+      ? [
+        [trustedCustomer.address_line1, trustedCustomer.address_line2].filter(Boolean).join(' '),
+        trustedCustomer.city,
+        trustedCustomer.zip,
+      ].filter(Boolean).join(', ')
+      : null;
+    const profileMeasurementUnitExact = profileDescribesQuotedProperty
+      && !!(customerSavedUnitAddress && quotedAddress
+        && sameStreetAddress(customerSavedUnitAddress, quotedAddress, { requireExactUnit: true }));
+
     // Did the composer switch to a DIFFERENT property (not merely refine
     // the same street with locality)? Computed here because BOTH the V2
     // shadow pass and the unit-scope model must fence the primary
@@ -1738,6 +1759,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         context,
         priorQualifyingServices,
         profileDescribesQuotedProperty,
+        profileMeasurementUnitExact,
         // Feature modifiers resolved by the lookup of the QUOTED address
         // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
         // water adjacency feed real pricing adjustments.

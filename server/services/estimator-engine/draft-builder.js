@@ -119,7 +119,14 @@ function turfAreaFullyMeasured(lines = [], engineInput = null) {
   // measured area through its recurring calculation but omits turfBasis/
   // turfSf from the returned line, so a line-metadata-only test parked
   // every measured one-time lawn unit quote (codex r35 P1).
-  if (positive(engineInput?.measuredTurfSf)) return true;
+  // ...but a PROFILE-sourced area whose unit could not be verified is not a
+  // measurement of the quoted unit — Apt A's saved turf must not silence the
+  // no-lot review on Apt B (codex pre-push r19 P1). Only an explicit false
+  // refuses: a measured area from any other source carries no such flag and
+  // keeps the shortcut.
+  if (positive(engineInput?.measuredTurfSf)) {
+    return engineInput?.measuredTurfUnitVerified !== false;
+  }
   const turfLines = lines.filter((l) => l.turfBasis != null
     || l.turfSf || l.turfSqFt || l.treatableArea);
   return turfLines.length > 0
@@ -197,7 +204,11 @@ function storiesSourceForPricing(propertyFacts) {
   return 'lookup';
 }
 
-function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false, lookupEnriched = null }) {
+function buildEngineInput({
+  intent, propertyFacts, context, priorQualifyingServices = [],
+  profileDescribesQuotedProperty = false, profileMeasurementUnitExact = false,
+  lookupEnriched = null,
+}) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
   // address) — an extraction-supplied different address never re-gathers,
@@ -246,7 +257,15 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     // customers.property_sqft is TREATED LAWN AREA by schema — the correct
     // plumbing is the engine's measured-turf input, never home sqft.
     ...((!isCommercial && profileDescribesQuotedProperty && positive(context?.customer?.property_sqft))
-      ? { measuredTurfSf: Number(context.customer.property_sqft) }
+      ? {
+        measuredTurfSf: Number(context.customer.property_sqft),
+        // Provenance, not pricing: this number is the PROFILE's, admitted by
+        // a match that tolerates a missing/absent unit. It still prices
+        // exactly as before — but it may not stand in for a measurement OF
+        // THIS UNIT when a unit-scoped draft asks whether review can be
+        // suppressed (codex pre-push r19 P1).
+        measuredTurfUnitVerified: profileMeasurementUnitExact === true,
+      }
       : {}),
     // Existing-customer WaveGuard context: qualifying recurring services the
     // caller already has, so an add-on quote gets the combined tier discount
