@@ -342,10 +342,12 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
 // unchanged: a stub row with no property_record is still a cache miss.
 // Both writers are fail-open — a stamp failure must never sink a lookup —
 // and tolerate the columns not existing yet (pre-migration deploys).
+// Only statuses a live code path can emit today — the condo unit-matching
+// classifier (PR3 of this lane) adds its own outcomes when it ships;
+// advertising empty segments ahead of that would misread as coverage.
 const LOOKUP_ATTEMPT_STATUSES = new Set([
   'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
-  'incomplete_address', 'unit_not_matched', 'multiple_unit_matches',
-  'new_construction_suspected', 'provider_timeout',
+  'incomplete_address', 'new_construction_suspected', 'provider_timeout',
 ]);
 
 async function markLookupAttempt(address, status, reason = null) {

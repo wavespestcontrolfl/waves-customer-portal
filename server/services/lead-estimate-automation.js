@@ -487,9 +487,15 @@ function evaluateLeadEstimateAutomationReadiness({
     // the shape that silently produced no lookup and a wrong-category
     // draft on a live lead). A quotable address needs a PRIMARY street
     // number; without one the automation blocks instead of pricing a
-    // property it can't ground (owner ruling 2026-08-11).
+    // property it can't ground (owner ruling 2026-08-11). Reported as
+    // 'street_address' — the clarify-ask allowlist (ASKABLE_MISSING in
+    // estimate-clarify-asks.js) only asks for that vocabulary, and the
+    // right recovery IS an address ask; a bespoke 'street_number' item
+    // blocked pricing but never asked (codex r2 P1). The review marker
+    // keeps the failure segmentable.
     if (address.line1 && /\d/.test(address.line1) && !hasPrimaryStreetNumber(address.line1)) {
-      missing.push('street_number');
+      missing.push('street_address');
+      review.push('street_number_missing');
     }
     // A residential-intake lead whose own words describe a commercial
     // premises ("brand-new industrial building… office and warehouse") is a

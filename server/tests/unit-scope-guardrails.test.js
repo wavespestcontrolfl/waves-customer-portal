@@ -126,6 +126,31 @@ describe('commercialCategoryConflict', () => {
       intent: { is_commercial: false },
     })).toBeNull();
   });
+  test('a property manager on a multifamily property conflicts; a tenant does not', () => {
+    // The module's own contract: commercial applies when the client is the
+    // association, complex owner, or property manager — the residential
+    // exemption is for unit OCCUPANTS (codex r2 P1).
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'property manager' },
+        property: { property_type: 'multi_family' },
+      },
+      intent: { is_commercial: false },
+    })).toBe('property_manager:multi_family');
+    expect(commercialCategoryConflict({
+      extraction: {
+        caller: { relationship_to_property: 'tenant' },
+        property: { property_type: 'multi_family' },
+      },
+      intent: { is_commercial: false },
+    })).toBeNull();
+  });
+  test('direct business-service wording fires; incidental business mentions stay quiet', () => {
+    expect(commercialTextSignal('need pest control at my business')).toBe(true);
+    expect(commercialTextSignal('commercial pest control quote please')).toBe(true);
+    expect(commercialTextSignal('can you service our business monthly')).toBe(true);
+    expect(commercialTextSignal('ants at the house, my business is slow lately')).toBe(false);
+  });
   test('the structured hoa_common_area_service boolean outranks a residential type text', () => {
     // A condo ASSOCIATION's common-area job reads property_type 'condo' —
     // the boolean is the schema's commercial routing signal (codex r2 P1).
@@ -350,18 +375,23 @@ describe('lead webhook readiness guardrails', () => {
     serviceInterest: 'Pest Control',
   };
 
-  test('gate ON: a street-number-less line1 blocks automation', () => {
+  test('gate ON: a street-number-less line1 blocks automation AS an askable street_address', () => {
     withGate('true', () => {
       const readiness = evaluateLeadEstimateAutomationReadiness(base);
       expect(readiness.ready).toBe(false);
-      expect(readiness.missing).toContain('street_number');
+      // 'street_address' is the clarify-ask vocabulary (ASKABLE_MISSING) —
+      // a bespoke item would block pricing but never ask for the address
+      // (codex r2 P1); the review marker keeps the failure segmentable.
+      expect(readiness.missing).toContain('street_address');
+      expect(readiness.review).toContain('street_number_missing');
     });
   });
 
   test('gate OFF: legacy any-digit check passes the same address', () => {
     withGate(undefined, () => {
       const readiness = evaluateLeadEstimateAutomationReadiness(base);
-      expect(readiness.missing).not.toContain('street_number');
+      expect(readiness.missing).not.toContain('street_address');
+      expect(readiness.review).not.toContain('street_number_missing');
     });
   });
 

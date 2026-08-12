@@ -3,8 +3,8 @@
  * guardrails PR1): every lookup ATTEMPT stamps the property_lookups row —
  * status 'pending' at start, a segmentable outcome at the end (resolved /
  * no_parcel / no_record / geocode_failed / incomplete_address /
- * new_construction_suspected / provider_timeout / unit_not_matched /
- * multiple_unit_matches). Before this, a lookup that failed ahead of
+ * new_construction_suspected / provider_timeout — the writer whitelists
+ * the vocabulary; later lanes extend it). Before this, a lookup that failed ahead of
  * saveLookup left no row at all, so the unresolved population could not be
  * counted or segmented by failure reason.
  *

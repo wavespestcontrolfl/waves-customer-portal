@@ -92,6 +92,16 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     'retail\\s+(?:space|unit|store|plaza)',
     '\\bflex\\s+(?:space|unit|building)\\b',
     '\\bsuite\\s*#?\\s*\\d+\\w*\\b',
+    // Direct business-service wording — "pest control at my business",
+    // "commercial pest control" (codex r2 P1: the premises nouns above
+    // don't cover the caller naming the RELATIONSHIP instead of the
+    // building). Anchored to service context ("at/for my business",
+    // "service our business") so an incidental "my business is slow
+    // lately" on a residential form stays quiet.
+    '(?:at|for)\\s+(?:my|our)\\s+business\\b',
+    '(?:service|treat|spray)\\w*\\s+(?:my|our)\\s+business\\b',
+    'business\\s+(?:location|premises|property|address)',
+    'commercial\\s+(?:pest|lawn|mosquito|rodent|termite)\\b',
   ].join('|'),
   'i',
 );
@@ -120,6 +130,15 @@ function commercialCategoryConflict({ extraction, intent }) {
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
   if (!type) return null;
   if (HOA_COMMON_AREA_TYPE_RE.test(type)) return type;
+  // A PROPERTY MANAGER on a multifamily/apartment property is the module's
+  // own commercial contract ("Commercial applies when the client is the
+  // association, complex owner, or property manager") — the residential
+  // exemption below is for unit OCCUPANTS, so it must not swallow a
+  // manager whose composed intent stayed residential (codex r2 P1).
+  if (/apartment|multi.?family/.test(type)
+    && resolveCustomerRelationship(extraction) === 'property_manager') {
+    return `property_manager:${type}`;
+  }
   if (RESIDENTIAL_TYPE_FAMILY_RE.test(type)) return null;
   return COMMERCIAL_TYPE_FAMILY_RE.test(type) ? type : null;
 }
