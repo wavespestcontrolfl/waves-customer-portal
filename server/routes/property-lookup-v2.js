@@ -680,14 +680,23 @@ async function performPropertyLookup(address, options = {}) {
     const record = result.propertyRecord;
     let status = 'no_record';
     let reason = null;
-    if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
+    // Vacant/new-construction detection runs BEFORE the parcel-ID branch:
+    // an unassessed vacant record usually still carries a parcel ID, so the
+    // resolved branch would swallow exactly the rows the
+    // new_construction_suspected segment exists for (codex pre-push P1).
+    let vacantSuspected = false;
+    if (record) {
+      try {
+        const { detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+        vacantSuspected = !!detectUnassessedVacantParcel(record);
+      } catch { /* detector unavailable — fall through to parcel branches */ }
+    }
+    if (record && vacantSuspected) {
+      status = 'new_construction_suspected';
+    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
       status = 'resolved';
     } else if (record) {
       status = 'no_parcel';
-      try {
-        const { detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
-        if (detectUnassessedVacantParcel(record)) status = 'new_construction_suspected';
-      } catch { /* detector unavailable — keep no_parcel */ }
     } else if (!hasPrimaryStreetNumber(address)) {
       status = 'incomplete_address';
       reason = 'no primary street number';

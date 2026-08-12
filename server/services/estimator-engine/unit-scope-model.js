@@ -49,8 +49,8 @@ function unitScopeGuardrailsEnabled() {
 // ── Address quality ─────────────────────────────────────────────
 
 // A usable service address starts with a primary street NUMBER followed by
-// more address text. Ordinal street NAMES ("48th Avenue East") deliberately
-// fail: \d+ cannot be followed by a letter run ("48th" breaks on the 'h'),
+// more address text. Ordinal street NAMES ("62nd Avenue East") deliberately
+// fail: \d+ cannot be followed by a letter run ("62nd" breaks on the 'n'),
 // which is exactly the incomplete-address class that produced a quote-less
 // silent lookup failure. Unit-letter house numbers ("123A Main St") and
 // hyphenated ranges ("123-125 Main St") pass.
@@ -62,14 +62,19 @@ function hasPrimaryStreetNumber(address) {
 
 // ── Category conflict (commercial signal on a residential draft) ─
 
-// Structured extraction property types that positively describe a
-// commercial premises. Kept to unambiguous nouns — 'multifamily' and
-// 'apartment' are NOT here (a unit tenant is residential; the ≥5-unit
-// whole-property rule lives in detectCategory).
-const COMMERCIAL_EXTRACTION_TYPES = new Set([
-  'office', 'industrial', 'warehouse', 'retail', 'commercial',
-  'restaurant', 'storefront',
-]);
+// Extraction property types that positively describe a commercial
+// premises, matched by FAMILY (the extraction field is free-form —
+// 'industrial_flex', 'industrial building', and 'commercial property' must
+// all count; an exact-string set let every variant evade the guard, codex
+// pre-push P1). Residential families are excluded FIRST and win ties:
+// 'multifamily'/'apartment'/'condo' are NOT commercial signals here — a
+// unit tenant is residential; the ≥5-unit whole-property rule lives in
+// detectCategory.
+// 'town' alone would swallow 'downtown office', and a bare house-suffix
+// match would swallow 'warehouse' — townhome spellings only, and
+// house/home only as standalone words.
+const RESIDENTIAL_TYPE_FAMILY_RE = /apartment|multi.?family|condo|town\s?(?:home|house)|single|duplex|triplex|quadplex|villa|mobile|manufactured|residential|\bhouse\b|\bhome\b/;
+const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex/;
 
 // Free-text commercial signal for intake paths that carry prose instead of
 // a structured type (lead webhook notes / call summaries). Conservative:
@@ -101,7 +106,8 @@ function commercialTextSignal(text) {
 function commercialCategoryConflict({ extraction, intent }) {
   if (intent?.is_commercial === true) return null;
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();
-  return COMMERCIAL_EXTRACTION_TYPES.has(type) ? type : null;
+  if (!type || RESIDENTIAL_TYPE_FAMILY_RE.test(type)) return null;
+  return COMMERCIAL_TYPE_FAMILY_RE.test(type) ? type : null;
 }
 
 // ── Property use ────────────────────────────────────────────────
@@ -117,6 +123,9 @@ function resolvePropertyUse({ propertyType, landUseDescription, isCommercial, co
   if (/single|townho|duplex|triplex|quadplex|villa|mobile|manufactured|house|home\b/.test(text)) {
     return 'single_family';
   }
+  // A generic commercial label ('commercial property', 'business') is
+  // positively NOT single_family — unknown, never a residential default.
+  if (/commercial|business/.test(text)) return 'unknown';
   if (isCommercial) return 'unknown';
   return text ? 'single_family' : 'unknown';
 }

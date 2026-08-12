@@ -3,10 +3,10 @@
  * 2026-08-11, PR1 of the apartment/condo estimator lane.
  *
  * Pins the two live failures the lane closes:
- *  - Jennifer (tenant, 1BR apartment, rental complex): classification must
+ *  - The apartment-tenant shape (tenant, 1BR unit in a rental complex): classification must
  *    stay first-class (residential_unit / multifamily_rental / tenant) and
  *    the absent lot must resolve NOT APPLICABLE, never "missing".
- *  - Anita (commercial flex suite, address with no street number): the
+ *  - The flex-suite shape (commercial suite, address with no street number): the
  *    address must red-lane and the commercial prose must block a
  *    residential auto-price.
  */
@@ -44,14 +44,14 @@ describe('gate semantics', () => {
 
 describe('hasPrimaryStreetNumber', () => {
   test('real street numbers pass', () => {
-    expect(hasPrimaryStreetNumber('1400 Lakefront Dr, Sarasota, FL 34240')).toBe(true);
+    expect(hasPrimaryStreetNumber('900 Bayview Ter, Venice, FL 34285')).toBe(true);
     expect(hasPrimaryStreetNumber('123A Main St')).toBe(true);
     expect(hasPrimaryStreetNumber('123-125 Main St')).toBe(true);
     expect(hasPrimaryStreetNumber('7 Palm Ave')).toBe(true);
     expect(hasPrimaryStreetNumber('728 132nd Street Circle NE')).toBe(true);
   });
-  test('ordinal street NAMES without a house number fail (the Anita class)', () => {
-    expect(hasPrimaryStreetNumber('48th Avenue East, Unit 101, FL 34221')).toBe(false);
+  test('ordinal street NAMES without a house number fail (the number-less ordinal-street class)', () => {
+    expect(hasPrimaryStreetNumber('62nd Avenue East, Unit 7, FL 34221')).toBe(false);
     expect(hasPrimaryStreetNumber('Palm Ave')).toBe(false);
     expect(hasPrimaryStreetNumber('')).toBe(false);
     expect(hasPrimaryStreetNumber(null)).toBe(false);
@@ -101,20 +101,20 @@ describe('commercialCategoryConflict', () => {
   });
 });
 
-describe('resolveUnitScopeModel — the Jennifer shape', () => {
-  const jennifer = {
+describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
+  const tenantUnit = {
     propertyRecord: null,
     extraction: {
       caller: { relationship_to_property: 'tenant' },
       property: { property_type: 'apartment' },
     },
-    intent: { is_commercial: false, address: '1400 Lakefront Dr, Apartment 7109, Sarasota, FL 34240' },
+    intent: { is_commercial: false, address: '900 Bayview Ter, Apartment 4102, Venice, FL 34285' },
     propertyFacts: { tenant: true, home: { value: null, source: 'unresolved' } },
-    address: '1400 Lakefront Dr, Apartment 7109, Sarasota, FL 34240',
+    address: '900 Bayview Ter, Apartment 4102, Venice, FL 34285',
   };
 
   test('classifies unit / multifamily / tenant with truthful size basis', () => {
-    const model = resolveUnitScopeModel(jennifer);
+    const model = resolveUnitScopeModel(tenantUnit);
     expect(model.serviceScope).toBe('residential_unit');
     expect(model.propertyUse).toBe('multifamily_rental');
     expect(model.customerRelationship).toBe('tenant');
@@ -122,7 +122,7 @@ describe('resolveUnitScopeModel — the Jennifer shape', () => {
   });
 
   test('marks the absent lot NOT APPLICABLE for a unit scope', () => {
-    const model = resolveUnitScopeModel(jennifer);
+    const model = resolveUnitScopeModel(tenantUnit);
     const facts = { tenant: true, lot: { value: null, source: 'unresolved', confidence: 'none' } };
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.lot.value).toBeNull();
@@ -131,14 +131,14 @@ describe('resolveUnitScopeModel — the Jennifer shape', () => {
   });
 
   test('a resolved lot value is never cleared, and whole-structure scopes are untouched', () => {
-    const model = resolveUnitScopeModel(jennifer);
+    const model = resolveUnitScopeModel(tenantUnit);
     const withLot = { lot: { value: 9000, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(withLot, model);
     expect(withLot.lot.value).toBe(9000);
     expect(withLot.lot.source).toBe('county_assessed');
 
     const owner = resolveUnitScopeModel({
-      ...jennifer,
+      ...tenantUnit,
       extraction: { caller: { relationship_to_property: 'owner' }, property: { property_type: 'single_family' } },
       propertyFacts: { tenant: false, home: { source: 'county_assessed' } },
       intent: { is_commercial: false, address: '100 Palm Ave, Venice FL' },
@@ -157,9 +157,9 @@ describe('resolveUnitScopeModel — the Jennifer shape', () => {
         caller: { relationship_to_property: 'tenant' },
         property: { property_type: 'industrial' },
       },
-      intent: { is_commercial: true, address: '4801 Industrial Way, Unit 101, Parrish FL' },
+      intent: { is_commercial: true, address: '4801 Industrial Way, Unit 7, Parrish FL' },
       propertyFacts: { tenant: true, home: { source: 'unresolved' } },
-      address: '4801 Industrial Way, Unit 101, Parrish FL',
+      address: '4801 Industrial Way, Unit 7, Parrish FL',
     });
     expect(model.serviceScope).toBe('commercial_suite');
     expect(model.propertyUse).toBe('industrial_flex');
@@ -177,7 +177,7 @@ describe('classifyLane guardrails', () => {
       is_commercial: false,
       confidence: 'high',
       services: { pest: { frequency: 'quarterly' } },
-      address: '1400 Lakefront Dr, Sarasota, FL 34240',
+      address: '900 Bayview Ter, Venice, FL 34285',
       evidence: [{ quote: 'quarterly pest control for my apartment please', speaker: 'caller' }],
     },
     propertyFacts: { home: { value: 1200, source: 'county_assessed' }, lot: { value: 5000, source: 'county_assessed' }, propertyType: 'condo_ground' },
@@ -185,14 +185,14 @@ describe('classifyLane guardrails', () => {
     totals: { monthly: 37.33, annual: 448, oneTime: 0 },
     comps: null,
     calibration: [],
-    context: { transcript: 'quarterly pest control for my apartment please', phone: '+15615105156' },
+    context: { transcript: 'quarterly pest control for my apartment please', phone: '+19415550140' },
   };
 
   test('gate ON: an address without a primary street number is RED with a machine-readable cause', () => {
     withGate('true', () => {
       const out = classifyLane({
         ...baseArgs,
-        intent: { ...baseArgs.intent, address: '48th Avenue East, Unit 101, FL 34221' },
+        intent: { ...baseArgs.intent, address: '62nd Avenue East, Unit 7, FL 34221' },
       });
       expect(out.lane).toBe('red');
       expect(out.causes).toContain('incomplete_address');
@@ -203,7 +203,7 @@ describe('classifyLane guardrails', () => {
     withGate(undefined, () => {
       const out = classifyLane({
         ...baseArgs,
-        intent: { ...baseArgs.intent, address: '48th Avenue East, Unit 101, FL 34221' },
+        intent: { ...baseArgs.intent, address: '62nd Avenue East, Unit 7, FL 34221' },
       });
       expect(out.lane).not.toBe('red');
     });
@@ -282,11 +282,11 @@ describe('lead webhook readiness guardrails', () => {
 
   const base = {
     intake: {
-      normalizedAddress: { line1: '48th Avenue East', fullAddress: '48th Avenue East, Unit 101, Parrish FL 34221', city: 'Parrish', zip: '34221' },
+      normalizedAddress: { line1: '62nd Avenue East', fullAddress: '62nd Avenue East, Unit 7, Parrish FL 34221', city: 'Parrish', zip: '34221' },
       email: 'lead@example.com',
     },
     customer: {},
-    phone: '+17274795188',
+    phone: '+19415550177',
     serviceInterest: 'Pest Control',
   };
 

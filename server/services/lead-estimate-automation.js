@@ -461,11 +461,11 @@ function evaluateLeadEstimateAutomationReadiness({
   if (!address.line1 || !/\d/.test(address.line1)) missing.push('street_address');
   if (!hasConcreteServiceInterest(resolvedServiceInterest)) missing.push('specific_service');
   if (unitScopeGuardrailsEnabled()) {
-    // Any-digit passes ordinal street NAMES ("48th Avenue East, Unit 101"
-    // — a real lead that silently produced no lookup and a wrong-category
-    // draft). A quotable address needs a PRIMARY street number; without one
-    // the automation blocks instead of pricing a property it can't ground
-    // (owner ruling 2026-08-11).
+    // Any-digit passes ordinal street NAMES ("62nd Avenue East, Unit 7" —
+    // the shape that silently produced no lookup and a wrong-category
+    // draft on a live lead). A quotable address needs a PRIMARY street
+    // number; without one the automation blocks instead of pricing a
+    // property it can't ground (owner ruling 2026-08-11).
     if (address.line1 && /\d/.test(address.line1) && !hasPrimaryStreetNumber(address.line1)) {
       missing.push('street_number');
     }
