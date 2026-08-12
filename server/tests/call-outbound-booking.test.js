@@ -391,6 +391,45 @@ describe('confirm-hook reminder resync — explicit null-start guard (Codex r21 
   });
 });
 
+describe('legacy evidence recovery — commit proof for pre-existing rows (Codex r22 P1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('the fast recovery leg requires the transition status when the caller passes recoveryStatusIn', () => {
+    // For pre-existing rows (legacy status transitions) row visibility is
+    // NOT commit proof — a rolled-back completion leaves the row visible
+    // as pending and the retry would leak completion evidence.
+    const credit = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    expect(credit).toContain("q.whereIn('status', recoveryStatusIn);");
+  });
+
+  test('both job-status evidence sites pass their committed-transition status set', () => {
+    const jobStatus = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
+    expect(jobStatus).toContain("recoveryStatusIn: ['completed'],");
+    expect(jobStatus).toContain("recoveryStatusIn: ['confirmed', 'en_route', 'on_site', 'completed'],");
+  });
+});
+
+describe('windowless repair — canonical placeholder conversion (Codex r22 P2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('the concurrent-windowless repair writes the durable placeholder markers, not a flag-only close', () => {
+    // A flag-only close is undone by the sync trigger's recompute on the
+    // next date-only move; only windows_preclosed rows hold placeholder
+    // semantics durably (and the marker invariant requires suppression).
+    const hook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    expect(hook).toContain('suppressed_by_sibling: true,');
+    expect(hook).toContain('windows_preclosed: true,');
+    // Demoting an armed owner must promote a suppressed sibling exactly as
+    // the trigger's slot-departure path does — no trigger event fires for
+    // this app-side demotion.
+    expect(hook).toContain('promote_suppressed_reminder_sibling(?::uuid, ?::uuid, ?::timestamptz, ?::date, NULL::time, ?, ?, ?, ?)');
+    // Slot advisory lock first, same order as registration and the trigger.
+    expect(hook).toContain('pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))');
+  });
+});
+
 describe('live-booking confirmation — TCPA-blocked SMS email fallback (Codex r21 P1)', () => {
   const fs = require('fs');
   const path = require('path');

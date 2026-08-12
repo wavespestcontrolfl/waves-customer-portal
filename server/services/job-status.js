@@ -376,6 +376,13 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             scheduledServiceId: jobId,
             source: 'phone_call',
             bookedAt: legacyCompletionEvidenceMoment,
+            // The service row PRE-EXISTS this transaction, so the marker's
+            // fast recovery leg cannot take visibility as commit proof — a
+            // rollback (lost status CAS, failed history insert) leaves the
+            // row visible as 'pending' and would leak completion evidence
+            // (Codex #3361 r22 P1). Require the committed transition's
+            // status; the in-trx outbox covers a committed one regardless.
+            recoveryStatusIn: ['completed'],
           });
         } catch (evidenceErr) {
           logger.warn(`[job-status] legacy completion credit evidence failed for ${jobId}: ${evidenceErr.message}`);
@@ -429,6 +436,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             customerId: confirmedRow.customer_id,
             scheduledServiceId: jobId,
             source: 'phone_call',
+            // Pre-existing row — same commit-proof rule as the completion
+            // site above (Codex #3361 r22 P1). The later statuses admit a
+            // confirm that legitimately advanced before the fast retry ran.
+            recoveryStatusIn: ['confirmed', 'en_route', 'on_site', 'completed'],
           });
         }
       } catch (evidenceErr) {

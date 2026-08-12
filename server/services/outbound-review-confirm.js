@@ -129,35 +129,76 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         if (postSlot && !postSlot.window_start && slotStart) {
           // The verified slot went WINDOWLESS (a concurrent edit cleared
           // the arrival time after our registration armed a start): never
-          // resync to the fabricated 09:00 fallback — close both reminder
-          // windows on the armed row so the cron cannot text a time nobody
-          // chose (Codex #3361 r18 P2). Deliberately NOT hand-writing the
-          // windows_preclosed placeholder flags: they carry trigger-managed
-          // sibling invariants; closed sent-flags achieve the same silence,
-          // and a later edit that sets a real window re-arms them through
-          // its own handleReschedule resync (start moved → flags
-          // recompute).
-          const closedWindows = await db('appointment_reminders')
-            .where({ scheduled_service_id: svc.id, cancelled: false })
+          // resync to the fabricated 09:00 fallback — convert the armed
+          // row to the CANONICAL windowless pre-closed placeholder
+          // (windows_preclosed + suppressed_by_sibling + all windows
+          // closed), the exact state registerAppointment's
+          // closeReminderWindows insert produces (Codex #3361 r18 P2,
+          // hardened r22 P2). A flag-only close is transient: the DB sync
+          // trigger preserves closed windows across a later date-only move
+          // only for windows_preclosed rows — an unmarked row would
+          // recompute against the fabricated 08:00 time and re-arm a
+          // reminder for a time nobody chose. The marker makes the DB
+          // machinery hold placeholder semantics durably, and the trigger's
+          // real-window branch re-arms the row normally when an arrival
+          // time is later set.
+          const converted = await db.transaction(async (trx) => {
+            // Pre-conversion state: the row's suppression (an ARMED row may
+            // own its 08:00 fallback slot with a real sibling suppressed
+            // beneath it) and its sent flags (a window the armed owner
+            // already delivered was rendered with the merged slot label, so
+            // a promoted sibling inherits it — the same contract the sync
+            // trigger's slot-departure path applies).
+            const armed = await trx('appointment_reminders')
+              .where({ scheduled_service_id: svc.id, cancelled: false })
+              .first('id', 'customer_id', 'appointment_time', 'suppressed_by_sibling',
+                'reminder_72h_sent', 'reminder_72h_sent_at', 'reminder_24h_sent', 'reminder_24h_sent_at');
+            if (!armed) return 0;
+            // Same lock order as registration and the sync trigger: slot
+            // advisory lock FIRST, then reminder-row writes — inverting it
+            // deadlocks against a concurrent registration on this slot.
+            await trx.raw('SELECT pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))', [armed.customer_id, armed.appointment_time]);
             // Atomic windowless guard (Codex #3361 r19 P2, same shape as
             // handleReschedule's expectSchedule): a THIRD move assigning a
             // real window between the postSlot read and this write makes
-            // the close miss instead of silencing the re-armed reminders —
-            // that move's own resync owns the row's state.
-            .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
-            .update({
-              reminder_72h_sent: true,
-              reminder_72h_sent_at: new Date(),
-              reminder_24h_sent: true,
-              reminder_24h_sent_at: new Date(),
-              updated_at: new Date(),
-            });
-          if (!closedWindows) {
+            // the conversion miss instead of silencing the re-armed
+            // reminders — that move's own resync owns the row's state.
+            const rows = await trx('appointment_reminders')
+              .where({ id: armed.id, cancelled: false })
+              .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
+              .update({
+                suppressed_by_sibling: true,
+                windows_preclosed: true,
+                confirmation_sent: true,
+                confirmation_sent_at: trx.raw('COALESCE(confirmation_sent_at, NOW())'),
+                reminder_72h_sent: true,
+                reminder_72h_sent_at: trx.raw('COALESCE(reminder_72h_sent_at, NOW())'),
+                reminder_24h_sent: true,
+                reminder_24h_sent_at: trx.raw('COALESCE(reminder_24h_sent_at, NOW())'),
+                updated_at: new Date(),
+              });
+            if (rows && !armed.suppressed_by_sibling) {
+              // The conversion demoted a slot OWNER: a real visit
+              // registered at the 08:00 fallback slot may sit suppressed
+              // beneath it, and no trigger event fires for this app-side
+              // demotion — promote exactly as the trigger does on slot
+              // departure, carrying the owner's delivered-window state.
+              await trx.raw(
+                'SELECT promote_suppressed_reminder_sibling(?::uuid, ?::uuid, ?::timestamptz, ?::date, NULL::time, ?, ?, ?, ?)',
+                [armed.customer_id, svc.id, armed.appointment_time,
+                  dateOnly(postSlot.scheduled_date),
+                  armed.reminder_72h_sent === true, armed.reminder_72h_sent_at || null,
+                  armed.reminder_24h_sent === true, armed.reminder_24h_sent_at || null],
+              );
+            }
+            return rows;
+          });
+          if (!converted) {
             // Guard miss = a real window arrived and its own sync owns the
             // reminder state now — success, not a retryable failure.
-            logger.info(`[${routeTag}] windowless close skipped for ${svc.id} — the service regained a window; its own resync owns the state`);
+            logger.info(`[${routeTag}] windowless placeholder conversion skipped for ${svc.id} — the service regained a window; its own resync owns the state`);
           } else {
-            logger.info(`[${routeTag}] reminder windows closed after concurrent windowless move for ${svc.id}`);
+            logger.info(`[${routeTag}] reminder converted to windowless placeholder after concurrent windowless move for ${svc.id}`);
           }
         } else if (postSlot && (dateOnly(postSlot.scheduled_date) !== dateOnly(slotDate)
           || String(postSlot.window_start || '') !== String(slotStart || ''))) {

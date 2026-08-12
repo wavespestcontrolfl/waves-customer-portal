@@ -409,10 +409,19 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
 async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false }) {
   let channel = 'sms';
   let confirmationOn = true;
+  // Fail-closed marker for the email fallback below: getReminderPrefs
+  // swallows a failed prefs LOOKUP into open defaults (confirmationOn=true),
+  // so a transient DB error would otherwise read as "not opted out" and the
+  // fallback would email a customer whose stored toggle may be false — the
+  // email path bypasses the sendCustomerMessage validator that suppresses
+  // the SMS for them (Codex #3361 r22 P1). The SMS legs stay fail-open as
+  // before: their sends re-check the opt-out at the validator.
+  let prefsKnown = false;
   try {
     const prefs = await getReminderPrefs(customerId);
     channel = prefs.confirmationChannel;
     confirmationOn = prefs.appointmentConfirmation;
+    prefsKnown = !prefs.unavailable;
   } catch (err) {
     logger.warn(`[appt-remind] confirmation channel lookup failed for ${customerId}: ${err.message} — sending SMS`);
   }
@@ -423,7 +432,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // path bypasses that validator.
   if (channel === 'sms' || !confirmationOn) {
     const smsOk = await smsAttempt();
-    if (smsOk || !smsPermanentlyBlocked || !confirmationOn) return smsOk;
+    if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
     // Consent-blocked text on the default channel: reach them by email.
     // deliverAppointmentEmailFallback raises the no-channel human alert
     // itself when the email is missing/suppressed.
@@ -1273,6 +1282,14 @@ async function getReminderPrefs(customerId) {
 
   return {
     raw: prefs || {},
+    // The prefs LOOKUP failed (as distinct from "no row") — the toggles
+    // below are fail-open defaults, not stored choices. Paths that would
+    // bypass the sendCustomerMessage opt-out validator (the confirmation
+    // email fallback) must fail CLOSED on this (Codex #3361 r22 P1).
+    // Sentinel marker checked directly (same shape customer-contact's
+    // prefsUnavailable() accepts) so partial test doubles of that module
+    // don't have to carry the helper.
+    unavailable: prefs?.__prefsUnavailable === true,
     smsEnabled: prefs?.sms_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,

@@ -5,6 +5,9 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: jest.fn(() => []),
   isServiceContactRole: jest.fn(() => false),
+  // Same marker shape as the real sentinel — getReminderPrefs' fail-closed
+  // `unavailable` flag keys on __prefsUnavailable.
+  PREFS_UNAVAILABLE: Object.freeze({ __prefsUnavailable: true }),
 }));
 jest.mock('../services/appointment-email', () => ({
   sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
@@ -318,6 +321,28 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     const smsAttempt = jest.fn(async () => false);
     const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt });
 
+    expect(reached).toBe(false);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('unreadable prefs (transient lookup failure): smsPermanentlyBlocked fails closed — no email', async () => {
+    // getReminderPrefs swallows the failed lookup into open defaults
+    // (confirmationOn=true); the fallback must treat that as "opt-out
+    // unknown" and stay silent, since the email path bypasses the
+    // sendCustomerMessage validator that would re-check the stored toggle.
+    const failChain = {};
+    ['where', 'whereIn'].forEach((m) => { failChain[m] = jest.fn(() => failChain); });
+    failChain.first = jest.fn(async () => { throw new Error('connection reset'); });
+    setDbQueues({
+      notification_prefs: [failChain],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt, smsPermanentlyBlocked: true,
+    });
+
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
     expect(reached).toBe(false);
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
