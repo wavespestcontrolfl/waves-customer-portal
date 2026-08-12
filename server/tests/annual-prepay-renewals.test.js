@@ -673,6 +673,10 @@ describe('annual prepay renewal helpers', () => {
         // carrying another service's id never counts as palm coverage even
         // with provenance + markers — the backfill cannot own it.
         { id: 'v-foreign', scheduled_date: '2027-05-01', service_type: 'Palm Injection', service_id: 'svc-something-else', is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+        // CONTRADICTORY identity (codex r27 pre-push P0): a foreign id
+        // beats a semiannual snapshot — completion trusts the id, so
+        // counting this row would suppress the other service's billing.
+        { id: 'v-contradictory', scheduled_date: '2027-04-01', service_type: 'Palm Injection', service_id: 'svc-something-else', service_key_snapshot: 'palm_injection_semiannual', is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
       ],
     });
     const backfillUpdate = query({});
