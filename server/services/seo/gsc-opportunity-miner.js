@@ -748,7 +748,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
       };
       cand.action_type = actionForOpportunity(cand);
       const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
-      if (total >= minScoreToActFor(cand.action_type)) return true;
+      if (total >= persistFloorFor(cand)) return true;
       continue;
     }
     if (pos <= thresholds.strikingDistancePositionMax) continue;
@@ -770,14 +770,21 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // family would be excluded for nothing (audit P2). Tuples without hub
     // provenance fall back to the aggregate (older callers / fabricated
     // test tuples), which only ever errs toward keeping the family.
+    // EVERY dimension mirrors mineNoContentYet, which is hub-only: hub
+    // impressions, HUB coverage, HUB mapped position. Judging the spoke
+    // domains too would let an uncovered or strongly-ranked spoke mark
+    // the rep unreachable while the miner happily emits the hub
+    // candidate — both buckets then queue for one intent (audit P1).
+    // Tuples without hub provenance fall back to the aggregate (older
+    // callers / fabricated test tuples), which only errs toward keeping
+    // the family.
     const hubImpressions = t.hubImpressions != null ? t.hubImpressions : (t.impressions || 0);
     if (hubImpressions < thresholds.minImpressionsToScore) continue;
-    if (!queryDomainsCovered(t.domains, mapCoveredDomains || new Set())) continue;
-    const tupleDomainPositions = (Array.isArray(t.domains) ? t.domains : [])
-      .map((d) => (mappedPositions instanceof Map
-        ? mappedPositions.get(mappedPositionKey(rep.query, d)) ?? null
-        : null));
-    if (!noContentYetEmittable(tupleDomainPositions, thresholds)) continue;
+    if (!queryDomainsCovered([HUB_DOMAIN], mapCoveredDomains || new Set())) continue;
+    const hubMappedPosition = mappedPositions instanceof Map
+      ? mappedPositions.get(mappedPositionKey(rep.query, HUB_DOMAIN)) ?? null
+      : null;
+    if (!noContentYetEmittable([hubMappedPosition], thresholds)) continue;
     const cand = {
       bucket: 'no_content_yet',
       query: rep.query,
@@ -786,11 +793,19 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
       city,
     };
     cand.action_type = actionForOpportunity(cand);
-    const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
-    if (total >= minScoreToActFor(cand.action_type)) return true;
+    const { total } = scoreOpportunity(cand, { position: pos, impressions: hubImpressions });
+    // persistFloorFor, not minScoreToActFor: no_content_yet city-service
+    // rows ride the blog floor, so the mirror must use the SAME shared
+    // gate or it calls a persistable candidate unreachable (audit P1).
+    if (total >= persistFloorFor(cand)) return true;
   }
   return false;
 }
+
+// Blog and city-service publishes are HUB-ONLY (hubOnlyBlogDomains in the
+// publisher), so every bucket that MINTS content mines hub demand only —
+// and every mirror of those buckets must scope to the same domain.
+const HUB_DOMAIN = 'wavespestcontrol.com';
 
 // Canonical ROUTE IDENTITY of a page URL — registrable domain (www
 // stripped) + query/hash-free path with the trailing slash trimmed,
@@ -1924,7 +1939,7 @@ class GscOpportunityMiner {
       // variant with sub-threshold hub demand plus enough spoke traffic
       // to clear the floor would otherwise read as reachable and exclude
       // its family from BOTH buckets (audit P2).
-      .select(db.raw("sum(impressions) FILTER (WHERE domain = 'wavespestcontrol.com') as hub_impressions"))
+      .select(db.raw('sum(impressions) FILTER (WHERE domain = ?) as hub_impressions', [HUB_DOMAIN]))
       .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type');
     const map = new Map();
@@ -2655,7 +2670,7 @@ class GscOpportunityMiner {
       // Blog publishes are HUB-ONLY (hubOnlyBlogDomains in the publisher);
       // gsc_queries also holds every spoke property, and spoke-observed
       // demand must never mint a hub post it doesn't have.
-      .where('domain', 'wavespestcontrol.com')
+      .where('domain', HUB_DOMAIN)
       .select('query', 'service_category', 'city_target', 'intent_type')
       .sum('impressions as impressions')
       // Impressions-weighted, matching mineAnswerGap: each stored position is

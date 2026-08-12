@@ -373,33 +373,35 @@ describe('queryDomainsCovered (per-tuple map coverage)', () => {
     expect(queryDomainsCovered(null, covered)).toBe(false);
     expect(queryDomainsCovered([null], covered)).toBe(false);
   });
-  test('reachability judges coverage PER TUPLE, not unioned across tuples (mixed coverage must not double-emit)', () => {
-    // Both domains map the query to a weakly-ranking page (pos 45) —
-    // isolates the COVERAGE dimension from the evidence dimension.
-    const mixedMapped = new Map([
-      ['drought tolerant plants florida\x00wavespestcontrol.com', 45],
-      ['drought tolerant plants florida\x00palmettoflpestcontrol.com', 45],
+  test('reachability scopes coverage and evidence to the HUB, matching mineNoContentYet', () => {
+    // The mirror judges the hub only, because mineNoContentYet is
+    // hub-only. Judging spoke domains too would let an uncovered or
+    // strongly-ranked spoke mark the rep unreachable while the miner
+    // emits the hub candidate — both buckets queueing for one intent.
+    const mapped = new Map([
+      ['drought tolerant plants florida\u0000wavespestcontrol.com', 45], // weak on the hub
     ]);
-    // One covered tuple + one uncovered tuple for the same query:
-    // mineNoContentYet emits the covered candidate, so the mirror must
-    // read the rep as reachable through that tuple — a domain union would
-    // read the whole rep uncheckable and let the family emit beside it.
-    const mixed = {
-      query: 'drought tolerant plants florida',
-      impressions: 120,
-      position: 20,
-      tuples: [
-        { impressions: 60, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] },
-        { impressions: 60, plainPosition: 22, service_category: 'lawn', city_target: null, domains: ['palmettoflpestcontrol.com'] },
-      ],
-    };
-    expect(listicleFamilyRepReachable(mixed, new Map(), undefined, { mapCoveredDomains: covered, mappedPositions: mixedMapped })).toBe(true);
-    // Only the uncovered tuple → unreachable (fail closed, family keeps demand).
-    const uncoveredOnly = { ...mixed, tuples: [mixed.tuples[1]] };
-    expect(listicleFamilyRepReachable(uncoveredOnly, new Map(), undefined, { mapCoveredDomains: covered, mappedPositions: mixedMapped })).toBe(false);
-    // Tuples without domain provenance (fallback reps) → fail closed.
-    const noProvenance = { ...mixed, tuples: [{ impressions: 60, plainPosition: 20, service_category: 'tree_shrub', city_target: null }] };
-    expect(listicleFamilyRepReachable(noProvenance, new Map(), undefined, { mapCoveredDomains: covered, mappedPositions: mixedMapped })).toBe(false);
+    const tuple = (over = {}) => ({
+      impressions: 120, hubImpressions: 120, plainPosition: 20,
+      service_category: 'tree_shrub', city_target: null,
+      domains: ['wavespestcontrol.com', 'palmettoflpestcontrol.com'],
+      ...over,
+    });
+    const rep = (t) => ({ query: 'drought tolerant plants florida', impressions: 120, position: 20, tuples: [t] });
+
+    // Hub demand, hub covered, hub weakly mapped → the miner will emit it.
+    expect(listicleFamilyRepReachable(rep(tuple()), new Map(), undefined,
+      { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(true);
+    // An uncovered SPOKE no longer suppresses it — only the hub matters.
+    expect(listicleFamilyRepReachable(rep(tuple({ domains: ['wavespestcontrol.com', 'unmapped-spoke.com'] })),
+      new Map(), undefined, { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(true);
+    // Spoke-carried demand with almost nothing on the hub → the hub-only
+    // bucket will never emit it, so the family keeps the demand.
+    expect(listicleFamilyRepReachable(rep(tuple({ hubImpressions: 5 })), new Map(), undefined,
+      { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(false);
+    // Hub itself uncovered → no trustworthy evidence → fail closed.
+    expect(listicleFamilyRepReachable(rep(tuple()), new Map(), undefined,
+      { mapCoveredDomains: new Set(['parrishpestcontrol.com']), mappedPositions: mapped })).toBe(false);
   });
 });
 
