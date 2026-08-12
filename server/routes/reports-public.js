@@ -205,6 +205,22 @@ const reportEventLimiter = rateLimit({
   message: { error: 'Too many report events. Please try again in a minute.' },
 });
 
+// cross_sell_requested is not analytics: it recomputes the full offer
+// (pricing engine + many reads) and writes durable rows, so it gets its own
+// LOW per-token limiter ahead of any recomputation (local codex r15 P1) —
+// a long-lived report token must not be able to drive expensive pricing
+// work at the 120/min analytics rate. Keyed per token: the token is the
+// capability under abuse, and per-token capping bounds each leaked link
+// regardless of the caller's IP pool.
+const crossSellActionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `xsell:${req.params.token || 'anon'}`,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
 const ALLOWED_REPORT_EVENTS = new Set([
   'service_report_viewed',
   'ai_summary_viewed',
@@ -1049,6 +1065,10 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     // repeat tap resolves to the existing open request. Creation failure is
     // a 503 so the card can only confirm a durably recorded request.
     if (eventName === 'cross_sell_requested') {
+      // Dedicated limiter runs BEFORE any recompute/DB work; it sends its
+      // own 429 when tripped.
+      await new Promise((resolve, reject) => crossSellActionLimiter(req, res, (err) => (err ? reject(err) : resolve())));
+      if (res.headersSent) return undefined;
       try {
         const joined = await db('service_records as sr')
           .leftJoin('customers as c', 'sr.customer_id', 'c.id')
@@ -1138,6 +1158,16 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
               .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
               .first();
             if (existing) {
+              // An IDENTICAL resubmission (same validated snapshot and
+              // subject) is a pure no-op (local codex r15 P1): no row
+              // churn, no extra event row — the card simply re-confirms.
+              const nextRevision = JSON.stringify({ source: 'service_report', serviceRecordId: service.id, crossSell });
+              const priorRevision = typeof existing.pricing_revision === 'string'
+                ? existing.pricing_revision
+                : JSON.stringify(existing.pricing_revision ?? null);
+              if (priorRevision === nextRevision && existing.subject === requestSubject) {
+                return { deduped: true };
+              }
               // Refresh the stored snapshot to THIS click's validated offer
               // (codex #3367 PR r1): the shown-price lock must reflect what
               // the customer just saw — an older revision (or a quote-mode
