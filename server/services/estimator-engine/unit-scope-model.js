@@ -288,6 +288,11 @@ const RESIDENTIAL_MULTIFAMILY_SUBTYPES = new Set([
   'hoa_common_area_residential',
 ]);
 
+// Subtypes carrying NO positive commercial-use evidence of their own (the
+// resolver's fallback / an absent value) — the only ones a bare unit-count
+// verdict may be exempted under.
+const NEUTRAL_COMMERCIAL_SUBTYPES = new Set(['', 'other']);
+
 /**
  * The lookup's own COMMERCIAL verdict as a category conflict against a
  * residential intent, or null. Pure so the rule is directly pinnable.
@@ -298,10 +303,16 @@ function lookupCategoryConflict({
 }) {
   if (isCommercialIntent === true) return null;
   if (String(enrichedCategory || '').toUpperCase() !== 'COMMERCIAL') return null;
+  const subtype = String(commercialSubtype || '');
   const residentialMultifamilyVerdict =
-    RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(String(commercialSubtype || ''))
-    // The ≥5-unit stacked aggregate: a unit count, not a commercial use.
-    || commercialDetectionSource === 'property_record_unit_count';
+    RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
+    // The ≥5-unit stacked aggregate: a unit count, not a commercial use —
+    // but ONLY when the subtype adds no positive commercial-use evidence.
+    // A >4-unit record that ALSO reads office_retail/warehouse/etc. must
+    // still conflict, so this is a strict allowlist of neutral subtypes:
+    // any future subtype defaults to conflicting (codex r17 P1).
+    || (commercialDetectionSource === 'property_record_unit_count'
+      && NEUTRAL_COMMERCIAL_SUBTYPES.has(subtype));
   if (serviceScope === 'residential_unit' && residentialMultifamilyVerdict) return null;
   return 'lookup_category:commercial';
 }

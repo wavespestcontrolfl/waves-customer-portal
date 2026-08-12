@@ -226,6 +226,14 @@ describe('lookupCategoryConflict — the lookup verdict vs a residential intent'
     })).toBeNull();
   });
 
+  test('a unit-count verdict carrying commercial-use evidence still conflicts (r17)', () => {
+    expect(lookupCategoryConflict({
+      isCommercialIntent: false, enrichedCategory: 'COMMERCIAL',
+      commercialSubtype: 'office_retail', commercialDetectionSource: 'property_record_unit_count',
+      serviceScope: 'residential_unit',
+    })).toBe('lookup_category:commercial');
+  });
+
   test('a genuinely commercial verdict conflicts even on a unit scope', () => {
     // An office/retail condo, or a lookup-verified Office at "…, Suite 2"
     // that the subpremise rule promoted to residential_unit (codex r16 P1).
