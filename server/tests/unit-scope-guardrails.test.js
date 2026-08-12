@@ -78,6 +78,14 @@ describe('commercialTextSignal', () => {
     expect(commercialTextSignal('ants in the master suite bathroom')).toBe(false);
     expect(commercialTextSignal('our en-suite bathroom has ants')).toBe(false);
     expect(commercialTextSignal('Suite A, Bradenton — roaches')).toBe(true);
+    // Whole-property multifamily/association requests (codex r25 P1).
+    expect(commercialTextSignal('I manage an apartment complex')).toBe(true);
+    expect(commercialTextSignal('pest control for our HOA common areas')).toBe(true);
+    expect(commercialTextSignal('we need the common areas of the association treated')).toBe(true);
+    // …but a RESIDENT of an HOA community is a residential customer.
+    expect(commercialTextSignal('my HOA requires quarterly pest control')).toBe(false);
+    expect(commercialTextSignal('we live in an HOA community with strict rules')).toBe(false);
+    expect(commercialTextSignal('we own our home and the HOA handles the street')).toBe(false);
   });
   test('stays quiet on residential prose that mentions work', () => {
     expect(commercialTextSignal('ants in my home office and the kitchen')).toBe(false);

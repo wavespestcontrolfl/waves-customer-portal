@@ -111,6 +111,16 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     '(?:service|treat|spray)\\w*\\s+(?:my|our)\\s+business\\b',
     'business\\s+(?:location|premises|property|address)',
     'commercial\\s+(?:pest|lawn|mosquito|rodent|termite)\\b',
+    // Whole-property multifamily/association requests (codex r25 P1).
+    // Deliberately requires COMPLEX-WIDE or MANAGEMENT phrasing: a
+    // resident of an HOA community ("my HOA requires quarterly service",
+    // "we live in an HOA") is a residential customer — the schema's own
+    // hoa_community_flag vs hoa_common_area_service distinction.
+    '(?:apartment|condo\\w*|multi.?family)\\s+(?:complex|community|building)\\b',
+    '\\b(?:i|we)\\s+(?:manage|own|operate|run)\\s+(?:an?\\s+|the\\s+|our\\s+)?(?:apartment|condo\\w*|multi.?family|complex|building)\\b',
+    '(?:hoa|association)\\s+common\\s*areas?',
+    'common\\s*areas?\\s+(?:of|for|at)\\s+(?:the\\s+|our\\s+)?(?:hoa|association|complex|community|building)',
+    '(?:hoa|association)\\s+(?:property|grounds)\\b',
     // Service-qualified premises without an article/possessive — "pest
     // control for a warehouse", "spraying at warehouse" (codex r9 P1: the
     // possessive/article forms above miss indefinite phrasings that are
