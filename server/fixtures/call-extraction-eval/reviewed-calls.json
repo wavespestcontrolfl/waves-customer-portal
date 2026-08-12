@@ -6,10 +6,14 @@
       "id": "name-email-address-ground-truth",
       "call_log_id": "86b33b84-d66f-4274-84b2-513299d47211",
       "reviewed_at": "2026-06-14",
-      "reviewed_outcome": "Reviewed customer-name/email corroboration plus street-suffix normalization should allow routing in shadow replay.",
+      "re_reviewed_at": "2026-08-11",
+      "reviewed_outcome": "Reviewed customer-name/email corroboration plus street-suffix normalization should allow routing in shadow replay. Re-reviewed 2026-08-11: the stored AV verdict no longer transfers (the current extraction states the city as University Park where the historical one said Sarasota — a real postal-locality distinction the strict transfer key is right to refuse), replay never calls live AV by design, and this pre-consent-era call is also held by the post-2026-08-01 consent gate (verified in the 08-11 live run). The case now asserts those two ratified holds are the ONLY ones; any extraction-quality flag still fails it.",
       "expect": {
         "current_status": "valid",
-        "current_would_auto_route": true,
+        "current_block_reasons_subset_of": [
+          "address_not_validated",
+          "no_sms_consent_captured"
+        ],
         "current_flags_exclude": [
           "name_email_mismatch",
           "address_unverifiable",
@@ -21,10 +25,14 @@
       "id": "historical-schedule-date-time-was-wrong",
       "call_log_id": "2a775bc2-abf7-494b-b931-7aa466111663",
       "reviewed_at": "2026-06-14",
-      "reviewed_outcome": "Transcript says tomorrow at 3 from a June 10 call; historical scheduled service was June 12 at 11, so current v2 schedule variance is expected and useful.",
+      "re_reviewed_at": "2026-08-11",
+      "reviewed_outcome": "Transcript says tomorrow at 3 from a June 10 call; historical scheduled service was June 12 at 11, so current v2 schedule variance is expected and useful. Re-reviewed 2026-08-11: under post-2026-08-01 policy this call correctly does NOT auto-route — the current extractor omits the zip the historical extraction carried (AV verdict transfer key misses) and the call predates SMS consent capture, so the consent gate holds it. Both holds are ratified policy, not regressions; the schedule-variance net stays the core assertion.",
       "expect": {
         "current_status": "valid",
-        "current_would_auto_route": true,
+        "current_block_reasons_subset_of": [
+          "address_not_validated",
+          "no_sms_consent_captured"
+        ],
         "legacy_schedule_variance_fields": [
           "scheduled_date",
           "window_start"
