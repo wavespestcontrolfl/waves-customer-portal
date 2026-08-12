@@ -629,8 +629,14 @@ async function getOptions(serviceId) {
         // the counter must count the scheme-less form the customer receives.
         composeUrl = String(composeUrl).replace(/^https?:\/\//i, '');
       }
+      // Serve the body PRE-normalized through the renderer's own portal
+      // scheme-strip: an admin-embedded literal https://portal... URL in
+      // the template is stripped at render time, and the client counter
+      // must count the stripped form without keeping its own copy of the
+      // owned-host list (codex r5 P2).
+      const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
       customCompose = {
-        template: row.body,
+        template: stripPortalUrlScheme(row.body),
         firstName: service.first_name || 'there',
         serviceType: (service.service_type || 'service').toLowerCase(),
         linkClause: customLinkClause(composeUrl),

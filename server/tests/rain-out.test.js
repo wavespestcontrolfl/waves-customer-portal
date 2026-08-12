@@ -1982,8 +1982,10 @@ describe('rain-out service', () => {
       expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
     });
 
+    // Carries a literal owned-portal URL so the compose test proves the
+    // body is served through the renderer's scheme-strip (codex r5 P2).
     const CUSTOM_TEMPLATE_ROW = {
-      body: "Hi {first_name} - {custom_message}\n\nWe've moved your {service_type} to {new_option}.{link_clause}",
+      body: "Hi {first_name} - {custom_message}\n\nWe've moved your {service_type} to {new_option}.{link_clause} Portal: https://portal.wavespestcontrol.com/login",
       is_active: true,
     };
 
@@ -2010,8 +2012,10 @@ describe('rain-out service', () => {
       expect(options.customCompose).toMatchObject({
         // The counter assembles the ACTIVE template body served here — a
         // client-side copy of the migration literal would silently desync
-        // from what commit() renders after an admin edit (codex PR P1).
-        template: CUSTOM_TEMPLATE_ROW.body,
+        // from what commit() renders after an admin edit (codex PR P1) —
+        // pre-normalized through the renderer's portal scheme-strip so the
+        // client never keeps its own owned-host list (codex r5 P2).
+        template: CUSTOM_TEMPLATE_ROW.body.replace('https://portal.wavespestcontrol.com', 'portal.wavespestcontrol.com'),
         firstName: 'Pat',
         serviceType: 'quarterly pest control',
         maxSegments: 2,
