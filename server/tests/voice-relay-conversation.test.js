@@ -80,4 +80,57 @@ describe('RelayConversation — explicit end after capture', () => {
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
     }));
   });
+
+  // ⭐ The recent-texts block is customer-AUTHORED SMS text. It rides the USER
+  // role, never `system`, and is seeded exactly once, ahead of the caller's
+  // first turn, as a user/assistant pair so roles still strictly alternate.
+  test('recent-texts data turn is seeded into the USER role, once, before the caller turn', async () => {
+    const convo = new RelayConversation({ callSid: 'CA5', from: '+19415551234', send: jest.fn() });
+    convo._callerContext = {
+      customer: { id: 'c-1', first_name: 'Pat' },
+      tier: 'full',
+      block: 'KNOWN CALLER ...',
+      dataTurn: '<<<RECENT TEXTS DATA\nCustomer: the ants are back\nEND RECENT TEXTS DATA>>>',
+    };
+    convo.messages.push({ role: 'user', content: 'hi there' });
+    // Drive only the seeding half of _runLoop (no Anthropic client in tests).
+    await convo._runLoop().catch(() => {});
+
+    expect(convo.messages[0]).toEqual({ role: 'user', content: convo._callerContext.dataTurn });
+    expect(convo.messages[1].role).toBe('assistant');
+    expect(convo.messages[2]).toEqual({ role: 'user', content: 'hi there' });
+    // Roles alternate — the API rejects two consecutive same-role messages.
+    for (let i = 1; i < convo.messages.length; i++) {
+      expect(convo.messages[i].role).not.toBe(convo.messages[i - 1].role);
+    }
+
+    // Seeded ONCE, however many turns follow.
+    await convo._runLoop().catch(() => {});
+    expect(convo.messages.filter((m) => m.content === convo._callerContext.dataTurn)).toHaveLength(1);
+  });
+
+  // The tool ctx is rebuilt EVERY turn; the lookup budget must not be, or a
+  // caller gets a fresh three lookups per turn.
+  test('the lookup budget is SESSION-scoped, not per-turn', () => {
+    const { LOOKUP_SESSION_BUDGET } = require('../services/voice-agent/relay-context');
+    const convo = new RelayConversation({ callSid: 'CA6', from: '+19415551234', send: jest.fn() });
+    const grants = [];
+    for (let turn = 0; turn < LOOKUP_SESSION_BUDGET + 2; turn++) {
+      grants.push(convo._buildToolCtx().consumeLookup()); // a NEW ctx each turn
+    }
+    expect(grants.filter(Boolean)).toHaveLength(LOOKUP_SESSION_BUDGET);
+    expect(grants.slice(LOOKUP_SESSION_BUDGET)).toEqual([false, false]);
+  });
+
+  // Contact-slot recognition must never reach the ctx as 'full'.
+  test('customerTier on the tool ctx mirrors the ANI match column, failing closed', () => {
+    const convo = new RelayConversation({ callSid: 'CA7', from: '+19415551234', send: jest.fn() });
+    expect(convo._buildToolCtx().customerTier).toBe('redacted'); // unknown caller
+    convo._callerContext = { customer: { id: 'c-1' }, tier: 'redacted' };
+    expect(convo._buildToolCtx().customerTier).toBe('redacted');
+    convo._callerContext = { customer: { id: 'c-1' } }; // tier missing entirely
+    expect(convo._buildToolCtx().customerTier).toBe('redacted');
+    convo._callerContext = { customer: { id: 'c-1' }, tier: 'full' };
+    expect(convo._buildToolCtx().customerTier).toBe('full');
+  });
 });

@@ -120,14 +120,14 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   test('gate off → not registered and refuses', async () => {
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
     expect(activeTools().map((t) => t.name)).not.toContain('get_open_estimates');
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/not available/i);
     expect(db).not.toHaveBeenCalled();
   });
 
   test('matched caller → snapshot line items + persisted totals, and NO pricing-engine call', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     // The whole point: sent prices are READ, never recomputed.
     expect(generateEstimate).not.toHaveBeenCalled();
     expect(out).toContain('Quarterly pest control at $41.50 per month');
@@ -142,7 +142,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('only sent/viewed estimates count as open, newest first', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID });
+    await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     const b = builders.estimates;
     expect(b.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed']);
     expect(relayMoney.OPEN_ESTIMATE_STATUSES).toEqual(['sent', 'viewed']);
@@ -151,7 +151,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('the estimate view token is never SELECTed, and never reaches the output', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     const selected = builders.estimates.select.mock.calls.flat();
     expect(selected).not.toContain('token');
     expect(out).not.toContain(SENT_ESTIMATE.token);
@@ -161,7 +161,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
-    const ctx = { customerId: 'c-other', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
+    const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
     const out = await executeTool('get_open_estimates', { customer_ref: 'C1' }, ctx);
     expect(out).toMatch(/1 open estimate/);
     expect(out).toMatch(/Tuesday July 21/);
@@ -171,7 +171,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
   test('no open estimates → says so and points at get_pricing, no invented quote', async () => {
     primeDb({ estimates: [] });
-    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/No open estimates/i);
     expect(out).not.toMatch(/\$\d/);
     expect(generateEstimate).not.toHaveBeenCalled();
@@ -185,7 +185,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
 
 describe('get_invoice_history — matched caller only', () => {
   test('looked-up ref → refused; unmatched caller → refused; neither reads invoices', async () => {
-    const refCtx = { customerId: CUSTOMER_ID, resolveLookupRef: () => 'c-9001' };
+    const refCtx = { customerId: CUSTOMER_ID, customerTier: 'full', resolveLookupRef: () => 'c-9001' };
     const refused = await executeTool('get_invoice_history', { customer_ref: 'C1' }, refCtx);
     expect(refused).toMatch(/only available for the account the caller's own phone number matches/i);
     const unmatched = await executeTool('get_invoice_history', {}, { customerId: null });
@@ -193,6 +193,26 @@ describe('get_invoice_history — matched caller only', () => {
     expect(unmatched).toMatch(/Do NOT guess at amounts owed/);
     expect(openBalanceSummary).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
+  });
+
+  // Tier defaults are 'redacted' everywhere: an exported helper called without
+  // an option, and a caller recognised only on a service-contact slot
+  // (spouse/tenant/PRIOR OCCUPANT), both get nothing.
+  test('no customerTier / contact-slot tier → invoices refused, none read', async () => {
+    const noTier = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    expect(noTier).toMatch(/only available for the account whose own phone number/i);
+    const slot = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'redacted' });
+    expect(slot).toMatch(/only available for the account whose own phone number/i);
+    expect(slot).not.toMatch(/\$\d/);
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('the exported invoiceHistoryText helper itself defaults to redacted', async () => {
+    const { invoiceHistoryText } = require('../services/voice-agent/relay-money');
+    const out = await invoiceHistoryText(CUSTOMER_ID);
+    expect(out).toMatch(/only available for the account whose own phone number/i);
+    expect(openBalanceSummary).not.toHaveBeenCalled();
   });
 
   test('matched caller → itemized unpaid + total + recently settled, via the open-balance loader', async () => {
@@ -208,7 +228,7 @@ describe('get_invoice_history — matched caller only', () => {
     primeDb({
       invoices: [{ invoice_number: 'WPC-2026-0255', status: 'paid', service_type: 'Pest Control', service_date: '2026-06-01', total: 112 }],
     });
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(openBalanceSummary).toHaveBeenCalledWith(CUSTOMER_ID, expect.objectContaining({ displayLimit: relayMoney.INVOICE_HISTORY_LIMIT }));
     expect(out).toContain('WPC-2026-0301');
     expect(out).toContain('$137.50 still owed');
@@ -222,7 +242,7 @@ describe('get_invoice_history — matched caller only', () => {
 
   test('paid-side read stays self-pay (no payer-owned statements) and selects no token', async () => {
     primeDb({ invoices: [] });
-    await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     const b = builders.invoices;
     expect(b.whereNull).toHaveBeenCalledWith('payer_id');
     expect(b.whereNull).toHaveBeenCalledWith('payer_statement_id');
@@ -235,7 +255,7 @@ describe('get_invoice_history — matched caller only', () => {
       invoices: [{ invoice_number: 'WPC-2026-0311', service_date: '2026-08-01', total: 75, credit_applied: 0 }],
     });
     primeDb({ invoices: [] });
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).not.toMatch(TOKEN_LEAK_RE);
     expect(out).toMatch(/Never read out a payment link/i);
     expect(out).toMatch(/Never take a card number/i);
@@ -243,10 +263,10 @@ describe('get_invoice_history — matched caller only', () => {
   });
 
   test('paid-up account reads as paid up; a failed balance read never guesses', async () => {
-    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/none — the account is paid up/i);
     openBalanceSummary.mockRejectedValue(new Error('pool exhausted'));
-    const degraded = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID });
+    const degraded = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(degraded).toMatch(/could not be checked right now/i);
     expect(degraded).toMatch(/do not guess/i);
   });

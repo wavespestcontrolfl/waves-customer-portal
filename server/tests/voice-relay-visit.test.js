@@ -107,14 +107,14 @@ describe('get_today_eta', () => {
     expect(activeTools().map((t) => t.name)).toContain('get_today_eta');
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
     expect(activeTools().map((t) => t.name)).not.toContain('get_today_eta');
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/not available/i);
     expect(db).not.toHaveBeenCalled();
   });
 
   test('same-ET-day predicate is an exact scheduled_date equality on today', async () => {
     primeDb({ scheduled_services: [VISIT_TODAY] });
-    await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     const b = builders.scheduled_services;
     expect(b.where).toHaveBeenCalledWith('scheduled_date', TODAY);
     expect(b.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'rescheduled']);
@@ -123,7 +123,7 @@ describe('get_today_eta', () => {
 
   test('no visit today → says so and forbids inventing a time (even with visits on other days)', async () => {
     primeDb({ scheduled_services: [] });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/No appointment on the schedule for this account today/i);
     expect(out).toMatch(/Do NOT guess/i);
     expect(out).not.toMatch(/EN ROUTE|window is/i);
@@ -131,7 +131,7 @@ describe('get_today_eta', () => {
 
   test('window comes from window_start/window_end, spoken', async () => {
     primeDb({ scheduled_services: [VISIT_TODAY] });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toContain('9 AM to 11 AM');
     expect(out).toContain('Pest Control');
     expect(out).toMatch(/has not started toward the property yet/i);
@@ -143,39 +143,74 @@ describe('get_today_eta', () => {
       scheduled_services: [{ ...VISIT_TODAY, window_start: null, window_end: null }],
       appointment_reminders: [{ appointment_time: '13:30:00' }],
     });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toContain('1:30 PM');
     expect(builders.appointment_reminders.where).toHaveBeenCalledWith({ scheduled_service_id: 'ss-1', cancelled: false });
   });
 
   test('en_route track_state → announces the tech is on the way (read-only peek)', async () => {
     primeDb({ scheduled_services: [{ ...VISIT_TODAY, track_state: 'en_route', en_route_at: '2026-08-12T13:05:00Z' }] });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/EN ROUTE/);
     assertNoWrites();
   });
 
   test('on_property → already at the property', async () => {
     primeDb({ scheduled_services: [{ ...VISIT_TODAY, track_state: 'on_property' }] });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/already at the property/i);
   });
 
   test('terminal status outranks a STALE track_state — a completed visit is never "on the way"', async () => {
     primeDb({ scheduled_services: [{ ...VISIT_TODAY, status: 'completed', track_state: 'en_route' }] });
-    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/already marked complete/i);
     expect(out).not.toMatch(/EN ROUTE|on the way/i);
   });
 
-  test('looked-up ref → existence only: no window, no live technician status', async () => {
+  // PHYSICAL SECURITY: an unverified voice must not learn whether a technician
+  // will be at that address today — not even yes/no. The refusal is BYTE
+  // IDENTICAL whether or not a visit exists, and the row is never read, so the
+  // refusal itself carries no signal.
+  test('looked-up ref → NOTHING, not even that a visit exists (no schedule read at all)', async () => {
     primeDb({ scheduled_services: [{ ...VISIT_TODAY, track_state: 'en_route' }] });
-    const ctx = { customerId: 'c-other', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
-    const out = await executeTool('get_today_eta', { customer_ref: 'C1' }, ctx);
-    expect(out).toMatch(/There IS a visit on today's schedule/);
-    expect(out).not.toContain('9 AM');
-    expect(out).not.toMatch(/EN ROUTE/i);
-    expect(out).toMatch(/do not describe the technician's live status/i);
+    const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
+    const withVisit = await executeTool('get_today_eta', { customer_ref: 'C1' }, ctx);
+    expect(withVisit).not.toMatch(/There IS a visit/i);
+    expect(withVisit).toMatch(/Do NOT say whether a visit is or is not on today's schedule/i);
+    expect(withVisit).not.toContain('9 AM');
+    expect(withVisit).not.toMatch(/EN ROUTE/i);
+    expect(db).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    primeDb({ scheduled_services: [] });
+    const withoutVisit = await executeTool('get_today_eta', { customer_ref: 'C1' }, ctx);
+    expect(withoutVisit).toBe(withVisit); // no oracle: identical either way
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // FAIL CLOSED: an ANI match with no tier on the session ctx is 'redacted'.
+  test('matched caller with NO customerTier on the ctx → redacted (defaults never fail open)', async () => {
+    primeDb({ scheduled_services: [VISIT_TODAY] });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
+    expect(out).toMatch(/only available for the account the caller's own phone number matches/i);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // A contact-slot ANI match (spouse/tenant/PRIOR OCCUPANT) recognises the
+  // account but authenticates nobody — today's schedule stays shut.
+  test('contact-slot match (tier redacted) → today\'s schedule is refused', async () => {
+    primeDb({ scheduled_services: [VISIT_TODAY] });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'redacted' });
+    expect(out).toMatch(/Do NOT say whether a visit is or is not on today's schedule/i);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('contact-slot match (tier redacted) → get_service_report is refused outright', async () => {
+    primeDb({ service_records: [] });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'redacted' });
+    expect(out).toMatch(/only available for the account whose own phone number/i);
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('unmatched caller with no ref → refused, no schedule read', async () => {
@@ -205,7 +240,7 @@ describe('get_service_report', () => {
       service_findings: [{ category: 'activity', severity: 'low', title: 'Ant activity at the kitchen slab', detail: 'Small trail along the baseboard', recommendation: 'Keep the area dry for a week' }],
       service_products: [{ product_name: 'Termidor SC', application_area: 'exterior perimeter', application_method: 'spray', targets: JSON.stringify(['ants', 'spiders']) }],
     });
-    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toContain('Friday July 31');
     expect(out).toContain('Ant activity at the kitchen slab');
     expect(out).toContain('Keep the area dry for a week');
@@ -223,7 +258,7 @@ describe('get_service_report', () => {
   test('re-entry wording comes ONLY from the shaping helper, quoted verbatim', async () => {
     primeDb({ service_records: [RECORD] });
     buildReentryContext.mockResolvedValue({ customerSummary: 'Exterior ready at 4:30 PM.' });
-    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(buildReentryContext).toHaveBeenCalled();
     expect(out).toContain('"Exterior ready at 4:30 PM."');
   });
@@ -231,7 +266,7 @@ describe('get_service_report', () => {
   test('no re-entry context → no re-entry sentence is composed at all', async () => {
     primeDb({ service_records: [RECORD] });
     buildReentryContext.mockResolvedValue(null);
-    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).not.toMatch(/Re-entry guidance/);
     expect(out).not.toMatch(/ready for normal use|until dry/i);
   });
@@ -242,7 +277,7 @@ describe('get_service_report', () => {
       service_findings: [{ title: 'internal finding', detail: 'do not disclose' }],
       service_products: [{ product_name: 'Secret Product' }],
     });
-    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toMatch(/not released for customer delivery/i);
     expect(out).not.toContain('internal finding');
     expect(out).not.toContain('Secret Product');
@@ -251,13 +286,13 @@ describe('get_service_report', () => {
 
   test('a visit_date pins the record; an unknown date reports nothing on file', async () => {
     primeDb({ service_records: [] });
-    const out = await executeTool('get_service_report', { visit_date: '2026-01-02' }, { customerId: CUSTOMER_ID });
+    const out = await executeTool('get_service_report', { visit_date: '2026-01-02' }, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(builders.service_records.where).toHaveBeenCalledWith('service_date', '2026-01-02');
     expect(out).toMatch(/No completed visit on file for that date/i);
   });
 
   test('looked-up ref → refused (more detail than the redacted tier allows)', async () => {
-    const ctx = { customerId: CUSTOMER_ID, resolveLookupRef: () => 'c-9001' };
+    const ctx = { customerId: CUSTOMER_ID, customerTier: 'full', resolveLookupRef: () => 'c-9001' };
     const out = await executeTool('get_service_report', { customer_ref: 'C1' }, ctx);
     expect(out).toMatch(/only available for the account the caller's own phone number matches/i);
     expect(db).not.toHaveBeenCalled();
@@ -272,8 +307,8 @@ describe('get_service_report', () => {
 
   test('neither tool ever calls the pricing engine', async () => {
     primeDb({ scheduled_services: [VISIT_TODAY], service_records: [RECORD] });
-    await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID });
-    await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID });
+    await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 });

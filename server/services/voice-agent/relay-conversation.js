@@ -236,8 +236,15 @@ const PROFILE_CACHE_TTL_MS = 60 * 1000;
 // system role. Deterministic line filter: drop directive-injection lines and
 // price/guarantee/policy-claim lines, neutralize our own frame delimiters.
 // STYLE text survives; a stripped line fails toward the base rules.
-const PROFILE_INJECTION_LINE_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|\b(assistant|system|user)\s*:/i;
-const PROFILE_FACTUAL_LINE_RE = /\$\s*\d|\bUSD\s*\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks)\b|%\s?(off|discount)|\b(guarantee[ds]?|warrant(y|ies)|refund)\b|\byou (can|may) (book|reserve|confirm)\b/i;
+//
+// THE definitions live in relay-context and are IMPORTED here (they are shared
+// with every other DB-sourced free-text field that reaches the model — the
+// KNOWN CALLER block, SMS bodies, technician notes). Re-exported below under
+// the names the pinning tests already use.
+const {
+  PROFILE_INJECTION_LINE_RE,
+  PROFILE_FACTUAL_LINE_RE,
+} = require('./relay-context');
 function sanitizeProfileForPrompt(text) {
   return String(text || '')
     .split('\n')
@@ -335,6 +342,14 @@ class RelayConversation {
     // this call actually looked up (an invented ref resolves to nothing).
     this._lookupRefs = new Map(); // 'C1' -> customerId
     this._lookupRefsByCustomer = new Map(); // customerId -> 'C1'
+    // Per-CALL lookup budget. lookup_customer is the one tool an anonymous
+    // caller can aim at the whole customer book, so it gets a hard count, not
+    // just per-query criteria rules: three DB-reaching lookups, then the tool
+    // is closed for the rest of the call.
+    this._lookupsUsed = 0;
+    // The recent-texts DATA TURN — customer-AUTHORED SMS bodies, seeded into
+    // the USER role ahead of the first caller turn, never into `system`.
+    this._dataTurnSeeded = false;
     // Phase E — the audit trail. Ordered turn list (caller / agent / tool) for
     // the call_log transcript written at close, the model's own capture_lead
     // summary (so the close needs no second LLM round trip), and the
@@ -441,24 +456,29 @@ class RelayConversation {
     }
   }
 
-  async _runLoop() {
-    if (this.ended || !anthropic) {
-      if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
-      return;
-    }
-    // Identity must be settled before the first model round: the tool ctx and
-    // the KNOWN CALLER block both come from it (bounded inside
-    // resolveCallerContext; a timeout just means unknown caller).
-    if (this._contextReady) {
-      try { await this._contextReady; } catch { /* fail closed to unknown */ }
-    }
-
-    const toolCtx = {
+  /**
+   * The per-turn tool context. Rebuilt each turn, but every mutable counter it
+   * exposes (lookup budget, owner-alert latch, capture flags) lives on the
+   * SESSION and is read/written through closures — so two tool calls inside one
+   * turn, or across turns, share the same state.
+   */
+  _buildToolCtx() {
+    return {
       from: this.from,
-      to: this.to,
       callSid: this.callSid,
       language: this.language,
       customerId: (this._callerContext && this._callerContext.customer && this._callerContext.customer.id) || null,
+      // 'full' only when the ANI is the account's OWN customers.phone; a
+      // contact-slot recognition caps at 'redacted' (relay-context
+      // findUniqueCustomerByAni). Fail closed when absent.
+      customerTier: (this._callerContext && this._callerContext.tier === 'full') ? 'full' : 'redacted',
+      // Per-call lookup budget: true while the caller still has lookups left.
+      consumeLookup: () => {
+        const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
+        if (this._lookupsUsed >= LOOKUP_SESSION_BUDGET) return false;
+        this._lookupsUsed += 1;
+        return true;
+      },
       rememberLookup: (row) => {
         if (!row || !row.id) return null;
         const existing = this._lookupRefsByCustomer.get(row.id);
@@ -485,6 +505,34 @@ class RelayConversation {
       markOwnerAlerted: () => { this._ownerAlerted = true; },
       markReserviceFiled: () => { this._reserviceFiled = true; },
     };
+  }
+
+  async _runLoop() {
+    if (this.ended || !anthropic) {
+      if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
+      return;
+    }
+    // Identity must be settled before the first model round: the tool ctx and
+    // the KNOWN CALLER block both come from it (bounded inside
+    // resolveCallerContext; a timeout just means unknown caller).
+    if (this._contextReady) {
+      try { await this._contextReady; } catch { /* fail closed to unknown */ }
+    }
+
+    // RECENT TEXTS ride the USER role, not `system`. SMS bodies are the only
+    // text in this lane the CUSTOMER authored, and the system role is where a
+    // model is most likely to treat a stray "ignore your instructions" as an
+    // order. Seeded ONCE, ahead of the caller's first turn, as a user/assistant
+    // pair so message roles still strictly alternate.
+    if (!this._dataTurnSeeded && this._callerContext && this._callerContext.dataTurn) {
+      this._dataTurnSeeded = true;
+      this.messages.unshift(
+        { role: 'user', content: this._callerContext.dataTurn },
+        { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
+      );
+    }
+
+    const toolCtx = this._buildToolCtx();
 
     const contextEnabled = isContextEnabled();
     if (this._officeHoursReady) {

@@ -82,7 +82,7 @@ function snapshotLines(estimateData) {
  *   - full tier (ANI-matched): line items + the sent prices + totals
  *   - redacted tier (looked-up ref): existence + date only, NO amounts
  */
-async function openEstimatesText(customerId, { tier = 'full' } = {}) {
+async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
   const redacted = tier !== 'full';
   const db = require('../../models/db');
   const { fmtMoney, speakDate, promptSafe } = require('./relay-context');
@@ -145,7 +145,17 @@ async function openEstimatesText(customerId, { tier = 'full' } = {}) {
  * total. Reuses open-balance.js for the open set — the same loader the
  * portal's billing balance view uses.
  */
-async function invoiceHistoryText(customerId) {
+async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
+  // Itemized billing detail is FULL-TIER ONLY, and the tier defaults to
+  // redacted so an exported helper cannot fail open. relay-tools already
+  // refuses the looked-up case; this is the in-body backstop that also covers
+  // a caller recognised on a secondary contact slot (spouse/tenant/prior
+  // occupant), whose voice authenticates nothing.
+  if (tier !== 'full') {
+    return 'Invoice detail is only available for the account whose own phone number the caller is '
+      + 'calling from. Do NOT state any invoice numbers, dates, or amounts. Tell the caller the account '
+      + 'holder can see their billing in the Waves portal, or a team member can go over it with them.';
+  }
   const db = require('../../models/db');
   const { fmtMoney, speakDate, promptSafe } = require('./relay-context');
   const { openBalanceSummary } = require('../open-balance');

@@ -18,11 +18,13 @@
  *    inbox) render — with lead_synopsis as the fallback the watchers use.
  *  - get_message_history reads the unified messages/conversations tables the
  *    admin comms views read (admin-communications.js /log,
- *    admin-customers.js /:id/comms — recordTouchpoint's write target), with
- *    the canonical dual-arm match from click-followup-gate.hasRepliedRecently:
- *    conversations.customer_id OR last-10 of conversations.contact_phone
- *    (contact_phone is NULL on linked-customer threads, so both arms are
- *    load-bearing).
+ *    admin-customers.js /:id/comms — recordTouchpoint's write target), keyed
+ *    on last-10 of conversations.contact_phone ONLY. The canonical dual-arm
+ *    match (click-followup-gate.hasRepliedRecently, which ORs in
+ *    conversations.customer_id) answers a different question — "has this
+ *    CUSTOMER replied" — and using it here widened the tool past its own
+ *    description to every thread on the account, including a spouse's or a
+ *    prior occupant's. ANI-scoped, exactly like get_call_history.
  *
  * OUTPUT SCRUBBING: summaries pass through redactAccessCodes (the
  * context-aggregator scrub every LLM-facing call summary already gets) and
@@ -47,14 +49,20 @@ const URL_RE = /\b(?:https?:\/\/\S+|[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\/\S+)/gi;
 const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{20,}\b/g;
 
 /** Scrub one DB-sourced free-text string for the model: no URLs, no tokens,
- *  no access codes, prompt-flattened. */
+ *  no access codes, prompt-flattened, and no DIRECTIVE content.
+ *
+ *  The last one matters most here: SMS bodies are the only text in this lane
+ *  the CUSTOMER authored, so "ignore your previous instructions..." typed into
+ *  a text message would otherwise arrive verbatim on their next call.
+ *  promptSafeUntrusted drops such a line whole (relay-context owns the one
+ *  definition, shared with the voice-profile filter). */
 function voiceSafeText(value, max = 200) {
   const { redactAccessCodes } = require('../context-aggregator');
-  const { promptSafe } = require('./relay-context');
+  const { promptSafeUntrusted } = require('./relay-context');
   const stripped = String(value == null ? '' : value)
     .replace(URL_RE, '[link]')
     .replace(LONG_TOKEN_RE, '[code]');
-  return promptSafe(redactAccessCodes(stripped), max);
+  return promptSafeUntrusted(redactAccessCodes(stripped), max);
 }
 
 function parsedExtraction(value) {
@@ -109,29 +117,39 @@ async function callHistoryText(fromPhone) {
 // ── get_message_history + the session RECENT TEXTS block ──────────────────
 
 /**
- * The SMS thread with this caller: linked-customer arm (conversations.
- * customer_id) OR unknown-thread arm (last-10 of conversations.contact_phone).
+ * The SMS thread with THE CALLING NUMBER — last-10 of
+ * conversations.contact_phone, and nothing else.
+ *
+ * ⭐ ANI-SCOPED, NOT CUSTOMER-SCOPED. The `conversations.customer_id` arm was
+ * removed: it is the canonical dual-arm match for "has this CUSTOMER replied
+ * recently" (click-followup-gate.hasRepliedRecently), but this tool's own
+ * description promises "the thread between Waves and the number THIS call is
+ * coming from", and the customer arm silently widened it to every thread on
+ * the account — a spouse's texts, a tenant's texts, a prior occupant's texts —
+ * read out to whoever is holding one of those phones. get_call_history is
+ * correctly ANI-keyed; this now matches it. A customer arm is also exactly the
+ * disclosure a contact-slot ANI match must never unlock.
+ *
+ * `customerId` stays in the signature (callers pass it, and the ANI-match
+ * precondition is enforced in relay-tools) but is deliberately unused for
+ * scoping.
+ *
  * Internal notes never leave the building (direction whitelist).
  * Returns scrubbed rows, NEWEST FIRST (callers reverse for speech order).
  */
 async function loadRecentMessages(customerId, fromPhone, limit = MESSAGE_HISTORY_LIMIT) {
   const { aniDigitKey } = require('./relay-context');
   const key = aniDigitKey(fromPhone);
-  if (!customerId && !key) return [];
+  if (!key) return [];
   const db = require('../../models/db');
   const rows = await db('messages')
     .join('conversations', 'messages.conversation_id', 'conversations.id')
     .where('messages.channel', 'sms')
     .whereIn('messages.direction', ['inbound', 'outbound'])
-    .where(function threadArms() {
-      if (customerId) this.orWhere('conversations.customer_id', customerId);
-      if (key) {
-        this.orWhereRaw(
-          "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
-          [key],
-        );
-      }
-    })
+    .whereRaw(
+      "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+      [key],
+    )
     .orderBy('messages.created_at', 'desc')
     .limit(limit)
     .select('messages.direction', 'messages.body', 'messages.created_at');
@@ -159,9 +177,14 @@ async function messageHistoryText(customerId, fromPhone) {
 }
 
 /**
- * Session-start "recent texts" block — injected next to the KNOWN CALLER
- * block (same gate, same injection point, ANI-matched only). Compact: the
- * last few messages, newest last. Null when there's nothing to show.
+ * Session-start "recent texts" block — ANI-matched sessions only. Compact:
+ * the last few messages, newest last. Null when there's nothing to show.
+ *
+ * ⭐ This block is injected as a USER-ROLE DATA TURN, never into the system
+ * prompt (relay-conversation seeds it ahead of the first caller turn). SMS
+ * bodies are the one thing here the CUSTOMER wrote, and the system role is
+ * where a model is most likely to obey an instruction it finds. The per-line
+ * directive filter (voiceSafeText → promptSafeUntrusted) is the other half.
  */
 async function buildRecentTextsBlock(customerId, fromPhone) {
   try {

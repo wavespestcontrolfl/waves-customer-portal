@@ -484,11 +484,25 @@ function availabilityResultToText(res) {
 }
 
 /**
+ * The disclosure tier the ANI match itself earned — 'full' ONLY when the
+ * calling number is the account's OWN `customers.phone`. A match on one of the
+ * service-contact slots (a lead-dedup column set that holds spouses, tenants
+ * and prior occupants) recognises the account but authenticates nobody, so it
+ * caps at 'redacted'.
+ *
+ * FAIL CLOSED: an absent/unknown tier on the session ctx is 'redacted'.
+ */
+function matchedCallerTier(ctx = {}) {
+  return ctx.customerTier === 'full' ? 'full' : 'redacted';
+}
+
+/**
  * Execute a tool call. Returns a short string (the tool_result content) telling
  * the model what happened so it can respond to the caller naturally.
  *
- * ctx: { from, to, callSid, language, markCaptured(), customerId }
- * (customerId is the ANI-matched customer for this session, or null.)
+ * ctx: { from, to, callSid, language, markCaptured(), customerId, customerTier }
+ * (customerId is the ANI-matched customer for this session, or null;
+ * customerTier is 'full' | 'redacted' — see matchedCallerTier.)
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
@@ -528,7 +542,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about a shared one). Output shaping + the session ref registry
       // (ctx.rememberLookup) keep this from ever dumping a record.
       if (name === 'lookup_customer') {
-        return await relayContext.lookupCustomersText(input, ctx.rememberLookup);
+        return await relayContext.lookupCustomersText(input, ctx);
       }
       // Phase C — call/text history is ANI-VERIFIED ONLY (stricter than the
       // two-tier account rule): transcripts and SMS bodies can carry payment
@@ -562,7 +576,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             + 'to read. Do NOT guess at amounts owed. Offer to have the office follow up, and capture the lead.';
         }
         const { invoiceHistoryText } = require('./relay-money');
-        return await invoiceHistoryText(ctx.customerId);
+        return await invoiceHistoryText(ctx.customerId, { tier: matchedCallerTier(ctx) });
       }
       // get_service_report is per-visit detail — strictly MORE than the visit
       // summary the redacted tier already withholds, so it is matched-caller
@@ -577,7 +591,10 @@ async function executeTool(name, input = {}, ctx = {}) {
             + 'to read. Do NOT describe any visit. Offer to have the office follow up, and capture the lead.';
         }
         const { serviceReportText } = require('./relay-visit');
-        return await serviceReportText(ctx.customerId, { visitDate: input.visit_date });
+        return await serviceReportText(ctx.customerId, {
+          visitDate: input.visit_date,
+          tier: matchedCallerTier(ctx),
+        });
       }
       // Account tools — two disclosure tiers, enforced HERE, not in prompt
       // language:
@@ -588,7 +605,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       //     to BE the matched caller's own account, full tier; otherwise the
       //     redacted tier (dates + service names + balance yes/no).
       let targetCustomerId = null;
-      let tier = 'full';
+      let tier = 'redacted';
       const ref = String(input.customer_ref || '').trim();
       if (ref) {
         const looked = typeof ctx.resolveLookupRef === 'function' ? ctx.resolveLookupRef(ref) : null;
@@ -597,7 +614,9 @@ async function executeTool(name, input = {}, ctx = {}) {
             + 'first; never invent or reuse a reference. Do not share or guess any account details.';
         }
         targetCustomerId = looked;
-        tier = ctx.customerId && looked === ctx.customerId ? 'full' : 'redacted';
+        // Even a ref that resolves to the caller's OWN matched account can only
+        // reach the tier the ANI match itself earned (see matchedCallerTier).
+        tier = ctx.customerId && looked === ctx.customerId ? matchedCallerTier(ctx) : 'redacted';
       } else {
         if (!ctx.customerId) {
           return 'No customer account matches the number this call is coming from. Do NOT share, confirm, or '
@@ -605,6 +624,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             + 'otherwise offer to have the office call them back, and capture the lead.';
         }
         targetCustomerId = ctx.customerId;
+        tier = matchedCallerTier(ctx);
       }
       if (name === 'get_account_overview') return await relayContext.accountOverviewText(targetCustomerId, { tier });
       if (name === 'get_service_history') return await relayContext.serviceHistoryText(targetCustomerId, { tier });
@@ -703,4 +723,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };

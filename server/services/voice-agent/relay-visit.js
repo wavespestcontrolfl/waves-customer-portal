@@ -80,8 +80,21 @@ function speakClock(value) {
  * Today's (ET) appointment for this customer, with a read-only peek at the
  * tracker lifecycle. Returns model-facing text; never writes.
  */
-async function todayEtaText(customerId, { tier = 'full' } = {}) {
+async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
   const redacted = tier !== 'full';
+  // PHYSICAL SECURITY: an unverified voice learns NOTHING about today, not even
+  // that a visit exists. "Is anyone coming to 42 Oak today?" answered yes/no is
+  // the single most abusable disclosure in this lane — it tells a stranger
+  // whether a technician (or the resident) will be at that address today. The
+  // answer is therefore identical whether or not a visit is on the schedule, so
+  // the refusal itself cannot be read as a signal — and the row is never even
+  // read.
+  if (redacted) {
+    return 'Today\'s schedule is only available for the account the caller\'s own phone number matches. '
+      + 'Do NOT say whether a visit is or is not on today\'s schedule for this account, do not state a '
+      + 'window, and do not describe any technician\'s status. Tell the caller the account holder can see '
+      + 'it in the Waves portal, or the office can go over it with them directly.';
+  }
   const db = require('../../models/db');
   const { etDateString } = require('../../utils/datetime-et');
   const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../call-booking-source-actions');
@@ -103,15 +116,6 @@ async function todayEtaText(customerId, { tier = 'full' } = {}) {
   if (!row) {
     return 'No appointment on the schedule for this account today. Do NOT guess at a time and do NOT '
       + 'claim a technician has left — check get_account_overview for the next scheduled visit instead.';
-  }
-
-  // Looked-up account: existence only. Same doctrine as the redacted account
-  // tier (which already withholds the appointment window) — and live
-  // technician position is never disclosed to an unverified voice.
-  if (redacted) {
-    return 'There IS a visit on today\'s schedule for that account. Do not state the time window and do not '
-      + 'describe the technician\'s live status — the account holder can see it in the portal, or the office '
-      + 'can go over it with them directly.';
   }
 
   let windowStart = speakClock(row.window_start);
@@ -185,9 +189,17 @@ function parseArray(value) {
  * sanctioned re-entry sentence. Suppressed entirely for typed reports whose
  * delivery posture is anything but auto_send.
  */
-async function serviceReportText(customerId, { visitDate = null } = {}) {
+async function serviceReportText(customerId, { visitDate = null, tier = 'redacted' } = {}) {
+  // Per-visit detail is FULL-TIER ONLY (strictly more than the visit summary
+  // the redacted tier already withholds), and the tier defaults to redacted so
+  // this exported helper cannot fail open.
+  if (tier !== 'full') {
+    return 'Visit reports are only available for the account whose own phone number the caller is calling '
+      + 'from. Do NOT describe any visit, finding, product, or re-entry guidance. Offer to have the office '
+      + 'follow up with the account holder.';
+  }
   const db = require('../../models/db');
-  const { promptSafe, speakDate } = require('./relay-context');
+  const { promptSafe, promptSafeUntrusted, speakDate } = require('./relay-context');
 
   const query = db('service_records')
     .where({ customer_id: customerId })
@@ -228,31 +240,31 @@ async function serviceReportText(customerId, { visitDate = null } = {}) {
   ]);
 
   const { customerSafeServiceNotes } = require('../project-types');
-  const noteText = promptSafe(customerSafeServiceNotes(record.technician_notes, structured), 240);
+  const noteText = promptSafeUntrusted(customerSafeServiceNotes(record.technician_notes, structured), 240);
 
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`
-    + `${record.service_type ? ` — ${promptSafe(record.service_type, 60)}` : ''}.`];
+    + `${record.service_type ? ` — ${promptSafeUntrusted(record.service_type, 60)}` : ''}.`];
 
   if (findings.length) {
     const rendered = findings
       .map((f) => {
-        const head = promptSafe(f.title, 80);
-        const detail = promptSafe(f.detail, 140);
+        const head = promptSafeUntrusted(f.title, 80);
+        const detail = promptSafeUntrusted(f.detail, 140);
         return [head, detail].filter(Boolean).join(': ');
       })
       .filter(Boolean);
     if (rendered.length) lines.push(`What the technician found: ${rendered.join(' | ')}.`);
-    const recs = findings.map((f) => promptSafe(f.recommendation, 120)).filter(Boolean);
+    const recs = findings.map((f) => promptSafeUntrusted(f.recommendation, 120)).filter(Boolean);
     if (recs.length) lines.push(`Recommended next steps: ${recs.join(' | ')}.`);
   }
 
   if (products.length) {
     const rendered = products
       .map((p) => {
-        const name = promptSafe(p.product_name, 60);
+        const name = promptSafeUntrusted(p.product_name, 60);
         if (!name) return null;
-        const area = promptSafe(p.application_area, 40);
-        const targets = parseArray(p.targets).map((t) => promptSafe(t, 30)).filter(Boolean).slice(0, 4);
+        const area = promptSafeUntrusted(p.application_area, 40);
+        const targets = parseArray(p.targets).map((t) => promptSafeUntrusted(t, 30)).filter(Boolean).slice(0, 4);
         // Owner rule: "per application", never "per visit".
         return `${name}${area ? ` applied to the ${area}` : ''}${targets.length ? ` for ${targets.join(', ')}` : ''}`;
       })

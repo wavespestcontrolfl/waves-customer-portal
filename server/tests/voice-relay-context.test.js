@@ -42,7 +42,12 @@ const { SYSTEM_PROMPT, buildBasePrompt, PRICE_LINE_NO_CONTEXT } = require('../se
 
 // Synthetic fixtures only — 555 numbers, no real customer data (repo P0).
 const FROM = '+19415550142';
-const CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '2023-04-01T00:00:00Z', pipeline_stage: 'active_customer' };
+// `phone` is the ONE authenticating column. A fixture without it is a
+// contact-slot recognition and fails closed to the redacted tier.
+const CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '2023-04-01T00:00:00Z', pipeline_stage: 'active_customer', phone: FROM };
+// Same account reached because the ANI sits in a service-contact slot — a
+// spouse, a tenant, or a PRIOR OCCUPANT of the property.
+const CONTACT_SLOT_CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '2023-04-01T00:00:00Z', pipeline_stage: 'active_customer', phone: '+19415559999', service_contact2_phone: FROM };
 
 // Chainable knex-builder stub: every chain method returns the builder, the
 // builder is thenable (resolves `rows`), `.first()` resolves rows[0]. Write
@@ -212,6 +217,7 @@ describe('GATE ON — caller recognition', () => {
 
     const ctx = await relayContext.resolveCallerContext(FROM);
     expect(ctx.customer).toEqual({ id: 'c-1111', first_name: 'Pat' });
+    expect(ctx.tier).toBe('full'); // the ANI IS customers.phone
     const block = ctx.block;
     expect(block).toContain('KNOWN CALLER');
     expect(block).toContain('First name: Pat');
@@ -263,12 +269,36 @@ describe('GATE ON — account tools', () => {
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
-    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111' });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
     expect(out).toContain('Pest Control');
     expect(out).toContain('Tuesday August 18');
     expect(out).toContain('Friday July 31');
     expect(out).toContain('$49.50');
     assertNoWrites();
+  });
+
+  // FAIL CLOSED: every tier default is 'redacted'. A session ctx with no tier
+  // — or a contact-slot recognition — gets the redacted view, never the
+  // balance AMOUNT or the appointment window.
+  test('matched caller with NO customerTier → redacted overview (no amount, no window)', async () => {
+    primeDb({
+      scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],
+      records: [],
+    });
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+    openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111' });
+    expect(out).not.toContain('$49.50');
+    expect(out).not.toContain('window starting');
+    expect(out).toMatch(/Do NOT state or estimate the amount/i);
+  });
+
+  test('the exported helpers themselves default to redacted (no option passed)', async () => {
+    primeDb({ scheduled: [], records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }] });
+    loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+    openBalanceSummary.mockResolvedValue({ total: 12, count: 1, moreCount: 0, invoices: [] });
+    expect(await relayContext.accountOverviewText('c-1111')).not.toContain('$12');
+    expect(await relayContext.serviceHistoryText('c-1111')).not.toContain('SAFE:note-1');
   });
 
   test('get_service_history → last visits use the customer-facing notes scrub, never raw internal notes', async () => {
@@ -278,7 +308,7 @@ describe('GATE ON — account tools', () => {
         { service_date: '2026-06-15', service_type: 'Pest Control', technician_notes: 'internal-only-secret', structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }), status: 'completed' },
       ],
     });
-    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111' });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
     // customerSafeServiceNotes (mocked as SAFE:-prefix) is the ONLY notes path.
     expect(out).toContain('SAFE:note-1');
     // internal_only typed delivery suppresses notes entirely (same predicate
@@ -290,7 +320,7 @@ describe('GATE ON — account tools', () => {
 
   test('balance of zero reads as none', async () => {
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
-    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111' });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
     expect(out).toMatch(/Open balance: none/);
   });
 });
@@ -310,10 +340,19 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
     phone: '+19415550999',
   };
 
-  function lookupCtx() {
+  // Mirrors the session ctx relay-conversation builds: opaque refs + the
+  // per-call lookup budget + the caller's own ANI.
+  function lookupCtx({ from = FROM, budget = relayContext.LOOKUP_SESSION_BUDGET } = {}) {
     const refs = new Map();
+    let used = 0;
     return {
       customerId: null,
+      from,
+      consumeLookup: () => {
+        if (used >= budget) return false;
+        used += 1;
+        return true;
+      },
       rememberLookup: (row) => {
         const ref = `C${refs.size + 1}`;
         refs.set(ref, row.id);
@@ -321,13 +360,67 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
       },
       resolveLookupRef: (ref) => refs.get(String(ref || '').trim().toUpperCase()) || null,
       _refs: refs,
+      _used: () => used,
     };
   }
+
+  // ⭐ THE ADDRESS-ORACLE FIX. One criterion never yields a ref — and the
+  // refusal is identical whether or not the DB would have matched, so the
+  // refusal itself is not an oracle either.
+  test('ONE criterion → no ref, no DB read, and the SAME answer match-or-not', async () => {
+    primeDb({ customers: [ROW] });
+    const ctx = lookupCtx();
+    const nameOnly = await executeTool('lookup_customer', { name: 'Dana Whitfield' }, ctx);
+    expect(nameOnly).toMatch(/need two details/i);
+    expect(nameOnly).not.toMatch(/customer_ref/);
+    expect(nameOnly).not.toContain('Dana');
+    expect(nameOnly).not.toContain('Sarasota');
+    expect(db).not.toHaveBeenCalled();
+    expect(ctx._refs.size).toBe(0);
+
+    primeDb({ customers: [] });
+    const noMatch = await executeTool('lookup_customer', { name: 'Zebulon Quark' }, ctx);
+    expect(noMatch).toBe(nameOnly); // byte-identical: nothing is confirmed or denied
+    expect(db).not.toHaveBeenCalled();
+    expect(ctx._used()).toBe(0); // a refused lookup costs no budget
+  });
+
+  test('street fragment alone → refused (the street oracle is the worst one)', async () => {
+    primeDb({ customers: [ROW] });
+    const out = await executeTool('lookup_customer', { street: 'Palmetto Grove' }, lookupCtx());
+    expect(out).toMatch(/need two details/i);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('phone alone is enough ONLY when it IS the caller\'s own ANI', async () => {
+    primeDb({ customers: [ROW] });
+    const foreign = await executeTool('lookup_customer', { phone: '941-555-0999' }, lookupCtx());
+    expect(foreign).toMatch(/need two details/i);
+    expect(db).not.toHaveBeenCalled();
+
+    primeDb({ customers: [ROW] });
+    const own = await executeTool('lookup_customer', { phone: FROM }, lookupCtx({ from: FROM }));
+    expect(own).toMatch(/customer_ref: C1/);
+  });
+
+  test('per-call lookup budget: 3 DB-reaching lookups, then the tool is closed', async () => {
+    const ctx = lookupCtx();
+    for (let i = 0; i < relayContext.LOOKUP_SESSION_BUDGET; i++) {
+      primeDb({ customers: [] });
+      const out = await executeTool('lookup_customer', { name: `Person${i}`, street: 'Main' }, ctx);
+      expect(out).toMatch(/No account matches/i);
+    }
+    primeDb({ customers: [ROW] });
+    const refused = await executeTool('lookup_customer', { name: 'Dana Whitfield', street: 'Palmetto' }, ctx);
+    expect(refused).toMatch(/No more account lookups/i);
+    expect(refused).not.toMatch(/customer_ref/);
+    expect(ctx._refs.size).toBe(0);
+  });
 
   test('single match → match-found + first name + city + ref, NEVER address/email/phone/id', async () => {
     primeDb({ customers: [ROW] });
     const ctx = lookupCtx();
-    const out = await executeTool('lookup_customer', { name: 'Dana Whitfield' }, ctx);
+    const out = await executeTool('lookup_customer', { name: 'Dana Whitfield', street: 'Palmetto Grove' }, ctx);
     expect(out).toContain('Dana');
     expect(out).toContain('Sarasota');
     expect(out).toMatch(/customer_ref: C1/);
@@ -372,7 +465,7 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
       ],
     });
     const ctx = lookupCtx();
-    const out = await executeTool('lookup_customer', { name: 'Whitfield' }, ctx);
+    const out = await executeTool('lookup_customer', { name: 'Whitfield', street: 'Palmetto Grove' }, ctx);
     expect(out).toContain('2 accounts');
     expect(out).toContain('Dana');
     expect(out).toContain('Daniel');
@@ -387,7 +480,7 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 
   test('6+ matches → too many, no names at all', async () => {
     primeDb({ customers: Array.from({ length: 6 }, (_, i) => ({ ...ROW, id: `c-${i}`, first_name: `Name${i}` })) });
-    const out = await executeTool('lookup_customer', { name: 'Smith' }, lookupCtx());
+    const out = await executeTool('lookup_customer', { name: 'Smith', street: 'Main St' }, lookupCtx());
     expect(out).toMatch(/more than five/i);
     expect(out).not.toContain('Name0');
     expect(out).not.toMatch(/customer_ref/);
@@ -395,7 +488,7 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 
   test('no match → suggests re-checking, captures as lead', async () => {
     primeDb({ customers: [] });
-    const out = await executeTool('lookup_customer', { name: 'Zebulon Quark' }, lookupCtx());
+    const out = await executeTool('lookup_customer', { name: 'Zebulon Quark', street: 'Nowhere Rd' }, lookupCtx());
     expect(out).toMatch(/No account matches/i);
   });
 });
@@ -403,9 +496,10 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 describe('GATE ON — disclosure tiers (enforced in tool output, not prompt language)', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
-  function refCtx({ ani = null } = {}) {
+  function refCtx({ ani = null, tier = 'full' } = {}) {
     return {
       customerId: ani,
+      customerTier: ani ? tier : 'redacted',
       resolveLookupRef: (ref) => (String(ref).toUpperCase() === 'C1' ? 'c-9001' : null),
     };
   }
@@ -459,8 +553,39 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     primeDb({
       records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }],
     });
-    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111' });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
     expect(out).toContain('SAFE:note-1');
+  });
+
+  // ⭐ CONTACT SLOTS ARE NOT AN AUTHENTICATION BOUNDARY. The three
+  // service_contact*_phone columns are a LEAD-DEDUP column set that holds
+  // spouses, tenants and PRIOR OCCUPANTS — an ANI matching one of them
+  // recognises the account but verifies nobody.
+  test('ANI on a contact slot → tier redacted, NOT full', async () => {
+    primeDb({ customers: [CONTACT_SLOT_CUSTOMER] });
+    loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+    openBalanceSummary.mockResolvedValue({ total: 231.75, count: 3, moreCount: 0, invoices: [] });
+    const ctx = await relayContext.resolveCallerContext(FROM);
+    expect(ctx.customer.id).toBe('c-1111');
+    expect(ctx.tier).toBe('redacted');
+    expect(ctx.matchedColumn).toBe('service_contact2_phone');
+    // The system block itself drops the amount and the arrival window.
+    expect(ctx.block).not.toContain('$231.75');
+    expect(ctx.block).toMatch(/NOT as that account holder's own/i);
+  });
+
+  test('a contact-slot ANI cannot reach a full-tier surface', async () => {
+    primeDb({ records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }] });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'redacted' });
+    expect(out).not.toContain('SAFE:note-1');
+    expect(out).toMatch(/Looked-up account|confirm, don't recite/i);
+  });
+
+  test('customers.phone wins when the ANI is in BOTH its own column and a slot', async () => {
+    primeDb({ customers: [{ ...CONTACT_SLOT_CUSTOMER, phone: FROM }] });
+    const ctx = await relayContext.resolveCallerContext(FROM);
+    expect(ctx.tier).toBe('full');
+    expect(ctx.matchedColumn).toBe('phone');
   });
 });
 
