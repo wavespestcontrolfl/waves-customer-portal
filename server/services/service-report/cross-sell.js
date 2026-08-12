@@ -88,6 +88,11 @@ function optionIsPriceable(option) {
   if (!option) return false;
   if (option.manualReview) return false;
   if (String(option.confidence || '').toLowerCase() === 'low') return false;
+  // A positive one-time/setup component may not price on the card (codex
+  // #3367 PR r5): per-application is the ONLY price field this payload may
+  // carry (r7 ruling), so a termite-basic dueAtStart would price-lock an
+  // undisclosed charge — demote to the quote CTA instead.
+  if (Number(option.dueAtStart) > 0 || Number(option.oneTime) > 0) return false;
   return Number(option.perVisit) > 0;
 }
 
@@ -222,6 +227,11 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // describe ONE property (a multi-property customer could earn an
     // unearned combined tier or another property's price), so no card.
     if (!primaryStreet) return null;
+    // A primary key without locality wildcard-matches every same-street
+    // property under sameScopeKey (codex #3367 PR r5) — the same rejection
+    // already applied to raw stamps and estimate seeds applies to the
+    // anchor itself: unprovable premises, no card.
+    if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
     // The joined row COALESCEs stamped city/zip to the customer mirror, so
     // a stamp carrying ONLY line1 masquerades as the primary locality
     // (codex #3367 PR r4): a multi-property customer with the same street
@@ -283,6 +293,13 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       reportIdentity = { ...reportIdentity, ...(catalogById.get(service.scheduled_service_id) || {}) };
     }
     const reportFamilies = ownershipKeysForRow(reportIdentity);
+    // The catalog-enriched identity feeds the commercial gate too (codex
+    // #3367 PR r5): a 'Commercial Pest Control' catalog row under stale
+    // generic text with a blank property_type passed both earlier
+    // commercial checks and could price a residential offer on a
+    // commercial report. Same predicate the plan-sync exclusions use.
+    const { isCommercialServiceRow } = require('../self-booking-plan-sync');
+    if (isCommercialServiceRow(reportIdentity)) return null;
 
     // Plan-rate ledger evidence (codex #3367 PR r1, reworked PR r2): a
     // family carrying a live monthly rate blocks offering that family even

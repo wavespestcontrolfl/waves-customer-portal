@@ -556,17 +556,20 @@ function positiveNumber(value) {
 // received"). Staff QA views post nothing and report success so the flow is
 // previewable without polluting analytics.
 async function submitReportEvent(token, eventName, metadata = {}) {
-  if (!token || !eventName) return false;
-  if (staffViewTokens.has(token)) return true;
+  // Returns { ok, status } — status 0 for network failure. The cross-sell
+  // card needs the 409 (stale offer) distinguished from a transient error:
+  // retrying the same stale payload can never succeed (codex #3367 PR r5).
+  if (!token || !eventName) return { ok: false, status: 0 };
+  if (staffViewTokens.has(token)) return { ok: true, status: 200 };
   try {
     const response = await fetch(`${API_BASE}/reports/${token}/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventName, channel: 'public_report', metadata }),
     });
-    return response.ok;
+    return { ok: response.ok, status: response.status };
   } catch {
-    return false;
+    return { ok: false, status: 0 };
   }
 }
 
@@ -2952,14 +2955,17 @@ function CrossSellCard({ data, token, mode }) {
   const handleRequest = async () => {
     if (requestState === 'sending' || requestState === 'sent') return;
     setRequestState('sending');
-    const ok = await submitReportEvent(token, 'cross_sell_requested', {
+    const result = await submitReportEvent(token, 'cross_sell_requested', {
       serviceKey: offer.serviceKey,
       serviceLabel: offer.label,
       optionId: option.id || null,
       perApplication: option.perVisit || null,
       offerMode: offer.mode,
     });
-    setRequestState(ok ? 'sent' : 'failed');
+    // 409 = the server-recomputed offer no longer matches this render —
+    // retrying the same stale payload can never succeed, so prompt a
+    // refresh instead of a dead retry loop (codex #3367 PR r5).
+    setRequestState(result.ok ? 'sent' : result.status === 409 ? 'stale' : 'failed');
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
@@ -2980,6 +2986,15 @@ function CrossSellCard({ data, token, mode }) {
           <p className="cross-sell-confirm">
             Request received — we&apos;ll confirm the details with you before anything is scheduled.
           </p>
+        ) : requestState === 'stale' ? (
+          <button
+            type="button"
+            data-glass-accent=""
+            className="review-cta cross-sell-cta"
+            onClick={() => window.location.reload()}
+          >
+            Offer updated — refresh to see the latest
+          </button>
         ) : (
           <button
             type="button"
@@ -3001,7 +3016,7 @@ function CrossSellCard({ data, token, mode }) {
           That didn&apos;t go through — please try again, or call (941) 297-5749.
         </p>
       )}
-      {requestState !== 'sent' && (
+      {requestState !== 'sent' && requestState !== 'stale' && (
         <p className="cross-sell-fine">
           {priced
             ? 'No charge today — we’ll confirm the details with you before anything is scheduled.'

@@ -328,6 +328,43 @@ describe('buildReportCrossSell', () => {
     expect(result.option).toBeNull();
   });
 
+  test('a commercial catalog identity suppresses the card even under stale residential text', async () => {
+    // 'Commercial Pest Control' catalog row, stale generic service_type,
+    // blank stored property_type: the catalog-enriched identity must hit
+    // the commercial gate — a residential price on a commercial report is
+    // the ruled no-card-at-all case.
+    const db = dbFor({
+      customer: CUSTOMER({ property_type: null }),
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      catalogRows: [{ id: 'done-2', service_key: 'commercial_pest_control', service_name: 'Commercial Pest Control' }],
+    });
+    const service = SERVICE({ service_type: 'Pest Control', scheduled_service_id: 'done-2' });
+    expect(await buildReportCrossSell(service, db, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a primary address without city or zip suppresses the card — anchor locality unprovable', async () => {
+    // The primary key is the anchor every frame scopes to; without
+    // locality it wildcard-matches every same-street property, so the
+    // card fails closed exactly like raw stamps and estimate seeds.
+    const db = dbFor({
+      customer: CUSTOMER({ city: null, zip: null }),
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('options carrying setup or one-time charges never price on the card', () => {
+    // Per-application is the ONLY price field the public payload may carry
+    // (r7 ruling): a termite-basic dueAtStart would price-lock an
+    // undisclosed setup charge — such options demote to the quote CTA.
+    const { optionIsPriceable } = _private;
+    expect(optionIsPriceable({ perVisit: 42 })).toBe(true);
+    expect(optionIsPriceable({ perVisit: 42, dueAtStart: 99 })).toBe(false);
+    expect(optionIsPriceable({ perVisit: 42, oneTime: 150 })).toBe(false);
+  });
+
   test('report-family guard: a pest report with zero upcoming rows never offers pest', async () => {
     // Recurring customer whose next visit isn't seeded yet — ownership sees
     // nothing upcoming, but the report itself proves they buy pest.
