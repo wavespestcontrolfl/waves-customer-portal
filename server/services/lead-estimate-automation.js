@@ -9,6 +9,11 @@ const DEFAULT_HOME_SQFT = 2000;
 const DEFAULT_LOT_SQFT = 8000;
 
 const { generateEstimate } = require('./pricing-engine');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+  commercialTextSignal,
+} = require('./estimator-engine/unit-scope-model');
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -262,6 +267,15 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   );
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push('property_measurements_defaulted');
+  // Gate ON: an unresolved type stays literal 'unknown' — the pricing
+  // engine's own normalizer prices it at the neutral default AND stamps
+  // propertyTypeWasDefaulted/invalid_property_type warnings, so the default
+  // is observable instead of masquerading as a classified single-family
+  // (owner ruling 2026-08-11).
+  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || null;
+  if (unitScopeGuardrailsEnabled() && !resolvedPropertyType) {
+    review.push('property_type_unresolved');
+  }
 
   return {
     input: {
@@ -273,7 +287,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       // (harmless for residential, which ignores it).
       lotSizeMeasured: !!lotSqFt,
       stories: numberOrNull(body.stories, customer.stories) || 1,
-      propertyType: body.propertyType || body.property_type || customer.property_type || 'Single Family',
+      propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
       features: {
@@ -446,6 +460,26 @@ function evaluateLeadEstimateAutomationReadiness({
   if (!resolvedPhone) missing.push('phone');
   if (!address.line1 || !/\d/.test(address.line1)) missing.push('street_address');
   if (!hasConcreteServiceInterest(resolvedServiceInterest)) missing.push('specific_service');
+  if (unitScopeGuardrailsEnabled()) {
+    // Any-digit passes ordinal street NAMES ("48th Avenue East, Unit 101"
+    // — a real lead that silently produced no lookup and a wrong-category
+    // draft). A quotable address needs a PRIMARY street number; without one
+    // the automation blocks instead of pricing a property it can't ground
+    // (owner ruling 2026-08-11).
+    if (address.line1 && /\d/.test(address.line1) && !hasPrimaryStreetNumber(address.line1)) {
+      missing.push('street_number');
+    }
+    // A residential-intake lead whose own words describe a commercial
+    // premises ("brand-new industrial building… office and warehouse") is a
+    // category conflict: reclassifying + scoping the suite is operator
+    // work, never an auto-priced residential draft.
+    const prose = [intake.message, intake.notes, resolvedServiceInterest]
+      .filter(Boolean).join(' ');
+    if (commercialTextSignal(prose)) {
+      missing.push('commercial_category_conflict');
+      review.push('commercial_signal_on_residential_intake');
+    }
+  }
 
   if (!address.city && !address.zip) review.push('city_or_zip_missing');
   if (!firstNonEmpty(intake.email, customer.email)) review.push('email_missing_sms_only');

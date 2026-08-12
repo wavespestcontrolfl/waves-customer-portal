@@ -141,8 +141,14 @@ describe('performPropertyLookup cache integration', () => {
     expect(live.meta.cache).toBe('miss');
     expect(live.aiAnalysis).toBeNull();
     expect(lookupPropertyFromAITrio).toHaveBeenCalledTimes(1);
-    // No vision keys in test env → aiAnalysis null → never cached.
-    expect(writes.some(([kind]) => kind === 'upsert')).toBe(false);
+    // No vision keys in test env → aiAnalysis null → the DATA slot is never
+    // cached. Attempt-lifecycle stamps (markLookupAttempt) are upserts by
+    // design — they carry attempt columns only, so the contract pins that no
+    // write carried property_record.
+    expect(writes.some(([, payload]) => payload && payload.property_record != null)).toBe(false);
+    // The attempt lifecycle DID stamp the row (owner ruling 2026-08-11):
+    // a record-less lookup must still leave a countable, segmentable row.
+    expect(writes.some(([, payload]) => payload && payload.last_attempt_status)).toBe(true);
   });
 
   it('hit serves the cached row with key-by-key response shape parity', async () => {

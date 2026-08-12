@@ -480,5 +480,6 @@ module.exports = {
     inferServiceScope,
     inferOwnershipType,
     buildMeasurementEvidence,
+    hasUnitSignal,
   },
 };

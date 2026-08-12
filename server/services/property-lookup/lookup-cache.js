@@ -331,6 +331,55 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
   return attachEvidenceToCachedLookup(address, '_addressAudit', addressAudit);
 }
 
+// ── Attempt lifecycle (owner ruling 2026-08-11) ─────────────────
+// "No property_lookups row at all" was an observability hole: a lookup
+// that failed before saveLookup (incomplete address, geocode failure, no
+// providers) left NOTHING behind, so the unresolved population could not
+// even be counted, let alone segmented by failure reason. Every attempt
+// now stamps the row — status 'pending' at start, a failure-reason status
+// at the end. The stamps live BESIDE the cached data (attempt columns
+// only) and never touch property_record/expires_at, so cache semantics are
+// unchanged: a stub row with no property_record is still a cache miss.
+// Both writers are fail-open — a stamp failure must never sink a lookup —
+// and tolerate the columns not existing yet (pre-migration deploys).
+const LOOKUP_ATTEMPT_STATUSES = new Set([
+  'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
+  'incomplete_address', 'unit_not_matched', 'multiple_unit_matches',
+  'new_construction_suspected', 'provider_timeout',
+]);
+
+async function markLookupAttempt(address, status, reason = null) {
+  if (isCacheDisabled()) return;
+  if (!LOOKUP_ATTEMPT_STATUSES.has(status)) return;
+  try {
+    const { hash, normalizedAddress } = addressKey(address);
+    const stamp = {
+      last_attempt_at: db.fn.now(),
+      last_attempt_status: status,
+      last_attempt_reason: reason ? String(reason).slice(0, 250) : null,
+      updated_at: db.fn.now(),
+    };
+    await db('property_lookups')
+      .insert({
+        address_hash: hash,
+        normalized_address: normalizedAddress,
+        attempt_count: 1,
+        ...stamp,
+      })
+      .onConflict('address_hash')
+      .merge({
+        ...stamp,
+        // Only the attempt START increments the counter; the finalize stamp
+        // for the same attempt re-uses it.
+        ...(status === 'pending'
+          ? { attempt_count: db.raw('COALESCE(property_lookups.attempt_count, 0) + 1') }
+          : {}),
+      });
+  } catch (err) {
+    logger.warn('[lookup-cache] attempt stamp failed', { status, error: err.message });
+  }
+}
+
 async function saveLookup(address, result) {
   if (isCacheDisabled()) return;
   // Never cache a failed lookup — a transient outage must not become a
@@ -503,6 +552,7 @@ module.exports = {
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
   saveLookup,
+  markLookupAttempt,
   saveVerifiedOverride,
   sanitizeVerifiedValue,
   VERIFIABLE_FIELDS,

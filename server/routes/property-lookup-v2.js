@@ -28,8 +28,13 @@ const {
   getCachedLookup,
   getVerifiedOverrides,
   saveLookup,
+  markLookupAttempt,
   saveVerifiedOverride,
 } = require('../services/property-lookup/lookup-cache');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+} = require('../services/estimator-engine/unit-scope-model');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -243,6 +248,11 @@ async function performPropertyLookup(address, options = {}) {
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
+
+  // Attempt stamp BEFORE geocoding (owner ruling 2026-08-11): a lookup that
+  // dies before saveLookup must still leave a countable row. Fail-open
+  // inside markLookupAttempt; skipped in write-nothing mode.
+  if (persist) await markLookupAttempt(address, 'pending');
 
   const result = {
     address: String(address).trim(),
@@ -661,6 +671,37 @@ async function performPropertyLookup(address, options = {}) {
 
   // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
   if (persist) await saveLookup(address, result);
+
+  // Finalize the attempt stamp with WHY this lookup resolved or didn't —
+  // "no parcel" used to bucket incomplete addresses, geocode failures, new
+  // construction, and provider timeouts together, and record-less attempts
+  // left no row at all. Purely observational: never alters the result.
+  if (persist) {
+    const record = result.propertyRecord;
+    let status = 'no_record';
+    let reason = null;
+    if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId)) {
+      status = 'resolved';
+    } else if (record) {
+      status = 'no_parcel';
+      try {
+        const { detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+        if (detectUnassessedVacantParcel(record)) status = 'new_construction_suspected';
+      } catch { /* detector unavailable — keep no_parcel */ }
+    } else if (!hasPrimaryStreetNumber(address)) {
+      status = 'incomplete_address';
+      reason = 'no primary street number';
+    } else if (!geo) {
+      status = 'geocode_failed';
+      reason = result.errors.find((e) => e.source === 'satellite')?.message || null;
+    } else if (result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))) {
+      status = 'provider_timeout';
+      reason = result.errors.map((e) => e.source).join(',');
+    } else {
+      reason = result.errors.map((e) => e.source).join(',') || null;
+    }
+    await markLookupAttempt(address, status, reason);
+  }
 
   return result;
 }
@@ -1504,7 +1545,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const residentialDisplayType =
     (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
       ? rc.propertyType
-      : (visionPropertyType || 'Single Family');
+      // Gate ON: with no record and no confident vision type there is no
+      // classification — surface 'Unknown' (observable, recoverable)
+      // instead of a plausible-but-wrong 'Single Family'. Pricing paths
+      // normalize Unknown to the same neutral default dollars; only the
+      // LABEL stops lying (owner ruling 2026-08-11).
+      : (visionPropertyType || (unitScopeGuardrailsEnabled() ? 'Unknown' : 'Single Family'));
 
   // County-facts turf prior: vision produced no turf number (satellite miss,
   // obstructed imagery, brand-new construction) but the county roll gave

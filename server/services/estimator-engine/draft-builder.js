@@ -33,6 +33,11 @@ const {
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { sameStreetAddress } = require('./address-compare');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+  commercialCategoryConflict,
+} = require('./unit-scope-model');
 
 const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
 
@@ -209,7 +214,14 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
       ? 'commercial'
       : (propertyFacts?.propertyType
         || (profileDescribesQuotedProperty ? pricingSafePropertyType(context?.customer?.property_type) : null)
-        || 'Single Family'),
+        // Gate ON: an unresolved classification stays visibly 'unknown'
+        // (the pest normalizer prices it at the neutral default, same
+        // dollars as before, and classifyLane parks the draft with an
+        // explicit property_type_unresolved reason) — it must never
+        // silently become single_family, because a plausible-but-wrong
+        // type prices confidently wrong where a missing one is observable
+        // and recoverable (owner ruling 2026-08-11).
+        || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family')),
     // customers.property_sqft is TREATED LAWN AREA by schema — the correct
     // plumbing is the engine's measured-turf input, never home sqft.
     ...((!isCommercial && profileDescribesQuotedProperty && positive(context?.customer?.property_sqft))
@@ -521,6 +533,31 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (!intent.address) {
     return { lane: LANES.RED, reasons: ['no service address established on the call or profile'] };
   }
+  if (unitScopeGuardrailsEnabled()) {
+    // An address without a primary street NUMBER cannot be geocoded or
+    // parcel-matched with confidence — every downstream property fact would
+    // be a guess. Red, never a silent no-data draft (owner ruling
+    // 2026-08-11: fail loud on incomplete addresses).
+    if (!hasPrimaryStreetNumber(intent.address)) {
+      return {
+        lane: LANES.RED,
+        reasons: [`service address "${intent.address}" has no primary street number — get the full address before quoting`],
+        causes: ['incomplete_address'],
+      };
+    }
+    // The call positively typed the premises commercial while the draft
+    // stayed residential: reclassifying is the composer's job, so a
+    // conflict here means one of them is wrong — no automated price until
+    // an operator resolves which (owner ruling: category conflicts red).
+    const conflictType = commercialCategoryConflict({ extraction: context?.extraction, intent });
+    if (conflictType) {
+      return {
+        lane: LANES.RED,
+        reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
+        causes: ['category_conflict'],
+      };
+    }
+  }
 
   const lines = engineResult?.lineItems || [];
   const pricedLines = lines.filter((l) => !lineRequiresReview(l));
@@ -579,6 +616,13 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
   if (propertyFacts?.newConstruction) reasons.push('new construction — county roll not yet assessed');
+  // Gate ON: the classification stayed 'unknown' instead of silently
+  // defaulting single_family (propertyTypeUnresolved is stamped off the
+  // ACTUAL engine input in index.js, so this can never drift from what
+  // priced) — observable and recoverable, but never a green one-click send.
+  if (propertyFacts?.propertyTypeUnresolved) {
+    reasons.push('property type unresolved — classify the property before send (priced at the neutral default)');
+  }
   if (manualLines.length) {
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
     reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
@@ -677,6 +721,9 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
     factLine('Home/building sqft', propertyFacts?.home),
     factLine('Lot sqft', propertyFacts?.lot),
     `- New construction: ${propertyFacts?.newConstruction ? 'YES (county roll unassessed)' : 'no'} · Tenant: ${propertyFacts?.tenant ? 'YES' : 'no'}`,
+    propertyFacts?.unitScope
+      ? `- Scope: ${propertyFacts.unitScope.serviceScope} · Use: ${propertyFacts.unitScope.propertyUse} · Relationship: ${propertyFacts.unitScope.customerRelationship} · Size basis: ${propertyFacts.unitScope.sizeBasis}`
+      : null,
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
     comps && !comps.insufficient

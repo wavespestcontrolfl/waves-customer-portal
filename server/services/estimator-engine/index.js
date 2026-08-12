@@ -1545,6 +1545,33 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       applyV2ToPropertyFacts(propertyFacts, propertyFactsV2);
     }
 
+    // Unit-scope model (GATE_UNIT_SCOPE_GUARDRAILS): first-class
+    // propertyUse × serviceScope × customerRelationship × sizeBasis so a
+    // unit tenant, an association, and a whole-property owner stop sharing
+    // one overloaded propertyType (owner ruling 2026-08-11). Always
+    // computed and stored (audit); gate ON additionally marks a unit's
+    // absent lot NOT APPLICABLE so classifyLane stops flagging a lot the
+    // property doesn't have. Fail-open: a model failure never sinks a draft.
+    try {
+      const {
+        unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
+      } = require('./unit-scope-model');
+      const unitScope = resolveUnitScopeModel({
+        propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
+        extraction: context.extraction,
+        intent,
+        propertyFacts,
+        address: intent.address || result.addressUsed || address,
+      });
+      propertyFacts.unitScope = unitScope;
+      result.unitScope = unitScope;
+      if (unitScopeGuardrailsEnabled()) {
+        applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
+      }
+    } catch (err) {
+      logger.warn(`[estimator-engine] unit-scope model failed: ${err.message}`);
+    }
+
     // Existing-customer pricing context: qualifying services for the combined
     // WaveGuard tier (the snapshot itself is computed AFTER pricing — it
     // derives the NEW services from the priced line items). Fail-open.
@@ -1573,6 +1600,13 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // water adjacency feed real pricing adjustments.
         lookupEnriched: effectiveSignals.enriched,
       });
+      // Stamp what ACTUALLY fed pricing: with the guardrails gate on, an
+      // unresolved residential classification prices as literal 'unknown'
+      // (neutral default dollars) and classifyLane parks the draft on this
+      // flag — stamped here so the reason can never drift from the input.
+      if (engineInput.propertyType === 'unknown') {
+        propertyFacts.propertyTypeUnresolved = true;
+      }
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);
