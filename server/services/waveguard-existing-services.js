@@ -144,6 +144,13 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // service must be built from.
   if (cols.primary_line_price) selectCols.push('primary_line_price');
   if (cols.line_discount_dollars) selectCols.push('line_discount_dollars');
+  // Appointment-LEVEL discount signal (distinct from the primary line's own
+  // discount above): it spans the primary and every add-on with no recorded
+  // apportionment, so a composite row carrying one cannot honestly quote its
+  // primary line as a per-application price and must withhold instead.
+  if (cols.discount_id) selectCols.push('discount_id');
+  if (cols.discount_type) selectCols.push('discount_type');
+  if (cols.discount_dollars) selectCols.push('discount_dollars');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');

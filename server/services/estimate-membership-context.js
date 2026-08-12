@@ -388,6 +388,16 @@ function isPrimaryLine(line = {}) {
   return String(line.client_id || '').includes('_primary');
 }
 
+function isAddonLine(line = {}) {
+  return String(line.client_id || '').includes('_addon_');
+}
+
+// A tag-aware invoice declares which line is the service; an invoice with no
+// tags at all is legacy and gets the single-positive heuristic instead.
+function invoiceIsTagAware(lines) {
+  return lines.some((line) => isPrimaryLine(line) || isAddonLine(line));
+}
+
 function isPositiveLine(line = {}) {
   return lineItemAmount(line) > 0;
 }
@@ -422,9 +432,17 @@ function isAppointmentWideDiscount(line = {}) {
 function invoiceCarriesServiceCharge(row = {}) {
   const lines = invoiceLineItems(row);
   if (!lines.length) return Number(row.total) > 0;
-  return lines
-    .filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line))
-    .some(isPositiveLine);
+  const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
+  // A tag-aware invoice bills for the SERVICE only when its primary line is
+  // itself a positive charge. An add-on-only invoice — the concrete case is a
+  // prepay-covered visit whose base is $0 while a one-time add-on bills — says
+  // nothing about what the recurring service costs per application, so like a
+  // setup-only invoice it is skipped and an older service invoice may answer
+  // (codex #3359 r2).
+  if (invoiceIsTagAware(billable)) {
+    return billable.some((line) => isPrimaryLine(line) && isPositiveLine(line));
+  }
+  return billable.some(isPositiveLine);
 }
 
 function invoiceServiceAmount(row = {}) {
@@ -457,7 +475,12 @@ function invoiceServiceAmount(row = {}) {
     // Legacy / fallback invoices carry no client_id at all. One positive line
     // is unambiguously the service; several cannot be told apart, so they
     // withhold rather than summing unrelated charges into a per-application
-    // price.
+    // price. A TAG-AWARE invoice never reaches this heuristic (codex #3359
+    // r2): its tags already said which line is the service, and with no
+    // positive primary the remaining positives are add-ons or checkout
+    // extras — treating one as the service records an add-on's price as the
+    // recurring per-application figure.
+    if (invoiceIsTagAware(billable)) return null;
     if (positives.length !== 1) return null;
     extras = [];
     serviceLines = [...positives, ...billable.filter(isDiscountLine)];
@@ -497,7 +520,7 @@ function invoiceServiceAmount(row = {}) {
 // amount reflects only ONE contract. When a key spans multiple per-property
 // contracts, loadCurrentServiceSpendContext must not stamp it across all of
 // them — it aggregates the per-contract scheduled prices instead.
-async function loadLastPaidSpendByKey(database, customerId) {
+async function loadLastPaidSpendByKey(database, customerId, catalogIdentityByRowId = new Map()) {
   const spend = {};
   try {
     const rows = await database('invoices')
@@ -507,39 +530,50 @@ async function loadLastPaidSpendByKey(database, customerId) {
       .orderBy('paid_at', 'desc')
       .limit(100)
       // discount_amount carries a manual invoice-level discount that never
-      // appears as a negative line (codex #3353 r11).
-      .select('service_type', 'total', 'line_items', 'paid_at', 'discount_amount');
+      // appears as a negative line (codex #3353 r11). scheduled_service_id
+      // links the invoice to the visit it was minted for, which is what
+      // resolves its catalog identity below.
+      .select('service_type', 'total', 'line_items', 'paid_at', 'discount_amount',
+        'scheduled_service_id');
     // The NEWEST invoice for a key decides that key, even when it decides
     // "withheld" (codex #3359): letting an older invoice fill in behind an
     // intentionally-unattributable newest one presents a superseded price as
     // what the customer currently pays.
     const decided = new Set();
     for (const row of rows) {
-      const key = accountServiceKey(row.service_type);
-      if (!key || decided.has(key)) continue;
+      // The SAME gated catalog-vs-text rule the scheduled rows are keyed with
+      // (codex #3359 r2): an invoice minted from a visit whose service_type
+      // text has drifted must file under the family the panel groups that
+      // visit's contract into, or the authoritative last-paid amount lands
+      // under a key nothing reads and the panel falls back to the scheduled
+      // estimate. Invoices minted without a visit link keep their own text,
+      // exactly as before.
+      const identityText = authoritativeServiceText(
+        row,
+        row.scheduled_service_id ? catalogIdentityByRowId.get(row.scheduled_service_id) : null,
+      );
       // A COMBINED invoice ("Quarterly Pest + Termite Bait Station") is one
-      // charge covering several families, but accountServiceKey files it
-      // under the FIRST component alone — so using it as that component's
-      // per-application basis presents the whole bundle as Pest Control's
+      // charge covering several families — so using it as any component's
+      // per-application basis presents the whole bundle as that component's
       // price (codex #3353 r3). This is the invoice-path twin of the
       // component-count guard on the customer-level stamps below, and it
       // matters more because last-paid takes precedence over every other
-      // basis. Withhold rather than mis-attribute.
-      // Not a service invoice (setup/membership or deposit only): it says
-      // nothing about the per-application price, so an older service invoice
-      // may still answer.
+      // basis. Withhold rather than mis-attribute — and decide EVERY
+      // component (codex #3359 r2): the customer's latest charge for each of
+      // them is part of the unattributable bundle, so an older standalone
+      // invoice for any component is superseded and must not fill in.
+      const keys = accountServiceKeys(identityText).filter(Boolean);
+      const undecidedKeys = keys.filter((key) => !decided.has(key));
+      if (!undecidedKeys.length) continue;
+      // Not a service invoice (setup/membership, deposit, or add-on only): it
+      // says nothing about the per-application price, so an older service
+      // invoice may still answer.
       if (!invoiceCarriesServiceCharge(row)) continue;
-      if (accountServiceKeys(row.service_type).length > 1) {
-        // A combined invoice decides the key too — as withheld. Falling
-        // through to an older single-family invoice would quote a price the
-        // customer has since stopped paying.
-        decided.add(key);
-        continue;
-      }
-      decided.add(key);
+      undecidedKeys.forEach((key) => decided.add(key));
+      if (keys.length > 1) continue;
       const amount = invoiceServiceAmount(row);
       if (amount != null) {
-        spend[key] = {
+        spend[undecidedKeys[0]] = {
           amount,
           paidAt: row.paid_at || null,
         };
@@ -675,11 +709,22 @@ async function loadAddonRowIds(database, rows) {
 // A composite visit therefore decomposes: primary_line_price minus its own
 // line discount. Without that column there is nothing to decompose from, so
 // the row yields no basis rather than a padded one.
+//
+// An APPOINTMENT-level discount on a composite row withholds outright (codex
+// #3359 r2): it spans the primary and every add-on with no recorded
+// apportionment — the exact shape invoiceServiceAmount withholds on — so
+// subtracting only the primary's own line discount would report the
+// undiscounted primary as what the customer pays. A row with no add-ons keeps
+// its estimated_price, which is already net of that discount and wholly the
+// primary's. Any of the three discount columns counts as the signal: rows
+// written before discount_dollars existed carry only discount_type/_id, and
+// an unresolvable discount must withhold, not be assumed zero.
 function rowServicePrice(row = {}, addonRowIds) {
   const composite = addonRowIds ? addonRowIds.has(String(row.id)) : true;
   if (!composite) {
     return Number(row.estimated_price) > 0 ? round2(row.estimated_price) : null;
   }
+  if (Number(row.discount_dollars) > 0 || row.discount_type || row.discount_id) return null;
   const primary = Number(row.primary_line_price);
   if (!(primary > 0)) return null;
   const net = round2(primary - (Number(row.line_discount_dollars) || 0));
@@ -815,9 +860,11 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     .flatMap((row) => qualifyingKeysForRow(row))
     .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
-  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const cadenceByRowId = await loadCadenceByRowId(database, customerId);
   const catalogIdentityByRowId = await loadCatalogIdentityByRowId(database, customerId);
+  // AFTER the identity load: paid invoices resolve their family through the
+  // visit they were minted for, under the same gated rule as the rows.
+  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId, catalogIdentityByRowId);
   const addonRowIds = await loadAddonRowIds(database, rows);
   // ET calendar day — scheduled_date is a pg DATE column, read as the stored
   // day (repo convention), so the cutoff must be the ET day too.

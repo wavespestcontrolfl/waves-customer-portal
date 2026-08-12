@@ -2009,6 +2009,140 @@ describe('current-spend cadence and stamped billing basis', () => {
     expect(spend.currentServices[0].currentPerVisit).toBeNull();
   });
 
+  test('a composite visit with an appointment-level discount withholds instead of quoting the undiscounted primary', async () => {
+    const database = fakeDb({
+      scheduledRows: [{
+        id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05',
+        // $100 primary + $75 add-on − 10% appointment discount. The $17.50
+        // spans both lines with no recorded apportionment — the same shape
+        // the invoice path withholds on.
+        estimated_price: 157.5, primary_line_price: 100, line_discount_dollars: 0,
+        discount_type: 'percentage', discount_amount: 10, discount_dollars: 17.5,
+      }],
+      addonRows: [{ scheduled_service_id: 'p1' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBeNull();
+  });
+
+  test('an add-on-only invoice is skipped, not recorded as the service price', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 110 }],
+      paidInvoices: [
+        // A prepay-covered visit whose base billed $0 while a one-time add-on
+        // billed — the add-on's price says nothing about the plan.
+        {
+          service_type: 'pest_control', total: 75, paid_at: '2026-06-20',
+          line_items: [
+            { client_id: 'scheduled_s1_addon_9', description: 'Fire Ant Treatment', amount: 75 },
+          ],
+        },
+        // Skipped, not withheld: the older SERVICE invoice still answers.
+        {
+          service_type: 'pest_control', total: 110, paid_at: '2026-03-20',
+          line_items: [
+            { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 110 },
+          ],
+        },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 110,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('a combined newest invoice supersedes older standalone invoices for EVERY component', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 },
+        { id: 't1', service_type: 'termite_bait', scheduled_date: '2099-02-05', estimated_price: 40 },
+      ],
+      paidInvoices: [
+        // The customer's latest termite charge is inside this unattributable
+        // bundle — so the older standalone termite invoice is superseded too.
+        { service_type: 'Quarterly Pest + Termite Bait Station', total: 130, paid_at: '2026-06-20' },
+        { service_type: 'termite_bait', total: 55, paid_at: '2026-01-20' },
+      ],
+      catalogRows: [
+        { id: 'p1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 't1', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const termite = spend.currentServices.find((service) => service.key === 'termite_bait');
+    expect(termite).toEqual(expect.objectContaining({
+      currentPerVisit: 40,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a paid invoice resolves its family through the visit\'s catalog identity (tier gate on)', async () => {
+    mockAutoTierGate = true;
+    const database = fakeDb({
+      // The drift case again, now with payment history: the row AND its
+      // invoice both say "Pest Control" while the catalog says lawn. Keyed by
+      // text, the authoritative last-paid amount files under pest_control —
+      // a key nothing reads — and the panel falls back to the scheduled price.
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+      paidInvoices: [{
+        service_type: 'Pest Control', total: 89, paid_at: '2026-05-20', scheduled_service_id: 'd1',
+        line_items: [
+          { client_id: 'scheduled_d1_primary', description: 'Pest Control', amount: 89 },
+        ],
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'lawn_care',
+      currentPerVisit: 89,
+      spendSource: 'last_paid_invoice',
+    }));
+    mockAutoTierGate = false;
+  });
+
+  test('with the tier gate OFF a linked invoice keeps its own text, matching the rows', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+      paidInvoices: [{
+        service_type: 'Pest Control', total: 89, paid_at: '2026-05-20', scheduled_service_id: 'd1',
+        line_items: [
+          { client_id: 'scheduled_d1_primary', description: 'Pest Control', amount: 89 },
+        ],
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Rows are keyed by text with the gate off; resolving the invoice through
+    // the catalog here would file the amount under a key the rows don't use —
+    // the mirror image of the gate-ON divergence.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      currentPerVisit: 89,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
   test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
     // No catalogRows — the builder has no leftJoin, so the cadence loader
     // throws exactly as it does against a database without the services table.
