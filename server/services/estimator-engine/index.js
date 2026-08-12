@@ -1557,37 +1557,41 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
         commercialCategoryConflict,
       } = require('./unit-scope-model');
-      // After an address re-gather the top-level extraction describes the
-      // call's PRIMARY property, not the one being quoted — its tenancy
-      // and property type must not classify the quoted property (codex r4
-      // P1: a primary-address tenant extraction + a re-gathered
-      // multifamily whole-property quote read as a leased unit and cleared
-      // the quoted property's real lot). The model is still computed from
-      // the re-gathered record for audit, marked cross-property.
+      // The cross-property fence applies only when the composer quoted a
+      // genuinely DIFFERENT property. addressRegathered also fires on
+      // same-property refinements — no prior gathered address at all, or
+      // the same street gaining city/ZIP (addressAddsLocality) — where the
+      // extraction still describes the quoted property and discarding its
+      // signals would bypass the category guard (codex r6 P1: a condo
+      // common-area extraction that merely added locality kept residential
+      // pricing). Only a street-level mismatch means another property
+      // (codex r4 P1: a primary-address tenant extraction must not
+      // classify a different quoted property, or clear its real lot).
+      const crossPropertyRegather = addressRegathered
+        && !!address && !sameStreetAddress(intent.address, address);
       const unitScope = resolveUnitScopeModel({
         propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
-        extraction: addressRegathered ? null : context.extraction,
+        extraction: crossPropertyRegather ? null : context.extraction,
         intent,
-        propertyFacts: addressRegathered ? { ...propertyFacts, tenant: false } : propertyFacts,
+        propertyFacts: crossPropertyRegather ? { ...propertyFacts, tenant: false } : propertyFacts,
         address: intent.address || result.addressUsed || address,
       });
-      if (addressRegathered) unitScope.crossPropertyExtraction = true;
+      if (crossPropertyRegather) unitScope.crossPropertyExtraction = true;
       propertyFacts.unitScope = unitScope;
       result.unitScope = unitScope;
       // Category-conflict signal, resolved HERE where the re-gather is
-      // known (codex r3 P1): the top-level extraction describes the call's
-      // PRIMARY property — when the composer quoted a different property
-      // (addressRegathered), that extraction must neither red-lane the
-      // quoted one (commercial primary, residential secondary) nor is it
-      // evidence about it; the re-gathered lookup's own signals carry the
-      // quoted property's category. classifyLane consumes the stamp.
-      propertyFacts.categoryConflict = addressRegathered
+      // known (codex r3 P1): when the composer quoted a DIFFERENT
+      // property, the primary extraction must neither red-lane the quoted
+      // one (commercial primary, residential secondary) nor is it evidence
+      // about it; the re-gathered lookup's own signals carry the quoted
+      // property's category. classifyLane consumes the stamp.
+      propertyFacts.categoryConflict = crossPropertyRegather
         ? null
         : commercialCategoryConflict({ extraction: context.extraction, intent });
-      // The lot-clearing mutation also stays off after a re-gather — a
-      // scope inferred without the quoted property's own extraction must
-      // not change lot-driven pricing (codex r4 P1).
-      if (unitScopeGuardrailsEnabled() && !addressRegathered) {
+      // The lot-clearing mutation also stays off on a cross-property
+      // re-gather — a scope inferred without the quoted property's own
+      // extraction must not change lot-driven pricing (codex r4 P1).
+      if (unitScopeGuardrailsEnabled() && !crossPropertyRegather) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
       }
     } catch (err) {
