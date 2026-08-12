@@ -448,6 +448,29 @@ describe('pickCtrRewriteTargetPage', () => {
   });
 });
 
+describe('freshness + split-collapse contracts (source shape)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('map coverage requires ABSOLUTE freshness, not only relative', () => {
+    // A whole-domain sync failure freezes gsc_queries AND the map at the
+    // same old date, so the relative comparison alone reports "covered"
+    // forever while the miner keeps acting on stale evidence.
+    expect(src).toMatch(/m\.map_max >= q\.queries_max - make_interval\(days => \?\)[\s\S]{0,120}m\.map_max >= current_date - make_interval\(days => \?\)/);
+    expect(src).toMatch(/MAP_ABSOLUTE_STALENESS_DAYS = 7/);
+  });
+
+  test('no_content_yet collapses classification splits to ONE candidate per query', () => {
+    // dedupeKey embeds service+city, so two splits of one query would both
+    // persist and draft two posts for one intent.
+    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,700}byQuery\.set\(q\.query, \{ q, service, city, impressions \}\)/);
+  });
+
+  test('a ctr_rewrite page is claimed only by a PERSISTABLE candidate', () => {
+    expect(src).toMatch(/if \(total < persistFloorFor\(probe\)\) continue;[\s\S]{0,200}claimedPages\.set/);
+  });
+});
+
 describe('degraded buckets THROW so mineAll suppresses their sweep', () => {
   // The sweep retires every pending row the mine did not re-emit, so an
   // "unavailable dependency" path that returns [] would look like "ran

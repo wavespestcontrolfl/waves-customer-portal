@@ -780,6 +780,11 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // the family.
     const hubImpressions = t.hubImpressions != null ? t.hubImpressions : (t.impressions || 0);
     if (hubImpressions < thresholds.minImpressionsToScore) continue;
+    // HUB position, for the same reason as hub impressions: the bucket
+    // ranks hub rows only, so a cross-domain average could put the rep
+    // outside the >15 window the miner actually applies (audit P2).
+    const hubPos = t.hubPosition != null ? t.hubPosition : pos;
+    if (hubPos <= thresholds.strikingDistancePositionMax) continue;
     if (!queryDomainsCovered([HUB_DOMAIN], mapCoveredDomains || new Set())) continue;
     const hubMappedPosition = mappedPositions instanceof Map
       ? mappedPositions.get(mappedPositionKey(rep.query, HUB_DOMAIN)) ?? null
@@ -793,7 +798,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
       city,
     };
     cand.action_type = actionForOpportunity(cand);
-    const { total } = scoreOpportunity(cand, { position: pos, impressions: hubImpressions });
+    const { total } = scoreOpportunity(cand, { position: hubPos, impressions: hubImpressions });
     // persistFloorFor, not minScoreToActFor: no_content_yet city-service
     // rows ride the blog floor, so the mirror must use the SAME shared
     // gate or it calls a persistable candidate unreachable (audit P1).
@@ -1792,6 +1797,16 @@ class GscOpportunityMiner {
   // so a thin domain's map can legitimately trail by a day or two).
   static QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS = 4;
 
+  // ABSOLUTE staleness bound. The relative check compares the map against
+  // that domain's own gsc_queries high-water mark — but if the WHOLE sync
+  // for a domain fails, both tables keep the same old maximum and the
+  // relative test reports "covered" forever. The 6am sync failing does not
+  // stop the 7:30am miner, so stale evidence would drive live retirements.
+  // GSC itself reports ~3 days behind (hub measured at exactly 3 on
+  // 2026-08-12), so 7 days is comfortable margin over normal lag while
+  // still catching a multi-day outage.
+  static MAP_ABSOLUTE_STALENESS_DAYS = 7;
+
   // Domains whose query→page map is present AND fresh for the window — the
   // coverage evidence behind queryDomainsCovered (no_content_yet and its
   // reachability mirror). An empty set means the map sync isn't keeping up
@@ -1809,8 +1824,11 @@ class GscOpportunityMiner {
                 WHERE date >= ?
                 GROUP BY domain) q
            ON q.domain = m.domain
-        WHERE m.map_max >= q.queries_max - make_interval(days => ?)`,
-      [since, since, GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS]
+        WHERE m.map_max >= q.queries_max - make_interval(days => ?)
+          AND m.map_max >= current_date - make_interval(days => ?)`,
+      [since, since,
+        GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS,
+        GscOpportunityMiner.MAP_ABSOLUTE_STALENESS_DAYS]
     );
     const covered = new Set();
     for (const r of (result.rows || [])) {
@@ -1947,6 +1965,10 @@ class GscOpportunityMiner {
       // to clear the floor would otherwise read as reachable and exclude
       // its family from BOTH buckets (audit P2).
       .select(db.raw('sum(impressions) FILTER (WHERE domain = ?) as hub_impressions', [HUB_DOMAIN]))
+      // Hub-only position too: mineNoContentYet judges hub rankings, and a
+      // strong hub position averaged with weak spokes (or the reverse)
+      // would make the mirror disagree with the bucket it mirrors.
+      .select(db.raw('avg(position) FILTER (WHERE domain = ?) as hub_avg_position', [HUB_DOMAIN]))
       .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type');
     const map = new Map();
@@ -1956,6 +1978,7 @@ class GscOpportunityMiner {
         impressions: parseInt(r.impressions, 10) || 0,
         hubImpressions: parseInt(r.hub_impressions, 10) || 0,
         plainPosition: Number(r.plain_avg_position) || 0,
+        hubPosition: finitePosition(r.hub_avg_position),
         service_category: r.service_category || null,
         city_target: r.city_target || null,
         domains: Array.isArray(r.domains) ? r.domains : [],
@@ -2136,6 +2159,24 @@ class GscOpportunityMiner {
         && queryDomainsCovered(r.domains, mapped.domains))) continue;
       const target = ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains));
       if (!target) continue;
+      // The claimant must be able to PERSIST. A high-volume but
+      // low-revenue/informational classification could otherwise claim the
+      // page while sitting under the rewrite floor, blocking a
+      // lower-impression sibling that would have qualified — leaving the
+      // page with no rewrite at all (audit P2).
+      const probe = {
+        bucket: 'ctr_rewrite',
+        query: r.query,
+        page_url: target,
+        service: r.service_category || inferServiceFromQuery(r.query),
+        city: normalizeCity(r.city_target) || inferCityFromQuery(r.query),
+      };
+      probe.action_type = actionForOpportunity(probe);
+      const { total } = scoreOpportunity(probe, {
+        position: parseFloat(r.avg_position),
+        impressions: parseInt(r.impressions, 10),
+      });
+      if (total < persistFloorFor(probe)) continue;
       const id = routeIdentity(target);
       if (!claimedPages.has(id)) claimedPages.set(id, r);
     }
@@ -3415,13 +3456,25 @@ class GscOpportunityMiner {
       .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore])
       .havingRaw('avg(position) > ?', [THRESHOLDS.strikingDistancePositionMax]);
 
-    const candidates = [];
+    // ONE candidate per query. A classifier change mid-window returns
+    // separate rows per (service_category, city_target), every one of them
+    // consults the SAME query-level evidence, and dedupeKey embeds service
+    // and city — so two splits would both persist and the runner would
+    // draft two posts for one search intent (audit P1). The
+    // highest-impression classification wins, mirroring how
+    // clusterListicleFamilies breaks the same tie.
+    const byQuery = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target) || inferCityFromQuery(q.query);
       const service = q.service_category || inferServiceFromQuery(q.query);
       if (!service) continue;
-      candidates.push({ q, service, city });
+      const impressions = parseInt(q.impressions, 10) || 0;
+      const existing = byQuery.get(q.query);
+      if (!existing || impressions > existing.impressions) {
+        byQuery.set(q.query, { q, service, city, impressions });
+      }
     }
+    const candidates = Array.from(byQuery.values());
     if (!candidates.length) return [];
 
     // Fail CLOSED on missing map coverage: "empty means the check didn't
