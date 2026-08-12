@@ -15,6 +15,7 @@ const base = {
   messageType: 'appointment_reminder',
   hasMedia: false,
   humanAuthored: false,
+  operatorInitiated: false,
 };
 
 describe('decidePushRoute', () => {
@@ -32,6 +33,12 @@ describe('decidePushRoute', () => {
 
   it('is sms_only for operator-authored messages', () => {
     expect(decidePushRoute({ ...base, humanAuthored: true })).toBe('sms_only');
+  });
+
+  it('is sms_only when the operator explicitly initiated the send', () => {
+    // Admin receipt routes accept via:'sms' with operatorInitiated:true —
+    // the operator chose the channel; push must not override it.
+    expect(decidePushRoute({ ...base, messageType: 'receipt', operatorInitiated: true })).toBe('sms_only');
   });
 
   it('routes critical templates to both channels', () => {

@@ -13,22 +13,24 @@
  *      the provider proves at least one device ACCEPTED it (`sent > 0`,
  *      the same delivery-proof contract as the internal-alert redirect in
  *      services/twilio.js).
- *   2. This runs INSIDE the SMS channel, after every pipeline validator
- *      (consent, suppression, send-window) has already passed — so push
- *      sends inherit the 8AM–8PM ET quiet-hours discipline instead of
- *      skipping it (validators/send-window.js exempts non-sms channels;
- *      routing at the provider seam closes that hole). The send-window
- *      boundary re-check (preSendCheck) runs before the push attempt for
- *      the same reason it runs before messages.create().
- *   3. Only AUTOMATED template messages route. Conversational and
- *      operator-authored messages ('manual', humanAuthored, media) stay
- *      SMS — a customer can reply to a text, never to a push.
- *   4. Every push-routed message stays visible to staff and customer:
- *      an sms_log row (status 'sent_push', from_phone 'push') keeps the
- *      comms history whole, and an in-app bell notification gives the
- *      customer a durable record behind the lock-screen banner.
+ *   2. Routing lives INSIDE TwilioService.sendSMS, after EVERY outbound
+ *      guard — owner silence, feature gates, the per-template kill switch,
+ *      validateOutbound, and the caller's send-window boundary re-check —
+ *      so push inherits the full SMS discipline (incl. 8AM–8PM ET quiet
+ *      hours) instead of bypassing any of it. Same precedent as the
+ *      internal-alert bell/push redirect in that file.
+ *   3. push_and_sms fires its push AFTER Twilio accepts the SMS — a failed
+ *      or deferred SMS that the pipeline retries can therefore never
+ *      duplicate the push/bell leg.
+ *   4. Only AUTOMATED template messages route. Conversational,
+ *      operator-authored, operator-initiated, and media-carrying messages
+ *      stay SMS — a customer can reply to a text, never to a push.
+ *   5. Every push-only send stays visible everywhere history is read:
+ *      an sms_log row (status 'sent', from_phone 'push', channel marker in
+ *      metadata), a conversations touchpoint threaded into the customer's
+ *      SMS conversation, and an in-app bell notification for the customer.
  *
- * The per-template matrix below is the OWNER-REVIEWED draft: time- and
+ * The per-template matrix is the OWNER-REVIEWED draft: time- and
  * money-critical messages send BOTH channels; only low-stakes
  * informational types are push-first; anything unlisted is sms_only by
  * omission (fail-safe default). Changing a template's channel is a
@@ -41,7 +43,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 
 // messageType (services/twilio.js vocabulary) → routing policy.
 //   push_first   — push replaces SMS when delivery is proven; SMS fallback.
-//   push_and_sms — both channels, always (critical: never rely on push alone).
+//   push_and_sms — both channels; push fires only after the SMS is accepted.
 //   (unlisted)   — sms_only.
 // Deliberately sms_only by omission: 'manual' + 'ai_assistant'
 // (conversational, reply-able), 'review_request' + 'payment_link' +
@@ -82,11 +84,12 @@ function pushPresentation(messageType) {
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
  */
-function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored }) {
+function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated }) {
   if (!gateOn) return 'sms_only';
   if (!customerId) return 'sms_only';
   if (hasMedia) return 'sms_only'; // push carries no MMS media
   if (humanAuthored) return 'sms_only'; // operator-typed → reply-able SMS
+  if (operatorInitiated) return 'sms_only'; // operator chose SMS explicitly
   return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
 }
 
@@ -98,145 +101,126 @@ async function hasActivePushDevice(customerId, knex = db) {
   return Boolean(row);
 }
 
-// Best-effort history record — comms surfaces read sms_log, so a
-// push-routed send must not leave a gap in the customer's thread.
-async function recordPushInSmsLog(input, messageType, notificationId) {
+async function sendPush(customerId, messageType, body) {
+  const { title, link, category } = pushPresentation(messageType);
+  const PushService = require('../push-notifications');
+  const stats = await PushService.sendToCustomer(customerId, {
+    title,
+    body,
+    url: link,
+    category,
+    tag: `push-routed:${messageType}`,
+  });
+  return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+// Durable in-app record, written only AFTER delivery is proven so retry
+// loops can never accumulate bell rows for undelivered attempts.
+// NotificationService.create (not notifyCustomer) on purpose: the message
+// already passed the SMS pipeline's consent checks, and notifyCustomer
+// would fire its own second push.
+async function recordBell(customerId, messageType, body) {
   try {
-    await db('sms_log').insert({
-      customer_id: input.customerId,
-      direction: 'outbound',
-      from_phone: 'push',
-      to_phone: String(input.to || '').slice(0, 20),
-      message_body: input.body,
-      twilio_sid: null,
-      status: 'sent_push',
-      message_type: messageType,
-      metadata: JSON.stringify({ push_notification_id: notificationId || null }),
+    const { title, link, category } = pushPresentation(messageType);
+    const NotificationService = require('../notification-service');
+    const notif = await NotificationService.create({
+      recipientType: 'customer',
+      recipientId: customerId,
+      category,
+      title,
+      body,
+      link,
     });
+    return notif && notif.id ? String(notif.id) : null;
   } catch (err) {
-    logger.error(`[push-routing] sms_log record failed: ${err.message}`);
+    logger.warn(`[push-routing] bell record failed: ${err.message}`);
+    return null;
   }
 }
 
 /**
- * Attempt push routing for one provider-bound message.
- *
- * Returns:
- *   { handled: false }                → proceed with SMS (includes push_and_sms,
- *                                       which pushes best-effort AND sends SMS)
- *   { handled: true, providerResult } → push proven delivered on a push_first
- *                                       type (or the boundary check blocked);
- *                                       caller returns providerResult as-is.
+ * push_first attempt, called by TwilioService.sendSMS immediately before
+ * the Twilio handoff (all guards + send-window already passed). When a
+ * device proves delivery, this writes the same history the SMS path would
+ * have — sms_log row + conversations touchpoint — and the caller skips
+ * Twilio entirely. Any failure returns { delivered: false } and the SMS
+ * proceeds untouched.
  */
-async function maybeRouteViaPush(input, messageType, preSendCheck) {
-  const decision = decidePushRoute({
-    gateOn: gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
-    customerId: input.customerId || null,
-    messageType,
-    hasMedia: Boolean((input.metadata && (input.metadata.mediaUrls || input.metadata.media))),
-    humanAuthored: Boolean(input.metadata && input.metadata.humanAuthored === true),
-  });
-  if (decision === 'sms_only') return { handled: false, decision };
-
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber }) {
   try {
-    if (!(await hasActivePushDevice(input.customerId))) {
-      return { handled: false, decision };
-    }
-
-    // Send-window boundary parity: the SMS path re-checks at the provider
-    // handoff (inside twilio.js, before messages.create). A push replacing
-    // that SMS must hit the same wall — quiet hours defer BOTH channels.
-    if (typeof preSendCheck === 'function') {
-      let verdict;
-      try {
-        verdict = await preSendCheck();
-      } catch (err) {
-        verdict = { ok: false, code: 'PRE_SEND_CHECK_FAILED', reason: err.message };
-      }
-      if (!verdict || verdict.ok !== true) {
-        return {
-          handled: true,
-          decision,
-          providerResult: {
-            sent: false,
-            provider: 'push',
-            blocked: true,
-            code: verdict?.code || 'PRE_SEND_CHECK_FAILED',
-            error: verdict?.reason || 'pre-send check did not pass',
-            retryable: verdict?.retryable === true,
-            deferred: verdict?.deferred === true,
-            nextAllowedAt: verdict?.nextAllowedAt,
-          },
-        };
-      }
-    }
-
-    const { title, link, category } = pushPresentation(messageType);
-
-    // Durable in-app record FIRST (mirrors notifyCustomer's bell-then-push
-    // order): the bell row survives even if the push provider hiccups.
-    let notificationId = null;
-    try {
-      const NotificationService = require('../notification-service');
-      const notif = await NotificationService.create({
-        recipientType: 'customer',
-        recipientId: input.customerId,
-        category,
-        title,
-        body: input.body,
-        link,
-      });
-      notificationId = notif && notif.id ? String(notif.id) : null;
-    } catch (err) {
-      logger.warn(`[push-routing] bell record failed (continuing): ${err.message}`);
-    }
-
-    const PushService = require('../push-notifications');
-    const stats = await PushService.sendToCustomer(input.customerId, {
-      title,
-      body: input.body,
-      url: link,
-      category,
-      notificationId,
-      tag: notificationId ? `push-routed:${notificationId}` : `push-routed:${messageType}`,
-    });
-    const delivered = Number(stats && stats.sent) > 0;
-
-    if (decision === 'push_and_sms') {
-      // Both channels: the SMS still goes out regardless of push outcome.
-      return { handled: false, decision, pushDelivered: delivered };
-    }
-
+    if (!(await hasActivePushDevice(customerId))) return { delivered: false };
+    const { delivered } = await sendPush(customerId, messageType, body);
     if (!delivered) {
-      // push_first without proof of delivery → SMS fallback. Dead tokens
-      // were already deactivated inside sendToCustomer.
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      return { handled: false, decision };
+      return { delivered: false };
     }
-
-    await recordPushInSmsLog(input, messageType, notificationId);
-    return {
-      handled: true,
-      decision,
-      providerResult: {
-        sent: true,
-        provider: 'push',
-        providerMessageId: notificationId ? `push:${notificationId}` : 'push:delivered',
-        sentAt: new Date().toISOString(),
-        raw: { pushStats: { sent: stats.sent, expired: stats.expired, failed: stats.failed, subscriptions: stats.subscriptions } },
-      },
-    };
+    const notificationId = await recordBell(customerId, messageType, body);
+    const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
+    // History parity: status stays 'sent' (legacy predicates filter on
+    // queued/sent/delivered); the channel marker lives in from_phone +
+    // metadata.
+    try {
+      await db('sms_log').insert({
+        customer_id: customerId,
+        direction: 'outbound',
+        from_phone: 'push',
+        to_phone: String(to || '').slice(0, 20),
+        message_body: body,
+        twilio_sid: null,
+        status: 'sent',
+        message_type: messageType,
+        metadata: JSON.stringify({ channel: 'push', push_notification_id: notificationId }),
+      });
+    } catch (logErr) {
+      logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
+    }
+    // Same unified-history writer the SMS path uses, threaded into the
+    // customer's SMS conversation so staff surfaces show the message inline.
+    require('../conversations')
+      .recordTouchpoint({
+        customerId,
+        channel: 'sms',
+        ourEndpointId: fromNumber,
+        contactPhone: to,
+        direction: 'outbound',
+        body,
+        authorType: 'system',
+        adminUserId: null,
+        twilioSid: null,
+        messageType,
+        deliveryStatus: 'sent',
+      })
+      .catch((err) => {
+        logger.warn(`[push-routing] touchpoint record failed: ${err.message}`);
+      });
+    return { delivered: true, sid, notificationId };
   } catch (err) {
-    // Any push-side failure → SMS, always.
-    logger.warn(`[push-routing] push attempt failed — falling back to SMS: ${err.message}`);
-    return { handled: false, decision };
+    logger.warn(`[push-routing] push_first attempt failed — falling back to SMS: ${err.message}`);
+    return { delivered: false };
+  }
+}
+
+/**
+ * push_and_sms companion, fired by TwilioService.sendSMS only AFTER Twilio
+ * accepted the SMS — best-effort, never throws into the send path, and a
+ * pipeline retry of a FAILED SMS can never reach it.
+ */
+async function sendCompanionPush({ customerId, body, messageType }) {
+  try {
+    if (!(await hasActivePushDevice(customerId))) return;
+    const { delivered } = await sendPush(customerId, messageType, body);
+    if (delivered) await recordBell(customerId, messageType, body);
+  } catch (err) {
+    logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }
 }
 
 module.exports = {
-  maybeRouteViaPush,
   decidePushRoute,
+  attemptPushFirst,
+  sendCompanionPush,
   PUSH_ROUTING_POLICY,
+  gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
   _test: { pushPresentation, PRESENTATION },
 };

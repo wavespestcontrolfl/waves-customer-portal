@@ -534,10 +534,52 @@ const TwilioService = {
           };
         }
       }
+      // Push channel routing (GATE_PUSH_CHANNEL_ROUTING, default OFF).
+      // Placed HERE — after owner silence, feature gates, the per-template
+      // kill switch, validateOutbound, and the caller's send-window
+      // boundary re-check above — so a push obeys every guard an SMS does
+      // (same precedent as the internal-alert redirect at the top of this
+      // method). push_first with proven device delivery skips Twilio; the
+      // routing layer writes sms_log + conversations history itself.
+      // push_and_sms fires AFTER messages.create succeeds (below), so a
+      // retried SMS failure can never duplicate the push leg.
+      const PushRouting = require("./messaging/push-channel-routing");
+      const pushRoute = PushRouting.decidePushRoute({
+        gateOn: PushRouting.gatePushRoutingOn(),
+        customerId: options.customerId || null,
+        messageType: options.messageType,
+        hasMedia: urls.length > 0 || Boolean(options.media),
+        humanAuthored: options.humanAuthored === true,
+        operatorInitiated: options.operatorInitiated === true,
+      });
+      if (pushRoute === "push_first") {
+        const pushed = await PushRouting.attemptPushFirst({
+          customerId: options.customerId,
+          to,
+          body,
+          messageType: options.messageType,
+          fromNumber,
+        });
+        if (pushed.delivered) {
+          logger.info(
+            `[push-routing] ${options.messageType} delivered as push to customer ${options.customerId} — SMS skipped`,
+          );
+          return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
+        }
+      }
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
+      if (pushRoute === "push_and_sms") {
+        // Companion push, best-effort and only now that Twilio accepted the
+        // SMS — never awaited into the send path.
+        void PushRouting.sendCompanionPush({
+          customerId: options.customerId,
+          body,
+          messageType: options.messageType,
+        }).catch(() => {});
+      }
 
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as
