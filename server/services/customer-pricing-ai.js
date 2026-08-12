@@ -605,10 +605,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         // Legacy cached profiles without _observed keep presence semantics.
         const obs = (p._observed && typeof p._observed === 'object') ? p._observed : null;
         for (const [key, present] of Object.entries({
-          pool: !!p.pool,
-          poolCage: !!p.poolCage,
-          poolCageSize: !!p.poolCageSize,
-          nearWater: !!p.nearWater,
+          // pool/cage/water are synthesized display STRINGS when unobserved
+          // ('NO'/'UNKNOWN'/'NONE' — codex #3367 PR r8), so presence lies
+          // for them exactly like the densities.
+          pool: obs ? !!obs.pool : !!p.pool,
+          poolCage: obs ? !!obs.poolCage : !!p.poolCage,
+          poolCageSize: obs ? !!obs.poolCageSize : !!p.poolCageSize,
+          nearWater: obs ? !!obs.nearWater : !!p.nearWater,
           shrubs: obs ? !!obs.shrubDensity : !!p.shrubDensity,
           trees: obs ? !!obs.treeDensity : !!p.treeDensity,
           complexity: obs ? !!obs.landscapeComplexity : !!p.landscapeComplexity,

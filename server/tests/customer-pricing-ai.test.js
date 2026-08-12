@@ -297,6 +297,41 @@ describe('customer pricing AI helpers', () => {
     // Observed MODERATE: the seed must NOT override the observation.
     expect(price(observedWithSeed)).toBe(price(synthesizedBare));
   });
+
+  test('synthesized pool/cage strings stay open for seeded features (PR r8 P1)', async () => {
+    // Cached profiles synthesize pool 'NO' / poolCage 'UNKNOWN' /
+    // poolCageSize 'NONE' / nearWater 'NONE' — truthy strings that are not
+    // observations. A seeded cage from the accepted estimate must survive
+    // them; an OBSERVED cage answer must still win.
+    const run = (observed, features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          pool: 'NO', poolCage: 'UNKNOWN', poolCageSize: 'NONE', nearWater: 'NONE',
+          _observed: {
+            propertyType: false, shrubDensity: false, treeDensity: false,
+            landscapeComplexity: false, irrigationVisible: false,
+            pool: observed, poolCage: observed, poolCageSize: observed, nearWater: observed,
+          },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-prov' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const synthesizedWithSeed = await run(false, { poolCage: true, poolCageSize: 'large' });
+    const synthesizedBare = await run(false, null);
+    const observedWithSeed = await run(true, { poolCage: true, poolCageSize: 'large' });
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    expect(price(synthesizedBare)).toBeGreaterThan(0);
+    expect(price(synthesizedWithSeed)).toBeGreaterThan(price(synthesizedBare));
+    expect(price(observedWithSeed)).toBe(price(synthesizedBare));
+  });
 });
 
 describe('count-based WaveGuard tier truth', () => {

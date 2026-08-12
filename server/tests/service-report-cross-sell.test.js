@@ -69,10 +69,11 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], catalogRows = [], stampRows = [], failCatalogJoin = false } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, estimates = [], planRates = [], catalogRows = [], stampRows = [], properties = [], failCatalogJoin = false } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
+    customer_properties: properties,
     // stampRows go FIRST so the builder's raw-stamp first() read sees them
     // (the fake's first() returns rows[0]); completed stamp rows carry no
     // upcoming lifecycle so the ownership loader ignores them.
@@ -357,6 +358,26 @@ describe('buildReportCrossSell', () => {
       }],
     });
     expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a recurring row linked only to a secondary property row never counts at the primary', async () => {
+    // Unstamped lawn row whose property_id resolves to a different street:
+    // dispatch's resolution order (stamp → property row → estimate →
+    // primary) applies to ownership scoping too, so lawn is NOT owned at
+    // the primary and the ladder still offers it — previously the row
+    // defaulted to primary and the ladder advanced to tree & shrub.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'r2', service_type: 'Lawn Care', scheduled_date: FUTURE_SCHEDULED_DATE,
+        status: 'scheduled', is_recurring: true, property_id: 'prop-9',
+      }],
+      properties: [{ id: 'prop-9', address_line1: '88 Palm Ave', city: 'Venice', zip: '34285' }],
+    });
+    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('lawn_care');
   });
 
   test('a report stamped at a different property than the primary is suppressed', async () => {

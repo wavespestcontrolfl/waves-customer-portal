@@ -1767,6 +1767,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       treeDensity: !!ai?.treeDensity,
       landscapeComplexity: !!ai?.landscapeComplexity,
       irrigationVisible: ai?.irrigationVisible === 'YES' || ai?.irrigationVisible === 'NO',
+      // Pool/cage/water synthesize display strings too ('NO', 'UNKNOWN',
+      // 'NONE' — codex #3367 PR r8): observed only when the record or
+      // vision actually supplied the read (poolSource null = mergePool's
+      // synthesized 'NO').
+      pool: poolSource(rc, ai) !== null,
+      poolCage: !!rc?.poolCageSqft || !!ai?.poolCage,
+      poolCageSize: !!rc?.poolCageSqft || !!ai?.poolCageSize,
+      nearWater: !!(ai?.waterProximity || ai?.nearWater),
     },
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
