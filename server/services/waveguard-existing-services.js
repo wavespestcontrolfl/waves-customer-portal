@@ -391,6 +391,15 @@ function ownershipFamiliesFromText(raw) {
     if (/\b(bait|station|monitor)/.test(s) || combinedPestRodent) add('rodent_bait');
   }
   if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
+  // Recurring spot-foam termite program (foam_recurring — catalog name
+  // "Recurring Foam Treatment" carries no termite token). Its OWN family,
+  // NOT termite_bait: foam coverage must never suppress a bait-station
+  // quote. No pricing consumer keys off this today (mapKey passes unknown
+  // keys through and they only ever equality-match) — it exists so the
+  // Property Score's termite component sees foam coverage through the same
+  // lifecycle-filtered ownership path as every other family. The adjacency
+  // requirement keeps rodent-exclusion foam-sealing work unmatched.
+  if (/recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s)) add('termite_foam');
   return keys;
 }
 

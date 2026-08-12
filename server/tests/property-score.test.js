@@ -51,6 +51,19 @@ describe('composeOverall', () => {
     expect(result.delta).toBe(2);
   });
 
+  it('rounds half-point declines symmetrically (never -0 → "holding steady")', () => {
+    const down = composeOverall([
+      { key: 'lawn', status: 'scored', score: 80, previousScore: 80 },
+      { key: 'tree_shrub', status: 'scored', score: 49, previousScore: 50 },
+    ]);
+    expect(down.delta).toBe(-1);
+    const up = composeOverall([
+      { key: 'lawn', status: 'scored', score: 80, previousScore: 80 },
+      { key: 'tree_shrub', status: 'scored', score: 51, previousScore: 50 },
+    ]);
+    expect(up.delta).toBe(1);
+  });
+
   it('ignores a scored status with a null score', () => {
     const result = composeOverall([
       { key: 'lawn', status: 'scored', score: null, previousScore: null },

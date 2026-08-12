@@ -36,7 +36,7 @@ const {
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
-const { loadOwnedRecurringServiceKeys, TERMINAL_STATUSES } = require('./waveguard-existing-services');
+const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 // Best-effort: the tree/shrub module also carries vision plumbing — a load
 // failure degrades that component to raw overall_score, never the endpoint.
 let formatAssessmentScores = null;
@@ -79,6 +79,10 @@ const OWNERSHIP_KEY_TO_LINE = {
   tree_shrub: 'tree_shrub',
   mosquito: 'mosquito',
   termite_bait: 'termite',
+  // foam_recurring rows classify as termite_foam in the ownership
+  // vocabulary (distinct from termite_bait so foam never suppresses a
+  // bait-station quote) — for the score card both mean termite protection.
+  termite_foam: 'termite',
 };
 async function loadActiveLineSet(customerId, knex) {
   const keys = await loadOwnedRecurringServiceKeys(knex, customerId).catch(() => []);
@@ -86,22 +90,6 @@ async function loadActiveLineSet(customerId, knex) {
   for (const key of keys) {
     const line = OWNERSHIP_KEY_TO_LINE[key];
     if (line) lines.add(line);
-  }
-  // Foam termite programs (foam_recurring: name "Recurring Foam Treatment")
-  // carry no 'termite' text token, so the ownership vocabulary cannot see
-  // them — but their catalog category is authoritative. Narrow,
-  // catalog-joined check using the exported canonical TERMINAL_STATUSES;
-  // rows without a service_id fail toward not claiming coverage.
-  if (!lines.has('termite')) {
-    const termiteRow = await knex('scheduled_services as ss')
-      .join('services as svc', 'ss.service_id', 'svc.id')
-      .where('ss.customer_id', customerId)
-      .whereNotIn('ss.status', TERMINAL_STATUSES)
-      .where('svc.category', 'termite')
-      .where('svc.billing_type', 'recurring')
-      .first('ss.id')
-      .catch(() => null);
-    if (termiteRow) lines.add('termite');
   }
   return lines;
 }
@@ -372,7 +360,7 @@ async function rainSummary(customerId, knex) {
   return {
     inches7d: inches,
     windowDays: 7,
-    note: `${inches}" of rain at your property in the last 7 days.`,
+    note: `${inches}" of rain in your service area in the last 7 days.`,
   };
 }
 
@@ -386,8 +374,11 @@ function composeOverall(components) {
   // newly appearing component), showing a delta would attribute one
   // component's movement to the whole composite — suppress it instead.
   const paired = scoredNow.filter((c) => c.previousScore != null);
+  // Symmetric signed rounding: Math.round(-0.5) is -0 (serializes as 0),
+  // which would erase a half-point decline while +0.5 reports +1.
+  const roundSigned = (v) => Math.sign(v) * Math.round(Math.abs(v));
   const delta = paired.length && paired.length === scoredNow.length
-    ? Math.round(mean(paired.map((c) => c.score)) - mean(paired.map((c) => c.previousScore)))
+    ? roundSigned(mean(paired.map((c) => c.score)) - mean(paired.map((c) => c.previousScore)))
     : null;
   return { score, delta, componentCount: scoredNow.length };
 }
