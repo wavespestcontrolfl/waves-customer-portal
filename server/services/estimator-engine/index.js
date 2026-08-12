@@ -24,7 +24,10 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const { buildCallContext, existingDraftForCall } = require('./context-builder');
-const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
+const {
+  resolvePropertyFacts, normalizeParcelView,
+  _private: { pricingSafePropertyType },
+} = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
 
 // A wrong-premise lookup poisons the RECORD leg too, not just the enriched
@@ -1541,8 +1544,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // lookup, that stale type could label the new address a unit and clear
     // its lot (codex r22 P1). Non-destructive: the priced propertyFacts
     // are untouched.
+    // Only the ORIGINAL extraction/profile fallback is fenced — the
+    // RE-GATHERED record's own type describes the quoted property, so a
+    // reliably identified condo/townhome keeps its pricing adjustment
+    // instead of being nulled to 'unknown' and parked (codex r32 P1).
+    const regatheredPropertyType = (crossPropertyRegather && effectiveParcelOk)
+      ? pricingSafePropertyType(effectiveSignals.propertyRecord?.propertyType)
+      : null;
     const scopeFacts = crossPropertyRegather
-      ? { ...propertyFacts, tenant: false, propertyType: null }
+      ? { ...propertyFacts, tenant: false, propertyType: regatheredPropertyType || null }
       : propertyFacts;
 
     // Property Facts V2 — scoped measurement selection. Shadow by default:
@@ -1690,7 +1700,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // charge for a lot the lane review shows as cleared (codex r27 P1).
         propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
           && crossPropertyRegather)
-          ? { ...propertyFacts, tenant: false, propertyType: null }
+          ? { ...propertyFacts, tenant: false, propertyType: regatheredPropertyType || null }
           : propertyFacts,
         context,
         priorQualifyingServices,
