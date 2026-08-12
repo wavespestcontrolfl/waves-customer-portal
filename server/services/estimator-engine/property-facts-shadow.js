@@ -111,19 +111,35 @@ function hasUnitSignal({ tenant, address, extraction, enhanced = false }) {
   return String(extraction?.property?.property_type || '') === 'apartment';
 }
 
-function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites = false }) {
+// Positive evidence the customer occupies PART of a building: an explicit
+// subpremise, a stacked association aggregate, or a multi-tenant record
+// type. Tenancy alone is NOT part-building evidence — a restaurant or
+// warehouse tenant can lease an entire freestanding property (codex r38/r39
+// P1). Shared by the unit-scope lane and the V2 scope inference so both
+// paths agree.
+function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType }) {
+  return subpremiseSignal === true || aggregated === true
+    || /multiple\s*unit|multi.?tenant|suite|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || ''));
+}
+
+function inferServiceScope({
+  propertyType, isCommercial, tenant, aggregated, unitSignal,
+  unitScopeSuites = false, partBuilding = false,
+}) {
   if (isCommercial) {
-    // Positive unit evidence (a Unit/Suite subpremise) makes this a SUITE
-    // whether the caller rents or OWNS it — an owner-occupied commercial
-    // condo/flex unit is still one unit of a larger parcel, and building
-    // scope would let lot-driven services price the whole complex
-    // (codex r8 P1). Tenancy alone still implies a suite.
-    // OWNER-unit suites are opt-in per call (`unitScopeSuites`): this
-    // module also feeds the independently-gated V2 pricing path, and
-    // reading GATE_UNIT_SCOPE_GUARDRAILS implicitly would let the new
-    // behavior ride GATE_PROPERTY_FACTS_V2 after an operator flipped the
-    // advertised kill switch off (codex r12 P1).
-    if (tenant || (unitSignal && unitScopeSuites)) return 'commercial_suite';
+    // Suite decision:
+    //  - lane ON (`unitScopeSuites`): tenancy OR any unit signal counts,
+    //    but ONLY with positive part-building evidence — a whole-building
+    //    restaurant/warehouse tenant keeps building scope and its county
+    //    area/lot (codex r38/r39 P1). This also covers the owner-occupied
+    //    commercial condo/flex unit, which is one unit of a larger parcel
+    //    (codex r8 P1).
+    //  - lane OFF: the legacy tenancy⇒suite mapping, unchanged, so the
+    //    independently-gated V2 pricing path cannot inherit new behavior
+    //    after the advertised kill switch is flipped (codex r12 P1).
+    if (unitScopeSuites ? ((tenant || unitSignal) && partBuilding) : tenant) {
+      return 'commercial_suite';
+    }
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
     return 'entire_commercial_building';
   }
@@ -413,8 +429,16 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       extraction,
       enhanced: unitScopeSuites,
     });
+    const partBuilding = hasPartBuildingEvidence({
+      subpremiseSignal: hasSubpremiseSignal({
+        address: address || propertyRecord?.formattedAddress,
+        extraction,
+      }),
+      aggregated,
+      propertyType,
+    });
     const serviceScope = inferServiceScope({
-      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
+      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
     });
     const ownershipType = inferOwnershipType({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
@@ -583,5 +607,6 @@ module.exports = {
     buildMeasurementEvidence,
     hasUnitSignal,
     hasSubpremiseSignal,
+    hasPartBuildingEvidence,
   },
 };

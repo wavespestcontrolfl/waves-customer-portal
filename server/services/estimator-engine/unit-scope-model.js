@@ -282,11 +282,17 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     enhanced: true,
   });
   const subpremiseSignal = shadowPrivate.hasSubpremiseSignal({ address: modelAddress, extraction });
+  // One shared predicate with the V2 path (codex r39 P1) so a whole-building
+  // commercial tenant keeps building scope on BOTH.
+  const partBuildingEvidence = shadowPrivate.hasPartBuildingEvidence({
+    subpremiseSignal, aggregated, propertyType,
+  });
   // This module IS the unit-scope lane, so owner-unit suites are always on
   // for the model it composes (its pricing-affecting apply is separately
   // gated); the V2 shadow path opts out by default — see inferServiceScope.
   let serviceScope = shadowPrivate.inferServiceScope({
-    propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites: true,
+    propertyType, isCommercial, tenant, aggregated, unitSignal,
+    unitScopeSuites: true, partBuilding: partBuildingEvidence,
   });
   // An explicit Unit/Apt/Suite subpremise on a residential job whose type
   // is missing or generic reads as a UNIT — a misclassified or
@@ -347,14 +353,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     })(),
     unitSignal,
     subpremiseSignal,
-    // Positive evidence the customer occupies PART of a building: an
-    // explicit subpremise, a stacked association aggregate, or a
-    // multi-tenant record type. Tenancy alone is NOT part-building
-    // evidence — a restaurant or warehouse tenant can lease an entire
-    // freestanding property, and clearing its county area/parcel lot would
-    // strip a valid whole-building quote's pricing inputs (codex r38 P1).
-    partBuildingEvidence: subpremiseSignal || aggregated
-      || /multiple\s*unit|multi.?tenant|suite|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || '')),
+    partBuildingEvidence,
     // Stacked ASSOCIATION aggregate: even a condo's figures describe the
     // whole building here, so the per-unit-folio exception must not apply.
     aggregated,

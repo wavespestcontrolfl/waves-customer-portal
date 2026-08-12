@@ -351,10 +351,18 @@ describe('kill-switch isolation from the V2 gate (r12)', () => {
     // Default (the V2 shadow path with the unit-scope gate off): prior behavior.
     expect(shadowPrivate.inferServiceScope(args)).toBe('entire_commercial_building');
     expect(shadowPrivate.inferOwnershipType(args)).toBe('fee_simple');
-    // Opt-in (the unit-scope lane, or V2 with both gates on).
-    expect(shadowPrivate.inferServiceScope({ ...args, unitScopeSuites: true })).toBe('commercial_suite');
+    // Opt-in (the unit-scope lane, or V2 with both gates on) — and the suite
+    // now requires PART-BUILDING evidence (codex r38/r39 P1).
+    expect(shadowPrivate.inferServiceScope({
+      ...args, unitScopeSuites: true, partBuilding: true,
+    })).toBe('commercial_suite');
     expect(shadowPrivate.inferOwnershipType({ ...args, unitScopeSuites: true })).toBe('commercial_condominium');
-    // A TENANT suite is pre-existing behavior and stays gate-independent.
+    // Lane ON without part-building evidence: a whole-building lease keeps
+    // building scope so its county area/lot survive.
+    expect(shadowPrivate.inferServiceScope({
+      ...args, tenant: true, unitScopeSuites: true, partBuilding: false,
+    })).toBe('entire_commercial_building');
+    // Lane OFF: the legacy tenancy⇒suite mapping is preserved verbatim.
     expect(shadowPrivate.inferServiceScope({ ...args, tenant: true })).toBe('commercial_suite');
   });
 });
