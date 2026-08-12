@@ -275,7 +275,13 @@ async function loadOfficeHours() {
       closedToday = closed.has(todayStr);
       closedTomorrow = closed.has(tomorrowStr);
     } catch (err) {
-      logger.warn(`[voice-relay-context] closed-day lookup failed — clock block assumes a working day: ${err.message}`);
+      // ⭐ UNKNOWN, NOT OPEN. Defaulting a failed lookup to "working day" makes
+      // the block ANNOUNCE that the office is open — and promise a reopening
+      // time — on what may be a scheduled closure. The honest degrade is the
+      // one the no-hours branch already takes: state the time, decline to
+      // state open/closed or a callback time.
+      logger.warn(`[voice-relay-context] closed-day lookup failed — clock block will not claim open/closed: ${err.message}`);
+      return { startMin, endMin, closedUnknown: true };
     }
     return { startMin, endMin, closedToday, closedTomorrow };
   } catch (err) {
@@ -310,7 +316,10 @@ function renderClockBlock(hours, now = new Date()) {
       '<<<CLOCK DATA',
       `Right now in Florida (Eastern Time): ${dateLine}, ${speakClock(nowMinutes)}`,
     ];
-    if (Number.isFinite(startMin) && Number.isFinite(endMin)) {
+    if (hours && hours.closedUnknown === true) {
+      lines.push('Whether today is a working day could not be confirmed — do NOT say the office is open or '
+        + 'closed, and do NOT promise a callback time; say a Waves team member will follow up as soon as possible');
+    } else if (Number.isFinite(startMin) && Number.isFinite(endMin)) {
       // ⭐ HOURS ARE NOT THE SAME QUESTION AS "IS TODAY A WORKING DAY". The
       // booking config carries a start and an end; whether a given date is
       // CLOSED lives in scheduling/blackout-dates (weekly days off + one-off

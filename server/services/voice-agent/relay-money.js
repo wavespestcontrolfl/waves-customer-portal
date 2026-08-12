@@ -188,7 +188,13 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     .where({ customer_id: customerId })
     .whereIn('status', OPEN_ESTIMATE_STATUSES)
     .orderBy('created_at', 'desc')
-    .limit(ESTIMATE_LIMIT)
+    // ⭐ OVERFETCH, BECAUSE THE FILTER RUNS AFTER THE LIMIT. Viewability
+    // (archived / expired / linkage-invalidated) is a predicate this query
+    // cannot express, so limiting to five FIRST let five newer hidden rows mask
+    // an older valid estimate and make the agent say there are none open —
+    // worse than saying nothing, because it is a confident wrong answer. Read a
+    // wider page and cut to ESTIMATE_LIMIT after filtering.
+    .limit(ESTIMATE_LIMIT * 5)
     // NOTE the absence of `token`: the estimate view link is a bearer
     // credential and never rides a voice reply.
     //
@@ -216,7 +222,7 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
   // that page uses (estimate-public.isEstimateCustomerViewable): archived,
   // linkage-invalidated and past-expiry rows all drop out here too.
   const { isEstimateCustomerViewable } = require('../../routes/estimate-public');
-  const viewable = rows.filter((row) => isEstimateCustomerViewable(row));
+  const viewable = rows.filter((row) => isEstimateCustomerViewable(row)).slice(0, ESTIMATE_LIMIT);
   if (!viewable.length) {
     return 'No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan '
       + 'pricing, and a team member can put a written estimate together.';

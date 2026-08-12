@@ -134,6 +134,16 @@ describe('renderClockBlock', () => {
     expect(block).not.toMatch(/opens again tomorrow at/);
   });
 
+  // ⭐ UNKNOWN IS NOT OPEN. A failed closed-day lookup must not let the block
+  // announce that the office is open, or promise a reopening, on what may be a
+  // scheduled closure.
+  test('an unresolvable closed-day lookup declines to claim open/closed at all', () => {
+    const block = relayContext.renderClockBlock({ ...HOURS, closedUnknown: true }, SUMMER_10AM_ET);
+    expect(block).toContain('Wednesday August 12, 2026, 10:00 AM'); // the clock still lands
+    expect(block).not.toMatch(/OPEN right now|CLOSED right now/);
+    expect(block).toMatch(/do NOT promise a callback time/i);
+  });
+
   test('no hours available → the clock still lands, hours are explicitly declined', () => {
     const block = relayContext.renderClockBlock(null, SUMMER_10AM_ET);
     expect(block).toContain('Wednesday August 12, 2026, 10:00 AM');

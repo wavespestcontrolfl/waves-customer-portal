@@ -368,6 +368,24 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(out).not.toMatch(/one-time work totalling/);
   });
 
+  // ⭐ THE FILTER RUNS AFTER THE QUERY, so the query must not have already cut
+  // the valid row. Five newer hidden estimates would otherwise mask an older
+  // live one and produce a confident "no open estimates".
+  test('newer HIDDEN estimates never mask an older valid one', async () => {
+    const expired = (n) => ({
+      ...SENT_ESTIMATE,
+      id: `est-hidden-${n}`,
+      expires_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    primeDb({ estimates: [expired(1), expired(2), expired(3), expired(4), expired(5), SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toMatch(/Open estimates on this account/);
+    expect(out).not.toMatch(/No open estimates/);
+    // …and the read asked for more rows than it will speak.
+    const limit = builders.estimates.limit.mock.calls[0][0];
+    expect(limit).toBeGreaterThan(5);
+  });
+
   test('looked-up ref → existence + date ONLY, never an amount', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     const ctx = { customerId: 'c-other', customerTier: 'full', resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
