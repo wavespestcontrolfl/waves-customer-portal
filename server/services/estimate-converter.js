@@ -4159,7 +4159,21 @@ const EstimateConverter = {
             for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
           }
         } catch (idErr) {
-          logger.warn(`[estimate-converter] reserved catalog-key prefetch failed (label matching only): ${idErr.message}`);
+          // One retry, then PROPAGATE (codex r27 P1): palm units match by
+          // identity ONLY and catalog-first adoptions are invisible to
+          // labels — an empty map after a transient failure would promote
+          // a duplicate parent beside the reserved program row. Unknown
+          // identity state fails the conversion instead.
+          try {
+            const retryIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+            if (retryIds.length) {
+              const retryRows = await database('services').whereIn('id', retryIds).select('id', 'service_key');
+              for (const idRow of retryRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+            }
+          } catch (retryErr) {
+            logger.error(`[estimate-converter] reserved catalog-key prefetch failed twice: ${retryErr.message}`);
+            throw idErr;
+          }
         }
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
           if (!reservedStart?.scheduled_date) break;
@@ -5104,9 +5118,21 @@ const EstimateConverter = {
             // the single-recurring case like the derivation below, so the
             // (0-recurring) prepay edge keeps its no-coverage/no-seeding shape
             // and can't grow phantom seeded visits from an override.
-            coverageServiceType = annualPrepayCoverageOverride.serviceType;
-            coverageVisitCount = annualPrepayCoverageOverride.visitCount;
-            coverageCadence = annualPrepayCoverageOverride.cadence;
+            // The override does NOT bypass the palm/lawn validation mirrors
+            // (codex r27 P1): a contradictory palm quote or commercial line
+            // must not mint the annual invoice just because the booking
+            // path supplied explicit coverage values — the ordinary
+            // acceptance path rejects the same line.
+            const overrideValidation = annualPrepayCoverageCadence(
+              recurringServicesForConversion[0], inferredFrequencyKey,
+            );
+            if (overrideValidation === PREPAY_COVERAGE_INVALID) {
+              recurringPrepayCoverageInvalid = true;
+            } else {
+              coverageServiceType = annualPrepayCoverageOverride.serviceType;
+              coverageVisitCount = annualPrepayCoverageOverride.visitCount;
+              coverageCadence = annualPrepayCoverageOverride.cadence;
+            }
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
