@@ -132,12 +132,20 @@ describe('sensitive SPA document headers', () => {
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 
-  test('recognizes only full secure-card 64-hex token document paths', () => {
+  test('recognizes only full secure-card token document paths (both minted shapes)', () => {
     const SECURE_TOKEN = 'b'.repeat(64);
     expect(isSecureCardPath(`/secure/${SECURE_TOKEN}`)).toBe(true);
     expect(isSecureCardPath(`/secure/${SECURE_TOKEN}/`)).toBe(true);
+    // Current mint: 22-char base64url (randomBytes(16) — the short-SMS-link
+    // shape), same acceptance as secure-card-public's TOKEN_RE.
+    const SHORT_TOKEN = 'Ab1-_c2Def3Ghi4Jkl5Mno'; // 22 base64url chars
+    expect(SHORT_TOKEN).toHaveLength(22);
+    expect(isSecureCardPath(`/secure/${SHORT_TOKEN}`)).toBe(true);
+    expect(isSecureCardPath(`/secure/${SHORT_TOKEN}/`)).toBe(true);
     expect(isSecureCardPath('/secure/not-a-token')).toBe(false);
     expect(isSecureCardPath(`/secure/${'c'.repeat(32)}`)).toBe(false);
+    expect(isSecureCardPath(`/secure/${'c'.repeat(21)}`)).toBe(false);
+    expect(isSecureCardPath(`/secure/${'c'.repeat(23)}`)).toBe(false);
     expect(isSecureCardPath(`/api/public/secure-card/${SECURE_TOKEN}`)).toBe(false);
   });
 

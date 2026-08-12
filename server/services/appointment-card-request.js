@@ -24,7 +24,7 @@
  *                              Follow-up nudges are Phase 4's job — never
  *                              this path's.
  *
- * Only after all four: mint the 64-hex tokenized "secure your appointment"
+ * Only after all four: mint the tokenized "secure your appointment"
  * link (/secure/{token}, page shipped separately), insert the pending
  * request row, and send ONE SMS through send_customer_message (purpose
  * card_request — consent, suppression, and audit ride the canonical path).
@@ -514,11 +514,18 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     const smsTo = recipientPhone || customer?.phone || null;
     if (delivery !== 'inline' && !smsTo) return skip('no_customer_phone');
 
-    const token = reuseToken || crypto.randomBytes(32).toString('hex');
-    // The 64-hex bearer link goes out UNSHORTENED (Codex #2771 P1): the
-    // generic /l/:code shortener would swap it for a 5-char permanent code
-    // — a far weaker credential for a payment-adjacent page — and /l/:code
-    // resolves outside the /api rate limiter.
+    const token = reuseToken || crypto.randomBytes(16).toString('base64url');
+    // The bearer link goes out UNSHORTENED (Codex #2771 P1): the generic
+    // /l/:code shortener would swap it for a 5-char permanent code — a far
+    // weaker credential for a payment-adjacent page — and /l/:code resolves
+    // outside the /api rate limiter. The token itself is 22-char base64url
+    // (128-bit — the same entropy class as the portal's other randomBytes(16)
+    // bearer surfaces) rather than the original 64-hex (owner directive
+    // 2026-08-12): the schemeless link drops from ~99 to ~57 GSM chars so the
+    // invite fits 2 SMS segments. Legacy 64-hex tokens on already-sent links
+    // keep resolving — lookups are DB equality, and every format gate
+    // (secure-card-public TOKEN_RE, isSecureCardPath, the log redactor)
+    // accepts both shapes.
     const secureUrl = portalUrl(`/secure/${token}`);
 
     // Render before ANY exposure: the inactive/missing template is the
