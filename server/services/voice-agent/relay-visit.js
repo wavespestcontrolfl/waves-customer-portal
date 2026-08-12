@@ -123,7 +123,15 @@ async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
       .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
       .orWhereNot('status', 'pending')
       .orWhere('customer_confirmed', true))
-    .orderBy('window_start', 'asc')
+    // ⭐ A LIVE VISIT OUTRANKS TERMINAL HISTORY FROM THE SAME DAY. Ordering by
+    // window_start alone hands back a morning no-show or a completed earlier
+    // visit when the customer ALSO has a confirmed replacement later today —
+    // and the tool then reports "that visit is finished" for the appointment
+    // the caller is actually asking about. Live statuses sort first; among
+    // equals the earliest window still wins.
+    .orderByRaw(
+      "CASE WHEN status IN ('completed','skipped','no_show') THEN 1 ELSE 0 END ASC, window_start ASC"
+    )
     .first('id', 'status', 'service_type', 'window_start', 'window_end',
       'track_state', 'en_route_at', 'arrived_at', 'customer_confirmed');
   if (!row) {
@@ -339,8 +347,25 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
       record: { ...record, applications: reentryApplications },
       knex: db,
     });
-    const summary = promptSafe(reentry && reentry.customerSummary, 160);
-    if (summary) lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
+    // ⭐ AND THE RENDERED SUMMARY IS NOT ALWAYS SPEAKABLE. With pending targets
+    // buildReentrySummary emits "<area> ready at 10:45 AM" — a FIXED re-entry
+    // clock figure, which AGENTS.md bans on every customer surface ("never a
+    // fixed re-entry/drying minute figure — the idiom is 'safe once dry' +
+    // technician confirms timing"). The web report carrying it is a remediation
+    // backlog; speaking it would EXTEND the banned class to a new surface,
+    // which the same rule calls out explicitly. So the timestamped form is
+    // never read out: pending ⇒ the approved idiom, and only the
+    // already-ready summary (no time in it) is spoken verbatim.
+    const targets = Array.isArray(reentry && reentry.targets) ? reentry.targets : [];
+    const pending = targets.filter((t) => t && Date.parse(t.readyAt) > Date.now());
+    if (pending.length) {
+      lines.push('Re-entry guidance, stated in these words and no others: treated areas are ready to use '
+        + 'once they are dry, and the technician confirms timing on site. Do NOT give a clock time, a number '
+        + 'of hours, or say anything is "safe".');
+    } else {
+      const summary = promptSafe(reentry && reentry.customerSummary, 160);
+      if (summary) lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
+    }
   } catch (err) {
     logger.warn(`[voice-relay-visit] re-entry context skipped: ${err.message}`);
   }

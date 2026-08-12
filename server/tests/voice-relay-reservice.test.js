@@ -24,6 +24,11 @@ jest.mock('../services/call-recording-processor', () => ({ CONTACT_MATCH_PHONE_C
 jest.mock('../services/reservice-scheduler', () => ({
   openReserviceCallbacks: jest.fn(async () => ({})),
   reserviceLanesForCustomer: jest.fn(async () => ['pest']),
+  // The SHARED lane vocabulary + the in-lock dedupe the self-service callback
+  // commit runs (routes/booking.js) — the filing path takes the same lock and
+  // asks the same question inside its transaction.
+  RESERVICE_LANES: { pest: { serviceKey: 'pest_reservice' }, lawn: { serviceKey: 'lawn_reservice' } },
+  openCallbackExistsForLane: jest.fn(async () => false),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 // The INTERNAL owner alert (owner ruling: a filed re-service must reach a human,
@@ -44,6 +49,7 @@ const NotificationService = require('../services/notification-service');
 const relayAlert = require('../services/voice-agent/relay-alert');
 const logger = require('../services/logger');
 const reserviceScheduler = require('../services/reservice-scheduler');
+const { openCallbackExistsForLane } = require('../services/reservice-scheduler');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailService = require('../services/email');
@@ -112,6 +118,7 @@ beforeEach(() => {
   delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
   primeDb();
   reserviceScheduler.openReserviceCallbacks.mockResolvedValue({});
+  openCallbackExistsForLane.mockResolvedValue(false);
   reserviceScheduler.reserviceLanesForCustomer.mockResolvedValue(['pest']);
 });
 
@@ -281,17 +288,41 @@ describe('GATE ON', () => {
   // "nothing open" read and file a second ticket — two owner pages for one
   // problem. The authoritative dedupe re-runs inside the insert's transaction,
   // under a per-(customer, lane) advisory lock.
-  test('the dedupe re-read and the insert share ONE transaction under a per-(customer, lane) lock', async () => {
+  // ⭐ THE SHARED LANE LOCK. A private namespace would serialize this module
+  // only against itself; the writer worth serializing against is the
+  // self-service callback commit (routes/booking.js), which takes
+  // `reservice-lane`/<customer>:<serviceKey> and then runs the same
+  // openCallbackExistsForLane check.
+  test('the dedupe re-read and the insert share ONE transaction under the SHARED lane lock', async () => {
     await executeTool('request_reservice', GOOD, CTX);
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(trx.raw).toHaveBeenCalledWith(
       expect.stringContaining('pg_advisory_xact_lock'),
-      ['voice-reservice-file', `${CUSTOMER_ID}:pest_issue`],
+      ['reservice-lane', `${CUSTOMER_ID}:pest_reservice`],
     );
+    // …and the booked-callback question is asked INSIDE that lock, on the trx.
+    expect(openCallbackExistsForLane).toHaveBeenCalledWith(trx, CUSTOMER_ID, 'pest');
     // The lock is taken BEFORE the re-read and the insert it protects.
     const lockOrder = trx.raw.mock.invocationCallOrder[0];
     expect(lockOrder).toBeLessThan(builders.service_requests.insert.mock.invocationCallOrder[0]);
     expect(builders.service_requests.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a callback that commits DURING the call blocks the ticket (in-lock dedupe)', async () => {
+    openCallbackExistsForLane.mockResolvedValue(true); // committed after the opening read
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(out).toMatch(/ALREADY on the schedule/i);
+    expect(out).not.toMatch(/\d{1,2}:\d{2}/); // no window, no date
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+    assertNoComms();
+  });
+
+  test('an in-lock dedupe FAILURE refuses to file (fail closed)', async () => {
+    openCallbackExistsForLane.mockRejectedValue(new Error('pool gone'));
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(out).toMatch(/could not check whether a re-service is already on the schedule/i);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled();
   });
 
   test('a ticket that appears between the read and the insert wins — no second ticket, no second owner page', async () => {

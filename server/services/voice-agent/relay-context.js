@@ -260,7 +260,24 @@ async function loadOfficeHours() {
     const startMin = clockMinutes((config && config.day_start) || DEFAULT_DAY_START);
     const endMin = clockMinutes((config && config.day_end) || DEFAULT_DAY_END);
     if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
-    return { startMin, endMin };
+    // Whether TODAY (and tomorrow) are working days at all — weekly days off
+    // and one-off closures both live in the shared blackout mechanism, not in
+    // booking_config's start/end. Read once per session with the hours; fails
+    // soft to "not a day off", which is the pre-existing behaviour.
+    let closedToday = false;
+    let closedTomorrow = false;
+    try {
+      const { getBlackoutDates } = require('../scheduling/blackout-dates');
+      const { etDateString, addETDays } = require('../../utils/datetime-et');
+      const todayStr = etDateString();
+      const tomorrowStr = etDateString(addETDays(new Date(), 1));
+      const closed = await getBlackoutDates(todayStr, tomorrowStr);
+      closedToday = closed.has(todayStr);
+      closedTomorrow = closed.has(tomorrowStr);
+    } catch (err) {
+      logger.warn(`[voice-relay-context] closed-day lookup failed — clock block assumes a working day: ${err.message}`);
+    }
+    return { startMin, endMin, closedToday, closedTomorrow };
   } catch (err) {
     logger.warn(`[voice-relay-context] office hours lookup failed — clock block will omit open/closed: ${err.message}`);
     return null;
@@ -294,13 +311,31 @@ function renderClockBlock(hours, now = new Date()) {
       `Right now in Florida (Eastern Time): ${dateLine}, ${speakClock(nowMinutes)}`,
     ];
     if (Number.isFinite(startMin) && Number.isFinite(endMin)) {
-      const open = nowMinutes >= startMin && nowMinutes < endMin;
-      lines.push(`Waves office hours: ${speakClock(startMin)} to ${speakClock(endMin)} Eastern, including weekends`);
+      // ⭐ HOURS ARE NOT THE SAME QUESTION AS "IS TODAY A WORKING DAY". The
+      // booking config carries a start and an end; whether a given date is
+      // CLOSED lives in scheduling/blackout-dates (weekly days off + one-off
+      // closures), which is why this block used to announce hours "including
+      // weekends" and promise a reopening tomorrow without asking whether
+      // tomorrow is open. On a closed day the agent must not promise a callback
+      // at all, and it must never name a reopening time it has not checked.
+      const closedToday = hours && hours.closedToday === true;
+      const closedTomorrow = hours && hours.closedTomorrow === true;
+      const open = !closedToday && nowMinutes >= startMin && nowMinutes < endMin;
+      lines.push(`Waves office hours on a working day: ${speakClock(startMin)} to ${speakClock(endMin)} Eastern `
+        + '(Waves works weekends — a closed day here is a scheduled day off, never "it is the weekend")');
       lines.push(`The office is ${open ? 'OPEN right now' : 'CLOSED right now'}`);
-      if (!open) {
-        lines.push(nowMinutes < startMin
-          ? `The office opens today at ${speakClock(startMin)} Eastern`
-          : `The office opens again tomorrow at ${speakClock(startMin)} Eastern`);
+      if (closedToday) {
+        lines.push('Today is a scheduled day off — do NOT promise a callback today, and do not state a '
+          + 'reopening time you have not been given');
+      } else if (!open) {
+        if (nowMinutes < startMin) {
+          lines.push(`The office opens today at ${speakClock(startMin)} Eastern`);
+        } else if (closedTomorrow) {
+          lines.push('Tomorrow is a scheduled day off — say a team member will follow up on the next working '
+            + 'day, and do not name a time');
+        } else {
+          lines.push(`The office opens again tomorrow at ${speakClock(startMin)} Eastern`);
+        }
       }
     } else {
       lines.push('Waves office hours: not available right now — do not state office hours or promise a specific callback time; say a team member will follow up as soon as possible');
@@ -1016,13 +1051,18 @@ async function lookupCustomersText(input = {}, ctx = {}) {
   if (rows.length === 1) {
     const row = rows[0];
     const ref = rememberLookup(row);
-    const first = promptSafe(row.first_name, 40) || 'the account holder';
-    const city = promptSafe(row.city, 40);
+    // ⭐ CUSTOMER-CONTROLLED TEXT GOES BACK TO THE MODEL AS TOOL DATA, so it
+    // takes the INJECTION filter, not just the character flattener: a first
+    // name or city reading "ignore previous instructions…" would otherwise
+    // arrive verbatim in a tool result and steer the reads that follow. Same
+    // treatment every other DB free-text path in this lane already gets.
+    const first = promptSafeUntrusted(row.first_name, 40) || 'the account holder';
+    const city = promptSafeUntrusted(row.city, 40);
     return `Found one matching account: ${first}${city ? ` in ${city}` : ''} (customer_ref: ${ref}). `
       + 'You may use this ref with get_account_overview / get_service_history to help the caller. '
       + 'Remember: this account did not match the caller\'s phone number — confirm details they state, don\'t recite details to them.';
   }
-  const firstNames = [...new Set(rows.map((r) => promptSafe(r.first_name, 40)).filter(Boolean))];
+  const firstNames = [...new Set(rows.map((r) => promptSafeUntrusted(r.first_name, 40)).filter(Boolean))];
   if (rows.length > LOOKUP_AMBIGUOUS_MAX) {
     return 'That matches more than five accounts — too many to pick from. Ask the caller for another detail (last name, street address, or the phone number on the account) and call lookup_customer again with more to go on.';
   }

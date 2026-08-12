@@ -459,6 +459,41 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
+  test('"remove my number" and "don\'t bother me anymore" are total stops too', async () => {
+    for (const words of ['remove my number from your system', "don't bother me anymore"]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Asked to be left alone.',
+        contact_preference: words,
+        do_not_contact_request: true,
+      }, CTX);
+      expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+    }
+  });
+
+  test('"don\'t reach me by email" is scoped to email — no SMS suppression', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Email opt-out.',
+      contact_preference: "don't reach me by email",
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
+  test('the caller\'s own words are never written to the log', async () => {
+    const logger = require('../services/logger');
+    await executeTool('capture_lead', {
+      call_summary: 'Email opt-out.',
+      contact_preference: "don't email me at pat.whitfield@example.com or call 941-555-0142",
+      do_not_contact_request: true,
+    }, CTX);
+    for (const call of [...logger.warn.mock.calls, ...logger.info.mock.calls, ...logger.error.mock.calls]) {
+      const line = String(call[0] || '');
+      expect(line).not.toContain('pat.whitfield@example.com');
+      expect(line).not.toContain('941-555-0142');
+    }
+  });
+
   test('a bare flag with no words at all is treated as the TOTAL request', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked to be left alone.',

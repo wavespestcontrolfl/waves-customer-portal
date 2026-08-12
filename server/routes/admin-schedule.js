@@ -8487,7 +8487,14 @@ router.put('/:id/status', async (req, res, next) => {
     // what arms reminders for them too.)
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
-      await runOfficeConfirmActivation(db, svc, 'admin-schedule');
+      // ⭐ A TECHNICIAN TOKEN ON THIS ROUTE IS A FIELD CONFIRM. Same distinction
+      // tech-track draws: the tech is already driving to meet the customer and
+      // collects a card in person, so the office-only card-request funnel — and
+      // the clearance stamp that arms the pre-visit sweep behind it — must not
+      // fire from a field status tap. Office confirms keep the full funnel.
+      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+        skipCardRequest: isTechnicianRequest(req),
+      });
     }
 
     // En-route: track-transitions flip (which fires the customer SMS

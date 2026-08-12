@@ -49,13 +49,13 @@ beforeEach(() => {
 
 describe('office hours come from the ONE existing source', () => {
   test('loadOfficeHours reads booking_config through booking._internals.loadBookingConfig', async () => {
-    expect(await relayContext.loadOfficeHours()).toEqual({ startMin: 480, endMin: 1020 });
+    expect(await relayContext.loadOfficeHours()).toMatchObject({ startMin: 480, endMin: 1020 });
     expect(booking.loadBookingConfig).toHaveBeenCalledTimes(1);
   });
 
   test('a config with different hours is honoured (DB-authoritative, not hardcoded)', async () => {
     booking.loadBookingConfig.mockResolvedValue({ day_start: '09:30', day_end: '18:00' });
-    expect(await relayContext.loadOfficeHours()).toEqual({ startMin: 570, endMin: 1080 });
+    expect(await relayContext.loadOfficeHours()).toMatchObject({ startMin: 570, endMin: 1080 });
   });
 
   test('an unreadable config → null (the block declines to state hours, never guesses)', async () => {
@@ -81,7 +81,7 @@ describe('renderClockBlock', () => {
   test('during hours → OPEN, with the live ET date and time', () => {
     const block = relayContext.renderClockBlock(HOURS, SUMMER_10AM_ET);
     expect(block).toContain('Right now in Florida (Eastern Time): Wednesday August 12, 2026, 10:00 AM');
-    expect(block).toContain('Waves office hours: 8:00 AM to 5:00 PM Eastern');
+    expect(block).toContain('Waves office hours on a working day: 8:00 AM to 5:00 PM Eastern');
     expect(block).toContain('The office is OPEN right now');
     // Framed as DATA, matching the KNOWN CALLER / RECENT TEXTS block pattern.
     expect(block).toContain('<<<CLOCK DATA');
@@ -110,7 +110,28 @@ describe('renderClockBlock', () => {
     const block = relayContext.renderClockBlock(HOURS, SUMMER_SUNDAY);
     expect(block).toContain('Sunday August 16, 2026, 10:30 AM');
     expect(block).toContain('The office is OPEN right now');
-    expect(block).toContain('including weekends');
+    // Weekends are working days here; "closed" only ever means a SCHEDULED day
+    // off (scheduling/blackout-dates), never the calendar weekend.
+    expect(block).toContain('Waves works weekends');
+    expect(block).toContain('scheduled day off');
+  });
+
+  // ⭐ HOURS ≠ WORKING DAY. Weekly days off and one-off closures live in the
+  // shared blackout mechanism, so a day off must not be announced as OPEN and
+  // must never carry a promised reopening time nobody checked.
+  test('a scheduled day off is CLOSED and promises no callback today', () => {
+    const block = relayContext.renderClockBlock({ ...HOURS, closedToday: true }, SUMMER_10AM_ET);
+    expect(block).toContain('The office is CLOSED right now');
+    expect(block).toMatch(/scheduled day off/);
+    expect(block).toMatch(/do NOT promise a callback today/i);
+    expect(block).not.toMatch(/opens today at/);
+  });
+
+  test('after hours with TOMORROW off → no reopening time is named', () => {
+    const block = relayContext.renderClockBlock({ ...HOURS, closedTomorrow: true }, SUMMER_7PM_ET);
+    expect(block).toContain('The office is CLOSED right now');
+    expect(block).toMatch(/next working day/i);
+    expect(block).not.toMatch(/opens again tomorrow at/);
   });
 
   test('no hours available → the clock still lands, hours are explicitly declined', () => {

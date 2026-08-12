@@ -1005,11 +1005,19 @@ class RelayConversation {
       logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — request_reservice is still in flight past the drain bound (its ticket is this call's artifact, not a lead)`);
       return;
     }
+    // ⭐ THE SAME SCRUB THE TRANSCRIPT TAKES. These are RAW STT turns, and the
+    // lead pipeline persists this summary in `leads.transcript_summary` and the
+    // activity metadata — so a caller who reads out a card number and hangs up
+    // before capture_lead would have had it stored in plaintext HERE even
+    // though relay-transcript scrubs the call_log copy. One scrubber, both
+    // destinations.
+    const { scrubForStorage } = require('./relay-transcript');
+    const spokenSoFar = this._userTurns.length
+      ? `Caller said: ${scrubForStorage(this._userTurns.join(' | ')).slice(0, 600)}`
+      : 'No transcript captured.';
     const write = createLeadFromExtraction(
       {
-        call_summary:
-          'Inbound voice call (auto-captured on hangup). ' +
-          (this._userTurns.length ? `Caller said: ${this._userTurns.join(' | ').slice(0, 600)}` : 'No transcript captured.'),
+        call_summary: `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`,
         requested_service: null,
       },
       { phone: callerPhone, toPhone: this.to, callSid: this.callSid, language: this.language }

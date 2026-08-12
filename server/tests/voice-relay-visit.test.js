@@ -51,7 +51,8 @@ const TODAY = '2026-08-12';
 
 function makeBuilder(rows) {
   const b = {};
-  const chain = ['whereNull', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'select', 'limit',
+  // orderByRaw: live visits sort ahead of terminal same-day history.
+  const chain = ['whereNull', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'orderByRaw', 'select', 'limit',
     'whereRaw', 'orWhereRaw', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'whereNot', 'join', 'leftJoin'];
   for (const m of chain) b[m] = jest.fn(() => b);
   b.where = jest.fn(function whereImpl(arg) { if (typeof arg === 'function') arg.call(b, b); return b; });

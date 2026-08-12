@@ -772,16 +772,25 @@ async function executeTool(name, input = {}, ctx = {}) {
       })();
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
       const statedSmsStop = TEXTY.test(stopClause);
-      const totalStop = /\b(?:contact|contacting|reach|reaching)\b/i.test(stopClause)
-        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText)
+      // A total stop is any "stop <reaching me at all>" phrasing — and the
+      // common ones do not say "contact": "remove my number", "don't bother me
+      // anymore", "take me off your list". It is NOT total when the same clause
+      // scopes it to a non-SMS channel ("don't reach me by email"), which is
+      // the inverse mistake: suppressing texts the caller never mentioned.
+      const NON_SMS_CHANNEL = /\b(?:e-?mail|mail|letter|post|call|calls|calling|phone)\b/i;
+      const totalIdiom = /\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(stopClause)
+        || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(preferenceText);
+      const totalStop = (totalIdiom && !NON_SMS_CHANNEL.test(stopClause))
         || !preferenceText.trim(); // a bare flag with no words = the total request
       const smsOptOut = statedSmsStop || totalStop;
       const emailOnlyRequest = !smsOptOut;
       if (input.do_not_contact_request === true && emailOnlyRequest) {
         logger.warn(
           `[voice-relay] verbal do-not-contact is NOT an unambiguous SMS stop callSid=${ctx.callSid || 'n/a'} `
-          + `(stop clause: "${stopClause.trim().slice(0, 60) || 'none'}") — no messaging suppression written `
-          + '(that would stop texts they did not ask to stop); recorded on the lead for a human'
+          + `(classified: ${totalIdiom ? 'total-stop scoped to another channel' : 'no texting words in the stop clause'}) `
+          + '— no messaging suppression written (that would stop texts they did not ask to stop); recorded on the '
+          + 'lead for a human. The instruction itself is NOT logged: it is caller free text and can carry a name, '
+          + 'a number or an address (AGENTS.md PII rule).'
         );
       }
       if (input.do_not_contact_request === true && !emailOnlyRequest) {

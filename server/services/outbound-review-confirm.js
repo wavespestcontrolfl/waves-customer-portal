@@ -665,12 +665,17 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * suppresses) and must tell transitionJobStatus to stand down via
  * `legacyOutboundActivation: 'caller'`, or the two would run concurrently.
  *
+ * `opts` is forwarded verbatim to the hook — notably `skipCardRequest` for a
+ * FIELD confirm (a technician tapping confirm collects a card in person; the
+ * office-only card-request funnel and its clearance stamp must not fire behind
+ * them, per the #3356 owner decision).
+ *
  * @returns {Promise<boolean>} true when the legs ran AND the row is now stamped.
  */
-async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm') {
+async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm', opts = {}) {
   let coreLegsOk = false;
   try {
-    coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag);
+    coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, opts);
   } catch (e) {
     logger.error(`[${routeTag}] office-confirm hook threw for ${svc.id}: ${e.message}`);
   }

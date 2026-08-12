@@ -190,8 +190,13 @@ async function requestReserviceText(input = {}, ctx = {}) {
         + 'details with the account holder. Never read out a link or a code.';
     }
     const when = speakDate(booked.date);
+    // Customer-facing arrival copy is the TWO-HOUR RANGE from the shared
+    // arrivalWindowRange() (AGENTS.md) — never the raw scheduling start, which
+    // reads as a promise to arrive exactly then.
+    const { arrivalWindowRange } = require('../../utils/sms-time-format');
+    const range = booked.windowStart ? arrivalWindowRange(booked.windowStart) : null;
     return `A free re-service visit is ALREADY on the schedule for this account${when ? ` on ${when}` : ''}`
-      + `${booked.windowStart ? ` (window starts ${booked.windowStart})` : ''}. Do NOT file another request. `
+      + `${range ? ` (arrival window ${range})` : ''}. Do NOT file another request. `
       + 'Tell the caller it is already booked. If they need to move it, a Waves team member can do that — '
       + 'never read out a link or a code.';
   }
@@ -231,10 +236,33 @@ async function requestReserviceText(input = {}, ctx = {}) {
   // Same doctrine as the booking writer's rung-2 lock: the lock is what makes a
   // read-then-insert safe.
   const filedTicket = await db.transaction(async (trx) => {
+    // ⭐ THE SHARED LANE LOCK, NOT A PRIVATE ONE. A namespace only this module
+    // takes serializes this module against ITSELF and nothing else — and the
+    // thing worth serializing against is the OTHER writer in this lane: the
+    // self-service callback commit (routes/booking.js) takes
+    // `reservice-lane`/<customer>:<serviceKey> and then checks
+    // openCallbackExistsForLane. Filing under a different key let both commit,
+    // producing a booked callback AND a redundant ticket that pages the owner
+    // about a visit already on the calendar. Same namespace, same key shape.
+    const { RESERVICE_LANES, openCallbackExistsForLane } = require('../reservice-scheduler');
+    const laneServiceKey = (RESERVICE_LANES[lane] && RESERVICE_LANES[lane].serviceKey) || lane;
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['voice-reservice-file', `${customerId}:${category}`],
+      ['reservice-lane', `${customerId}:${laneServiceKey}`],
     );
+    // …and the booked-callback dedupe re-runs INSIDE the lock. The read at the
+    // top of this function is outside any transaction, so a callback that
+    // committed in between would otherwise be invisible right up to the insert.
+    try {
+      if (await openCallbackExistsForLane(trx, customerId, lane)) {
+        return { status: 'already_booked' };
+      }
+    } catch (err) {
+      // An unanswerable dedupe is not a licence to write — the same fail-closed
+      // posture the read at the top takes.
+      logger.error(`[voice-relay-reservice] in-lock callback dedupe FAILED for ${customerId} — refusing to file: ${err.message}`);
+      return { status: 'dedupe_failed' };
+    }
     const raced = await trx('service_requests')
       .where({ customer_id: customerId, category })
       .whereIn('status', OPEN_REQUEST_STATUSES)
@@ -255,6 +283,22 @@ async function requestReserviceText(input = {}, ctx = {}) {
       .returning('*');
     return { status: 'created', row };
   });
+  if (filedTicket.status === 'already_booked') {
+    // A callback committed between the opening read and this lock. Same answer
+    // that read gives, and — as there — the schedule detail is full-tier only.
+    logger.warn(
+      `[voice-relay-reservice] a re-service callback committed mid-call for customer ${customerId} `
+      + `— no ticket filed (callSid=${ctx.callSid || 'n/a'})`
+    );
+    return 'A free re-service visit is ALREADY on the schedule for this account. Do NOT file another request '
+      + 'and do NOT state a date or arrival window. Tell the caller it is already booked and that a Waves team '
+      + 'member can go over the details. Never read out a link or a code.';
+  }
+  if (filedTicket.status === 'dedupe_failed') {
+    return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '
+      + 'filed — filing a second one would double-book them. Tell the caller a Waves team member will follow up '
+      + 'about it shortly, and do NOT state a date, a time, a link, or a code.';
+  }
   if (filedTicket.status === 'already_open') {
     logger.warn(
       `[voice-relay-reservice] concurrent ${category} request for customer ${customerId} — `
