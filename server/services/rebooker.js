@@ -771,8 +771,10 @@ class SmartRebooker {
     const RESCHEDULABLE = RESCHEDULABLE_STATUSES;
 
     // Non-anchor siblings whose tracker lifecycle was rewound inside the
-    // trx — they get the shared post-commit cleanup after commit.
+    // trx — they get the shared post-commit cleanup after commit. The
+    // anchor's own rewind is tracked separately (same trx-fresh decision).
     const rewoundSiblings = [];
+    let anchorRewound = false;
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -964,15 +966,16 @@ class SmartRebooker {
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx
         // commits. The sibling SELECT is column-limited, so carry the
-        // series' customer_id for the refresh payload. The anchor is
-        // normally handled by the block below keyed on the OUTER read —
-        // but if a concurrent En Route tap advanced the anchor between
-        // that read and this trx's fresh sibling read, only THIS row shows
-        // the evidence, so the anchor must ride along here too.
+        // series' customer_id for the refresh payload. The anchor's flag is
+        // tracked separately and drives the anchor cleanup block below —
+        // keyed on THIS trx's fresh read (with the same date-change gate),
+        // never the outer snapshot, so a concurrent tap after the outer
+        // read is covered and a same-day edit that did NOT rewind never
+        // clears an active tech.
         if (sibRewound) {
-          const isAnchorRow = String(sib.id) === String(serviceId);
-          const outerCleanupCovers = wasLive || needsLifecycleRewind(service);
-          if (!isAnchorRow || !outerCleanupCovers) {
+          if (String(sib.id) === String(serviceId)) {
+            anchorRewound = true;
+          } else {
             rewoundSiblings.push({ ...sib, customer_id: service.customer_id });
           }
         }
@@ -1181,9 +1184,11 @@ class SmartRebooker {
     // Live-anchor post-commit cleanup — same pattern as the single-job
     // override in reschedule(): free the tech_status pointer and push
     // the customer-tracker refresh so an open TrackPage doesn't sit on
-    // the stale en-route / on-site screen. Evidence-only rewinds (live
-    // track_state under a non-live status) need the same cleanup.
-    if (wasLive || needsLifecycleRewind(service)) {
+    // the stale en-route / on-site screen. Keyed on the trx's OWN rewind
+    // decision (anchorRewound — fresh read, date-change gated), so a
+    // same-day edit that preserved the lifecycle never clears an active
+    // tech, and a concurrent tap after the outer read is still covered.
+    if (wasLive || anchorRewound) {
       if (service.technician_id) {
         try {
           await clearTechCurrentJob({

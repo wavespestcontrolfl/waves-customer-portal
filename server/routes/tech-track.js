@@ -193,6 +193,21 @@ router.post('/:id/en-route', async (req, res, next) => {
       return res.status(status).json({ error: result.reason });
     }
 
+    // Delegated stale heal: markEnRoute's operational sync is best-effort
+    // (it logs and continues), so verify the status actually landed before
+    // reporting success — a sync failure would leave status='confirmed'
+    // beside track_state='en_route'. A re-tap converges: confirmed is a
+    // valid en-route source, and the tracker side is idempotent.
+    if (staleOnSiteHeal) {
+      const after = await db('scheduled_services').where({ id: svc.id }).first('status');
+      if (after?.status !== 'en_route') {
+        return res.status(409).json({
+          error: 'The stale visit was reset but the status update did not complete — tap En Route again.',
+          code: 'stale_heal_status_sync_incomplete',
+        });
+      }
+    }
+
     logger.info(
       `[tech-track] en-route service=${svc.id} tech=${req.technicianId} ` +
       `fromStatus=${fromStatus} smsSent=${result.smsSent} alreadyEnRoute=${!!result.alreadyEnRoute}`
