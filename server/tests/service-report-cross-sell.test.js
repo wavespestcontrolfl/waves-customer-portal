@@ -400,6 +400,22 @@ describe('buildReportCrossSell', () => {
     expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
   });
 
+  test('an estimate-linked row that cannot be resolved suppresses the strict scope entirely', async () => {
+    // source_estimate_id set but the estimate is missing/addressless: the
+    // premises are unprovable, and defaulting to primary would count a
+    // possibly-secondary plan there — same fail-closed rule as the
+    // property_id leg.
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      stampRows: [{
+        id: 'r4', service_type: 'Lawn Care', scheduled_date: FUTURE_SCHEDULED_DATE,
+        status: 'scheduled', is_recurring: true, source_estimate_id: 'est-missing',
+      }],
+    });
+    expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
+  });
+
   test('a report stamped at a different property than the primary is suppressed', async () => {
     const db = dbFor({
       serviceTypes: ['Pest Control'],

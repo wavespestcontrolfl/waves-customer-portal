@@ -388,8 +388,16 @@ async function filterRowsToStreet(database, rows, streetScope) {
     if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
-        street = normalizedEstimateStreet(src?.address);
-      } catch { /* fall through to the primary-street default */ }
+        street = normalizedEstimateStreet(src?.address) || street;
+      } catch (estErr) {
+        // Same strict fail-closed rule as the property_id leg (pre-push
+        // P0 ×2): an estimate-LINKED row that cannot resolve must not
+        // relabel itself as the primary property.
+        if (streetScope.requireSharedLocality) throw estErr;
+      }
+      if (streetScope.requireSharedLocality && (!street || scopeKeyLacksLocality(street))) {
+        throw new Error('estimate-linked row unresolvable for strict street scope');
+      }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
     if (street && sameScopeKey(street, streetScope.estimateStreet)) {
