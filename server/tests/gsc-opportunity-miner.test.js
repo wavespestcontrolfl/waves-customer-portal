@@ -463,7 +463,10 @@ describe('freshness + split-collapse contracts (source shape)', () => {
   test('no_content_yet collapses classification splits to ONE candidate per query', () => {
     // dedupeKey embeds service+city, so two splits of one query would both
     // persist and draft two posts for one intent.
-    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,1600}byQuery\.set\(q\.query, \{ q, service, city, impressions \}\)/);
+    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,2400}byQuery\.set\(q\.query, \{ q, service, city, impressions, persistable \}\)/);
+    // …and the winner must be PERSISTABLE first, so the collapse agrees
+    // with reachability (which admits a rep when ANY tuple clears).
+    expect(src).toMatch(/\(persistable && !existing\.persistable\)/);
   });
 
   test('freshness is proven BEFORE an empty mine is accepted as "no signal"', () => {

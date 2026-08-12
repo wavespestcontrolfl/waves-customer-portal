@@ -3502,9 +3502,27 @@ class GscOpportunityMiner {
         || inferServiceFromQuery(q.query);
       if (!service) continue;
       const impressions = parseInt(q.impressions, 10) || 0;
+      // PERSISTABLE first, then impressions. A slightly larger
+      // low-revenue classification could otherwise win the collapse, fall
+      // under its floor, and be dropped — while the family lane yielded
+      // because reachability saw the smaller PERSISTABLE tuple, leaving
+      // the demand with neither bucket (audit P1). Reachability admits a
+      // rep when ANY tuple clears the floor, so the collapse must prefer
+      // a clearing tuple for the two to agree.
+      const probe = {
+        bucket: 'no_content_yet', query: q.query, page_url: null, service, city,
+      };
+      probe.action_type = actionForOpportunity(probe);
+      const { total } = scoreOpportunity(probe, {
+        position: parseFloat(q.avg_position), impressions,
+      });
+      const persistable = total >= persistFloorFor(probe);
       const existing = byQuery.get(q.query);
-      if (!existing || impressions > existing.impressions) {
-        byQuery.set(q.query, { q, service, city, impressions });
+      const better = !existing
+        || (persistable && !existing.persistable)
+        || (persistable === existing.persistable && impressions > existing.impressions);
+      if (better) {
+        byQuery.set(q.query, { q, service, city, impressions, persistable });
       }
     }
     const candidates = Array.from(byQuery.values());
@@ -3923,20 +3941,35 @@ class GscOpportunityMiner {
       // canonical mine retries the pair once that work finishes.
       const lockedKeys = new Set(locked.map((r) => r.dedupe_key));
       const targetedCompanions = new Set(companionKeys);
+      const parentsByCompanion = new Map();
       const blockedParents = new Set();
       for (const r of probeStale) {
         if (!r.page_url) continue;
         const ck = dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
         });
+        if (!targetedCompanions.has(ck)) continue;
         // Only companions we INTENDED to retire block their parent; a
         // protected companion means another live parent still needs it,
         // which is no reason to keep ours.
-        if (targetedCompanions.has(ck) && !lockedKeys.has(ck)) blockedParents.add(r.dedupe_key);
+        if (!lockedKeys.has(ck)) blockedParents.add(r.dedupe_key);
+        if (!parentsByCompanion.has(ck)) parentsByCompanion.set(ck, []);
+        parentsByCompanion.get(ck).push(r.dedupe_key);
       }
-      const expireKeys = locked
+      const expiringParents = new Set(locked
         .map((r) => r.dedupe_key)
-        .filter((k) => !blockedParents.has(k));
+        .filter((k) => !targetedCompanions.has(k) && !blockedParents.has(k)));
+      // BOTH directions of the pair invariant. The previous pass only
+      // deferred a parent whose companion was claimed; the mirror case —
+      // the PARENT claimed while the companion stayed pending — would
+      // expire an orphaned companion whose parent is still live work
+      // (audit P1). A companion expires only when every parent that
+      // targeted it is being expired too.
+      const expireKeys = locked.map((r) => r.dedupe_key).filter((k) => {
+        if (!targetedCompanions.has(k)) return expiringParents.has(k);
+        const parents = parentsByCompanion.get(k) || [];
+        return parents.length > 0 && parents.every((pk) => expiringParents.has(pk));
+      });
       if (blockedParents.size) {
         logger.info(`[gsc-opp-miner] ${bucket} sweep: ${blockedParents.size} pair(s) deferred — companion claimed mid-sweep`);
       }
