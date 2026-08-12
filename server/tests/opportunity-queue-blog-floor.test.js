@@ -317,6 +317,52 @@ describe('miner persistAll action-aware gate', () => {
     city: null,
   };
 
+  test('a stale parent cannot shield its OWN companion (it is still pending when protection is computed)', async () => {
+    // The live-parent lookup sees rows that are still 'pending' —
+    // including the very rows being retired. Without excluding them, each
+    // stale parent contributes its own companion key, the parent is
+    // expired, and the companion stays claimable forever.
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        _filters: null, _in: null, _notIn: null,
+        where: jest.fn((f) => { q._filters = f; return q; }),
+        whereNot: jest.fn(() => q),
+        whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+        select: jest.fn(() => q),
+        // Live lookup returns the stale row itself — honouring the
+        // caller's dedupe_key exclusion is what makes this pass.
+        then: (res, rej) => {
+          const excluded = new Set(q._notIn?.[0] === 'dedupe_key' ? q._notIn[1] : []);
+          const rows = [{ page_url: staleRow.page_url, service: staleRow.service, city: staleRow.city, dedupe_key: staleRow.dedupe_key }]
+            .filter((r) => !excluded.has(r.dedupe_key));
+          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : rows).then(res, rej);
+        },
+        forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
+        update: jest.fn((u) => {
+          updates.push({ table, filters: q._filters, in: q._in, updates: u });
+          return Promise.resolve(1);
+        }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1 });
+
+    await miner.persistAll([
+      opp({
+        score: 87, bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm', service: 'pest', city: null,
+        page_url: 'https://x/new-page/', dedupe_key: 'ctr::new-page',
+      }),
+    ]);
+
+    const companionRetirements = updates.filter((u) => u.filters?.bucket === 'link_boost');
+    expect(companionRetirements.length).toBeGreaterThanOrEqual(1);
+    expect(companionRetirements[0].in).toEqual(['dedupe_key', ['link_boost::pest::_::https://x/old-page/']]);
+  });
+
   test('a moved ctr_rewrite target retires the superseded row and its companion by EXACT key', async () => {
     // The ranking URL for a query moves A → B between mines. B queues
     // under a new dedupe key (page_url is in the key), so A's pending row
@@ -561,12 +607,17 @@ describe('miner persistAll action-aware gate', () => {
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
         whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
         select: jest.fn(() => q),
-        // The live-parent lookup (no bucket filter) returns a refresh row
-        // on the SAME page as the stale rewrite row.
+        // The live-parent lookup (no bucket filter) returns BOTH the
+        // still-pending stale rewrite row and an unrelated refresh row on
+        // the same page — the stale one must be excluded by the caller,
+        // the refresh one must protect.
         then: (res, rej) => Promise.resolve(
           q._filters?.bucket === 'ctr_rewrite'
             ? [staleRow]
-            : [{ page_url: 'https://x/old-page/', service: 'pest', city: null }]
+            : [
+              { page_url: 'https://x/old-page/', service: 'pest', city: null },
+              { page_url: staleRow.page_url, service: staleRow.service, city: staleRow.city },
+            ]
         ).then(res, rej),
         forUpdate: jest.fn(() => Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : [])),
         update: jest.fn((u) => {

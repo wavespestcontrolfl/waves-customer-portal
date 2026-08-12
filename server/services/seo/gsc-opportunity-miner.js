@@ -3503,14 +3503,20 @@ class GscOpportunityMiner {
    * every companion in sight, so the error path returns a set that
    * protects everything by reporting failure to the caller.
    */
-  async _companionProtection(runner, opportunities = []) {
+  async _companionProtection(runner, opportunities = [], retiringKeys = new Set()) {
     const keys = companionProtectionKeys(opportunities);
     try {
-      const live = await runner('opportunity_queue')
+      let liveQ = runner('opportunity_queue')
         .whereIn('status', ['pending', 'claimed', 'pending_review'])
         .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
-        .whereNotNull('page_url')
-        .select('page_url', 'service', 'city');
+        .whereNotNull('page_url');
+      // The rows being retired RIGHT NOW are still 'pending' in the queue,
+      // so without this exclusion every stale parent would contribute its
+      // own companion key and shield it — retiring the parent while its
+      // companion stayed claimable, the exact leak this protection exists
+      // to prevent (audit P1).
+      if (retiringKeys.size) liveQ = liveQ.whereNotIn('dedupe_key', Array.from(retiringKeys));
+      const live = await liveQ.select('page_url', 'service', 'city');
       for (const r of live) {
         keys.add(dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
@@ -3540,8 +3546,6 @@ class GscOpportunityMiner {
     }
     if (!activeKeysByQuery.size) return;
 
-    const protectedCompanionKeys = await this._companionProtection(runner, opportunities);
-
     for (const [query, activeKeys] of activeKeysByQuery) {
       try {
         // FOR UPDATE + update-by-locked-key, same reason as the sweep: a
@@ -3559,6 +3563,12 @@ class GscOpportunityMiner {
             status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
           });
 
+        // Protection is computed AFTER the stale set is known, with those
+        // rows excluded — they are still 'pending' and would otherwise
+        // shield their own companions.
+        const protectedCompanionKeys = await this._companionProtection(
+          runner, opportunities, new Set(stale.map((r) => r.dedupe_key))
+        );
         // null protection = lookup failed = protect everything.
         const companionKeys = protectedCompanionKeys === null ? [] : stale
           .filter((r) => r.page_url)
@@ -3624,7 +3634,9 @@ class GscOpportunityMiner {
       // Protection must see the COMPLETE batch: a live decay_refresh
       // parent targeting the stale rewrite's page shares its companion
       // key, and the ctr-only list cannot see it (audit P1).
-      const protectedKeys = await this._companionProtection(runner, fullBatch || ctrOpportunities);
+      const protectedKeys = await this._companionProtection(
+        runner, fullBatch || ctrOpportunities, new Set(stale.map((r) => r.dedupe_key))
+      );
       const companionKeys = protectedKeys === null ? [] : stale
         .filter((r) => r.page_url)
         .map((r) => dedupeKey({
