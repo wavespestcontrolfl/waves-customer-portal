@@ -12,7 +12,12 @@
  *      goes out as SMS exactly as today. A push only replaces an SMS when
  *      the provider proves at least one device ACCEPTED it (`sent > 0`,
  *      the same delivery-proof contract as the internal-alert redirect in
- *      services/twilio.js).
+ *      services/twilio.js). DELIBERATE at-least-once stance: a transport
+ *      timeout after the request reached the wire is ambiguous (the push
+ *      may still land), and we classify it undelivered anyway — a rare
+ *      duplicate (push + SMS) is the accepted cost, because the opposite
+ *      guess risks a customer silently receiving NOTHING, and Twilio's
+ *      own retry semantics already accept the same trade for SMS.
  *   2. Routing lives INSIDE TwilioService.sendSMS, after EVERY outbound
  *      guard — owner silence, feature gates, the per-template kill switch,
  *      validateOutbound, and the caller's send-window boundary re-check —
@@ -392,6 +397,23 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
+      // Durable settlement for SCHEDULED sends: without the proof row the
+      // recovery sweep would resend this already-delivered push. Settle the
+      // scheduled claim directly — the same status flip the sweep itself
+      // performs when it finds proof — with a marker naming why.
+      if (scheduledSmsLogId) {
+        await db.raw(
+          `UPDATE sms_log
+             SET status = 'sent',
+                 updated_at = now(),
+                 metadata = COALESCE(metadata, '{}'::jsonb)
+                   || jsonb_build_object('push_settled_without_proof', true)
+           WHERE id = ? AND status <> 'sent'`,
+          [scheduledSmsLogId],
+        ).catch((settleErr) => {
+          logger.error(`[push-routing] CRITICAL: proof row AND direct settlement failed for scheduled ${scheduledSmsLogId} — sweep may resend: ${settleErr.message}`);
+        });
+      }
     }
     const notificationId = await recordBell(customerId, messageType, body);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';

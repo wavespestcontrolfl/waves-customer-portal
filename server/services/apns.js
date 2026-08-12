@@ -18,6 +18,10 @@ const http2 = require('http2');
 const jwt = require('jsonwebtoken');
 const logger = require('./logger');
 
+// AMBIGUITY, deliberate: destroying after handoff cannot retract bytes
+// the provider already accepted — the push may still deliver. Routing
+// classifies timeouts as undelivered ON PURPOSE (at-least-once: a rare
+// duplicate beats silent loss; see push-channel-routing.js rule 1).
 // Bounded requests: a hung APNs connection must fail the send promptly —
 // and destroying the stream also prevents a LATE delivery after a caller
 // (push-channel-routing) has already taken its SMS fallback.

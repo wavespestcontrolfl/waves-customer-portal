@@ -17,6 +17,10 @@ const https = require('https');
 const logger = require('./logger');
 
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+// AMBIGUITY, deliberate: destroying after handoff cannot retract bytes
+// the provider already accepted — the push may still deliver. Routing
+// classifies timeouts as undelivered ON PURPOSE (at-least-once: a rare
+// duplicate beats silent loss; see push-channel-routing.js rule 1).
 // Bounded requests — see APNS_REQUEST_TIMEOUT_MS in apns.js for rationale.
 const FCM_REQUEST_TIMEOUT_MS = 8000;
 
