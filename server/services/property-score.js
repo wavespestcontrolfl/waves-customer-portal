@@ -416,6 +416,16 @@ function composeOverall(components) {
   return { score, delta, componentCount: scoredNow.length };
 }
 
+// PROPERTY SCOPING: customer_id IS the property scope on this surface. In
+// the portal's multi-property model each service property is its own
+// `customers` row under a shared account — POST /api/auth/select-property
+// (routes/auth.js) re-issues the session token for the TARGET property's
+// own customer id, so req.customerId always denotes exactly one property.
+// Assessments, pest history, bonds/stations, snapshots, rainfall area, and
+// ownership rows are all keyed to that per-property row; nothing here can
+// mix sibling properties. (loadOwnedRecurringServiceKeys' streetScope
+// exists for the estimate flow's same-row multi-street edge and stays
+// available if that ever applies here.)
 async function buildPropertyScore(customerId, knex = db) {
   const settle = (promise, fallback) => promise.catch(() => fallback);
   const activeLines = await loadActiveLineSet(customerId, knex);
