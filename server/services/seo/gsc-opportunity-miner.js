@@ -1464,16 +1464,39 @@ class GscOpportunityMiner {
     return map;
   }
 
-  // Domains with in-window query→page rows — the coverage evidence behind
-  // queryDomainsCovered (no_content_yet and its reachability mirror). An
-  // empty set means the sync didn't run at all; a partial set means some
-  // domains' absences are sync holes, not content gaps.
+  // A failed map leg can hide behind a healthy queries leg for WEEKS:
+  // syncQueryPageMap swallows its own errors (catch → warn, no rethrow),
+  // so syncDailyData reports success while gsc_query_page_map goes stale —
+  // and any historical row inside the window would still "prove" coverage.
+  // The domain's own gsc_queries freshness is the authoritative yardstick:
+  // both legs sync the same window in the same call, so when queries have
+  // advanced but the map hasn't, the gap is a sync hole. The grace absorbs
+  // benign skew (GSC omits low-volume rows from the query+page breakdown,
+  // so a thin domain's map can legitimately trail by a day or two).
+  static QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS = 4;
+
+  // Domains whose query→page map is present AND fresh for the window — the
+  // coverage evidence behind queryDomainsCovered (no_content_yet and its
+  // reachability mirror). An empty set means the map sync isn't keeping up
+  // anywhere; a partial set means the missing domains' absent mappings are
+  // sync holes, not content gaps (pre-push audit P1 ×2, 2026-08-12).
   async _queryPageMapCoveredDomains(since) {
-    const rows = await db('gsc_query_page_map')
-      .where('date_from', '>=', since)
-      .distinct('domain');
+    const result = await db.raw(
+      `SELECT m.domain
+         FROM (SELECT domain, max(date_from) AS map_max
+                 FROM gsc_query_page_map
+                WHERE date_from >= ?
+                GROUP BY domain) m
+         JOIN (SELECT domain, max(date) AS queries_max
+                 FROM gsc_queries
+                WHERE date >= ?
+                GROUP BY domain) q
+           ON q.domain = m.domain
+        WHERE m.map_max >= q.queries_max - make_interval(days => ?)`,
+      [since, since, GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS]
+    );
     const covered = new Set();
-    for (const r of rows) {
+    for (const r of (result.rows || [])) {
       if (r.domain) covered.add(String(r.domain).toLowerCase());
     }
     return covered;
