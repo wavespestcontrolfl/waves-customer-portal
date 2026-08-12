@@ -1508,10 +1508,15 @@ class GscOpportunityMiner {
         // page that is now performing fine. Guarded on a successful bucket
         // run: with an error, an empty/short bucket means "didn't run", not
         // "no signal", and sweeping would retire valid queued work.
-        if (!errors.ctr_rewrite) {
+        // periodDays gate mirrors the family sweep: a manual 7-day mine
+        // sees far fewer qualifying queries, and treating everything
+        // absent from that shorter window as "recovered" would expire
+        // valid rows produced by the authoritative 28-day run.
+        if (!errors.ctr_rewrite && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS) {
           await this._sweepRecoveredCtrRewrites(
             revalidated.filter((o) => o.bucket === 'ctr_rewrite'),
-            trx
+            trx,
+            revalidated
           );
         }
       });
@@ -3440,18 +3445,20 @@ class GscOpportunityMiner {
 
     for (const [query, activeKeys] of activeKeysByQuery) {
       try {
+        // FOR UPDATE + update-by-locked-key, same reason as the sweep: a
+        // concurrent claimNext between the select and the update would
+        // leave the parent claimed but its companion expired (audit P1).
         let staleQ = runner('opportunity_queue')
           .where({ bucket: 'ctr_rewrite', query, status: 'pending' });
         if (activeKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(activeKeys));
-        const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+        const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
         if (!stale.length) continue;
 
-        let expireQ = runner('opportunity_queue')
-          .where({ bucket: 'ctr_rewrite', query, status: 'pending' });
-        if (activeKeys.size) expireQ = expireQ.whereNotIn('dedupe_key', Array.from(activeKeys));
-        await expireQ.update({
-          status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
-        });
+        await runner('opportunity_queue')
+          .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+          .update({
+            status: 'expired', skip_reason: 'ctr_rewrite_target_moved', updated_at: new Date(),
+          });
 
         const companionKeys = stale
           .filter((r) => r.page_url)
@@ -3487,26 +3494,33 @@ class GscOpportunityMiner {
    * 'expired' — revivable the moment the signal returns. Companions follow
    * their parent, minus anything the current batch still stands behind.
    */
-  async _sweepRecoveredCtrRewrites(ctrOpportunities = [], trx = null) {
+  async _sweepRecoveredCtrRewrites(ctrOpportunities = [], trx = null, fullBatch = null) {
     const runner = trx || db;
     const liveQueries = new Set(
       ctrOpportunities.filter((o) => o.query).map((o) => String(o.query))
     );
     try {
+      // FOR UPDATE: claimNext can otherwise claim a row between the select
+      // and the update — the guarded parent update then skips it while its
+      // companion is still expired from the stale snapshot. Locking also
+      // lets the update key on the LOCKED rows themselves rather than
+      // re-running the predicate against a moved target (audit P1).
       let staleQ = runner('opportunity_queue')
         .where({ bucket: 'ctr_rewrite', status: 'pending' });
       if (liveQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(liveQueries));
-      const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+      const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city').forUpdate();
       if (!stale.length) return;
 
-      let expireQ = runner('opportunity_queue')
-        .where({ bucket: 'ctr_rewrite', status: 'pending' });
-      if (liveQueries.size) expireQ = expireQ.whereNotIn('query', Array.from(liveQueries));
-      await expireQ.update({
-        status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
-      });
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+        .update({
+          status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
+        });
 
-      const protectedKeys = companionProtectionKeys(ctrOpportunities);
+      // Protection must see the COMPLETE batch: a live decay_refresh
+      // parent targeting the stale rewrite's page shares its companion
+      // key, and the ctr-only list cannot see it (audit P1).
+      const protectedKeys = companionProtectionKeys(fullBatch || ctrOpportunities);
       const companionKeys = stale
         .filter((r) => r.page_url)
         .map((r) => dedupeKey({

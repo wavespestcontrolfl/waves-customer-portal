@@ -276,6 +276,7 @@ describe('miner persistAll action-aware gate', () => {
   // so the tests can assert exactly which rows a run would retire.
   function reconcileHarness(staleRows) {
     const updates = [];
+    const locks = [];
     db.mockImplementation((table) => {
       const q = {
         _filters: null, _notIn: null, _in: null,
@@ -284,9 +285,14 @@ describe('miner persistAll action-aware gate', () => {
         whereNotIn: jest.fn((c, v) => { q._notIn = [c, v]; return q; }),
         whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
         whereRaw: jest.fn(() => q),
-        select: jest.fn(() => Promise.resolve(
-          q._filters?.bucket === 'ctr_rewrite' ? staleRows : []
-        )),
+        // select(...).forUpdate() — the reconciliation LOCKS the rows it
+        // is about to retire and then updates them by locked key, so the
+        // selection predicate and the update target are asserted apart.
+        select: jest.fn(() => q),
+        forUpdate: jest.fn(() => {
+          locks.push({ table, filters: q._filters, notIn: q._notIn });
+          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? staleRows : []);
+        }),
         update: jest.fn((u) => {
           updates.push({ table, filters: q._filters, notIn: q._notIn, in: q._in, updates: u });
           return Promise.resolve(1);
@@ -295,7 +301,7 @@ describe('miner persistAll action-aware gate', () => {
       return q;
     });
     db.raw.mockResolvedValue({ rowCount: 1 });
-    return updates;
+    return { updates, locks };
   }
 
   const staleRow = {
@@ -310,7 +316,7 @@ describe('miner persistAll action-aware gate', () => {
     // under a new dedupe key (page_url is in the key), so A's pending row
     // would stay claimable for 14 days and rewrite a page the current
     // evidence no longer selects.
-    const updates = reconcileHarness([staleRow]);
+    const { updates, locks } = reconcileHarness([staleRow]);
 
     await miner.persistAll([
       opp({
@@ -325,11 +331,17 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ]);
 
+    // Selection: pending rows for the query that are NOT the current
+    // target — taken under FOR UPDATE so a concurrent claim cannot slip
+    // between the read and the retirement.
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
+    expect(lock.notIn).toEqual(['dedupe_key', ['ctr::new-page']]);
+
     const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
     expect(retirements).toHaveLength(2);
-    // 1. pending rows for the query that are NOT the current target
-    expect(retirements[0].filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
-    expect(retirements[0].notIn).toEqual(['dedupe_key', ['ctr::new-page']]);
+    // 1. the parent, updated by the exact LOCKED key
+    expect(retirements[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
     expect(retirements[0].updates.status).toBe('expired'); // revivable, not sticky-skipped
     // 2. the companion by EXACT dedupe key — never by page, since a
     //    link_boost key carries no query and is shared across queries.
@@ -342,7 +354,7 @@ describe('miner persistAll action-aware gate', () => {
     // Coverage vanished / CTR recovered / materiality failed → page_url
     // null. The previous target must not stay claimable just because the
     // new candidate is non-actionable.
-    const updates = reconcileHarness([staleRow]);
+    const { updates, locks } = reconcileHarness([staleRow]);
 
     await miner.persistAll([
       opp({
@@ -355,16 +367,16 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ]);
 
-    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
-    expect(retirements.length).toBeGreaterThanOrEqual(1);
+    expect(updates.some((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toBe(true);
     // No active key to exclude — every pending row for the query goes.
-    expect(retirements[0].filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
-    expect(retirements[0].notIn).toBe(null);
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', query: 'plaster bagworm', status: 'pending' });
+    expect(lock.notIn).toBe(null);
   });
 
   test('a BELOW-FLOOR candidate does not defend its stored row (stale higher score would stay claimable)', async () => {
     process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
-    const updates = reconcileHarness([staleRow]);
+    const { updates, locks } = reconcileHarness([staleRow]);
 
     await miner.persistAll([
       opp({
@@ -379,14 +391,14 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ]);
 
-    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
-    expect(retirements.length).toBeGreaterThanOrEqual(1);
+    expect(updates.some((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved')).toBe(true);
     // Nothing persisted, so nothing defends the query: no key exclusion.
-    expect(retirements[0].notIn).toBe(null);
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.notIn).toBe(null);
   });
 
   test("a decay_refresh parent's companion is protected even when the per-run cap omitted it", async () => {
-    const updates = reconcileHarness([staleRow]);
+    const { updates } = reconcileHarness([staleRow]);
 
     await miner.persistAll([
       opp({
@@ -425,7 +437,7 @@ describe('miner persistAll action-aware gate', () => {
     // other's still-valid work. The protection covers candidates whose
     // companion the per-run cap omitted, hence it is derived from the
     // rewrite candidates themselves.
-    const updates = reconcileHarness([staleRow]);
+    const { updates } = reconcileHarness([staleRow]);
 
     await miner.persistAll([
       opp({
@@ -460,7 +472,7 @@ describe('miner persistAll action-aware gate', () => {
     // A query whose CTR climbed back, or whose impressions/position left
     // the gates, vanishes from mineCtrRewrite entirely — per-query
     // reconciliation never sees it, so the lane sweep must.
-    const updates = reconcileHarness([staleRow]);
+    const { updates, locks } = reconcileHarness([staleRow]);
 
     await miner._sweepRecoveredCtrRewrites([
       opp({
@@ -474,11 +486,14 @@ describe('miner persistAll action-aware gate', () => {
       }),
     ]);
 
+    const lock = locks.find((l) => l.filters?.bucket === 'ctr_rewrite');
+    expect(lock.filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
+    // Only queries the bucket no longer emits are swept.
+    expect(lock.notIn).toEqual(['query', ['still qualifying']]);
+
     const sweeps = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_signal_recovered');
     expect(sweeps.length).toBeGreaterThanOrEqual(1);
-    expect(sweeps[0].filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
-    // Only queries the bucket no longer emits are swept.
-    expect(sweeps[0].notIn).toEqual(['query', ['still qualifying']]);
+    expect(sweeps[0].in).toEqual(['dedupe_key', [staleRow.dedupe_key]]);
     expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
   });
 
@@ -487,7 +502,8 @@ describe('miner persistAll action-aware gate', () => {
       const q = {
         where: jest.fn(() => q),
         whereNotIn: jest.fn(() => q),
-        select: jest.fn(() => Promise.reject(new Error('boom'))),
+        select: jest.fn(() => q),
+        forUpdate: jest.fn(() => Promise.reject(new Error('boom'))),
       };
       return q;
     });
