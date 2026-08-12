@@ -88,6 +88,7 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 const { hasPresenceValue } = require('../pricing-engine/property-calculator');
+const { hasGlobalVerifyFlag } = require('../lookup-confidence');
 
 // True only when NOTHING on file contradicts "this customer has a single
 // premises, the primary one" (codex #3367 PR r11 P1). Used by the unlinked-
@@ -733,7 +734,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     let lookupProducedResult = false;
     const trackedPropertyLookup = async (address) => {
       const found = await propertyLookup(address);
-      if (found) lookupProducedResult = true;
+      // A result the RESOLVER will reject is not a result (pre-push P0). A
+      // global address/'all' verification flag makes the resolver adopt
+      // nothing from the payload — and apply none of its verified
+      // overrides — so pricing falls back to stored fields and the seed
+      // exactly as if the lookup had missed. Skipping the corrections probe
+      // there would publish an exact price on data staff already fixed.
+      // Same predicate the resolver uses (lookupDescribesThisProperty), so
+      // acceptance cannot drift between the two.
+      if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
       return found;
     };
 

@@ -212,6 +212,26 @@ describe('buildReportCrossSell', () => {
       expect(demoted.option).toBeNull();
     });
 
+    test('a lookup the RESOLVER rejects still runs the probe (pre-push P0)', async () => {
+      // A global address/'all' flag makes the resolver adopt nothing from
+      // the payload — and apply none of its verified overrides — so pricing
+      // falls back to stored fields and the seed exactly as on a miss.
+      // Treating the truthy response as "corrections applied" skipped the
+      // probe and published an exact price on data staff had fixed.
+      hasVerifiedOverrides.mockResolvedValueOnce(true);
+      const wrongPremisesLookup = async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          fieldVerifyFlags: [{ field: 'address', priority: 'high' }],
+        },
+        propertyRecord: {},
+      });
+      const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: wrongPremisesLookup });
+      expect(demoted).not.toBeNull();
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.option).toBeNull();
+    });
+
     test('no corrections on file still prices', async () => {
       const priced = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
       expect(priced.mode).toBe('priced');
