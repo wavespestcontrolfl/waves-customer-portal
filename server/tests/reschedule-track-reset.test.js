@@ -643,7 +643,8 @@ describe('markEnRoute stale-attempt self-heal', () => {
     const cleanupUpdate = query(1);
     db
       .mockReturnValueOnce(query(mixedSvc)) // loadService
-      .mockReturnValueOnce(cleanupUpdate); // in-place stale-field cleanup
+      .mockReturnValueOnce(cleanupUpdate) // in-place stale-field cleanup
+      .mockReturnValueOnce(query({ ...mixedSvc, actual_start_time: null })); // re-entry loadService (clean row)
 
     const result = await trackTransitions.markEnRoute('job-mixed');
 
@@ -660,6 +661,36 @@ describe('markEnRoute stale-attempt self-heal', () => {
     // No duplicate track SMS.
     const { sendTechEnRoute } = require('../services/twilio');
     expect(sendTechEnRoute).not.toHaveBeenCalled();
+  });
+
+  test('mixed-evidence cleanup CAS miss retries on fresh state instead of reporting success', async () => {
+    // A concurrent lifecycle writer (e.g. the arrival-SMS claim) changed a
+    // CAS field without clearing the stale start — the miss must re-read
+    // and retry, not fall through to the idempotent success.
+    const mixedSvc = {
+      id: 'job-mixed-race',
+      customer_id: 'cust-17',
+      technician_id: null,
+      status: 'confirmed',
+      track_state: 'en_route',
+      scheduled_date: todayStr,
+      en_route_at: isoDaysAgo(0, 'T08:05'),
+      actual_start_time: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    const retryCleanup = query(1);
+    db
+      .mockReturnValueOnce(query(mixedSvc)) // loadService
+      .mockReturnValueOnce(query(0)) // cleanup CAS misses
+      .mockReturnValueOnce(query({ ...mixedSvc, arrival_sms_sent_at: isoDaysAgo(0, 'T08:06') })) // retry loadService (guard stamped, start still stale)
+      .mockReturnValueOnce(retryCleanup) // retry cleanup lands
+      .mockReturnValueOnce(query({ ...mixedSvc, actual_start_time: null })); // post-clean loadService
+
+    const result = await trackTransitions.markEnRoute('job-mixed-race');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('en_route');
+    expect(retryCleanup.update.mock.calls[0][0]).toMatchObject({ actual_start_time: null });
   });
 });
 

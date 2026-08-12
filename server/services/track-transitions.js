@@ -419,22 +419,38 @@ async function markEnRoute(serviceId, opts = {}) {
   // an earlier aborted one (e.g. a current en_route_at next to a week-old
   // actual_start_time a partial reset left behind). Clear ONLY the stale
   // fields in place — no state or status change, no SMS side effects — so
-  // completion duration doesn't measure from the old attempt. Best-effort
-  // behind the full-snapshot CAS; a miss means the row changed under us
-  // and the next signal retries.
-  if (hasStaleLifecycle && hasCurrentLifecycle
+  // completion duration doesn't measure from the old attempt. A zero-row
+  // CAS result is NOT success: a concurrent lifecycle writer (e.g. the
+  // arrival-SMS claim stamping its guard) changes a CAS field without
+  // clearing the stale start, so re-read and retry (bounded), same as
+  // markOnProperty — falling through would report success while the old
+  // start survives into a multi-day completion duration.
+  if (!opts._afterStaleHeal
+    && hasStaleLifecycle && hasCurrentLifecycle
     && Object.keys(staleFieldClears).length > 0
     && ['en_route', 'on_property'].includes(svc.track_state)) {
+    const attempts = (opts._staleHealAttempts || 0) + 1;
+    if (attempts >= 3) {
+      logger.warn(`[track-transitions] mixed-evidence cleanup on ${serviceId} lost ${attempts} concurrent races; surfacing conflict`);
+      return { ok: false, reason: 'concurrent_update' };
+    }
+    let cleaned = 0;
     try {
       const { applyTrackLifecycleCas } = require('./rebooker');
-      await applyTrackLifecycleCas(
+      cleaned = await applyTrackLifecycleCas(
         db('scheduled_services')
           .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null }),
         svc,
       ).update({ ...staleFieldClears, updated_at: new Date() });
     } catch (err) {
       logger.error(`[track-transitions] mixed-evidence stale-field cleanup failed for ${serviceId}: ${err.message}`);
+      return { ok: false, reason: 'stale_heal_failed' };
     }
+    // Success re-enters too: the fresh read classifies clean and the
+    // idempotent branch answers from current state, not this stale snapshot.
+    return markEnRoute(serviceId, cleaned > 0
+      ? { ...opts, _afterStaleHeal: true }
+      : { ...opts, _staleHealAttempts: attempts });
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't
