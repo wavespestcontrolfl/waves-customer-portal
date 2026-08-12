@@ -98,6 +98,11 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     email: lead.email || null,
     rawPhone: phone,
     serviceInterest: extracted.service_interest || null,
+    // The sender's own prose — the readiness gate's commercial-signal scan
+    // reads intake.message; without it an email describing an industrial/
+    // office property with a generic "Pest Control" interest bypassed the
+    // category guard entirely (codex pre-push P1).
+    message: String(email?.body_text || email?.snippet || '').slice(0, 4000),
     normalizedAddress: {
       line1: addr.line1,
       city: addr.city,

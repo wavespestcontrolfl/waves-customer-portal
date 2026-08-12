@@ -137,8 +137,12 @@ function commercialCategoryConflict({ extraction, intent }) {
   // building — regardless of what the property_type text says (codex r7
   // P1: 'multi_family' + subtype 'multi_unit_residential' + owner slipped
   // every text family).
+  // EVERY nonempty schema subtype counts — including 'other': the field is
+  // only populated when the extraction classified the job commercial, so
+  // an unspecific subtype is still a positive commercial signal (codex
+  // pre-push P1 on the 'other' exemption).
   const subtype = String(extraction?.property?.commercial_subtype || '').trim().toLowerCase();
-  if (subtype && subtype !== 'null' && subtype !== 'none' && subtype !== 'other') {
+  if (subtype && subtype !== 'null' && subtype !== 'none') {
     return `commercial_subtype:${subtype}`;
   }
   const type = String(extraction?.property?.property_type || '').trim().toLowerCase();

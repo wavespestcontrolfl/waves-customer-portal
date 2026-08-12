@@ -174,7 +174,8 @@ describe('commercialCategoryConflict', () => {
       extraction: { property: { property_type: 'multi_family', commercial_subtype: 'multi_unit_residential' } },
       intent: { is_commercial: false },
     })).toBe('commercial_subtype:multi_unit_residential');
-    // Null/other subtypes carry no positive signal.
+    // A null subtype carries no signal; 'other' DOES — the field is only
+    // populated when the extraction classified the job commercial.
     expect(commercialCategoryConflict({
       extraction: { property: { property_type: 'apartment', commercial_subtype: null } },
       intent: { is_commercial: false },
@@ -182,7 +183,7 @@ describe('commercialCategoryConflict', () => {
     expect(commercialCategoryConflict({
       extraction: { property: { property_type: 'apartment', commercial_subtype: 'other' } },
       intent: { is_commercial: false },
-    })).toBeNull();
+    })).toBe('commercial_subtype:other');
   });
   test('"the office" without a possessive stays quiet; possessives still fire (r7)', () => {
     expect(commercialTextSignal('I work at the office downtown, but the ants are at my house')).toBe(false);
