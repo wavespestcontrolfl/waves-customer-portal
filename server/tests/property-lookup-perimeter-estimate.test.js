@@ -142,3 +142,12 @@ describe('estimates never become authoritative pricing measurements (Codex P2s, 
     expect(v1Input.services.preSlabTermiticide.slabSqFt).toBe(1700);
   });
 });
+
+describe('_observed propertyType provenance (codex #3367 PR r10)', () => {
+  test('a provider UNKNOWN placeholder is not an observation', () => {
+    const observedBit = (rc) => buildEnrichedProfile(rc, {}, 27.4, -82.4)._observed.propertyType;
+    expect(observedBit({ propertyType: 'UNKNOWN', squareFootage: 1600 })).toBe(false);
+    expect(observedBit({ propertyType: 'Condominium', squareFootage: 1600 })).toBe(true);
+    expect(observedBit({ squareFootage: 1600 })).toBe(false);
+  });
+});

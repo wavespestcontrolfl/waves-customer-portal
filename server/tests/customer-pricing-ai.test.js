@@ -188,6 +188,471 @@ describe('customer pricing AI helpers', () => {
     expect(option.estimatedPlanMonthly).toBeNull();
     expect(option.notes.some(note => note.includes('current billing differs'))).toBe(true);
   });
+
+  test('partial lookup evidence merges seeded features FIELD-BY-FIELD (pre-push #3367 r11 P0)', async () => {
+    // Low-graded imagery with a county-backed pool: only the record-backed
+    // pool is adopted from the lookup, and every other feature field must
+    // stay open to the accepted-estimate seed. The old all-or-nothing
+    // featuresFromLookup flag discarded the whole seed whenever ANY lookup
+    // feature was adopted, pricing a bare-property rate for a home whose
+    // accepted estimate carried the modifiers.
+    const lowTrustPoolLookup = async () => ({
+      enriched: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+        pool: 'YES', poolSource: 'county', aiConfidence: 30,
+      },
+      propertyRecord: {},
+    });
+    const run = (features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lowTrustPoolLookup,
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-seed-merge' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const withSeededCage = await run({ poolCage: true, poolCageSize: 'large' });
+    const bareSeed = await run(null);
+    expect(withSeededCage.options.length).toBeGreaterThan(0);
+    expect(bareSeed.options.length).toBeGreaterThan(0);
+    expect(withSeededCage.options[0].perVisit).toBeGreaterThan(bareSeed.options[0].perVisit);
+  });
+
+  test('a trusted lookup classification survives the seed even when it equals the default (PR r3 P1)', async () => {
+    // 'single_family' is also the resolver default, so provenance must be
+    // tracked explicitly: an adopted lookup single_family beats a stale
+    // seeded 'condo'; only a silent lookup lets the seed fill the gap.
+    const run = (lookupType) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          ...(lookupType ? { propertyType: lookupType } : {}),
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-type-prov', property_type: null }),
+      propertySeed: { propertyType: 'condo' },
+    });
+    const trusted = await run('single_family');
+    expect(trusted.property.propertyType).toBe('single_family');
+    const silent = await run(null);
+    expect(silent.property.propertyType).toBe('condo');
+  });
+
+  test('a SYNTHESIZED Single Family display default never blocks the seeded type (PR r7 P1)', async () => {
+    // buildEnrichedProfile supplies 'Single Family' when neither record nor
+    // vision classified the property; the _observed provenance bit is the
+    // only way to tell it from an observation.
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          propertyType: 'Single Family',
+          _observed: { propertyType: false, shrubDensity: false, treeDensity: false, landscapeComplexity: false, irrigationVisible: false },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-type-synth', property_type: null }),
+      propertySeed: { propertyType: 'condo' },
+    });
+    expect(result.property.propertyType).toBe('condo');
+  });
+
+  test('synthesized density defaults stay open for seeded features; observed ones do not (PR r7 P1)', async () => {
+    // Trusted cache hit whose AI omitted the densities: the profile still
+    // carries 'MODERATE', so provenance must come from _observed, not
+    // presence — otherwise heavy seeded shrubs/trees from the accepted
+    // estimate are discarded and a lower rate price-locks.
+    const run = (observed, features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          shrubDensity: 'MODERATE', treeDensity: 'MODERATE',
+          _observed: { propertyType: false, shrubDensity: observed, treeDensity: observed, landscapeComplexity: false, irrigationVisible: false },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-density-prov' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        bedArea: 3000, bedAreaSource: 'explicit',
+        ...(features ? { features } : {}),
+      },
+    });
+    const synthesizedWithSeed = await run(false, { shrubs: 'heavy', trees: 'heavy' });
+    const synthesizedBare = await run(false, null);
+    const observedWithSeed = await run(true, { shrubs: 'heavy', trees: 'heavy' });
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    expect(price(synthesizedBare)).toBeGreaterThan(0);
+    // Synthesized defaults: the seeded heavy densities must move the price.
+    expect(price(synthesizedWithSeed)).toBeGreaterThan(price(synthesizedBare));
+    // Observed MODERATE: the seed must NOT override the observation.
+    expect(price(observedWithSeed)).toBe(price(synthesizedBare));
+  });
+
+  test('synthesized pool/cage strings stay open for seeded features (PR r8 P1)', async () => {
+    // Cached profiles synthesize pool 'NO' / poolCage 'UNKNOWN' /
+    // poolCageSize 'NONE' / nearWater 'NONE' — truthy strings that are not
+    // observations. A seeded cage from the accepted estimate must survive
+    // them; an OBSERVED cage answer must still win.
+    const run = (observed, features, poolCage = 'NO') => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          pool: 'NO', poolCage, poolCageSize: 'NONE', nearWater: 'NONE',
+          _observed: {
+            propertyType: false, shrubDensity: false, treeDensity: false,
+            landscapeComplexity: false, irrigationVisible: false,
+            pool: observed, poolCage: observed, poolCageSize: observed, nearWater: observed,
+          },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-prov' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const synthesizedWithSeed = await run(false, { poolCage: true, poolCageSize: 'large' });
+    const synthesizedBare = await run(false, null);
+    const observedWithSeed = await run(true, { poolCage: true, poolCageSize: 'large' });
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    expect(price(synthesizedBare)).toBeGreaterThan(0);
+    expect(price(synthesizedWithSeed)).toBeGreaterThan(price(synthesizedBare));
+    expect(price(observedWithSeed)).toBe(price(synthesizedBare));
+  });
+
+  test('a dimension the lookup REJECTED is not a gap the seed may fill (PR r14 P1)', async () => {
+    // A fieldVerifyFlags entry means the lookup refused its own read and
+    // said to verify that measurement first. Filling the hole from an older
+    // accepted estimate would grade the new price solely on the seeded
+    // number and publish it as exact, with the caveat stripped off.
+    const run = ({ flags = [], seed }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        // No homeSqFt/lotSqFt of its own: the profile columns are cleared
+        // below, so the seed is the only other source.
+        enriched: { stories: 1, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-rejected', property_sqft: null, lot_sqft: null }),
+      propertySeed: seed,
+    });
+    const seed = { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' };
+
+    // Unflagged: the seed fills the gap and the offer prices.
+    const filled = await run({ seed });
+    expect(filled.property?.homeSqFt).toBe(2400);
+
+    // Flagged square footage: the seed must NOT fill it.
+    const rejected = await run({ flags: [{ field: 'squareFootage', priority: 'high' }], seed });
+    expect(rejected.property?.homeSqFt).not.toBe(2400);
+
+    // The global address flag rejects every dimension — the lookup may
+    // describe a different premises entirely.
+    const wrongPremises = await run({ flags: [{ field: 'address', priority: 'high' }], seed });
+    expect(wrongPremises.property?.homeSqFt).not.toBe(2400);
+    expect(wrongPremises.property?.lotSqFt).not.toBe(8000);
+
+    // A flag on ONE dimension leaves the others fillable.
+    const partial = await run({ flags: [{ field: 'squareFootage', priority: 'high' }], seed });
+    expect(partial.property?.lotSqFt).toBe(8000);
+
+  });
+
+  test('a county-confirmed attached garage prices even with no seed (PR r16 P1)', async () => {
+    // detectAttachedGarage reads the county record's garageType, so this is
+    // assessor data, not an imagery guess — it must price at either vision
+    // grade. Pest charges a real adjustment for it and the customers table
+    // has no column to fall back on, so a cached lookup that knows about
+    // the garage but never mapped it into the features would price BELOW
+    // the true amount.
+    const run = ({ garage, aiConfidence = 0.9, flags = [] }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2100, lotSqFt: 8000, stories: 1,
+          aiConfidence, fieldVerifyFlags: flags,
+          ...(garage === undefined ? {} : { hasAttachedGarage: garage }),
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-garage' }),
+      // No seed at all — the lookup is the only evidence.
+      propertySeed: null,
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const withGarage = await run({ garage: true });
+    const without = await run({ garage: false });
+    expect(price(withGarage)).toBeGreaterThan(price(without));
+
+    // County data survives a LOW vision grade, like the record-backed
+    // pool/cage.
+    const lowGrade = await run({ garage: true, aiConfidence: 0.1 });
+    expect(price(lowGrade)).toBe(price(withGarage));
+
+    // A wrong-premises flag adopts NOTHING from the lookup — the garage
+    // included. With no home size left to price on, the request fails
+    // closed rather than quoting: no option at all, which is a stronger
+    // guarantee than "priced without the garage".
+    const wrongPremises = await run({ garage: true, flags: [{ field: 'address', priority: 'high' }] });
+    expect(price(wrongPremises)).toBeUndefined();
+
+    // Absent field is absence of evidence, not a negative.
+    expect(price(await run({ garage: undefined }))).toBe(price(without));
+  });
+
+  test('an observed-NEGATIVE garage outranks a stale seed (pre-push P0)', async () => {
+    // The county recorded a garage and it is not attached. That is newer
+    // evidence than any accepted estimate, so a seeded attachedGarage:true
+    // must not restore the adjustment — marking only the POSITIVE
+    // lookup-backed let exactly that happen. detectAttachedGarage also
+    // returns false for "no garageType on file", so the negative counts
+    // only when the record actually named a type.
+    const run = ({ garageType, seedGarage }) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9,
+          hasAttachedGarage: false, garageType,
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-garage-neg' }),
+      propertySeed: { homeSqFt: 2100, features: { attachedGarage: seedGarage } },
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const baseline = await run({ garageType: 'DETACHED', seedGarage: false });
+    // County says DETACHED → the seed's true may not restore the adjustment.
+    expect(price(await run({ garageType: 'DETACHED', seedGarage: true }))).toBe(price(baseline));
+    // No garageType on file → no observation, so the seed still fills.
+    expect(price(await run({ garageType: '', seedGarage: true }))).toBeGreaterThan(price(baseline));
+  });
+
+  test('a wrong-premises lookup blocks EVERY seed field, not just dimensions (PR r18 P1)', async () => {
+    // The global 'address' flag means the lookup may describe a different
+    // parcel. Rejecting only the dimensions still let a customer whose
+    // STORED sqft was sufficient get an exact price built on the older
+    // estimate's modifiers, classification, and structural facts — for a
+    // property we cannot prove is theirs.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (flags) => resolvePropertyContext({
+      // Stored dimensions are enough to price without the lookup.
+      customer: propertyCustomer({ id: 'cust-premises', property_sqft: 2200, lot_sqft: 7000, property_type: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, aiConfidence: 0.9, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      propertySeed: {
+        homeSqFt: 2400, bedArea: 1200, stories: 2,
+        propertyType: 'condo', yearBuilt: 1975, constructionMaterial: 'WOOD_FRAME',
+        foundationType: 'CRAWLSPACE', roofType: 'TILE',
+        features: { pool: true, poolCage: true, trees: 'heavy', attachedGarage: true },
+      },
+    });
+
+    const clean = await resolve([]);
+    expect(clean.propertyInput.features.pool).toBe(true);
+    expect(clean.propertyInput.propertyType).toBe('condo');
+    expect(clean.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+
+    const wrongPremises = await resolve([{ field: 'address', priority: 'high' }]);
+    expect(wrongPremises.propertyInput.features.pool).not.toBe(true);
+    expect(wrongPremises.propertyInput.features.poolCage).not.toBe(true);
+    expect(wrongPremises.propertyInput.features.attachedGarage).not.toBe(true);
+    expect(wrongPremises.propertyInput.propertyType).not.toBe('condo');
+    expect(wrongPremises.propertyInput.constructionMaterial).toBeNull();
+    expect(wrongPremises.propertyInput.foundationType).toBeNull();
+    expect(wrongPremises.propertyInput.roofType).toBeNull();
+  });
+
+  test('a FLAGGED property type is not restored by the seed (PR r18 P1)', async () => {
+    // condo/townhome classification moves the price, so restoring the older
+    // estimate's type publishes an exact amount on the value the lookup
+    // says to confirm. A SILENT lookup stays a gap the seed may fill —
+    // that is the r3 ruling and it must survive this guard.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = ({ lookupType, flags = [] }) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-type-flag', property_type: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1, aiConfidence: 0.9,
+          fieldVerifyFlags: flags,
+          ...(lookupType ? { propertyType: lookupType } : {}),
+        },
+        propertyRecord: {},
+      }),
+      propertySeed: { propertyType: 'condo' },
+    });
+
+    // Silent lookup → the seed fills (unchanged r3 behavior).
+    expect((await resolve({ lookupType: null })).propertyInput.propertyType).toBe('condo');
+    // Carried but FLAGGED → refused, and the seed may not stand it back up.
+    const flagged = await resolve({
+      lookupType: 'townhome',
+      flags: [{ field: 'propertyType', priority: 'high' }],
+    });
+    expect(flagged.propertyInput.propertyType).not.toBe('condo');
+    expect(flagged.propertyInput.propertyType).not.toBe('townhome');
+  });
+
+  test('a REJECTED vision feature is not refilled from the seed (PR r17 P1)', async () => {
+    // lookupFeaturesAreTrustworthy is exactly the flag/confidence gate for
+    // vision features. When it refuses them the values are not adopted —
+    // and the seed must not restore the older estimate's version, or the
+    // offer publishes an exact price the current lookup says to verify.
+    // Asserted on the resolved property INPUT: several of these modifiers
+    // do not move a pest price at these dimensions, so a price assertion
+    // could pass with the fix reverted.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (flags) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-feat', property_sqft: null, lot_sqft: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9, fieldVerifyFlags: flags },
+        propertyRecord: {},
+      }),
+      propertySeed: {
+        homeSqFt: 2100,
+        features: { pool: true, poolCage: true, trees: 'heavy', shrubs: 'heavy' },
+      },
+    });
+
+    // No flags: the seed's feature evidence fills as before.
+    const clean = await resolve([]);
+    expect(clean.propertyInput.features.pool).toBe(true);
+    expect(clean.propertyInput.features.trees).toBe('heavy');
+
+    // A pool/tree/landscape flag refuses the whole vision feature read, so
+    // none of them may be restored from the seed.
+    for (const field of ['pool', 'estimatedTreeCount', 'landscapeComplexity', 'shrubDensity']) {
+      const flagged = await resolve([{ field, priority: 'high' }]);
+      expect(flagged.propertyInput.features.pool).not.toBe(true);
+      expect(flagged.propertyInput.features.poolCage).not.toBe(true);
+      expect(flagged.propertyInput.features.trees).not.toBe('heavy');
+    }
+  });
+
+  test('a REJECTED structural fact is not refilled from the seed (pre-push P0)', async () => {
+    // structuralFactIsTrustworthy withholds a fact whose record evidence is
+    // weak or conflicting. Restoring it from an older estimate hands the
+    // engine exactly the input the lookup just refused.
+    // Asserted on the resolved property INPUT, not the price: these facts
+    // feed termite/WDO and rodent modifiers that do not move at these
+    // dimensions, so a price assertion here would pass either way.
+    const { resolvePropertyContext } = require('../services/customer-pricing-ai')._private;
+    const resolve = (fieldEvidence) => resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-struct', property_sqft: null, lot_sqft: null }),
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2100, lotSqFt: 8000, stories: 1, aiConfidence: 0.9 },
+        propertyRecord: { constructionMaterial: 'CBS', foundationType: 'SLAB', _fieldEvidence: fieldEvidence },
+      }),
+      propertySeed: { homeSqFt: 2100, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE' },
+    });
+
+    // Trusted: the county fact wins and the seed never applies (fill-only).
+    const trusted = await resolve({});
+    expect(trusted.propertyInput.constructionMaterial).toBe('CBS');
+
+    // Disputed: the fact is WITHHELD — and stays withheld. The seed's
+    // WOOD_FRAME must not stand it back up.
+    const disputed = await resolve({ constructionMaterial: { fieldVerify: true } });
+    expect(disputed.propertyInput.constructionMaterial).toBeNull();
+    // A fact that was NOT disputed still resolves normally in the same run.
+    expect(disputed.propertyInput.foundationType).toBe('SLAB');
+
+    // Each rejected fact is independent.
+    const bothDisputed = await resolve({
+      constructionMaterial: { fieldVerify: true },
+      foundationType: { fieldVerify: true },
+    });
+    expect(bothDisputed.propertyInput.constructionMaterial).toBeNull();
+    expect(bothDisputed.propertyInput.foundationType).toBeNull();
+  });
+
+  test('a flagged bed-area read keeps the seed out of the Tree & Shrub price (PR r15 P1)', async () => {
+    // The response's property block does not surface bedArea, so the price
+    // itself is the observable: a seeded bed area and the lot inference the
+    // pricer falls back to do not agree.
+    const run = (flags) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { stories: 1, fieldVerifyFlags: flags }, propertyRecord: {} }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-bed', property_sqft: null, lot_sqft: null }),
+      propertySeed: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', bedArea: 1200 },
+    });
+    const price = (r) => r.options?.[0]?.perVisit;
+
+    const seeded = await run([]);
+    expect(price(seeded)).toBeGreaterThan(0);
+
+    // Its OWN flag, and the turf/imagery flag it shares a picture with,
+    // both reject the read — the seed may not stand in for it.
+    for (const field of ['estimatedBedAreaSf', 'bed_area', 'estimatedTurfSf']) {
+      const flagged = await run([{ field, priority: 'high' }]);
+      expect(price(flagged)).not.toBe(price(seeded));
+    }
+  });
+
+  test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
+    // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
+    // adoption rule maps only 'YES' to true. So an observed-but-undecided
+    // read is NOT a backing: counting it as one blocked the accepted-
+    // estimate seed for a field the lookup never decided, and a previously
+    // priced cage silently became false — publishing an exact per-
+    // application price BELOW the one real money was quoted on.
+    const run = (poolCage, features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+          pool: 'NO', poolCage, poolCageSize: 'NONE', nearWater: 'NONE',
+          _observed: {
+            propertyType: false, shrubDensity: false, treeDensity: false,
+            landscapeComplexity: false, irrigationVisible: false,
+            // Observed: the vision read DID supply the field — it just
+            // didn't decide it.
+            pool: true, poolCage: true, poolCageSize: true, nearWater: true,
+          },
+        },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-possible' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const seed = { poolCage: true, poolCageSize: 'large' };
+    const price = (r) => r.options?.[0]?.perVisit || null;
+    const bare = await run('POSSIBLE', null);
+    expect(price(bare)).toBeGreaterThan(0);
+    // POSSIBLE (and any other undecided answer) leaves the seed free to fill.
+    expect(price(await run('POSSIBLE', seed))).toBeGreaterThan(price(bare));
+    expect(price(await run('UNKNOWN', seed))).toBeGreaterThan(price(bare));
+    // A DECIDED negative still outranks the seed — r8's guarantee is intact.
+    expect(price(await run('NO', seed))).toBe(price(bare));
+  });
 });
 
 describe('count-based WaveGuard tier truth', () => {

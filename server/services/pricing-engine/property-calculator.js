@@ -705,5 +705,10 @@ module.exports = {
   estimateLawnSqFt, computeTurfArea, toNonNegativeNumber,
   estimateBedArea, calculatePerimeter,
   getLotCategory, getMosquitoTreatableCategory, deriveMosquitoLotCategoryFromArea,
+  // The engine's own presence rule (NO/NONE/FALSE/N/0/UNKNOWN are negative,
+  // anything else present). Exported so a consumer replaying stored engine
+  // INPUTS into features derives them exactly as normalizeFeatureInputs
+  // does, instead of hand-rolling a denylist that misses a spelling.
+  hasPresenceValue,
   resolveMosquitoTreatableArea, resolveMosquitoLotCategory, calculatePropertyProfile,
 };

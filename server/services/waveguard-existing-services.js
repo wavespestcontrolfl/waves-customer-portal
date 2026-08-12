@@ -156,8 +156,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   if (cols.is_callback) selectCols.push('is_callback');
   if (cols.source) selectCols.push('source');
   // For per-property tier scoping: an unstamped row resolves its property via
-  // the estimate that created it (codex #3244 r6).
+  // the estimate that created it (codex #3244 r6) — or directly via its
+  // customer_properties link (codex #3367 PR r8).
   if (cols.source_estimate_id) selectCols.push('source_estimate_id');
+  if (cols.property_id) selectCols.push('property_id');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -346,18 +348,75 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
 // re-resolved via the creating estimate).
 async function filterRowsToStreet(database, rows, streetScope) {
   if (!streetScope || !streetScope.estimateStreet) return rows;
-  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const kept = [];
+  const propKeyCache = new Map();
   for (const row of rows) {
     let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+    // Dispatch's resolution order for an unstamped row: property row first
+    // (linkAcceptedEstimateProperty stamps FROM it), then the creating
+    // estimate, then the primary default (codex #3367 PR r8 — a recurring
+    // family linked only to a secondary customer_properties row must not
+    // count at the primary property).
+    if ((!street || scopeKeyLacksLocality(street)) && row.property_id) {
+      try {
+        if (!propKeyCache.has(row.property_id)) {
+          const prop = await database('customer_properties')
+            .where({ id: row.property_id })
+            .first('address_line1', 'address_line2', 'city', 'zip');
+          propKeyCache.set(row.property_id, prop
+            ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
+            : null);
+        }
+      } catch (propErr) {
+        // Strict scopes must not degrade a property-LINKED row to the
+        // primary default (pre-push P0): a swallowed lookup failure would
+        // pass requireSharedLocality trivially and count a secondary
+        // property's plan at the primary. Default consumers keep the
+        // legacy fall-through.
+        if (streetScope.requireSharedLocality) throw propErr;
+      }
+      const propKey = propKeyCache.get(row.property_id);
+      if (propKey) {
+        street = propKey;
+      } else if (streetScope.requireSharedLocality && propKeyCache.has(row.property_id)) {
+        // Linked to a property row that is missing or cannot be keyed —
+        // unprovable premises for a strict scope.
+        throw new Error('property-linked row unresolvable for strict street scope');
+      }
+    }
     if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
-        street = normalizedEstimateStreet(src?.address);
-      } catch { /* fall through to the primary-street default */ }
+        street = normalizedEstimateStreet(src?.address) || street;
+      } catch (estErr) {
+        // Same strict fail-closed rule as the property_id leg (pre-push
+        // P0 ×2): an estimate-LINKED row that cannot resolve must not
+        // relabel itself as the primary property.
+        if (streetScope.requireSharedLocality) throw estErr;
+      }
+      if (streetScope.requireSharedLocality && (!street || scopeKeyLacksLocality(street))) {
+        throw new Error('estimate-linked row unresolvable for strict street scope');
+      }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
-    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) {
+      // Opt-in property-equality proof (codex #3367 PR r7): sameScopeKey's
+      // per-field wildcard accepts disjoint locality evidence (a city-only
+      // primary against a zip-only stamp) across cities. Consumers pricing
+      // MONEY off this scope (report cross-sell) set requireSharedLocality:
+      // a same-street row that cannot be localized may be another
+      // property's obligation, and both keeping and dropping it can be
+      // wrong (unearned combined tier vs offering an owned family) — so
+      // the frame fails loudly and the caller's fail-closed machinery
+      // suppresses. Default consumers (the never-re-price panel scope,
+      // where over-recognition is the documented safe direction) are
+      // unchanged.
+      if (streetScope.requireSharedLocality && !scopeKeysShareLocality(street, streetScope.estimateStreet)) {
+        throw new Error('recurring row locality unprovable for street scope');
+      }
+      kept.push(row);
+    }
   }
   return kept;
 }

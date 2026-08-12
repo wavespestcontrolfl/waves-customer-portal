@@ -333,6 +333,17 @@ function lookupEnabled() {
   return process.env.CUSTOMER_PRICING_AI_LOOKUP !== 'false';
 }
 
+// Every field the accepted-estimate seed can fill, in one list so a blanket
+// rejection cannot silently miss one. A wrong-premises lookup rejects all of
+// them (codex #3367 PR r18); the per-field rejections elsewhere name their
+// own members. Keep in sync with the seed replay in resolvePropertyContext.
+const SEED_FILLABLE_FIELDS = [
+  'homeSqFt', 'lotSqFt', 'lawnSqFt', 'bedArea', 'stories',
+  'propertyType', 'yearBuilt', 'constructionMaterial', 'foundationType', 'roofType',
+  'pool', 'poolCage', 'poolCageSize', 'nearWater',
+  'shrubs', 'trees', 'complexity', 'irrigation', 'treeCount', 'attachedGarage',
+];
+
 // Columns the `customers` table ACTUALLY has for pricing (verified against
 // the live schema 2026-08-09): bed_sqft, canopy_type, lot_sqft, palm_count,
 // property_sqft, property_type. Everything else this resolver used to read
@@ -347,14 +358,16 @@ function lookupEnabled() {
 // them; the gate below is what has to open for it to be consulted.
 // Shared trust predicates — the agent draft path applies the same rule.
 const {
-  lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
+  lookupFeatureReadIsFlagged, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
-  lookupTurfEstimateIsTrustworthy, lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
+  lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
+  lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
   structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
 
-async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
+async function resolvePropertyContext({ customer, turfProfile, propertyLookup, propertySeed = null }) {
   let source = 'customer_profile';
   const address = addressForCustomer(customer);
   // customers.property_sqft is TREATED LAWN AREA by schema (initial_schema
@@ -388,6 +401,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
   let stories = null;
   let storiesEvidence = null;
   let propertyType = customer.property_type || 'single_family';
+  // Whether the lookup/record actually SUPPLIED the type — 'single_family'
+  // is also the resolver default, so the value alone can't prove provenance
+  // (codex #3367 PR r3: a stale seeded 'condo'/'townhome' must not replace
+  // a trusted lookup classification that happens to equal the default).
+  let propertyTypeFromLookup = false;
   let yearBuilt = null;
   let constructionMaterial = null;
   let foundationType = null;
@@ -408,6 +426,26 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     complexity: 'moderate',
     irrigation: false,
   };
+  // WHICH feature fields carried adopted lookup evidence (trusted vision
+  // read or record-backed pool/cage). Read by the seed block below: seeded
+  // feature evidence fills FIELD-BY-FIELD into the gaps the lookup left
+  // (pre-push codex r11 P0: the old all-or-nothing flag let a lone
+  // record-backed pool discard the seed's shrub/tree/complexity/irrigation
+  // evidence that priced the accepted estimate — a bare-property rate
+  // would price-lock for a home whose accepted estimate carried the
+  // modifiers).
+  const lookupFeatureKeys = new Set();
+  // Dimensions the LOOKUP explicitly REFUSED (codex #3367 PR r14). A field
+  // carrying its own fieldVerifyFlags entry — or every field, when the
+  // global address flag says the lookup may describe a different premises —
+  // is not adopted below because the lookup itself said to verify it first.
+  // That is a rejection, not a gap, and the accepted-estimate seed fill must
+  // not quietly launder an older number into the hole it left: the price is
+  // graded solely on the inputs it ends up with, so a measurement the lookup
+  // flagged would publish as an exact per-application figure anyway. Only
+  // the seed path consults this — a rejected dimension with no seed already
+  // fails closed to the pricer's own missing-property handling.
+  const lookupRejectedFields = new Set();
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -434,6 +472,33 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // and features. Adopt none of it; the profile's own values stand and a
       // missing home size fails closed to PROPERTY_DETAILS_NEEDED.
       const lookupDescribesThisProperty = !hasGlobalVerifyFlag(p);
+      if (!lookupDescribesThisProperty) {
+        // The premises itself is unverified — the lookup may describe a
+        // different parcel entirely — so NOTHING may be back-filled from an
+        // older estimate: not the dimensions, not the features, not the
+        // classification, not the structural facts (codex #3367 PR r18).
+        // Rejecting only the dimensions still let a customer whose stored
+        // sqft was sufficient receive an exact price built on the older
+        // estimate's modifiers, for a property we cannot prove is theirs.
+        for (const field of SEED_FILLABLE_FIELDS) lookupRejectedFields.add(field);
+      } else {
+        // FLAG-based rejections only. The bed-area and turf-ESTIMATE
+        // predicates also return false when the lookup simply carried no
+        // value, which is an ordinary gap the seed exists to fill — reading
+        // those as rejections would strip the seed from nearly every offer.
+        // lookupTurfReadIsTrustworthy is the value-agnostic one: it fires
+        // on a turf/lawn verify flag or inadequate confidence, both of
+        // which are the lookup refusing its own read.
+        if (!lookupDimensionIsTrustworthy(p, 'homeSqFt')) lookupRejectedFields.add('homeSqFt');
+        if (!lookupDimensionIsTrustworthy(p, 'lotSqFt')) lookupRejectedFields.add('lotSqFt');
+        if (!lookupDimensionIsTrustworthy(p, 'stories')) lookupRejectedFields.add('stories');
+        if (!lookupTurfReadIsTrustworthy(p)) lookupRejectedFields.add('lawnSqFt');
+        // Bed area is flag-rejected by its OWN flag or by the turf/imagery
+        // flag it shares a picture with (codex #3367 PR r15). Only the flag
+        // counts: lookupBedAreaIsTrustworthy also returns false for a
+        // missing value, which is the ordinary gap the seed exists to fill.
+        if (lookupBedAreaReadIsFlagged(p)) lookupRejectedFields.add('bedArea');
+      }
       if (lookupDescribesThisProperty) {
       // Weak or conflicting core dimensions arrive with their own
       // fieldVerifyFlags (the flag builder marks squareFootage / lotSize /
@@ -507,12 +572,37 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // the record in place (rc.propertyType, _propertyTypeSource:
       // 'satellite'), so a bare record read would hand the rejected
       // satellite type straight back.
-      propertyType = (lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
-        || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null)
-        || propertyType;
+      // The enriched propertyType may be the builder's synthesized
+      // 'Single Family' display default, indistinguishable by value from
+      // an observation (codex #3367 PR r7) — trust it only when the
+      // profile's provenance bit says the record/vision supplied it.
+      // Legacy cached profiles without _observed keep the old behavior.
+      const typeObserved = !p._observed || p._observed.propertyType !== false;
+      // A REFUSED classification is not a gap either (codex #3367 PR r18):
+      // condo/townhome moves the price, so restoring the older estimate's
+      // type publishes an exact amount on the very value the lookup says to
+      // confirm first.
+      // Only a type the lookup actually CARRIED can be refused. A silent
+      // lookup is a gap the seed is entitled to fill (the r3 ruling), and
+      // typeObserved alone does not distinguish them — it is true for a
+      // legacy profile with no _observed bits at all, including one that
+      // carried no classification.
+      if (typeObserved && p.propertyType && !lookupPropertyTypeIsTrustworthy(p)) {
+        lookupRejectedFields.add('propertyType');
+      }
+      const adoptedLookupType = (typeObserved && lookupPropertyTypeIsTrustworthy(p) ? p.propertyType : null)
+        || (recordPropertyTypeIsTrustworthy(record) ? knownFact(record.propertyType) : null);
+      if (adoptedLookupType) {
+        propertyType = adoptedLookupType;
+        propertyTypeFromLookup = true;
+      }
       // Year built drives the pest/WDO age modifiers — same evidence gate
       // as the structural facts below (the enriched value is a mirror of
       // the same record merge, so one evidence bit covers both legs).
+      if (!structuralFactIsTrustworthy({ record, field: 'yearBuilt' })) {
+        // Same rejection bookkeeping as the structural facts below.
+        lookupRejectedFields.add('yearBuilt');
+      }
       yearBuilt = yearBuilt
         || (structuralFactIsTrustworthy({ record, field: 'yearBuilt' })
           ? (p.yearBuilt || record.yearBuilt)
@@ -533,7 +623,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // carries same-named RISK notices on authoritative values, which must
       // keep pricing; see structuralFactIsTrustworthy.)
       const structuralFact = (field, recordValue, enrichedValue) => {
-        if (!structuralFactIsTrustworthy({ record, field })) return null;
+        // A disputed fact is a REJECTION, not a gap (pre-push P0): without
+        // recording it, the seed block below restores the stale value the
+        // lookup just refused and the engine prices on it.
+        if (!structuralFactIsTrustworthy({ record, field })) {
+          lookupRejectedFields.add(field);
+          return null;
+        }
         return knownFact(recordValue)
           || (visionFactsOk ? knownFact(enrichedValue) : null)
           || null;
@@ -555,14 +651,110 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // stand instead. Records-sourced facts below (year built, construction,
       // foundation, roof) are county data, not vision, so they are unaffected.
       const featuresTrusted = lookupFeaturesAreTrustworthy(p);
+      // An attached garage is COUNTY data, not an imagery guess
+      // (detectAttachedGarage reads the record's garageType), so it is
+      // adopted at either grade — same standing as the record-backed
+      // pool/cage below. Pest pricing charges a real adjustment for it and
+      // the customers table has no column to fall back on, so a cached
+      // lookup that KNOWS the property has one but never mapped it into the
+      // features would price and lock a per-application amount BELOW the
+      // true one (codex #3367 PR r16). Positive-only: detectAttachedGarage
+      // returns false both for "no garage" and for "no garageType on file",
+      // so a false is absence of evidence and must leave the seed's own
+      // replay free to fill it.
+      if (p.hasAttachedGarage === true) {
+        features.attachedGarage = true;
+        lookupFeatureKeys.add('attachedGarage');
+      } else if (p.hasAttachedGarage === false && String(p.garageType || '').trim()) {
+        // An observed NEGATIVE is evidence too (pre-push P0): the county
+        // recorded a garage and it is not attached (DETACHED, CARPORT).
+        // Marking only the positive lookup-backed let a stale seed restore
+        // attachedGarage:true over that newer county fact and price-lock
+        // the adjustment. detectAttachedGarage returns false for "no
+        // garageType on file" as well, which is why the negative counts
+        // only when the record actually named a garage type.
+        features.attachedGarage = false;
+        lookupFeatureKeys.add('attachedGarage');
+      }
       // Record-backed pool/cage survive a low AI grade — assessor data, not
       // an imagery guess. Quoting a county-confirmed pool property as
       // pool-less because a photo was obstructed is the wrong failure.
       if (!featuresTrusted) {
-        if (poolFeaturesAreRecordBacked(p)) features.pool = p.pool === 'YES' || features.pool;
+        if (poolFeaturesAreRecordBacked(p)) {
+          features.pool = p.pool === 'YES' || features.pool;
+          lookupFeatureKeys.add('pool');
+        }
         if (poolCageIsRecordBacked(p)) {
           features.poolCage = true;
-          if (p.poolCageSize) features.poolCageSize = String(p.poolCageSize).toLowerCase();
+          lookupFeatureKeys.add('poolCage');
+          if (p.poolCageSize) {
+            features.poolCageSize = String(p.poolCageSize).toLowerCase();
+            lookupFeatureKeys.add('poolCageSize');
+          }
+        }
+        // A FLAGGED vision read is a refusal, and a refusal is not a gap —
+        // the seed may not restore the older estimate's value and let the
+        // offer publish an exact price the current lookup says to verify
+        // first (codex #3367 PR r17). Same rule the dimensions and
+        // structural facts already follow.
+        //
+        // FLAG-ONLY, deliberately. This branch also covers a merely
+        // LOW-GRADED read, and that case is a ruled behavior in the other
+        // direction (pre-push r11 P0): weak imagery means fall back to
+        // other evidence — the county-backed pool still prices and the
+        // accepted-estimate seed still fills every other feature. Treating
+        // a low grade as a refusal would price a bare-property rate for a
+        // home whose accepted estimate carried the modifiers, which is the
+        // bug that test exists to prevent.
+        if (lookupFeatureReadIsFlagged(p)) {
+          for (const key of ['pool', 'poolCage', 'poolCageSize', 'nearWater',
+            'shrubs', 'trees', 'complexity', 'irrigation', 'treeCount']) {
+            if (!lookupFeatureKeys.has(key)) lookupRejectedFields.add(key);
+          }
+        }
+      } else {
+        // A field is lookup-backed only when the trusted payload actually
+        // carried a value for it — a silent field keeps its default here
+        // and stays open for the seed's fill below. The densities,
+        // complexity, and irrigation flags are SYNTHESIZED by
+        // buildEnrichedProfile when unobserved ('MODERATE'/false), so
+        // presence alone lies for them (codex #3367 PR r7) — their backing
+        // comes from the profile's _observed provenance bits instead.
+        // Legacy cached profiles without _observed keep presence semantics.
+        const obs = (p._observed && typeof p._observed === 'object') ? p._observed : null;
+        // An UNCERTAIN read is not a backing (codex #3367 PR r11): the vision
+        // schema explicitly permits 'POSSIBLE' for pool and poolCage, and the
+        // adoption line below maps only 'YES' to true. Counting POSSIBLE as
+        // lookup-backed therefore blocks the accepted-estimate seed for a
+        // field the lookup never actually decided — a previously priced
+        // pool/cage silently becomes false and the report publishes an EXACT
+        // per-application price BELOW the one real money was quoted on. Only
+        // a decided answer backs the field; POSSIBLE stays open to the seed
+        // and, with no seed, keeps the estimator's own doctrine (a satellite-
+        // only pool is never charged). poolCageSize is derived from poolCage
+        // (normalizePoolCageSize returns 'NONE' unless the cage is a YES), so
+        // it is only decided when the cage itself is.
+        const decidedFeature = (value) => {
+          const v = String(value == null ? '' : value).trim().toUpperCase();
+          return v === 'YES' || v === 'NO';
+        };
+        for (const [key, present] of Object.entries({
+          // pool/cage/water are synthesized display STRINGS when unobserved
+          // ('NO'/'UNKNOWN'/'NONE' — codex #3367 PR r8), so presence lies
+          // for them exactly like the densities.
+          pool: (obs ? !!obs.pool : !!p.pool) && decidedFeature(p.pool),
+          poolCage: (obs ? !!obs.poolCage : !!p.poolCage) && decidedFeature(p.poolCage),
+          poolCageSize: (obs ? !!obs.poolCageSize : !!p.poolCageSize) && decidedFeature(p.poolCage),
+          nearWater: obs ? !!obs.nearWater : !!p.nearWater,
+          shrubs: obs ? !!obs.shrubDensity : !!p.shrubDensity,
+          trees: obs ? !!obs.treeDensity : !!p.treeDensity,
+          complexity: obs ? !!obs.landscapeComplexity : !!p.landscapeComplexity,
+          irrigation: obs
+            ? !!obs.irrigationVisible
+            : (p.irrigationVisible !== undefined && p.irrigationVisible !== null),
+          treeCount: lookupTreeCountIsTrustworthy(p),
+        })) {
+          if (present) lookupFeatureKeys.add(key);
         }
       }
       features = !featuresTrusted ? features : {
@@ -598,6 +790,79 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     }
   }
 
+  // Gap-fill from the customer's own PRICED-ESTIMATE inputs (service-report
+  // cross-sell): a dimension that already priced this property's live plan
+  // may fill a gap the profile and lookup both left — it is the number real
+  // money was quoted on. FILL ONLY, never override: a stored profile value,
+  // an adopted lookup read, and a measured-zero lawn all outrank the seed.
+  // Stories provenance replays the estimate's own storiesSource (default
+  // 'estimated', which correctly keeps the stories_estimated review marker
+  // for estimates that guessed).
+  let storiesFromSeed = false;
+  if (propertySeed) {
+    // A field the lookup REJECTED is not a gap the seed may fill (codex
+    // #3367 PR r14) — the lookup said to verify that measurement (or the
+    // premises itself) before pricing, and the resulting price is graded on
+    // whatever inputs it ends up with, so a seeded replacement publishes as
+    // an exact figure with the caveat stripped off. Left unfilled, the
+    // pricer's own missing-property handling applies and the offer demotes.
+    const seedMayFill = (field) => !lookupRejectedFields.has(field);
+    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
+    if (seedMayFill('lotSqFt') && !lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
+    if (seedMayFill('lawnSqFt') && !lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) {
+      lawnSqFt = propertySeed.lawnSqFt;
+    }
+    if (seedMayFill('bedArea') && !bedArea && propertySeed.bedArea > 0) {
+      bedArea = propertySeed.bedArea;
+      // An operator-measured bed area stays explicit; anything else prices
+      // as an estimate (the T&S pricer's density factor is measured-only).
+      bedAreaSource = propertySeed.bedAreaSource === 'explicit' ? 'explicit' : 'estimated';
+    }
+    if (seedMayFill('stories') && !stories && propertySeed.stories > 0) {
+      stories = propertySeed.stories;
+      storiesFromSeed = true;
+    }
+    // Non-dimensional pricing evidence replays too (codex #3367 PR r1,
+    // field-by-field per pre-push r11 P0): features (pool/cage/densities),
+    // property type, and structural facts all move money — pricing a
+    // seeded property against the resolver's non-observational defaults
+    // would price-lock a bare-property rate for a home whose accepted
+    // estimate carried the modifiers. Fill-only, PER FIELD: a lookup-backed
+    // field always wins; every other field takes the seed's evidence over
+    // the bare default.
+    if (propertySeed.features
+      && typeof propertySeed.features === 'object' && !Array.isArray(propertySeed.features)) {
+      for (const [key, value] of Object.entries(propertySeed.features)) {
+        if (value === undefined || value === null || value === '') continue;
+        if (lookupFeatureKeys.has(key)) continue;
+        // A feature the lookup REFUSED is not a gap either (codex #3367 PR
+        // r17) — same bookkeeping the dimensions and structural facts use.
+        if (!seedMayFill(key)) continue;
+        features[key] = value;
+      }
+    }
+    // Seed type fills only a true gap: no stored type AND no adopted
+    // lookup/record classification (codex #3367 PR r3) — a trusted
+    // single_family read is indistinguishable from the default by value,
+    // so provenance is tracked explicitly above.
+    if (seedMayFill('propertyType')
+      && !customer.property_type && !propertyTypeFromLookup && propertyType === 'single_family'
+      && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
+      propertyType = propertySeed.propertyType;
+    }
+    // A structural fact the lookup REJECTED (weak or conflicting evidence on
+    // the record's own _fieldEvidence) is not a gap the seed may refill —
+    // restoring the stale value hands the engine exactly the input the
+    // lookup just refused, and the offer publishes an exact price on it
+    // (pre-push P0).
+    if (seedMayFill('yearBuilt')) yearBuilt = yearBuilt || propertySeed.yearBuilt || null;
+    if (seedMayFill('constructionMaterial')) {
+      constructionMaterial = constructionMaterial || propertySeed.constructionMaterial || null;
+    }
+    if (seedMayFill('foundationType')) foundationType = foundationType || propertySeed.foundationType || null;
+    if (seedMayFill('roofType')) roofType = roofType || propertySeed.roofType || null;
+  }
+
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
 
   const propertyInput = {
@@ -618,7 +883,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     // carries provenance without any verify flag, and a non-direct or
     // low-confidence inference must price as 'estimated', not 'lookup'.
     storiesSource: stories
-      ? storiesSourceForPricing({ stories, storiesEvidence })
+      ? (storiesFromSeed
+        ? (propertySeed?.storiesSource || 'estimated')
+        : storiesSourceForPricing({ stories, storiesEvidence }))
       : 'default',
     propertyType,
     features,
@@ -797,7 +1064,7 @@ function ownedAndNotRepeatable(serviceKey, currentSet) {
   return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
 }
 
-async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup }) {
+async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup, propertySeed = null }) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
@@ -883,6 +1150,7 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     customer,
     turfProfile,
     propertyLookup: lookupCanInformPricing ? lookupFn : null,
+    propertySeed,
   });
 
   // Measured AFTER the exclusion: an owned service missing a measurement must
@@ -974,6 +1242,10 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     ok: true,
     message,
     currentServices: currentServiceKeys.map(toKeyLabel),
+    // Raw modeled-baseline keys (mapKey'd, e.g. termite_bait → termite) —
+    // the report cross-sell reads these to prove every evidenced owned
+    // family actually made it into the priced baseline (codex #3367 PR r1).
+    currentServiceKeys: [...currentServiceKeys],
     requestedServices: requestedServices.map(toKeyLabel),
     alreadyIncluded: alreadyIncluded.map(toKeyLabel),
     property: summarizeProperty(propertyContext),
@@ -993,11 +1265,21 @@ function summarizeProperty(context) {
     lawnSqFt: p.lawnSqFt || null,
     stories: p.stories || null,
     grassType: context.grassType || null,
+    // The RESOLVED type (stored type + trusted lookup adoption) — consumers
+    // with a commercial-suppression rule (report cross-sell) must read this,
+    // not the raw customers column, or a blank column with a commercial
+    // cached lookup slips past (codex #3367 r4).
+    propertyType: p.propertyType || null,
   };
 }
 
 module.exports = {
   buildCustomerPricingResponse,
+  // The exact address string this module hands the property lookup — a
+  // consumer that must reason about that lookup independently (the
+  // service-report cross-sell probes for verified corrections whether or
+  // not the lookup ran) has to key on the same string, not its own guess.
+  addressForCustomer,
   inferRequestedServices,
   serviceKeyFromText,
   variantsForService,

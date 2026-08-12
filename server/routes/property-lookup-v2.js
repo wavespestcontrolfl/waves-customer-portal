@@ -167,6 +167,11 @@ async function performPropertyLookup(address, options = {}) {
   // backfill patches and the final saveLookup so a documented read-only run
   // truly leaves no rows behind.
   const persist = options.persist !== false;
+  // options.cacheOnly: latency-bound callers (the service-report cross-sell
+  // card renders inside a customer-facing report fetch) take a cached row
+  // as-is — no backfill provider round-trips — and get null on a miss
+  // instead of the live geocode/search/vision pipeline.
+  const cacheOnly = options.cacheOnly === true;
 
   // ── STEP -1: Cache ──
   // A verified-fresh row answers without re-running geocode/search/vision —
@@ -183,7 +188,8 @@ async function performPropertyLookup(address, options = {}) {
       // like the live path; a null result is NOT persisted — an outage must
       // not write "no zone" for the TTL — it simply retries next hit.
       if (
-        cached.property_record
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._floodZone === undefined
         && Number.isFinite(Number(cached.lat))
         && Number.isFinite(Number(cached.lng))
@@ -198,7 +204,8 @@ async function performPropertyLookup(address, options = {}) {
       // Permit-evidence backfill, same pattern: query once on hit, persist
       // even when empty (a checked marker), retry only on provider failure.
       if (
-        cached.property_record
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._poolPermits === undefined
         && cached.property_record._parcel?.paoParcelId
         && cached.property_record._parcel?.county
@@ -224,8 +231,29 @@ async function performPropertyLookup(address, options = {}) {
       const cachedSnapped = cached.property_record
         ? typedNumberDisagreesWithRecord(address, cached.property_record)
         : null;
+      // The cache-only path cannot run the backfill (it is latency-bound and
+      // must not make a GIS call), so a row that still NEEDS the audit is
+      // unaudited evidence — and returning it rebuilds the result with no
+      // 'address' verification flag, which is exactly the signal every
+      // downstream price guard keys on. A detected snap is the acute case:
+      // the cached record belongs to a different house number, and serving
+      // it unflagged lets the report cross-sell publish an exact price from
+      // the NEIGHBOR's parcel for the rest of the 180-day TTL. Treated as a
+      // miss instead (codex #3367 PR r18) — the caller prices from the
+      // stored profile alone, and any non-cache-only caller still backfills
+      // the audit and resumes normal hits.
       if (
-        cached.property_record
+        cacheOnly
+        && cached.property_record
+        && cached.property_record._addressAudit === undefined
+        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
+      ) {
+        logger.info('[property-lookup-v2] cache-only: unaudited row needs a house-number audit — treating as miss');
+        return null;
+      }
+      if (
+        !cacheOnly
+        && cached.property_record
         && cached.property_record._addressAudit === undefined
         && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
       ) {
@@ -243,6 +271,11 @@ async function performPropertyLookup(address, options = {}) {
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
+
+  // Cache-only probe missed (or was combined with refresh): never fall
+  // through to the live pipeline — the caller prices from the stored
+  // profile alone.
+  if (cacheOnly) return null;
 
   const result = {
     address: String(address).trim(),
@@ -1738,6 +1771,36 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // coverage, unpermitted pools, and Sarasota has no permit service.
     poolPermit: rc?._poolPermits?.poolPermit || null,
     enclosurePermit: rc?._poolPermits?.enclosurePermit || null,
+
+    // Per-field observation provenance (codex #3367 PR r7): this profile
+    // synthesizes defaults for unobserved fields ('MODERATE' densities,
+    // irrigationVisible false, the 'Single Family' display type), and a
+    // pricing consumer replaying accepted-estimate evidence must be able
+    // to tell an observation from a default — the synthesized value is
+    // otherwise indistinguishable at the consumer boundary. True = the raw
+    // record/vision evidence actually supplied the field. Built on every
+    // profile build, so cache-hit rebuilds carry it without a backfill.
+    _observed: {
+      // Provider placeholders ('UNKNOWN') are not observations (PR r10) —
+      // same knownFact rule the structural-facts consumers apply.
+      propertyType: commercialProfile
+        || !!(((rc?.propertyType
+          && String(rc.propertyType).trim().toUpperCase() !== 'UNKNOWN'
+          && normalizePricingPropertyType(rc.propertyType) !== 'commercial'))
+          || visionPropertyType),
+      shrubDensity: !!ai?.shrubDensity,
+      treeDensity: !!ai?.treeDensity,
+      landscapeComplexity: !!ai?.landscapeComplexity,
+      irrigationVisible: ai?.irrigationVisible === 'YES' || ai?.irrigationVisible === 'NO',
+      // Pool/cage/water synthesize display strings too ('NO', 'UNKNOWN',
+      // 'NONE' — codex #3367 PR r8): observed only when the record or
+      // vision actually supplied the read (poolSource null = mergePool's
+      // synthesized 'NO').
+      pool: poolSource(rc, ai) !== null,
+      poolCage: !!rc?.poolCageSqft || !!ai?.poolCage,
+      poolCageSize: !!rc?.poolCageSqft || !!ai?.poolCageSize,
+      nearWater: !!(ai?.waterProximity || ai?.nearWater),
+    },
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',

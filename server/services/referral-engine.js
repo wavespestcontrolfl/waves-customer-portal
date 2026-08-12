@@ -1000,10 +1000,20 @@ async function checkMilestones(promoterId) {
 // ---------------------------------------------------------------------------
 // 6. getSettings
 // ---------------------------------------------------------------------------
+// Strict variant for surfaces that must FAIL CLOSED (the public report
+// referral card): returns the LIVE settings row or null — never the
+// defaults below, which advertise an active $25/$25 program that a failed
+// lookup or an unconfigured environment cannot honor. Errors propagate to
+// the caller's catch.
+async function getLiveSettings() {
+  const row = await db('referral_program_settings').where({ id: 1 }).first();
+  return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
+}
+
 async function getSettings() {
   try {
-    const row = await db('referral_program_settings').where({ id: 1 }).first();
-    if (row) return { ...row, base_url: normalizeReferralBaseUrl(row.base_url) };
+    const row = await getLiveSettings();
+    if (row) return row;
   } catch { /* table may not exist yet */ }
 
   // Defaults. referrer_reward_cents matches the agreed flat $25 (the prod row +
@@ -1207,6 +1217,7 @@ module.exports = {
   creditReferralOnFirstService,
   checkMilestones,
   getSettings,
+  getLiveSettings,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

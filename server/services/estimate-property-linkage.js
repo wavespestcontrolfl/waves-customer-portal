@@ -310,6 +310,18 @@ function scopeKeyLacksLocality(key) {
   return !!street && !city && !zip;
 }
 
+// At least one locality field (city or zip) present on BOTH keys and equal.
+// sameScopeKey compares each locality field only when both sides carry it,
+// so disjoint evidence — a city-only key against a zip-only key — matches
+// across cities (codex #3367 PR r6/r7). Consumers that need property
+// EQUALITY proof (not merely absence of contradiction) call this after
+// sameScopeKey passes.
+function scopeKeysShareLocality(a, b) {
+  const [, ac, az] = String(a || '').split('|');
+  const [, bc, bz] = String(b || '').split('|');
+  return (!!ac && !!bc && ac === bc) || (!!az && !!bz && az === bz);
+}
+
 // Strict on street, wildcard on locality segments either side lacks.
 function sameScopeKey(a, b) {
   if (!a || !b) return false;
@@ -388,6 +400,7 @@ module.exports = {
   normalizedStampedStreet,
   sameScopeKey,
   scopeKeyLacksLocality,
+  scopeKeysShareLocality,
   normalizedEstimatePropertyKey,
   samePropertyKey,
   estimateQuotesCustomerAddress,
