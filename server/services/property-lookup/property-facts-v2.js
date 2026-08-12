@@ -219,6 +219,10 @@ function lotApplicabilityFor({ propertySubtype, ownershipType }) {
   if (ownershipType === 'residential_condominium' || ownershipType === 'commercial_condominium'
     || ownershipType === 'association_common_property') return 'common_master_parcel';
   if (ownershipType === 'leased_suite') return 'no_individual_lot';
+  // A tenant leasing an ENTIRE freestanding building still sits on one real
+  // parcel — lot-driven services legitimately treat it, so this is a
+  // private parcel, never 'no individual lot' (codex r40 P1).
+  if (ownershipType === 'leased_whole_building') return 'private_parcel';
   const subtype = normalizeSubtype(propertySubtype);
   if (subtype === 'condominium' || subtype === 'condo' || subtype === 'apartment') return 'common_master_parcel';
   if (ownershipType === 'fee_simple') return 'private_parcel';

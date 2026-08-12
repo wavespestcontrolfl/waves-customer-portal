@@ -133,7 +133,14 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     // category guard entirely (codex pre-push P1). Signature/quoted-history
     // stripped first: a residential inquiry sent under a work signature
     // ("Suite 200") must not read as a commercial premises (codex r9 P2).
-    message: emailProseForScan(email?.body_text || email?.snippet || ''),
+    // The SUBJECT carries the ask as often as the body ("Pest control for
+    // our warehouse" + a generic body), and the classifier already reads
+    // it — excluding it here let that inquiry pass readiness as residential
+    // (codex r40 P1).
+    message: [
+      String(email?.subject || '').trim(),
+      emailProseForScan(email?.body_text || email?.snippet || ''),
+    ].filter(Boolean).join('\n'),
     normalizedAddress: {
       line1: addr.line1,
       city: addr.city,

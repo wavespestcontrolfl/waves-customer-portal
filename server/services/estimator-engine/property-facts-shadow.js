@@ -157,8 +157,21 @@ function inferServiceScope({
   return 'entire_residential_structure';
 }
 
-function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites = false }) {
-  if (tenant) return isCommercial ? 'leased_suite' : 'leased_land';
+function inferOwnershipType({
+  propertyType, isCommercial, tenant, aggregated, unitSignal,
+  unitScopeSuites = false, partBuilding = false,
+}) {
+  if (tenant) {
+    // A commercial tenant is a leased SUITE only when they occupy part of a
+    // building; a whole-building restaurant/warehouse lease sits on a real
+    // parcel, and 'leased_suite' made selectLot report no_individual_lot so
+    // V2 cleared that valid parcel area (codex r40 P1 — the ownership half
+    // of the r38/r39 scope fix). Gate-scoped like every other lane change.
+    if (isCommercial) {
+      return (unitScopeSuites && !partBuilding) ? 'leased_whole_building' : 'leased_suite';
+    }
+    return 'leased_land';
+  }
   // Owner-occupied commercial UNIT (positive unit evidence, no tenancy):
   // a commercial condominium — its lot is the development's master parcel,
   // never a private lot (pairs with the suite scope above, codex r8 P1).
@@ -441,7 +454,7 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
     });
     const ownershipType = inferOwnershipType({
-      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites,
+      propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
     });
     const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
     if (!evidence.length) return null;

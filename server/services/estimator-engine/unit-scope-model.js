@@ -324,7 +324,8 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     serviceScope = 'residential_unit';
   }
   const ownershipType = shadowPrivate.inferOwnershipType({
-    propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites: true,
+    propertyType, isCommercial, tenant, aggregated, unitSignal,
+    unitScopeSuites: true, partBuilding: partBuildingEvidence,
   });
 
   return {

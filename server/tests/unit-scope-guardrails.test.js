@@ -364,6 +364,23 @@ describe('kill-switch isolation from the V2 gate (r12)', () => {
     })).toBe('entire_commercial_building');
     // Lane OFF: the legacy tenancy⇒suite mapping is preserved verbatim.
     expect(shadowPrivate.inferServiceScope({ ...args, tenant: true })).toBe('commercial_suite');
+    // OWNERSHIP follows the same rule (codex r40 P1): a whole-building
+    // lease keeps a real parcel, so V2's lot selection must not read
+    // 'no_individual_lot' and clear it.
+    const { lotApplicabilityFor } = require('../services/property-lookup/property-facts-v2');
+    const wholeBuildingOwnership = shadowPrivate.inferOwnershipType({
+      ...args, tenant: true, unitScopeSuites: true, partBuilding: false,
+    });
+    expect(wholeBuildingOwnership).toBe('leased_whole_building');
+    expect(lotApplicabilityFor({
+      propertySubtype: 'restaurant', ownershipType: wholeBuildingOwnership,
+    })).toBe('private_parcel');
+    // A part-building suite tenant stays leased_suite ⇒ no individual lot.
+    expect(shadowPrivate.inferOwnershipType({
+      ...args, tenant: true, unitScopeSuites: true, partBuilding: true,
+    })).toBe('leased_suite');
+    // Lane OFF keeps the legacy leased_suite for every commercial tenant.
+    expect(shadowPrivate.inferOwnershipType({ ...args, tenant: true })).toBe('leased_suite');
   });
 });
 
