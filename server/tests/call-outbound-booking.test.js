@@ -153,6 +153,90 @@ describe('transitionJobStatus — legacy pending review rows activate lazily', (
       'svc1', 'cust1', '2026-08-11T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false, closeReminderWindows: false },
     );
   });
+
+  test('CONFIRMED-but-unstamped marker row → completed still detects and activates (Codex r24 P1)', async () => {
+    // A reschedule path commits the row 'confirmed' first and activates
+    // fail-soft afterwards — a failed/crashed activation leaves a
+    // confirmed row with customer_confirmed=false. Its later
+    // confirmed → completed transition must still detect it (detection
+    // keys on the ROW, not on fromStatus === 'pending').
+    const legacyRow = {
+      id: 'svc1',
+      source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+      status: 'confirmed',
+      customer_confirmed: false,
+      customer_id: 'cust1',
+      scheduled_date: '2026-08-11',
+      window_start: '09:00',
+      service_type: 'pest_control',
+      source_call_log_id: null,
+      is_callback: false,
+      estimated_price: 100,
+    };
+    const updates = [];
+    const makeChain = (table) => {
+      const q = {};
+      ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'whereRaw',
+        'leftJoin', 'orderBy', 'limit', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.select = jest.fn(async () => []);
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services') return { ...legacyRow };
+        if (table === 'scheduled_services as s') {
+          return {
+            job_id: 'svc1', customer_id: 'cust1', tech_id: null, service_type: 'pest_control',
+            scheduled_date: '2026-08-11', window_start: '09:00', window_end: null,
+            notes: null, internal_notes: null, updated_at: new Date(),
+          };
+        }
+        return null;
+      });
+      q.update = jest.fn(async (vals) => { updates.push({ table, vals }); return 1; });
+      q.insert = jest.fn(async () => 1);
+      q.del = jest.fn(async () => 1);
+      return q;
+    };
+    const trx = jest.fn((table) => makeChain(table));
+    trx.transaction = async (cb) => cb(trx);
+    trx.fn = { now: () => new Date() };
+    trx.raw = jest.fn(() => ({}));
+    trx.executionPromise = Promise.resolve();
+    const db = require('../models/db');
+    db.mockImplementation((table) => makeChain(table));
+    db.transaction = async (cb) => cb(db);
+    db.fn = { now: () => new Date() };
+    db.raw = jest.fn(() => ({}));
+
+    await transitionJobStatus({
+      jobId: 'svc1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', trx,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const confirmStamp = updates.find((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true);
+    expect(confirmStamp).toBeTruthy();
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+  });
+});
+
+describe('replay repair — windowless reused rows register the placeholder (Codex r24 P1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('the replay registration passes windowless state through instead of fabricating 09:00', () => {
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    // registerScheduleSideEffects forwards closeReminderWindows into
+    // registerAppointment (the canonical pre-closed placeholder path)...
+    expect(callProc).toContain('{ sendConfirmation: false, closeReminderWindows }');
+    // ...and the same-key replay caller derives it from the reused row,
+    // never fabricating a start for a cleared arrival time.
+    expect(callProc).toContain('closeReminderWindows: !svc.window_start,');
+    expect(callProc).not.toContain("String(svc.window_start).slice(0, 5) : '09:00'");
+    // Confirmation repairs (sweep re-arm AND the email leg) are scoped to
+    // visits that still have an arrival time, with a write-time
+    // windows_preclosed belt on the re-arm.
+    expect(callProc).toContain('if (svc.window_start && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
+    expect(callProc).toContain('.where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })');
+  });
 });
 
 describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () => {
@@ -443,12 +527,14 @@ describe('same-key replay — consent-blocked email confirmation repair (Codex r
 
   test('a replay with SMS consent-blocked but email permitted retries the email leg, evidence-gated', () => {
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    // The branch exists and is scoped to the partial TCPA block.
-    expect(callProc).toContain('} else if (v2SmsBlocked && !v2EmailBlocked) {');
+    // The branch exists, scoped to the partial TCPA block AND to visits
+    // that still have an arrival time (a windowless visit has no time to
+    // confirm — Codex r24 P1).
+    expect(callProc).toContain('} else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {');
     // Evidence gate on the email audit ledger before re-sending, and the
     // repair goes through the channel-aware helper (opt-out + prefs
     // fail-closed enforced there) with the SMS leg stubbed off.
-    const branchAt = callProc.indexOf('} else if (v2SmsBlocked && !v2EmailBlocked) {');
+    const branchAt = callProc.indexOf('} else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {');
     const branchSlice = callProc.slice(branchAt, branchAt + 3000);
     expect(branchSlice).toContain("interaction_type: 'email_outbound'");
     expect(branchSlice).toContain('smsPermanentlyBlocked: true,');

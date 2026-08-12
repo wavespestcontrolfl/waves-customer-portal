@@ -2098,7 +2098,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false }) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
     await AppointmentReminders.registerAppointment(
@@ -2107,7 +2107,12 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
       `${scheduledDate}T${windowStart || '08:00'}`,
       serviceType,
       'call_recording',
-      { sendConfirmation: false }
+      // closeReminderWindows: a WINDOWLESS visit registers the canonical
+      // pre-closed placeholder at the date+08:00 slot instead of an ARMED
+      // reminder at a fabricated start — the cron must never text a time
+      // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
+      // registration leg applies).
+      { sendConfirmation: false, closeReminderWindows }
     );
   } catch (err) {
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
@@ -11732,8 +11737,14 @@ const CallRecordingProcessor = {
                   scheduledServiceId: svc.id,
                   customerId,
                   scheduledDate: replayDate,
-                  windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : '09:00',
+                  // A reused row whose arrival time was CLEARED after the
+                  // first attempt (window_start null) must register the
+                  // canonical windowless pre-closed placeholder, never an
+                  // armed reminder at a fabricated 09:00 — the office
+                  // explicitly removed that time (Codex #3361 r24 P1).
+                  windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : null,
                   serviceType: svc.service_type,
+                  closeReminderWindows: !svc.window_start,
                 });
                 // Confirmation repair, evidence-gated: the reused-row branch
                 // below never re-sends inline, and selfHealMissingReminderRows
@@ -11749,7 +11760,12 @@ const CallRecordingProcessor = {
                 // per-visit delivery evidence exists, and the visit is still
                 // in the future; the sweep's canonical send owns fan-out and
                 // cannot double-text a customer the first attempt reached.
-                if (!v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                // A WINDOWLESS reused row (arrival time cleared) skips both
+                // confirmation repairs outright: a windowless visit has no
+                // time to confirm — its registration above is the pre-closed
+                // placeholder, and any confirmation would render a time
+                // nobody chose (Codex #3361 r24 P1).
+                if (svc.window_start && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
                   try {
                     // ALL THREE delivery ledgers, not just messaging_audit_log
                     // (Codex #3361 r7 P2): appointment EMAILS audit into
@@ -11784,7 +11800,11 @@ const CallRecordingProcessor = {
                     }
                     if (!confirmationDelivered) {
                       const rearmed = await db('appointment_reminders')
-                        .where({ scheduled_service_id: svc.id, cancelled: false })
+                        // windows_preclosed belt (write-time): a placeholder's
+                        // confirmation closed in its insert and must never
+                        // re-arm, even if the visit went windowless after the
+                        // svc snapshot above was read.
+                        .where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })
                         .where('appointment_time', '>', new Date())
                         // Live-status check at WRITE time, not the earlier
                         // svc snapshot: a tech can complete the visit between
@@ -11800,7 +11820,7 @@ const CallRecordingProcessor = {
                   } catch (confirmRepairErr) {
                     logger.warn(`[call-proc] replay confirmation repair failed for ${svc.id}: ${confirmRepairErr.message}`);
                   }
-                } else if (v2SmsBlocked && !v2EmailBlocked) {
+                } else if (svc.window_start && v2SmsBlocked && !v2EmailBlocked) {
                   // Consent-blocked SMS with email still permitted: the
                   // inline r21 fallback emails the confirmation, but a crash
                   // between the committed insert and that send loses it — and
@@ -11818,7 +11838,7 @@ const CallRecordingProcessor = {
                       .whereRaw("metadata->>'status' = 'sent'")
                       .first('id');
                     const replayApptTime = parseETDateTime(
-                      `${replayDate}T${svc.window_start ? String(svc.window_start).slice(0, 5) : '23:59'}`,
+                      `${replayDate}T${String(svc.window_start).slice(0, 5)}`,
                     );
                     if (!emailEvidence && replayApptTime.getTime() > Date.now()) {
                       const AppointmentReminders = require('./appointment-reminders');

@@ -332,22 +332,31 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // reminders, converted the originating lead, and resolved the review
     // card — with the guard gone, a straight pending → en_route/completed
     // flip would silently skip all of it and strand the row half-armed
-    // (Codex #3361 P0). Detection only happens here; the activation itself
-    // runs POST-COMMIT via the shared hook-first helper, which stamps
-    // customer_confirmed only after the core legs succeed — so a transient
-    // leg failure (or a crash after commit) leaves the row unstamped and
-    // the next touch retries (Codex #3361 r4 P1). The dispatch/schedule
-    // confirm routes stamp customer_confirmed themselves before calling
-    // this writer (same trx), so those paths skip here and keep their own
-    // hook call — no double run. Cancel/skip stay pure rejections.
-    if (!['cancelled', 'skipped'].includes(String(toStatus || '')) && String(fromStatus) === 'pending') {
+    // (Codex #3361 P0). Detection keys on the ROW being an unconfirmed
+    // marker row, NOT on fromStatus === 'pending' (Codex #3361 r24 P1): a
+    // reschedule path commits the row 'confirmed' first and activates
+    // fail-soft afterwards, so a failed/crashed activation leaves a
+    // confirmed-but-unstamped row whose later confirmed → completed
+    // transition must still detect it here — otherwise completion billing
+    // runs with no in-trx credit evidence and no post-commit activation
+    // until the hourly sweep. The activation itself runs POST-COMMIT via
+    // the shared hook-first helper, which stamps customer_confirmed only
+    // after the core legs succeed — so a transient leg failure (or a
+    // crash after commit) leaves the row unstamped and the next touch
+    // retries (Codex #3361 r4 P1). The dispatch/schedule confirm routes
+    // stamp customer_confirmed themselves before calling this writer
+    // (same trx), so those paths skip here and keep their own hook call —
+    // no double run. Cancel/skip stay pure rejections, and a row read in
+    // a rejected state (cancelled/skipped) is left to the hourly sweep,
+    // whose post-commit read sees the transition's outcome.
+    if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) {
       const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed', 'customer_id');
       legacyOutboundActivationNeeded = !!legacyRow
         && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && legacyRow.status === 'pending'
+        && !['cancelled', 'skipped'].includes(String(legacyRow.status || ''))
         && !legacyRow.customer_confirmed;
       // COMPLETION is the billing moment: the inspection-credit booking
       // evidence commits WITH this transition (same #3178 r33 rule as the
