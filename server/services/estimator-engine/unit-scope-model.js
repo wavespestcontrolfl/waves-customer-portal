@@ -303,9 +303,18 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // house, or a multifamily record the provider flattened. Without this,
   // lot-driven work could be sized to the entire property (codex r20 P1).
   const tenantOfSubpremise = subpremiseSignal && relationship === 'tenant';
-  if (!isCommercial && subpremiseSignal
+  // A TENANT whose own words classify the premises as an apartment/condo/
+  // multifamily unit is a unit occupant even when the provider flattened
+  // the record to Single Family and the address carries no Apt/Unit line
+  // (codex r37 P1) — otherwise the county building area and parcel lot
+  // stayed authoritative and lot-driven work priced the whole property.
+  const tenantOfExtractedUnitType = relationship === 'tenant'
+    && /apartment|condo|multi.?family/i.test(String(extraction?.property?.property_type || ''));
+  if (!isCommercial
+    && (subpremiseSignal || tenantOfExtractedUnitType)
     && serviceScope === 'entire_residential_structure'
-    && (tenantOfSubpremise || !WHOLE_STRUCTURE_TYPES.test(String(propertyType || '')))) {
+    && (tenantOfSubpremise || tenantOfExtractedUnitType
+      || !WHOLE_STRUCTURE_TYPES.test(String(propertyType || '')))) {
     serviceScope = 'residential_unit';
   }
   const ownershipType = shadowPrivate.inferOwnershipType({

@@ -283,20 +283,27 @@ const LOOKUP_PROPERTY_TYPE_LABELS = {
 };
 
 // The server surfaces 'Unknown' when a lookup resolved no trusted type
-// (GATE_UNIT_SCOPE_GUARDRAILS). That is an explicit "no classification",
-// not an unrecognized label: returning {} merged nothing into the form, so
-// looking up a second unresolved address left the PRIOR address's Condo /
-// Single Family / Commercial classification — and its commercial flag —
-// active on the new property (codex r28 P1).
+// (GATE_UNIT_SCOPE_GUARDRAILS). It autofills NOTHING for the
+// classification fields: an unresolved lookup has no classification to
+// offer, and writing one would clobber whatever is in the form.
+//
+// Deliberately not a CLEAR (codex r37 P1): the form does not record which
+// values a lookup populated versus which the operator typed, so clearing
+// would wipe an operator's explicit Commercial/Condo classification. This
+// is strictly better than the pre-change behavior, where an unresolved
+// lookup returned 'Single Family' and overwrote the operator's choice with
+// a wrong positive label. The remaining gap — a stale classification (and
+// stale sqft/lot/stories) left over from a PRIOR address's lookup — needs
+// the same autofill-provenance mechanism for both halves and is recorded
+// as a follow-up in the PR body.
 const UNKNOWN_LOOKUP_PROPERTY_TYPES = new Set(["unknown", "unresolved"]);
 
 export function resolveLookupPropertyTypeAutofill(propertyType, category) {
   const normalizedPropertyType = normalizePropertyType(propertyType);
-  // A COMMERCIAL category still classifies (the branch below) — only an
-  // unresolved type with no commercial category clears the form.
+  // A COMMERCIAL category still classifies (the branch below).
   if (UNKNOWN_LOOKUP_PROPERTY_TYPES.has(normalizedPropertyType)
     && normalizePropertyType(category) !== "commercial") {
-    return { propertyType: "", isCommercial: "NO", commercialSubtype: "" };
+    return {};
   }
   if (normalizedPropertyType === "commercial") {
     return { propertyType: "Commercial", isCommercial: "YES" };

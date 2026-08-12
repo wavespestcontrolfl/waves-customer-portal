@@ -419,6 +419,27 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     expect(model.subpremiseSignal).toBe(true);
     expect(model.serviceScope).toBe('commercial_suite');
   });
+  test('a tenant whose extraction says apartment is a unit even on a flattened record with no unit line (r37)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: {
+        caller: { relationship_to_property: 'tenant' },
+        property: { property_type: 'apartment' },
+      },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Venice, FL 34285' },
+      propertyFacts: { tenant: true, home: { value: 3400, source: 'county_assessed' } },
+      address: '900 Bayview Ter, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('residential_unit');
+    const facts = {
+      home: { value: 3400, source: 'county_assessed', confidence: 'high' },
+      lot: { value: 9000, source: 'county_assessed', confidence: 'high' },
+    };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBeNull();
+    expect(facts.lot.value).toBeNull();
+  });
+
   test('the schema street_line_2 unit field signals even when the composed address dropped it (r6)', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
