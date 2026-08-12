@@ -409,6 +409,39 @@ describe('miner persistAll action-aware gate', () => {
     expect(updates[0].updates).toMatchObject({ status: 'expired', skip_reason: 'seo_actions_owns_page' });
   });
 
+  test('a parent whose companion never existed is still retired', async () => {
+    // The cap excluded the companion, link boosts are off, or another
+    // queue owns the page: the synthesized key has no row behind it, so
+    // the lock can never return it. Blocking on that would strand the
+    // parent permanently.
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: null, _in: null,
+        where: jest.fn((f) => { if (typeof f === 'object') q._filters = f; return q; }),
+        whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q),
+        whereIn: jest.fn((c, v) => { q._in = [c, v]; return q; }),
+        whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+        select: jest.fn(() => q),
+        // No companion row exists anywhere.
+        then: (res, rej) => Promise.resolve(
+          q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []
+        ).then(res, rej),
+        forUpdate: jest.fn(() => Promise.resolve(
+          (q._in?.[1] || []).map((k) => ({ dedupe_key: k }))
+        )),
+        update: jest.fn((u) => { updates.push({ in: q._in, updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    db.raw.mockResolvedValue({ rowCount: 1, rows: [{ domain: 'x' }] });
+
+    await miner._sweepRecoveredQueries('ctr_rewrite', [], null, null, new Set(), SINCE);
+
+    const expired = updates.flatMap((u) => u.in?.[1] || []);
+    expect(expired).toEqual([staleRow.dedupe_key]);
+  });
+
   test('a parent is NOT retired when its companion was claimed mid-sweep', async () => {
     // claimNext can claim a companion between the unlocked probe and the
     // lock. Expiring the parent anyway leaves a claimed orphan doing
@@ -423,7 +456,10 @@ describe('miner persistAll action-aware gate', () => {
         whereRaw: jest.fn(() => q), whereNotNull: jest.fn(() => q),
         select: jest.fn(() => q),
         then: (res, rej) => Promise.resolve(
-          q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []
+          q._filters?.bucket === 'ctr_rewrite'
+            ? [staleRow]
+            // the companion-existence probe: the row exists and is pending
+            : (q._in?.[0] === 'dedupe_key' ? q._in[1].map((k) => ({ dedupe_key: k })) : [])
         ).then(res, rej),
         // The companion is gone (claimed); only the parent locks.
         forUpdate: jest.fn(() => Promise.resolve(
@@ -487,7 +523,12 @@ describe('miner persistAll action-aware gate', () => {
         select: jest.fn(() => q),
         then: (res, rej) => {
           order.push('probe(unlocked)');
-          return Promise.resolve(q._filters?.bucket === 'ctr_rewrite' ? [staleRow] : []).then(res, rej);
+          return Promise.resolve(
+            q._filters?.bucket === 'ctr_rewrite'
+              ? [staleRow]
+              // companion-existence probe: the companion row exists
+              : (q._in?.[0] === 'dedupe_key' ? q._in[1].map((k) => ({ dedupe_key: k })) : [])
+          ).then(res, rej);
         },
         forUpdate: jest.fn(() => {
           order.push(`lock:${(q._in?.[1] || []).length}keys`);

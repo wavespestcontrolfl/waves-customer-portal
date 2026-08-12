@@ -767,7 +767,8 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     // classifier value that canonicalizes to null makes the MINER skip,
     // so the mirror must skip too, or it calls the rep reachable through
     // a bucket that will never emit it.
-    const ncyService = canonicalizeServiceCategory(t.service_category)
+    const ncyCanon = canonicalizeServiceCategory(t.service_category);
+    const ncyService = (ncyCanon && classifierQuerySupported(t.service_category, ncyCanon, rep.query) ? ncyCanon : null)
       || inferServiceFromQuery(rep.query);
     if (!ncyService) continue;
     // mineNoContentYet is HUB-ONLY, so the mirror must clear the floor on
@@ -3498,7 +3499,16 @@ class GscOpportunityMiner {
       // hyphenated coarse ids, so a raw value reaches the runner as
       // facts_unmappable and parks instead of drafting (audit P2). Same
       // helper the listicle lane uses for the same reason.
-      const service = canonicalizeServiceCategory(q.service_category)
+      // The sync's SERVICE_PATTERNS are UNBOUNDED substring tests, so
+      // "types of important documents florida" arrives stored as 'pest'
+      // ('ant' inside 'important'). Trusting that would enqueue pest
+      // content for an unrelated query now that this bucket actually
+      // emits. classifierQuerySupported is the boundary-aware validator
+      // the listicle lane already built for this exact failure; a stored
+      // category counts only with real query evidence, otherwise fall
+      // through to contextual inference.
+      const canon = canonicalizeServiceCategory(q.service_category);
+      const service = (canon && classifierQuerySupported(q.service_category, canon, q.query) ? canon : null)
         || inferServiceFromQuery(q.query);
       if (!service) continue;
       const impressions = parseInt(q.impressions, 10) || 0;
@@ -3924,7 +3934,18 @@ class GscOpportunityMiner {
       // the authoritative snapshot, so nothing can be claimed between
       // locking a parent and locking its companion. Rows claimed before it
       // are simply absent (the status filter re-evaluates under the lock).
-      const targetKeys = probeStale.map((r) => r.dedupe_key).concat(companionKeys);
+      // Which companion rows actually EXIST as pending work. A
+      // synthesized key with no row behind it — the cap excluded it, link
+      // boosts are disabled, or another queue owns the page — must not
+      // block its parent forever: the lock can never return a row that
+      // does not exist (audit P2).
+      const existingCompanions = companionKeys.length
+        ? new Set((await runner('opportunity_queue')
+          .where({ bucket: 'link_boost', status: 'pending' })
+          .whereIn('dedupe_key', companionKeys)
+          .select('dedupe_key')).map((r) => r.dedupe_key))
+        : new Set();
+      const targetKeys = probeStale.map((r) => r.dedupe_key).concat(Array.from(existingCompanions));
       const locked = await runner('opportunity_queue')
         .whereIn('dedupe_key', targetKeys)
         .where('status', 'pending')
@@ -3948,7 +3969,7 @@ class GscOpportunityMiner {
         const ck = dedupeKey({
           bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
         });
-        if (!targetedCompanions.has(ck)) continue;
+        if (!targetedCompanions.has(ck) || !existingCompanions.has(ck)) continue;
         // Only companions we INTENDED to retire block their parent; a
         // protected companion means another live parent still needs it,
         // which is no reason to keep ours.

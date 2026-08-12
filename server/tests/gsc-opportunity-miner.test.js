@@ -463,7 +463,7 @@ describe('freshness + split-collapse contracts (source shape)', () => {
   test('no_content_yet collapses classification splits to ONE candidate per query', () => {
     // dedupeKey embeds service+city, so two splits of one query would both
     // persist and draft two posts for one intent.
-    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,2400}byQuery\.set\(q\.query, \{ q, service, city, impressions, persistable \}\)/);
+    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,3200}byQuery\.set\(q\.query, \{ q, service, city, impressions, persistable \}\)/);
     // …and the winner must be PERSISTABLE first, so the collapse agrees
     // with reachability (which admits a rep when ANY tuple clears).
     expect(src).toMatch(/\(persistable && !existing\.persistable\)/);
@@ -482,8 +482,11 @@ describe('freshness + split-collapse contracts (source shape)', () => {
   test('no_content_yet canonicalizes the service before queueing', () => {
     // Raw 'tree_shrub'/'specialty' reach the runner as facts_unmappable
     // and park instead of drafting.
-    expect(src).toMatch(/const service = canonicalizeServiceCategory\(q\.service_category\)\s*\n\s*\|\| inferServiceFromQuery\(q\.query\);/);
-    expect(src).toMatch(/const ncyService = canonicalizeServiceCategory\(t\.service_category\)/);
+    expect(src).toMatch(/const canon = canonicalizeServiceCategory\(q\.service_category\);/);
+    // …and the STORED category is only trusted with boundary-aware query
+    // evidence ('ant' inside 'important' must not read as pest).
+    expect(src).toMatch(/classifierQuerySupported\(q\.service_category, canon, q\.query\)/);
+    expect(src).toMatch(/classifierQuerySupported\(t\.service_category, ncyCanon, rep\.query\)/);
   });
 
   test('a ctr_rewrite page is claimed only by a PERSISTABLE candidate', () => {
