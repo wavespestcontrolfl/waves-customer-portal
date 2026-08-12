@@ -194,10 +194,19 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
     let prefsOwnerId = customerId;
     if (PRIMARY_SCOPED_COLUMNS.has(col)) {
       const { resolvePrimaryProfileId } = require('../../routes/notifications');
-      prefsOwnerId = await resolvePrimaryProfileId(
-        { accountId: accountId || null, customerId },
-        knex,
-      ).catch(() => customerId);
+      try {
+        // onError 'throw': the resolver's default fallback would silently
+        // read the CURRENT profile on a transient failure and could
+        // override the primary profile's explicit choice — unknown
+        // ownership fails closed to SMS instead.
+        prefsOwnerId = await resolvePrimaryProfileId(
+          { accountId: accountId || null, customerId },
+          knex,
+          { onError: 'throw' },
+        );
+      } catch {
+        return false;
+      }
     }
     const ERR = Symbol('prefs-lookup-failed');
     const prefsRow = await knex('notification_prefs')
@@ -209,8 +218,15 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
     // mapped column seeds 'sms' (rows were globally backfilled, and
     // unrelated writes restamp updated_at), so only a non-default value —
     // 'email' or 'both' — is an unambiguous explicit choice, and it vetoes.
-    // Known limit until prefs grow a 'push' option: re-selecting the 'sms'
-    // default is indistinguishable from never choosing.
+    //
+    // OWNER RULING (2026-08-12) on the 'sms'-valued case: a customer who
+    // installed the app, signed in, and ACCEPTED the notification prompt
+    // has opted into app notifications — that registration, not the
+    // indistinguishable-from-default 'sms' value, is the governing signal,
+    // and app-installed customers default to push. Critical templates are
+    // push_and_sms (the SMS still goes); a per-customer push opt-out
+    // toggle ships with the notification-prefs UI follow-up and will veto
+    // here once it exists.
     const value = prefsRow ? String(prefsRow[col] || '').toLowerCase() : '';
     if (value === 'email' || value === 'both') return false;
   }

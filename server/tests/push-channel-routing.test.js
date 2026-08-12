@@ -140,6 +140,20 @@ describe('pushEligibleRuntime', () => {
     await expect(_test.pushEligibleRuntime('c-2', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
   });
 
+  it('vetoes when the primary-profile lookup FAILS (unknown ownership ≠ fallback)', async () => {
+    // The route resolver's default swallows errors and falls back to the
+    // current profile — routing must instead fail closed to SMS, or a
+    // transient failure could override the primary profile's explicit choice.
+    const knex = stubKnex({
+      customers: (where) => {
+        if (where && where.account_id) throw new Error('db down');
+        return { phone: '9415550123', account_id: 'acct-1' };
+      },
+      notification_prefs: { en_route_channel: 'sms' },
+    });
+    await expect(_test.pushEligibleRuntime('c-2', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
+  });
+
   it('vetoes secondary-contact recipients (to is not the account holder phone)', async () => {
     const knex = stubKnex({ customers: { phone: '9415550123', account_id: null }, notification_prefs: undefined });
     await expect(_test.pushEligibleRuntime('c-1', '9415559999', 'tech_en_route', knex)).resolves.toBe(false);

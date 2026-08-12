@@ -412,13 +412,20 @@ async function accountPropertyIds(req) {
 // when no primary profile resolves.
 // knex is injectable so non-request callers (push-channel-routing) can reuse
 // this exact resolver with a `{ accountId, customerId }`-shaped arg.
-async function resolvePrimaryProfileId(req, knex = db) {
+// onError 'fallback' (default) keeps the route behavior: a failed lookup
+// falls back to the current profile. Callers whose decision must FAIL
+// CLOSED on unknown ownership (push routing) pass onError 'throw' —
+// "lookup failed" and "no primary exists" are different answers there.
+async function resolvePrimaryProfileId(req, knex = db, { onError = 'fallback' } = {}) {
   const accountId = req.accountId || req.customer?.account_id || req.customerId;
   if (!accountId) return req.customerId;
   const primary = await knex('customers')
     .where({ account_id: accountId, is_primary_profile: true })
     .first('id')
-    .catch(() => null);
+    .catch((err) => {
+      if (onError === 'throw') throw err;
+      return null;
+    });
   return primary?.id || req.customerId;
 }
 
