@@ -73,12 +73,16 @@ function movementReason(delta) {
 // rows only, unlimited), classified by the canonical detectServiceLine.
 // No parallel predicate: both halves are the exact mechanisms the
 // WaveGuard estimate flow and the report stack already use.
-async function hasActiveRecurringLine(customerId, line, knex) {
+// Loaded ONCE per request in buildPropertyScore and shared across every
+// component check — the loader repeats a customer lookup + columnInfo +
+// scheduled-service scan per call, so per-component calls would multiply
+// identical queries.
+async function loadActiveLineSet(customerId, knex) {
   const rows = await loadActiveRecurringServiceRows(knex, customerId).catch(() => []);
-  return rows.some((svc) => detectServiceLine(svc?.service_type) === line);
+  return new Set(rows.map((svc) => detectServiceLine(svc?.service_type)));
 }
 
-async function lawnComponent(customerId, knex) {
+async function lawnComponent(customerId, knex, activeLines) {
   const base = { key: 'lawn', label: 'Lawn' };
   // created_at tie-break: same-day confirmed assessments are allowed and
   // UUID ids carry no chronology.
@@ -105,14 +109,14 @@ async function lawnComponent(customerId, knex) {
   // Pending only on ACTIVE recurring lawn coverage — hasCustomerLawnCare
   // treats any waveguard_tier as lawn evidence, which promises pest-only
   // WaveGuard customers a lawn score that will never come.
-  const monitored = await hasActiveRecurringLine(customerId, 'lawn', knex);
+  const monitored = activeLines.has('lawn');
   if (monitored) {
     return { ...base, status: 'pending', reason: 'Your lawn score appears after the first confirmed lawn assessment.' };
   }
   return { ...base, status: 'not_monitored', reason: 'No lawn care program on this property.' };
 }
 
-async function pestComponent(customerId, knex) {
+async function pestComponent(customerId, knex, activeLines) {
   const base = { key: 'pest', label: 'Pest Pressure' };
   const config = await loadActiveConfig(knex).catch(() => null);
   // serviceLine-scoped: mosquito is a separate component — a mosquito visit's
@@ -181,14 +185,14 @@ async function pestComponent(customerId, knex) {
     return { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' };
   }
 
-  const monitored = await hasActiveRecurringLine(customerId, 'pest', knex);
+  const monitored = activeLines.has('pest');
   if (monitored) {
     return { ...base, status: 'active', reason: 'Your pest protection program is active.' };
   }
   return { ...base, status: 'not_monitored', reason: 'No pest protection program on this property.' };
 }
 
-async function termiteComponent(customerId, knex) {
+async function termiteComponent(customerId, knex, activeLines) {
   const base = { key: 'termite', label: 'Termite' };
   const bond = await knex('termite_bonds')
     .where({ customer_id: customerId, status: 'active' })
@@ -220,14 +224,14 @@ async function termiteComponent(customerId, knex) {
   }
   // Recurring-only termite coverage (e.g. foam_recurring) carries no bond
   // row and may predate any station rows — still protection.
-  const recurring = await hasActiveRecurringLine(customerId, 'termite', knex);
+  const recurring = activeLines.has('termite');
   if (recurring) {
     return { ...base, status: 'active', reason: 'Recurring termite protection active.' };
   }
   return { ...base, status: 'not_monitored', reason: 'No termite protection on file.' };
 }
 
-async function treeShrubComponent(customerId, knex) {
+async function treeShrubComponent(customerId, knex, activeLines) {
   const base = { key: 'tree_shrub', label: 'Trees & Shrubs' };
   // service_date first — a late-entered older visit must not become the
   // current assessment (created_at is only the tie-breaker, matching the
@@ -261,16 +265,16 @@ async function treeShrubComponent(customerId, knex) {
       asOf: dateOnlyString(scored[0].row.service_date),
     };
   }
-  const monitored = await hasActiveRecurringLine(customerId, 'tree_shrub', knex);
+  const monitored = activeLines.has('tree_shrub');
   if (monitored) {
     return { ...base, status: 'pending', reason: 'Your tree & shrub score appears after the first confirmed assessment.' };
   }
   return { ...base, status: 'not_monitored', reason: 'No tree & shrub program on this property.' };
 }
 
-async function mosquitoComponent(customerId, knex) {
+async function mosquitoComponent(customerId, knex, activeLines) {
   const base = { key: 'mosquito', label: 'Mosquito' };
-  const monitored = await hasActiveRecurringLine(customerId, 'mosquito', knex);
+  const monitored = activeLines.has('mosquito');
   if (monitored) {
     return { ...base, status: 'active', reason: 'Your mosquito program is active.' };
   }
@@ -327,7 +331,10 @@ async function rainSummary(customerId, knex) {
   const areaId = customer?.lawn_water_area_id;
   if (!areaId) return null;
   // getAreaRainfall returns null on a partial window (undercount guard).
-  const raw = await getAreaRainfall(areaId, etDateString(addETDays(new Date(), -6)), etDateString(), knex);
+  // Window ends YESTERDAY: the daily sync writes today's row from a
+  // forecast_days=1 request, so today's total includes rain that hasn't
+  // fallen yet — forecast must never read as observed rainfall.
+  const raw = await getAreaRainfall(areaId, etDateString(addETDays(new Date(), -7)), etDateString(addETDays(new Date(), -1)), knex);
   if (raw == null) return null;
   // Same calibration the lawn-water engine applies before presenting the
   // property's water picture (adjusted_rain_7day_inches) — the card must
@@ -359,12 +366,13 @@ function composeOverall(components) {
 
 async function buildPropertyScore(customerId, knex = db) {
   const settle = (promise, fallback) => promise.catch(() => fallback);
+  const activeLines = await loadActiveLineSet(customerId, knex);
   const [lawn, pest, termite, treeShrub, mosquito, irrigation, rain] = await Promise.all([
-    settle(lawnComponent(customerId, knex), { key: 'lawn', label: 'Lawn', status: 'not_monitored', reason: null }),
-    settle(pestComponent(customerId, knex), { key: 'pest', label: 'Pest Pressure', status: 'not_monitored', reason: null }),
-    settle(termiteComponent(customerId, knex), { key: 'termite', label: 'Termite', status: 'not_monitored', reason: null }),
-    settle(treeShrubComponent(customerId, knex), { key: 'tree_shrub', label: 'Trees & Shrubs', status: 'not_monitored', reason: null }),
-    settle(mosquitoComponent(customerId, knex), { key: 'mosquito', label: 'Mosquito', status: 'not_monitored', reason: null }),
+    settle(lawnComponent(customerId, knex, activeLines), { key: 'lawn', label: 'Lawn', status: 'not_monitored', reason: null }),
+    settle(pestComponent(customerId, knex, activeLines), { key: 'pest', label: 'Pest Pressure', status: 'not_monitored', reason: null }),
+    settle(termiteComponent(customerId, knex, activeLines), { key: 'termite', label: 'Termite', status: 'not_monitored', reason: null }),
+    settle(treeShrubComponent(customerId, knex, activeLines), { key: 'tree_shrub', label: 'Trees & Shrubs', status: 'not_monitored', reason: null }),
+    settle(mosquitoComponent(customerId, knex, activeLines), { key: 'mosquito', label: 'Mosquito', status: 'not_monitored', reason: null }),
     settle(irrigationComponent(customerId, knex), { key: 'irrigation', label: 'Irrigation', status: 'not_monitored', reason: null }),
     settle(rainSummary(customerId, knex), null),
   ]);
@@ -381,5 +389,5 @@ async function buildPropertyScore(customerId, knex = db) {
 module.exports = {
   buildPropertyScore,
   // exported for tests
-  _test: { composeOverall, pressureToHealth, movementReason, hasActiveRecurringLine },
+  _test: { composeOverall, pressureToHealth, movementReason, loadActiveLineSet },
 };

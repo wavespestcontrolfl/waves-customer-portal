@@ -833,6 +833,14 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
 // (termite/mosquito) show presence; irrigation shows the snapshot status.
 // "Not monitored" is deliberately quiet copy — factual, not a pitch.
 // =========================================================================
+// YYYY-MM-DD → "Aug 1, 2026". Noon-UTC anchor so the date-only string never
+// slides to the previous calendar day in any viewer timezone.
+function formatScoreDate(dateOnly) {
+  const d = new Date(`${dateOnly}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return dateOnly;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function PropertyScoreCard({ data, compact }) {
   if (!data?.available) return null;
   const components = data.components || [];
@@ -904,12 +912,15 @@ function PropertyScoreCard({ data, compact }) {
             }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{c.label}</div>
-                {c.reason && <div style={{ marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.4 }}>{c.reason}</div>}
+                {c.reason && <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{c.reason}</div>}
+                {c.asOf && c.status === 'scored' && (
+                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>As of {formatScoreDate(c.asOf)}</div>
+                )}
               </div>
               <div style={{
                 flexShrink: 0, padding: '3px 10px', borderRadius: 999,
                 background: tone.background, border: `1px solid ${tone.border}`, color: tone.color,
-                fontSize: 12, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
               }}>
                 {chip.text}
               </div>
