@@ -155,8 +155,14 @@ describe('prompt wiring', () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
     process.env.GATE_VOICE_AI_BOOKING = 'true';
     try {
+      // Slots are referenced by OPAQUE REF now (the model is never shown an ISO
+      // date), so the 8am floor is checked against the remembered slot's start.
       const out = await relayBooking.requestBookingText(
-        { date: '2026-08-20', time: '7:30 AM' }, { customerId: 'c-1' }
+        { slot_ref: 'S1' },
+        {
+          customerId: 'c-1',
+          resolveSlotRef: () => ({ date: '2026-08-20', startMinutes: 450, lat: 27.4, lng: -82.5 }),
+        }
       );
       expect(out).toMatch(/never start before 8:00 AM/i);
       expect(booking.buildBookingAvailability).not.toHaveBeenCalled();

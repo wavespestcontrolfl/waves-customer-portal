@@ -358,7 +358,8 @@ const BOOKING_TOOLS = [
     name: 'request_booking',
     description:
       'Place a booking REQUEST for a slot that find_slots or get_availability ' +
-      'returned on THIS call, for the matched caller\'s account or a ' +
+      'returned on THIS call, identified by its slot_ref, for the matched ' +
+      'caller\'s account or a ' +
       'customer_ref from lookup_customer. This does NOT confirm an appointment ' +
       '— it creates a pending request a Waves team member reviews and confirms ' +
       'with the customer. The slot is re-checked against live availability ' +
@@ -367,12 +368,11 @@ const BOOKING_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        date: { type: 'string', description: 'The chosen slot\'s date, exactly as the availability tool returned it (YYYY-MM-DD)' },
-        time: { type: 'string', description: 'The chosen slot\'s start time, exactly as returned (e.g. "9:00 AM")' },
+        slot_ref: { type: 'string', description: 'The slot_ref (e.g. "S2") of the time the caller picked, exactly as find_slots or get_availability printed it on THIS call. Never invent one, and never pass a date or a time here.' },
         service: { type: 'string', description: 'What the caller wants, in their own words (mapped to a real Waves service; unclear asks book a Waves Assessment)' },
         customer_ref: { type: 'string', description: 'A customer_ref from lookup_customer on THIS call, when booking for a looked-up account. Omit for the matched caller\'s own account.' },
       },
-      required: ['date', 'time'],
+      required: ['slot_ref'],
     },
   },
 ];
@@ -405,8 +405,24 @@ function speakSlot(slot) {
   return time ? `${dateStr} at ${time}` : dateStr;
 }
 
-function formatSlots(slots, max = 4) {
-  return (slots || []).slice(0, max).map(speakSlot).filter(Boolean).join('; ');
+/**
+ * Speakable slot list, each carrying an OPAQUE SLOT REF.
+ *
+ * speakSlot deliberately says "Tuesday August 18 at 9 AM" — there is no ISO
+ * date anywhere in what the model is told. request_booking used to demand
+ * `YYYY-MM-DD`, so the model had to RECONSTRUCT a key it was never given.
+ * Instead the session remembers each offered slot (with the coords, duration
+ * and timeOfDay it was generated from) under a ref, exactly like the
+ * lookup_customer refs: the model echoes an opaque handle, and an invented one
+ * resolves to nothing.
+ */
+function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
+  return (slots || []).slice(0, max).map((slot) => {
+    const spoken = speakSlot(slot);
+    if (!spoken) return null;
+    const ref = typeof rememberSlot === 'function' ? rememberSlot(slot, offerContext) : null;
+    return ref ? `${spoken} (slot_ref: ${ref})` : spoken;
+  }).filter(Boolean).join('; ');
 }
 
 /**
@@ -452,7 +468,19 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
       timeOfDay: w.timeOfDay, expandOpenDays: true,
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
-    return { status: 'ok', availability, summary: summarizeWindow(w, { count, nearby: availability.nearby }) };
+    return {
+      status: 'ok',
+      availability,
+      summary: summarizeWindow(w, { count, nearby: availability.nearby }),
+      // Carried onto every remembered slot so request_booking can re-run the
+      // engine with the SAME inputs. Dropping timeOfDay is not harmless: it
+      // lets morning candidates push an offered afternoon slot out of the
+      // per-day cap, so the re-check loses a slot that is still open.
+      offerContext: {
+        lat: coords.lat, lng: coords.lng, duration,
+        timeOfDay: w.timeOfDay || 'any', expandOpenDays: true,
+      },
+    };
   }
 
   const { etDateString, addETDays } = require('../../utils/datetime-et');
@@ -461,17 +489,22 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
   const availability = await booking.buildBookingAvailability({
     lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today,
   });
-  return { status: 'ok', availability, summary: null };
+  return {
+    status: 'ok',
+    availability,
+    summary: null,
+    offerContext: { lat: coords.lat, lng: coords.lng, duration, timeOfDay: 'any', expandOpenDays: false },
+  };
 }
 
-function availabilityResultToText(res) {
+function availabilityResultToText(res, ctx = {}) {
   if (res.status === 'unavailable') {
     return 'Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.';
   }
   if (res.status === 'need_location') {
     return 'Could not determine the service location. Ask the caller for their street address or ZIP code, then call this tool again.';
   }
-  const list = formatSlots(res.availability && res.availability.slots, 4);
+  const list = formatSlots(res.availability && res.availability.slots, 4, ctx.rememberSlot, res.offerContext);
   if (!list) {
     return `${res.summary ? res.summary + ' ' : ''}No open times in that window. Tell the caller a Waves team member will call to find a time that works, and capture the lead.`;
   }
@@ -479,7 +512,8 @@ function availabilityResultToText(res) {
     `${res.summary ? res.summary + ' ' : ''}Open times: ${list}. ` +
     'NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. ' +
     'After they choose, tell them a Waves team member will call shortly to confirm and lock it in, ' +
-    'then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved.'
+    'then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. ' +
+    'If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.'
   );
 }
 
@@ -676,12 +710,24 @@ async function executeTool(name, input = {}, ctx = {}) {
         preferred_contact_method: input.preferred_contact_method || null,
         do_not_contact_request: input.do_not_contact_request === true,
       };
-      await createLeadFromExtraction(extracted, {
+      const leadResult = await createLeadFromExtraction(extracted, {
         phone: callerPhone,
         toPhone: ctx.to || null,
         callSid: ctx.callSid || null,
         language: ctx.language || null,
       });
+      // Thread the lead id into the session. A booking placed on THIS call
+      // stamps it on the review card, so office confirm converts THIS lead —
+      // outbound-review-confirm.js otherwise falls back to "the customer's
+      // single active lead", which can convert an unrelated open quote to WON.
+      const capturedLeadId = leadResult && leadResult.leadId;
+      if (capturedLeadId && typeof ctx.noteLeadId === 'function') ctx.noteLeadId(capturedLeadId);
+      // capture_lead usually runs AFTER request_booking (the prompt says so),
+      // so back-fill the card that was already written for this call.
+      if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {
+        const { attachLeadToVoiceBookingCard } = require('./relay-booking');
+        await attachLeadToVoiceBookingCard(ctx.callSid, capturedLeadId);
+      }
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
       logger.info(`[voice-relay] capture_lead saved callSid=${ctx.callSid || 'n/a'}`);
       // The model's own one-line summary becomes call_log.call_summary at
@@ -697,13 +743,13 @@ async function executeTool(name, input = {}, ctx = {}) {
 
     if (name === 'get_availability') {
       const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res);
+      return availabilityResultToText(res, ctx);
     }
 
     if (name === 'find_slots') {
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
       const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res);
+      return availabilityResultToText(res, ctx);
     }
 
     return `Unknown tool "${name}". Do not retry; continue the conversation.`;

@@ -93,38 +93,66 @@ function slotStartMinutes(slot) {
 }
 
 /**
- * Re-run the SAME availability engine find_slots quotes from, pinned to the
- * requested date at the customer's on-file address, and return the engine
- * slot matching the requested start — or null (stale/invented slot).
+ * Re-run the SAME availability engine, with the SAME inputs the offer was
+ * generated from, pinned to the offered date — and return the engine slot
+ * matching the offered start, or a status the caller turns into script.
+ *
+ * TWO THINGS THIS GETS RIGHT THAT THE FIRST CUT DID NOT:
+ *
+ *  1. It searches `days[].slots`, not `availability.slots`. The latter is
+ *     `curateSlots(...)` output: at most FOUR picks, at most ONE PER DATE,
+ *     score-ranked with an AM/PM diversity swap. A caller offered "Wednesday
+ *     2 PM" whose day's top pick is 9 AM would re-validate against a list
+ *     containing only the 9 AM and get `slot_gone` — for a slot that was still
+ *     wide open. `days[].slots` is the full per-day list (up to 8 with
+ *     expandOpenDays).
+ *  2. It carries the ORIGINAL `timeOfDay`, `expandOpenDays`, coords and
+ *     duration. timeOfDay is not merely a narrowing filter: dropping it lets
+ *     morning candidates push an afternoon slot out of the per-day cap
+ *     (`slots.slice(0, perDayCap)` after a start_time sort), so re-running
+ *     "wide" can LOSE the very slot that was offered. Coords likewise — the
+ *     offer was route-scored from the address the CALLER gave, and re-scoring
+ *     from a different origin returns a different slot set.
  */
-async function revalidateSlot({ customer, dateStr, startMinutes }) {
+async function revalidateSlot({ offer }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'engine_unavailable' };
+  if (!offer || !offer.lat || !offer.lng || !offer.date) return { status: 'need_location' };
 
   const booking = require('../../routes/booking')._internals;
   const config = await booking.loadBookingConfig();
-  const street = String(customer.address_line1 || '').trim();
-  const cityStr = String(customer.city || '').trim();
-  const zipStr = String(customer.zip || '').trim();
-  const addrParts = [street, cityStr, zipStr].filter(Boolean);
-  const coords = await booking.resolveBookingCoords({
-    address: (street || zipStr) && addrParts.length ? `${addrParts.join(', ')}, FL` : null,
-    city: cityStr || null,
-  });
-  if (!coords.lat || !coords.lng) return { status: 'need_location' };
+
+  // COMMIT-TIME DATE BOUNDS, the same mirror createSelfBooking applies
+  // (advance_days_min floor + the 90-day browse horizon), BEFORE the engine is
+  // consulted. Without it a stale offer — or a model-invented date — could ask
+  // to book a same-day slot the builder never offers, or one 300 days out.
+  const dateError = booking.validateBookingSlotDate(offer.date, config);
+  if (dateError) return { status: 'date_out_of_bounds', message: dateError };
+
+  // Past date / past time, ET-anchored exactly like createSelfBooking's own
+  // pre-transaction checks (`scheduled_date` is a DATE, so a plain ET-day
+  // string comparison is the correct predicate — no timestamptz window).
+  const { etDateString, etParts } = require('../../utils/datetime-et');
+  const todayEt = etDateString();
+  if (offer.date < todayEt) return { status: 'in_the_past' };
+  if (offer.date === todayEt) {
+    const nowEt = etParts(new Date());
+    if (offer.startMinutes <= nowEt.hour * 60 + nowEt.minute) return { status: 'in_the_past' };
+  }
 
   const availability = await booking.buildBookingAvailability({
-    lat: coords.lat,
-    lng: coords.lng,
-    duration: config.slot_duration_minutes || 60,
-    rangeFrom: dateStr,
-    rangeTo: dateStr,
+    lat: offer.lat,
+    lng: offer.lng,
+    duration: offer.duration || config.slot_duration_minutes || 60,
+    rangeFrom: offer.date,
+    rangeTo: offer.date,
     config,
     today: new Date(),
+    timeOfDay: offer.timeOfDay || 'any',
+    expandOpenDays: offer.expandOpenDays === true,
   });
-  const slot = (availability.slots || []).find(
-    (s) => s && s.date === dateStr && slotStartMinutes(s) === startMinutes
-  );
+  const day = (availability.days || []).find((d) => d && d.date === offer.date);
+  const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
   return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
 }
 
@@ -151,6 +179,152 @@ async function resolveBookableService(db, requestedService) {
   return services.find((s) => /^waves assessment$/i.test(String(s.name || ''))) || null;
 }
 
+const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-actions');
+
+/**
+ * THE COMMIT GATE. Everything above this point is an OFFER; this is the write,
+ * and it takes the same gates every other scheduled_services writer takes.
+ *
+ * Before this, the voice booking called the availability BUILDER and then
+ * inserted in a plain transaction with no locks and no re-check. The builder is
+ * an OFFER surface — services/scheduling/occupancy.js lists it as EXEMPT from
+ * the lock contract precisely BECAUSE "every offer is re-validated under lock at
+ * its own commit gate". This writer had no such gate, so two callers (or a
+ * caller racing a web booker) could take the same slot.
+ *
+ * LOCK LADDER — the ORDERING CONTRACT in services/scheduling/occupancy.js,
+ * coarsest first, skipping only the rungs this writer does not need:
+ *   1. date-occupancy   acquireOccupancyLock(trx, date)              [required]
+ *   2. self-booking     'self-booking-confirm' / `<customerId>:<date>`
+ *   3. technician       'slot-reserve' / `<techId>:<date>`  (when assigned)
+ *   4. zone             SKIPPED — this writer resolves no zone
+ *   5. global day cap   acquireSelfBookingDayCapLock(trx, date)
+ *   6. customer-comms   lockCustomerComms(trx, customerId)           [required
+ *      of EVERY writer that COMMITS a scheduled_services INSERT, and taken
+ *      before any row lock]
+ *
+ * And the second half of the contract: a rung-1 holder MUST run the GLOBAL
+ * predicate (findConflictingVisits) under the lock, before its insert. The lock
+ * only serializes writers; it cannot widen what a writer's own narrow check
+ * sees, and this writer's dedupe is customer-scoped, so the global probe is the
+ * only thing that catches a different customer's committed row in the window.
+ */
+async function commitVoiceBooking({
+  db, customerId, dateStr, windowStart, windowEnd, insertData, callLogId,
+  catalogRow, slot, thirdParty, unverifiedNote, leadId,
+}) {
+  const { acquireOccupancyLock, findConflictingVisits } = require('../scheduling/occupancy');
+  const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../availability');
+  const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+  const booking = require('../../routes/booking')._internals;
+  const config = await booking.loadBookingConfig();
+  const { maxPerDay } = booking.bookingSlotWindow(config);
+  // window_end may be NULL on a slot with no explicit end; the conflict
+  // predicate needs a real end, so fall back to the row's own duration.
+  const endTime = windowEnd || addMinutesToClock(windowStart, insertData.estimated_duration_minutes || 60);
+
+  try {
+    return await db.transaction(async (trx) => {
+      // Rung 1 — FIRST statement in the transaction, before every row lock.
+      await acquireOccupancyLock(trx, dateStr);
+      // Rung 2 — serializes this customer's own same-day writers, which is
+      // what makes the read-then-insert dedupe below safe (it was a bare
+      // read-then-insert with no constraint behind it).
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['self-booking-confirm', `${customerId}:${dateStr}`],
+      );
+      // Rung 3 — only when the offer carries a technician.
+      if (insertData.technician_id) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['slot-reserve', `${insertData.technician_id}:${dateStr}`],
+        );
+      }
+      // Rung 5 — the global self-booking day cap.
+      await acquireSelfBookingDayCapLock(trx, dateStr);
+      // Rung 6 — every scheduled_services INSERT owes this one.
+      await lockCustomerComms(trx, customerId);
+
+      // DEDUPE, now under rung 2. Widened past the old
+      // source_action='voice_agent' scope: the point is not "no second VOICE
+      // booking", it is "do not put this customer in two places at once", so
+      // any live row of theirs at that date+start counts.
+      const existing = await trx('scheduled_services')
+        .where({ customer_id: customerId, scheduled_date: dateStr })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where((q) => q
+          .where('window_start', windowStart)
+          .orWhere('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION))
+        .first('id');
+      if (existing) return { status: 'duplicate' };
+
+      // Commit-time max_self_books_per_day re-check, the same predicate the
+      // availability builder drops full days with (shared helper). The builder's
+      // cap is advisory-only without this.
+      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
+      if (dayCount >= maxPerDay) return { status: 'day_full' };
+
+      // The GLOBAL, tech-blind occupancy probe the contract requires of every
+      // rung-1 holder. Excludes this customer's own rows only via the dedupe
+      // above — a clash here is somebody ELSE's committed visit or live hold.
+      const clash = await findConflictingVisits({
+        db: trx, date: dateStr, windowStart, windowEnd: endTime,
+      });
+      if (clash.length) return { status: 'slot_taken' };
+
+      const [created] = await trx('scheduled_services').insert(insertData).returning('*');
+      // Surface the pending request in the existing admin confirm queue — the
+      // same outbound_booking_review card the office already works. Only
+      // possible when the live call has a call_log row (the card FKs it).
+      if (callLogId && created) {
+        const { buildTriageItem } = require('../call-routing-gates');
+        const synopsis = `Voice-agent booking request: ${catalogRow.name} on ${dateStr} at `
+          + `${slot.start_label || windowStart}.`
+          + (unverifiedNote ? ` ⚠️ ${unverifiedNote}` : '');
+        await trx('triage_items')
+          .insert(buildTriageItem({
+            callLogId,
+            flag: 'outbound_booking_review',
+            extraction: {
+              // buildTriageItem reads meta.call_summary for the card's synopsis.
+              meta: { call_summary: synopsis },
+            },
+            severity: 'advisory',
+            extraPayload: {
+              origin: 'voice_agent',
+              scheduled_service_id: created.id,
+              // Threaded from capture_lead when it already ran on this call.
+              // outbound-review-confirm.js falls back to "the customer's single
+              // active lead" when this is null — which can convert an unrelated
+              // open quote to WON.
+              lead_id: leadId || null,
+              keep_open_for_quote: false,
+              // Read by the office confirm queue UI alongside the synopsis.
+              unverified_requester: Boolean(thirdParty),
+              ...(unverifiedNote ? { unverified_requester_note: unverifiedNote } : {}),
+            },
+          }))
+          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      }
+      return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
+    });
+  } catch (err) {
+    logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
+    return { status: 'error' };
+  }
+}
+
+/** 'HH:MM[:SS]' + minutes → 'HH:MM:SS' (the conflict predicate needs a real end). */
+function addMinutesToClock(value, minutes) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const total = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + (Number(minutes) || 0);
+  const h = Math.floor(total / 60) % 24;
+  return `${String(h).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
+}
+
 const REFUSE_GATE_OFF =
   'Booking requests are not available on this call. Offer open times if you have them, '
   + 'capture the lead with the caller\'s preferred time in preferred_date_time, and tell them '
@@ -173,9 +347,22 @@ async function requestBookingText(input = {}, ctx = {}) {
   // Double gate, fail closed (defense in depth vs. a stale registered tool list).
   if (!isBookingEnabled()) return REFUSE_GATE_OFF;
 
+  // ONE booking request per call. The triage card's onConflict is
+  // `(call_log_id, reason_code) WHERE status IN ('open','in_progress')`, so a
+  // SECOND booking on the same call gets NO review card — it lands on the
+  // dispatch calendar invisible to the office confirm queue, which is the one
+  // thing that makes a pending voice booking real. Refusing the second is the
+  // safe half of "one card per booking, or refuse a second booking per call".
+  if (typeof ctx.bookingRequested === 'function' && ctx.bookingRequested() === true) {
+    return 'A booking request has already been placed on this call — do NOT place another. If the caller '
+      + 'wants a different time, tell them the Waves team member who calls to confirm can move it. '
+      + 'Do not say anything is booked or guaranteed.';
+  }
+
   // Whose booking: the ANI-matched caller, or an account looked up on THIS
   // call (spouse/landlord/parent acting for the account holder).
   let customerId = null;
+  let thirdParty = false;
   const ref = String(input.customer_ref || '').trim();
   if (ref) {
     customerId = typeof ctx.resolveLookupRef === 'function' ? ctx.resolveLookupRef(ref) : null;
@@ -187,16 +374,32 @@ async function requestBookingText(input = {}, ctx = {}) {
     customerId = ctx.customerId || null;
   }
   if (!customerId) return REFUSE_NO_CUSTOMER;
+  // ⭐ AN UNVERIFIED THIRD-PARTY REQUESTER. lookup_customer can hand back a ref
+  // for an account the caller's phone did NOT match, so a caller who knows a
+  // name and a street can put a pending booking on a stranger's account — and
+  // the office confirming it runs runOutboundReviewConfirmHook, which arms
+  // reminders and opens the card-on-file funnel toward that customer. The row
+  // and the review card both carry a loud, explicit warning so the human who
+  // confirms it knows to verify identity first.
+  thirdParty = customerId !== (ctx.customerId || null);
 
-  const dateStr = normalizeDateInput(input.date);
-  const startMinutes = parseTimeToMinutes(input.time);
-  if (!dateStr || startMinutes === null) {
-    return 'To request a booking I need the exact date (YYYY-MM-DD) and start time of a slot that '
-      + 'find_slots or get_availability returned on this call. Offer times from those tools first.';
+  // The OPAQUE SLOT REF the availability tools handed the model. Refs, not an
+  // echoed 'YYYY-MM-DD' + '9:00 AM' pair: speakSlot says "Tuesday August 18 at
+  // 9 AM" with no ISO date anywhere, so asking request_booking for a date
+  // string made the model reconstruct a key it was never given. Same doctrine
+  // as the lookup refs — an invented ref resolves to nothing.
+  const slotRef = String(input.slot_ref || '').trim();
+  const offer = slotRef && typeof ctx.resolveSlotRef === 'function' ? ctx.resolveSlotRef(slotRef) : null;
+  if (!offer) {
+    return 'To request a booking I need the slot_ref of a time that find_slots or get_availability '
+      + 'returned on THIS call (they look like S1, S2). Call one of those tools, read the caller two or '
+      + 'three of the options, and pass back the slot_ref they picked. Never invent one.';
   }
+  const dateStr = offer.date;
+  const startMinutes = offer.startMinutes;
   // House rule: no client appointments before 8am ET — hard floor, checked
   // before the engine is even consulted.
-  if (startMinutes < EARLIEST_START_MINUTES) {
+  if (!Number.isFinite(startMinutes) || startMinutes < EARLIEST_START_MINUTES) {
     return 'Appointments never start before 8:00 AM — do not offer or request earlier times. '
       + 'Pick a time from what find_slots returned, 8:00 AM or later.';
   }
@@ -211,8 +414,8 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
 
   // Never trust the model's memory of a slot: re-check the offered slot
-  // through the same availability engine find_slots uses.
-  const recheck = await revalidateSlot({ customer, dateStr, startMinutes });
+  // through the same availability engine, with the same inputs, right now.
+  const recheck = await revalidateSlot({ offer });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '
       + 'Capture the lead with the caller\'s preferred time; a team member will call to schedule.';
@@ -220,6 +423,10 @@ async function requestBookingText(input = {}, ctx = {}) {
   if (recheck.status === 'need_location') {
     return 'Could not verify the service location for this account, so no booking request was placed. '
       + 'Capture the lead with the preferred time; a team member will call to schedule.';
+  }
+  if (recheck.status === 'in_the_past' || recheck.status === 'date_out_of_bounds') {
+    return 'That day is not open for booking any more — nothing was booked. Call find_slots again for '
+      + 'fresh times and offer the caller a new option.';
   }
   if (recheck.status !== 'ok') {
     return 'That time is no longer open — nothing was booked. Call find_slots again for fresh times '
@@ -232,22 +439,6 @@ async function requestBookingText(input = {}, ctx = {}) {
   if (!catalogRow) {
     return 'Could not match this to a bookable Waves service right now, so no booking request was '
       + 'placed. Capture the lead with what the caller needs; a team member will call to schedule.';
-  }
-
-  // Idempotency: a double tool-call (model retry) must not create two pending
-  // rows for the same customer/slot.
-  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-actions');
-  const existing = await db('scheduled_services')
-    .where({
-      customer_id: customerId,
-      scheduled_date: dateStr,
-      source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
-    })
-    .whereIn('status', ['pending', 'confirmed'])
-    .first('id', 'window_start');
-  if (existing) {
-    return 'A booking request for this caller and day is already in — do not create another. '
-      + 'Tell the caller a Waves team member will text or call shortly to confirm the time.';
   }
 
   const { resolveCallBookingPrice, callBookingInvoiceOnComplete } = require('../call-booking-catalog');
@@ -266,12 +457,18 @@ async function requestBookingText(input = {}, ctx = {}) {
     callLogId = (callRow && callRow.id) || null;
   }
 
+  const { maskPhone } = require('./relay-protocol');
+  const unverifiedNote = thirdParty
+    ? `UNVERIFIED third-party requester — verify identity before confirming. Requested by the caller on `
+      + `${maskPhone(ctx.from)}, whose phone number does NOT match this account.`
+    : null;
   const requestedSummary = String(input.service || '').trim().slice(0, 160);
+  const windowStart = slot.start_time || slot.startTime24;
   const insertData = {
     customer_id: customerId,
     technician_id: slot.technician_id || null,
     scheduled_date: dateStr,
-    window_start: slot.start_time || slot.startTime24,
+    window_start: windowStart,
     window_end: slot.end_time || slot.endTime24 || null,
     window_display: slot.start_label && slot.end_label ? `${slot.start_label} - ${slot.end_label}`.slice(0, 30) : null,
     service_type: catalogRow.name,
@@ -291,6 +488,7 @@ async function requestBookingText(input = {}, ctx = {}) {
     // Dispatcher-only review cue (surfaced in the dispatch JobDrawer).
     internal_notes: [
       'Voice-agent booking request — CONFIRM with customer before dispatch (pending review).',
+      unverifiedNote,
       requestedSummary && requestedSummary.toLowerCase() !== String(catalogRow.name || '').toLowerCase()
         ? `Caller asked for: ${requestedSummary}.`
         : null,
@@ -300,50 +498,87 @@ async function requestBookingText(input = {}, ctx = {}) {
     source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
   };
 
-  await db.transaction(async (trx) => {
-    const [created] = await trx('scheduled_services').insert(insertData).returning('*');
-    // Surface the pending request in the existing admin confirm queue — the
-    // same outbound_booking_review card the office already works. Only
-    // possible when the live call has a call_log row (the card FKs it).
-    if (callLogId && created) {
-      const { buildTriageItem } = require('../call-routing-gates');
-      await trx('triage_items')
-        .insert(buildTriageItem({
-          callLogId,
-          flag: 'outbound_booking_review',
-          extraction: {
-            // buildTriageItem reads meta.call_summary for the card's synopsis.
-            meta: {
-              call_summary: `Voice-agent booking request: ${catalogRow.name} on ${dateStr} at ${slot.start_label || insertData.window_start}.`,
-            },
-          },
-          severity: 'advisory',
-          extraPayload: {
-            origin: 'voice_agent',
-            scheduled_service_id: created.id,
-            lead_id: null,
-            keep_open_for_quote: false,
-          },
-        }))
-        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-        .ignore();
-    }
+  const commit = await commitVoiceBooking({
+    db, customerId, dateStr, windowStart, windowEnd: insertData.window_end,
+    insertData, callLogId, catalogRow, slot, thirdParty, unverifiedNote,
+    leadId: typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null),
   });
+  if (commit.status === 'duplicate') {
+    return 'A booking request for this caller and day is already in — do not create another. '
+      + 'Tell the caller a Waves team member will text or call shortly to confirm the time.';
+  }
+  if (commit.status === 'slot_taken') {
+    return 'That time was just taken by someone else — NOTHING was booked. Call find_slots again for '
+      + 'fresh times and offer the caller a new option.';
+  }
+  if (commit.status === 'day_full') {
+    return 'That day just filled up — NOTHING was booked. Call find_slots again and offer the caller a '
+      + 'different day.';
+  }
+  if (commit.status !== 'ok') {
+    return 'The booking request could not be placed — NOTHING was booked. Tell the caller a Waves team '
+      + 'member will call to schedule, and capture the lead with their preferred time.';
+  }
 
-  logger.info(`[voice-relay-booking] pending voice_agent booking created for customer ${customerId} on ${dateStr} (callSid=${ctx.callSid || 'n/a'})`);
+  if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(commit.callLogId || callLogId);
+  logger.info(
+    `[voice-relay-booking] pending voice_agent booking created for customer ${customerId} on ${dateStr}`
+    + `${thirdParty ? ' [UNVERIFIED third-party requester]' : ''} (callSid=${ctx.callSid || 'n/a'})`
+  );
 
-  const spokenTime = slot.start_label || String(insertData.window_start);
+  const spokenTime = slot.start_label || String(windowStart);
   return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr} starting around ${spokenTime}. `
     + 'This is NOT a confirmed appointment: tell the caller a Waves team member will text or call '
     + 'shortly to confirm the final time. Do NOT say the time is locked in, booked, or guaranteed. '
     + 'Then call capture_lead as usual before ending the call.';
 }
 
+/**
+ * Back-fill `payload.lead_id` on the booking review card for this call.
+ *
+ * request_booking normally runs BEFORE capture_lead (the prompt tells the agent
+ * to book, then capture), so the lead id does not exist yet when the card is
+ * written. Without it, outbound-review-confirm.js takes its documented
+ * pre-payload fallback — "the customer's single active lead" — which can
+ * convert an unrelated open quote to WON on confirm.
+ *
+ * Best-effort and never throws: the card is already durable, and the fallback
+ * is what happens today.
+ */
+async function attachLeadToVoiceBookingCard(callSid, leadId) {
+  if (!callSid || !leadId) return false;
+  try {
+    const db = require('../../models/db');
+    const callRow = await db('call_log').where({ twilio_call_sid: callSid }).first('id');
+    if (!callRow) return false;
+    const card = await db('triage_items')
+      .where({ call_log_id: callRow.id, reason_code: 'outbound_booking_review' })
+      .whereIn('status', ['open', 'in_progress'])
+      .orderBy('created_at', 'desc')
+      .first('id', 'payload');
+    if (!card) return false;
+    const payload = typeof card.payload === 'string' ? JSON.parse(card.payload) : (card.payload || {});
+    if (payload.origin !== 'voice_agent' || payload.lead_id) return false; // not ours, or already set
+    await db('triage_items')
+      .where({ id: card.id })
+      .update({ payload: JSON.stringify({ ...payload, lead_id: leadId }), updated_at: new Date() });
+    logger.info(`[voice-relay-booking] lead ${leadId} attached to booking review card ${card.id}`);
+    return true;
+  } catch (err) {
+    logger.warn(`[voice-relay-booking] could not attach lead ${leadId} to the booking review card: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
+  attachLeadToVoiceBookingCard,
   isBookingEnabled,
   isBookingGateOn,
   requestBookingText,
+  commitVoiceBooking,
+  revalidateSlot,
   parseTimeToMinutes,
   normalizeDateInput,
+  addMinutesToClock,
   EARLIEST_START_MINUTES,
 };

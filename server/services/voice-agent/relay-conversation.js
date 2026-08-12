@@ -25,6 +25,12 @@ const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools, executeTool } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 
+/** 'HH:MM[:SS]' on an engine slot → minutes past midnight (the slot-ref key). */
+function slotStartMinutes(slot) {
+  const m = String((slot && (slot.start_time || slot.startTime24)) || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
@@ -189,8 +195,12 @@ function bookingPromptAddendum() {
     '',
     'BOOKING REQUESTS (request_booking):',
     '- After the caller picks a time that find_slots or get_availability returned on THIS',
-    '  call, you may call request_booking with that exact date and time. It places a',
-    '  PENDING REQUEST the office reviews — it does NOT confirm an appointment.',
+    '  call, you may call request_booking with that option\'s slot_ref — the short handle',
+    '  (S1, S2, ...) printed next to each time. Pass the ref, never a date or a time you',
+    '  typed yourself; an invented ref will simply not resolve. It places a PENDING REQUEST',
+    '  the office reviews — it does NOT confirm an appointment.',
+    '- ONE booking request per call. If they want a different time afterwards, say the Waves',
+    '  team member who calls to confirm can move it; do not place a second request.',
     '- Tell the caller a Waves team member will text or call shortly to confirm the final',
     '  time. NEVER say the time is locked in, booked, confirmed, or guaranteed.',
     '- If the tool says the time is gone, run find_slots again and offer fresh options.',
@@ -347,6 +357,22 @@ class RelayConversation {
     // just per-query criteria rules: three DB-reaching lookups, then the tool
     // is closed for the rest of the call.
     this._lookupsUsed = 0;
+    // Session-scoped OFFERED-SLOT registry. Same opaque-ref doctrine as the
+    // lookup refs: the availability tools speak "Tuesday August 18 at 9 AM"
+    // (no ISO date anywhere), so request_booking takes a ref instead of making
+    // the model reconstruct a date key it was never given. Each entry carries
+    // the coords/duration/timeOfDay the offer was generated from, so the
+    // commit-time re-check re-runs the engine with the SAME inputs.
+    this._slotRefs = new Map(); // 'S1' -> { date, startMinutes, lat, lng, ... }
+    this._slotRefsByKey = new Map(); // 'YYYY-MM-DD@540' -> 'S1'
+    // ONE booking request per call: a second one gets no triage card (the
+    // card's onConflict is per call_log_id) and would land on the dispatch
+    // calendar invisible to the office confirm queue.
+    this._bookingRequested = false;
+    // The lead id capture_lead created on this call, threaded into the booking
+    // review card so office confirm converts THAT lead — not whichever single
+    // active lead the customer happens to have.
+    this._leadId = null;
     // The recent-texts DATA TURN — customer-AUTHORED SMS bodies, seeded into
     // the USER role ahead of the first caller turn, never into `system`.
     this._dataTurnSeeded = false;
@@ -489,6 +515,32 @@ class RelayConversation {
         return ref;
       },
       resolveLookupRef: (ref) => this._lookupRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      // Offered-slot refs. Stable per (date, start): re-offering the same slot
+      // on a later turn returns the SAME ref rather than growing the registry.
+      rememberSlot: (slot, offerContext) => {
+        const startMinutes = slotStartMinutes(slot);
+        if (!slot || !slot.date || !Number.isFinite(startMinutes)) return null;
+        const key = `${slot.date}@${startMinutes}`;
+        const existing = this._slotRefsByKey.get(key);
+        if (existing) return existing;
+        const ref = `S${this._slotRefs.size + 1}`;
+        this._slotRefs.set(ref, {
+          date: slot.date,
+          startMinutes,
+          lat: offerContext && offerContext.lat,
+          lng: offerContext && offerContext.lng,
+          duration: (offerContext && offerContext.duration) || null,
+          timeOfDay: (offerContext && offerContext.timeOfDay) || 'any',
+          expandOpenDays: Boolean(offerContext && offerContext.expandOpenDays),
+        });
+        this._slotRefsByKey.set(key, ref);
+        return ref;
+      },
+      resolveSlotRef: (ref) => this._slotRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      bookingRequested: () => this._bookingRequested,
+      markBookingRequested: () => { this._bookingRequested = true; },
+      leadId: () => this._leadId,
+      noteLeadId: (id) => { if (id) this._leadId = id; },
       markCaptured: () => {
         this.leadCaptured = true;
       },
