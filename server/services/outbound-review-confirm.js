@@ -639,6 +639,63 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
 }
 
 /**
+ * OFFICE-CONFIRM activation — hook FIRST, stamp on success, for the two admin
+ * status routes (admin-dispatch, admin-schedule) that flip an office-review
+ * row to 'confirmed' themselves.
+ *
+ * Those routes used to stamp `customer_confirmed` inside the confirmation
+ * transaction and then call the hook post-commit, ignoring its result. But
+ * `customer_confirmed` is the COMPLETION MARKER for this whole lane, not just a
+ * UI flag: activateLegacyOutboundReviewRowIfNeeded skips a stamped row, and
+ * sweepStrandedLegacyOutboundActivations selects on `customer_confirmed:
+ * false`. So a row whose core legs failed — or whose process exited between the
+ * commit and the hook — was already stamped, and both retry rails rejected it
+ * forever: no reminder registration, an unconverted lead, an open review card,
+ * with nothing left to notice.
+ *
+ * The fix is the rule the rest of the lane already follows (Codex #3361 r3/r4
+ * P1, job-status.processLegacyOutboundActivation): the stamp is the RECEIPT for
+ * a completed activation, so it is written here, after the legs, and only when
+ * they succeeded. A failure leaves the row confirmed-but-unstamped — exactly
+ * the state the hourly sweep exists to drain — and every leg is idempotent, so
+ * the retry is safe.
+ *
+ * Callers keep their own hook call (office semantics: the clearance stamp and
+ * the messaging-mode card ask, which the lazy-activation path deliberately
+ * suppresses) and must tell transitionJobStatus to stand down via
+ * `legacyOutboundActivation: 'caller'`, or the two would run concurrently.
+ *
+ * @returns {Promise<boolean>} true when the legs ran AND the row is now stamped.
+ */
+async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm') {
+  let coreLegsOk = false;
+  try {
+    coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag);
+  } catch (e) {
+    logger.error(`[${routeTag}] office-confirm hook threw for ${svc.id}: ${e.message}`);
+  }
+  if (!coreLegsOk) {
+    logger.error(
+      `[${routeTag}] office-confirm activation incomplete for ${svc.id} — leaving customer_confirmed `
+      + 'unstamped so the legacy-activation sweep retries it'
+    );
+    return false;
+  }
+  try {
+    const stamped = await dbh('scheduled_services')
+      .where({ id: svc.id, customer_confirmed: false })
+      // A rejection that committed during the hook window wins: never stamp a
+      // cancelled/skipped row confirmed (same guard as the lazy helper).
+      .whereNotIn('status', ['cancelled', 'skipped'])
+      .update({ customer_confirmed: true, confirmed_at: new Date() });
+    return stamped > 0;
+  } catch (e) {
+    logger.error(`[${routeTag}] office-confirm stamp failed for ${svc.id}: ${e.message}`);
+    return false;
+  }
+}
+
+/**
  * Hourly backstop that drains the ENTIRE legacy outbound-review population
  * (Codex #3361 r5/r7 P1): the per-path lazy activations
  * (transitionJobStatus, the reschedule writers, the call-pipeline reuse
@@ -711,6 +768,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 
 module.exports = {
   runOutboundReviewConfirmHook,
+  runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
   verifyReminderSlotAfterRegistration,

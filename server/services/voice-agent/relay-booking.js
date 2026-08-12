@@ -44,6 +44,12 @@ const logger = require('../logger');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
+// Rollback sentinel: this call already holds an open outbound_booking_review
+// card, so a second booking would land outside the office confirm queue.
+// Carried on err.code so the commit's own catch can tell it apart from a real
+// failure (see the throw site in commitVoiceBooking).
+const VOICE_BOOKING_CARD_TAKEN = 'VOICE_BOOKING_CARD_TAKEN';
+
 function isBookingGateOn() {
   return String(process.env.GATE_VOICE_AI_BOOKING || '').toLowerCase() === 'true';
 }
@@ -323,7 +329,7 @@ async function commitVoiceBooking({
         const synopsis = `Voice-agent booking request: ${catalogRow.name} on ${dateStr} at `
           + `${slot.start_label || windowStart}.`
           + (unverifiedNote ? ` ⚠️ ${unverifiedNote}` : '');
-        await trx('triage_items')
+        const [card] = await trx('triage_items')
           .insert(buildTriageItem({
             callLogId,
             flag: 'outbound_booking_review',
@@ -347,7 +353,31 @@ async function commitVoiceBooking({
             },
           }))
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
+          .ignore()
+          .returning('id');
+        // ⭐ THE ONE-BOOKING-PER-CALL INVARIANT, ENFORCED BY THE DATABASE.
+        //
+        // requestBookingText refuses a second booking using the session's
+        // in-memory latch, and that latch is only as durable as the session
+        // object: a WebSocket reconnect on the SAME CallSid builds a fresh
+        // RelayConversation with the latch cleared and the slot registry
+        // empty, so a second booking on a DIFFERENT date clears the
+        // customer+date dedupe above and inserts. Its card is then swallowed
+        // by `triage_items_open_unique_idx` (one open card per
+        // call_log_id+reason_code) — and a pending row with no card is
+        // invisible to the office confirm queue, which is the only thing that
+        // makes a pending voice booking real.
+        //
+        // So the CARD is the invariant, not the latch: no card, no booking.
+        // The conflict-ignore returns no row precisely when this call already
+        // holds an open review card, and throwing here rolls the
+        // scheduled_services insert back with it. Same transaction, so the
+        // check cannot be raced by a concurrent second session either.
+        if (!card) {
+          const err = new Error('a review card is already open for this call');
+          err.code = VOICE_BOOKING_CARD_TAKEN;
+          throw err;
+        }
       } else if (created) {
         // LOUD: a pending row with no review card is invisible to the office
         // confirm queue. requestBookingText refuses to reach this state at all
@@ -362,6 +392,15 @@ async function commitVoiceBooking({
       return { status: 'ok', scheduledServiceId: created && created.id, callLogId };
     });
   } catch (err) {
+    // Not a failure: the deliberate rollback that keeps "one booking per call"
+    // true when the session latch has been reset by a reconnect.
+    if (err && err.code === VOICE_BOOKING_CARD_TAKEN) {
+      logger.warn(
+        `[voice-relay-booking] second booking on call ${callLogId} rolled back — `
+        + 'this call already holds an open outbound_booking_review card'
+      );
+      return { status: 'already_requested' };
+    }
     logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
     return { status: 'error' };
   }
@@ -633,14 +672,26 @@ async function requestBookingText(input = {}, ctx = {}) {
     source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
   };
 
+  const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));
+  const leadIdAtCommit = readSessionLeadId();
   const commit = await commitVoiceBooking({
     db, customerId, dateStr, windowStart, windowEnd: insertData.window_end,
     insertData, callLogId, catalogRow, slot, thirdParty, unverifiedNote,
-    leadId: typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null),
+    leadId: leadIdAtCommit,
   });
   if (commit.status === 'duplicate') {
     return 'A booking request for this caller and day is already in — do not create another. '
       + 'Tell the caller a Waves team member will text or call shortly to confirm the time.';
+  }
+  if (commit.status === 'already_requested') {
+    // The DB-side half of the one-booking-per-call rule (the session latch
+    // above is the other half, and a reconnect can clear it). NOTHING was
+    // written — the transaction rolled back. Re-arm the latch so a third
+    // attempt is refused in memory instead of rolling back another write.
+    if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(callLogId);
+    return 'A booking request has already been placed on this call — NOTHING new was booked. '
+      + 'Tell the caller the Waves team member who calls to confirm can move the time if they need '
+      + 'a different one. Do not say anything is booked or guaranteed.';
   }
   if (commit.status === 'slot_taken') {
     return 'That time was just taken by someone else — NOTHING was booked. Call find_slots again for '
@@ -656,6 +707,25 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
 
   if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(commit.callLogId || callLogId);
+  // THE OTHER HALF OF THE LEAD BACK-FILL, for the slow-commit race.
+  //
+  // capture_lead back-fills the card when the booking already finished
+  // (`bookingRequested()` true). It cannot when the booking is still in
+  // flight — this tool has an 8s write timeout after which the turn loop
+  // detaches it and the model moves on, so capture_lead can create the lead,
+  // see the latch still false, and skip the back-fill entirely, while the card
+  // written moments later carries the `lead_id: null` this call snapshotted
+  // BEFORE the lead existed. The voice-origin confirm path deliberately skips
+  // the "single active lead" fallback, so that null is permanent: the
+  // captured lead stays active after the office confirms the appointment.
+  //
+  // Re-reading the session lead id here closes it — the card is durable by
+  // now, and the attach is idempotent (it no-ops on a card that already has
+  // one) so the two halves can never fight.
+  const leadIdAfterCommit = readSessionLeadId();
+  if (!leadIdAtCommit && leadIdAfterCommit) {
+    await attachLeadToVoiceBookingCard(ctx.callSid, leadIdAfterCommit);
+  }
   logger.info(
     `[voice-relay-booking] pending voice_agent booking created for customer ${customerId} on ${dateStr}`
     + `${thirdParty ? ' [UNVERIFIED third-party requester]' : ''} (callSid=${ctx.callSid || 'n/a'})`

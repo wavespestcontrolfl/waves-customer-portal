@@ -296,11 +296,23 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       BOTH emits chain on commit. If
  *                                       not passed, this function owns
  *                                       the trx end-to-end.
+ * @param {string} [args.legacyOutboundActivation] pass 'caller' when the
+ *                                       CALLER owns the office-review
+ *                                       activation for this row (the two
+ *                                       admin confirm routes do — they run
+ *                                       the office variant of the hook and
+ *                                       stamp customer_confirmed on its
+ *                                       success). This writer then skips its
+ *                                       own lazy activation instead of
+ *                                       running a second, concurrent one.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer, cancelNoticeToken }) {
+async function transitionJobStatus({
+  jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
+  cancelNoticeToken, legacyOutboundActivation,
+}) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
@@ -344,9 +356,16 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // after the core legs succeed — so a transient leg failure (or a
     // crash after commit) leaves the row unstamped and the next touch
     // retries (Codex #3361 r4 P1). The dispatch/schedule confirm routes
-    // stamp customer_confirmed themselves before calling this writer
-    // (same trx), so those paths skip here and keep their own hook call —
-    // no double run. Cancel/skip stay pure rejections, and a row read in
+    // own the activation for the row they are confirming — they run the
+    // OFFICE version of the hook (clearance stamp + messaging-mode card
+    // ask, both of which the lazy path deliberately suppresses) and stamp
+    // on its success — so they pass `legacyOutboundActivation: 'caller'`
+    // and this writer stands down rather than running a second, concurrent
+    // activation. (They used to be excluded implicitly, by stamping
+    // customer_confirmed inside this same trx; that stamp is what made a
+    // failed hook unretryable, so it moved to the hook's success path and
+    // the stand-down had to become explicit.) Cancel/skip stay pure
+    // rejections, and a row read in
     // a rejected state (cancelled/skipped) is left to the hourly sweep,
     // whose post-commit read sees the transition's outcome.
     if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) {
@@ -361,7 +380,8 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed', 'customer_id');
-      legacyOutboundActivationNeeded = !!legacyRow
+      legacyOutboundActivationNeeded = legacyOutboundActivation !== 'caller'
+        && !!legacyRow
         && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)
         && !['cancelled', 'skipped'].includes(String(legacyRow.status || ''))
         && !legacyRow.customer_confirmed;

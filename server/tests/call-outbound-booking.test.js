@@ -719,6 +719,54 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.call_sms_cleared_at)).toBe(true);
   });
 
+  // ⭐ THE STAMP IS A RECEIPT, NOT A UI FLAG. customer_confirmed is what
+  // activateLegacyOutboundReviewRowIfNeeded and the hourly sweep both key on,
+  // so an office confirm that stamped inside its own transaction and then lost
+  // a core leg (or the process) left a half-armed row both rails skip forever.
+  describe('runOfficeConfirmActivation — hook first, stamp on success', () => {
+    const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+
+    function stampOf(db) {
+      return db._state.updates.find((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true);
+    }
+
+    test('stamps customer_confirmed only after the core legs succeed', async () => {
+      const db = confirmHookDb({ fallbackLeads: [] });
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(true);
+      expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+      expect(stampOf(db)).toBeTruthy();
+      expect(stampOf(db).vals.confirmed_at).toBeInstanceOf(Date);
+    });
+
+    test('a failed core leg leaves the row UNSTAMPED so the sweep retries it', async () => {
+      AppointmentReminders.registerAppointment.mockResolvedValueOnce(null);
+      const db = confirmHookDb({ fallbackLeads: [] });
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
+
+    test('a stamp write that fails reports false — the sweep still owns the row', async () => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.customer_confirmed) throw new Error('write failed');
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
+  });
+
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {
     const db = confirmHookDb({ fallbackLeads: [{ id: 'lead-1', status: 'new' }, { id: 'lead-2', status: 'contacted' }] });
     await runOutboundReviewConfirmHook(db, svc, 'test');

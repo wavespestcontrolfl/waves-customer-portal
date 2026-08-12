@@ -3534,6 +3534,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
+    // An OFFICE CONFIRM of a pending office-review booking (outbound-callback
+    // or voice-agent) owes the shared activation legs, and its
+    // `customer_confirmed` stamp is the RECEIPT for those legs having run —
+    // so this route defers the stamp to the post-commit hook's success and
+    // tells the shared writer to stand down (see runOfficeConfirmActivation).
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    const isOfficeReviewConfirm = toStatus === 'confirmed'
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
     try {
       await db.transaction(async (trx) => {
         // Lifecycle timestamps live on the same row as status; flip
@@ -3543,11 +3551,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
         const lifecycleAt = new Date();
-        if (toStatus === 'confirmed') {
+        if (toStatus === 'confirmed' && !isOfficeReviewConfirm) {
           // Same lifecycle semantics as the admin-schedule status route. For a
           // pending outbound-review booking this is the flag the shared-writer
           // guard and the customer self-service filters key on — without it a
           // dispatch-side confirm left the row permanently review-locked.
+          // OFFICE-REVIEW rows are the exception: for them the same column is
+          // also the activation receipt, so it is stamped post-commit, only
+          // once the shared confirm hook's core legs succeed.
           lifecycleUpdates.customer_confirmed = true;
         }
         if (toStatus === 'on_site') {
@@ -3580,6 +3591,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // fire-and-forget claim could race and steal the marker from the
           // operator-requested text.
           notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+          // This route runs the OFFICE version of the activation itself
+          // (below) — the shared writer must not fire its lazy one too.
+          legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
         });
       });
     } catch (err) {
@@ -3598,15 +3612,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // must run the same side effects as the admin-schedule confirm path (arm
     // deferred reminders, convert the originating call lead, resolve the
     // outbound_booking_review card) — shared hook so the two can't drift.
-    // Post-commit + best-effort, same as every other block below.
-    {
-      // Voice-agent bookings share the lifecycle (OFFICE_REVIEW_PENDING_
-      // SOURCE_ACTIONS): office confirm is what arms reminders for them too.
-      const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
-      if (toStatus === 'confirmed' && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)) {
-        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
-        await runOutboundReviewConfirmHook(db, svc, 'admin-dispatch');
-      }
+    // Post-commit, and hook-first/stamp-on-success: the customer_confirmed
+    // stamp deferred above lands inside this helper, ONLY when the core legs
+    // ran. A failure leaves the row confirmed-but-unstamped for the hourly
+    // legacy-activation sweep to retry, instead of stamping a half-armed row
+    // that both retry rails then skip forever.
+    // (Voice-agent bookings share this lifecycle via
+    // OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is what arms
+    // reminders for them too.)
+    if (isOfficeReviewConfirm) {
+      const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+      await runOfficeConfirmActivation(db, svc, 'admin-dispatch');
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.

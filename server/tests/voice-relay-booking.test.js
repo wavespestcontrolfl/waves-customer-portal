@@ -138,7 +138,14 @@ function makeBuilder(rows) {
 let builders;
 let trxBuilders;
 let trx;
-function primeDb({ customers = [CUSTOMER], scheduled = [], callLog = [{ id: 'cl-77' }] } = {}) {
+function primeDb({
+  customers = [CUSTOMER], scheduled = [], callLog = [{ id: 'cl-77' }],
+  // The partial unique index `triage_items_open_unique_idx` returns NO row from
+  // the conflict-ignore insert when this call already holds an open review
+  // card. That is the DB-side one-booking-per-call invariant, so the fixture
+  // can simulate it.
+  reviewCardTaken = false,
+} = {}) {
   builders = {
     customers: makeBuilder(customers),
     scheduled_services: makeBuilder(scheduled),
@@ -164,7 +171,8 @@ function primeDb({ customers = [CUSTOMER], scheduled = [], callLog = [{ id: 'cl-
   const triageTrx = {
     insert: jest.fn(() => triageTrx),
     onConflict: jest.fn(() => triageTrx),
-    ignore: jest.fn(() => Promise.resolve()),
+    ignore: jest.fn(() => triageTrx),
+    returning: jest.fn(() => Promise.resolve(reviewCardTaken ? [] : [{ id: 'triage-9' }])),
   };
   trxBuilders = { scheduled_services: ssTrx, triage_items: triageTrx };
   trx = (table) => trxBuilders[table];
@@ -729,6 +737,57 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     await executeTool('request_booking', GOOD_INPUT, slotCtx({ leadId: () => 'lead-42' }));
     const payload = JSON.parse(trxBuilders.triage_items.insert.mock.calls[0][0].payload);
     expect(payload.lead_id).toBe('lead-42');
+  });
+
+  // ⭐ THE SAME INVARIANT, ENFORCED BY THE DATABASE. The latch above lives on
+  // the RelayConversation instance: a WebSocket reconnect on the same CallSid
+  // builds a fresh session with it cleared, and a booking on a DIFFERENT date
+  // clears the customer+date dedupe too. Only the review card's partial unique
+  // index (call_log_id, reason_code WHERE status open/in_progress) is durable —
+  // so no card ⇒ the whole booking rolls back, rather than a pending row
+  // landing outside the office confirm queue.
+  test('a reconnected session with a cleared latch is still refused — no card, no booking', async () => {
+    primeDb({ reviewCardTaken: true });
+    const out = await executeTool('request_booking', { slot_ref: 'S2' }, slotCtx());
+    expect(out).toMatch(/already been placed on this call/i);
+    expect(out).toMatch(/NOTHING new was booked/);
+    // The insert was attempted and rolled back WITH the missing card — the
+    // transaction body threw, so nothing was committed.
+    expect(trxBuilders.triage_items.returning).toHaveBeenCalled();
+  });
+
+  // The 8s write timeout detaches request_booking and the model moves on, so
+  // capture_lead can land the lead while the booking is still committing — it
+  // then sees the latch still false and skips its own back-fill, and the card
+  // is written with the null lead id this call snapshotted before the lead
+  // existed. The voice-origin confirm path skips the single-active-lead
+  // fallback, so that null never heals on its own.
+  test('a lead captured DURING a slow booking commit is attached to the card afterwards', async () => {
+    const card = { id: 'ti-9', payload: JSON.stringify({ origin: 'voice_agent', lead_id: null }) };
+    const update = jest.fn(() => Promise.resolve(1));
+    const triage = {
+      where: jest.fn(() => triage),
+      whereIn: jest.fn(() => triage),
+      orderBy: jest.fn(() => triage),
+      first: jest.fn(() => Promise.resolve(card)),
+      update,
+    };
+    const baseDb = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'triage_items' ? triage : baseDb(table)));
+    // Null when the card payload is built, set by the time the commit returns.
+    let sessionLeadId = null;
+    const ctx = slotCtx({ leadId: () => sessionLeadId });
+    const commit = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation(async (cb) => {
+      sessionLeadId = 'lead-88'; // capture_lead lands while the commit runs
+      return commit(cb);
+    });
+    const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+    expect(out).toMatch(/Booking REQUEST submitted/);
+    // The card went in with the null it had at insert time…
+    expect(JSON.parse(trxBuilders.triage_items.insert.mock.calls[0][0].payload).lead_id).toBeNull();
+    // …and the back-fill closed it.
+    expect(JSON.parse(update.mock.calls[0][0].payload).lead_id).toBe('lead-88');
   });
 
   test('attachLeadToVoiceBookingCard back-fills the card when capture_lead runs AFTER booking', async () => {

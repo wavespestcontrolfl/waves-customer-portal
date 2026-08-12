@@ -8336,6 +8336,14 @@ router.put('/:id/status', async (req, res, next) => {
       }
     }
     const { transitionJobStatus } = require('../services/job-status');
+    // An OFFICE CONFIRM of a pending office-review booking (outbound-callback
+    // or voice-agent): its `customer_confirmed` stamp is the RECEIPT for the
+    // shared activation legs, so it moves out of the transaction and onto the
+    // post-commit hook's success (see runOfficeConfirmActivation) — and the
+    // shared writer stands down instead of running a second activation.
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    const isOfficeReviewConfirm = toStatus === 'confirmed'
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
 
     try {
       await db.transaction(async (trx) => {
@@ -8361,7 +8369,10 @@ router.put('/:id/status', async (req, res, next) => {
         // rolls back these timestamps + flags.
         const lifecycleUpdates = {};
         if (toStatus === 'confirmed') {
-          lifecycleUpdates.customer_confirmed = true;
+          // Office-review rows are the exception: for them this column is also
+          // the activation receipt, stamped post-commit only once the shared
+          // confirm hook's core legs succeed.
+          if (!isOfficeReviewConfirm) lifecycleUpdates.customer_confirmed = true;
         } else if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, new Date()));
         } else if (toStatus === 'completed') {
@@ -8381,6 +8392,9 @@ router.put('/:id/status', async (req, res, next) => {
           // This route's cancel branch sends its own notice below — the
           // shared-writer hook must stand down, not race the claim.
           notifyCustomer: 'caller',
+          // Same for the legacy activation: this route runs the OFFICE
+          // version of it below and owns the stamp.
+          legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
         });
       });
     } catch (err) {
@@ -8465,14 +8479,15 @@ router.put('/:id/status', async (req, res, next) => {
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
     // status route — the other surface staff confirm from — runs the exact
     // same side effects and the two paths can't drift.
-    {
-      // Voice-agent bookings share the lifecycle (OFFICE_REVIEW_PENDING_
-      // SOURCE_ACTIONS): office confirm is what arms reminders for them too.
-      const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
-      if (toStatus === 'confirmed' && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)) {
-        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
-        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
-      }
+    // Hook-first / stamp-on-success: the customer_confirmed stamp deferred out
+    // of the transaction lands inside this helper, and only when the core legs
+    // ran — a failure leaves the row confirmed-but-unstamped for the hourly
+    // legacy-activation sweep to retry. (Voice-agent bookings share the
+    // lifecycle via OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is
+    // what arms reminders for them too.)
+    if (isOfficeReviewConfirm) {
+      const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+      await runOfficeConfirmActivation(db, svc, 'admin-schedule');
     }
 
     // En-route: track-transitions flip (which fires the customer SMS
