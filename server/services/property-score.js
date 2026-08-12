@@ -32,7 +32,6 @@ const { lawnOverall } = require('./lawn-health-shared');
 const {
   loadActiveConfig,
   loadHistoryForCustomer,
-  loadScoreForServiceRecord,
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
@@ -131,39 +130,58 @@ async function lawnComponent(customerId, knex, activeLines) {
 async function pestComponent(customerId, knex, activeLines) {
   const base = { key: 'pest', label: 'Pest Pressure' };
   const config = await loadActiveConfig(knex).catch(() => null);
-  // One row → the full customer-visibility path (stored score row, service
-  // record, catalog one-time exclusion, buildPestPressureCustomerView).
-  // Used for the current AND the previous point, so hidden rows can never
-  // leak into either end of the delta.
-  const viewFor = async (rowRef, historyRows) => {
-    if (!rowRef || !rowRef.service_record_id) return null;
-    const fullRow = await loadScoreForServiceRecord(knex, rowRef.service_record_id).catch(() => null);
-    const serviceRecord = await knex('service_records')
-      .where({ id: rowRef.service_record_id })
-      .first()
-      .catch(() => null);
-    // Catalog-resolved one-time exclusion — the view's label heuristic misses
-    // one-time services whose names carry no cadence word (Fire Ant, Tick
-    // Control…); the report paths pass this too. Fail toward showing nothing.
-    const oneTimeExcluded = serviceRecord
-      ? await isOneTimePressureExcludedRecord(serviceRecord, knex).catch(() => true)
-      : false;
-    return buildPestPressureCustomerView({
-      config,
-      scoreRow: fullRow || rowRef,
-      serviceRecord,
-      historyRows,
-      oneTimeExcluded,
-    });
-  };
-  // Walk newest → oldest: a newest row the customer must not see (one-time
-  // visit, opted-out service line) skips to the next VISIBLE score instead of
-  // hiding an older valid one. A visible-but-insufficient view stops the walk
-  // — surfacing an older score behind a newer insufficient one would be stale.
-  // Returns null when the page held no decisive row.
-  const walk = async (historyRows) => {
-    for (let i = 0; i < historyRows.length; i += 1) {
-      const view = await viewFor(historyRows[i], historyRows);
+  // One PAGE → three bulk loads (full score rows, service records, and the
+  // rows' scheduled services live behind a lazy memo), then visibility is
+  // evaluated in memory — per-row lookups made one dashboard request cost
+  // hundreds of sequential queries on hidden-row runs.
+  const walkPage = async (limit, startIndex) => {
+    const history = await loadHistoryForCustomer(knex, customerId, { serviceLine: 'pest', limit }).catch(() => []);
+    const rows = Array.isArray(history) ? history : [];
+    const ids = rows.map((r) => r?.service_record_id).filter(Boolean);
+    // Bulk equivalent of store.loadScoreForServiceRecord — same table, one
+    // whereIn instead of N lookups.
+    const [scoreRows, serviceRecords] = ids.length
+      ? await Promise.all([
+        knex('pest_pressure_scores').whereIn('service_record_id', ids).catch(() => []),
+        knex('service_records').whereIn('id', ids).catch(() => []),
+      ])
+      : [[], []];
+    const scoreByRecord = new Map(scoreRows.map((r) => [r.service_record_id, r]));
+    const recordById = new Map(serviceRecords.map((r) => [r.id, r]));
+    // Catalog-resolved one-time exclusion, memoized per scheduled service —
+    // resolved lazily so the common stop-at-first-row case pays one call.
+    // failClosed: on THIS surface a lookup error hides the score rather
+    // than risking a one-time score presented as recurring pressure.
+    const exclusionMemo = new Map();
+    const excludedFor = async (serviceRecord) => {
+      const key = serviceRecord.scheduled_service_id || serviceRecord.id;
+      if (!exclusionMemo.has(key)) {
+        exclusionMemo.set(
+          key,
+          await isOneTimePressureExcludedRecord(serviceRecord, knex, { failClosed: true }).catch(() => true),
+        );
+      }
+      return exclusionMemo.get(key);
+    };
+    const viewFor = async (rowRef) => {
+      if (!rowRef || !rowRef.service_record_id) return null;
+      const serviceRecord = recordById.get(rowRef.service_record_id) || null;
+      const oneTimeExcluded = serviceRecord ? await excludedFor(serviceRecord) : false;
+      return buildPestPressureCustomerView({
+        config,
+        scoreRow: scoreByRecord.get(rowRef.service_record_id) || rowRef,
+        serviceRecord,
+        historyRows: rows,
+        oneTimeExcluded,
+      });
+    };
+    // Walk newest → oldest: a row the customer must not see (one-time visit,
+    // opted-out service line) skips to the next VISIBLE score instead of
+    // hiding an older valid one. A visible-but-insufficient view stops the
+    // walk — surfacing an older score behind a newer insufficient one would
+    // be stale.
+    for (let i = startIndex; i < rows.length; i += 1) {
+      const view = await viewFor(rows[i]);
       if (!view) continue;
       if (view.score != null) {
         const score = pressureToHealth(view.score);
@@ -172,43 +190,45 @@ async function pestComponent(customerId, knex, activeLines) {
         // value. (trend_delta reconstruction breaks after a manual override;
         // raw displayed_score would leak rows the customer can't see.)
         let previousScore = null;
-        for (let j = i + 1; j < historyRows.length; j += 1) {
-          const olderView = await viewFor(historyRows[j], historyRows).catch(() => null);
+        for (let j = i + 1; j < rows.length; j += 1) {
+          const olderView = await viewFor(rows[j]).catch(() => null);
           if (olderView && olderView.score != null) {
             previousScore = pressureToHealth(olderView.score);
             break;
           }
         }
         return {
-          ...base,
-          status: 'scored',
-          pressure: view.score,
-          maxPressure: view.maxScore,
-          pressureLabel: view.label,
-          score,
-          previousScore,
-          delta: score != null && previousScore != null ? score - previousScore : null,
-          reason: view.summary || null,
-          asOf: view.date,
+          outcome: {
+            ...base,
+            status: 'scored',
+            pressure: view.score,
+            maxPressure: view.maxScore,
+            pressureLabel: view.label,
+            score,
+            previousScore,
+            delta: score != null && previousScore != null ? score - previousScore : null,
+            reason: view.summary || null,
+            asOf: view.date,
+          },
+          count: rows.length,
         };
       }
-      return { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' };
+      return {
+        outcome: { ...base, status: 'pending', reason: view.summary || 'Pest Pressure will appear once enough service data is available.' },
+        count: rows.length,
+      };
     }
-    return null;
+    return { outcome: null, count: rows.length };
   };
-  // serviceLine-scoped: mosquito is a separate component — a mosquito visit's
-  // score must never stand in for Pest Pressure. Page sizes: the small page
-  // covers the common case; when every row in a FULL small page is hidden
-  // (e.g. a run of one-time visits), re-walk a much deeper page so an older
-  // valid recurring score is still found. 60 rows ≈ 5 years of monthly
-  // visits — beyond that the fallback states are honest.
-  for (const limit of [6, 60]) {
-    const history = await loadHistoryForCustomer(knex, customerId, { serviceLine: 'pest', limit }).catch(() => []);
-    const historyRows = Array.isArray(history) ? history : [];
-    const outcome = await walk(historyRows);
-    if (outcome) return outcome;
-    if (historyRows.length < limit) break; // no deeper rows exist
+  // Small page covers the common case; when a FULL small page is entirely
+  // hidden (a run of one-time visits), re-walk a deeper page starting past
+  // the rows already examined. 60 rows ≈ 5 years of monthly visits — beyond
+  // that the fallback states are honest.
+  let result = await walkPage(6, 0);
+  if (!result.outcome && result.count === 6) {
+    result = await walkPage(60, 6);
   }
+  if (result.outcome) return result.outcome;
 
   const monitored = activeLines.has('pest');
   if (monitored) {

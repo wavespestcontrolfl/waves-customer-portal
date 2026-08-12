@@ -913,7 +913,7 @@ function PropertyScoreCard({ data, compact }) {
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{c.label}</div>
                 {c.reason && <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{c.reason}</div>}
-                {c.asOf && c.status === 'scored' && (
+                {c.asOf && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>As of {formatScoreDate(c.asOf)}</div>
                 )}
               </div>
