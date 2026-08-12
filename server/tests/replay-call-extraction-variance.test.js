@@ -134,6 +134,25 @@ describe('call extraction replay variance reporting', () => {
     })).toMatchObject({ status: 'pass', failures: [] });
   });
 
+  test('block-reasons subset ignores the all-flags fallback on central-gate vetoes', () => {
+    // On a central-gate veto routeForV2 falls back to ALL merged flags for
+    // appointmentBlockingFlags — advisory flags there must not count as holds.
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        routeReason: 'address_not_validated',
+        appointmentBlockingFlags: ['no_sms_consent_captured', 'prior_complaint_unresolved'],
+        flags: ['no_sms_consent_captured', 'prior_complaint_unresolved'],
+        schedulingStatus: 'confirmed',
+      },
+    });
+
+    expect(evaluateFixtureExpectation(result, {
+      expect: { current_block_reasons_subset_of: ['address_not_validated'] },
+    })).toMatchObject({ status: 'pass', failures: [] });
+  });
+
   test('block-reasons subset fails on any hold outside the allowed list', () => {
     const result = validResult({
       current: {

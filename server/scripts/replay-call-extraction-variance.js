@@ -398,14 +398,22 @@ function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
       // asserts "blocked by NOTHING ELSE" instead of a hard auto-route:
       // any new blocking flag or route reason still fails the case.
       // Mirrors call-routing-gates blocked_reasons: the umbrella
-      // 'triage_flags' reason is skipped in favor of the specific
-      // appointmentBlockingFlags it summarizes.
+      // 'triage_flags' reason unwraps to the specific
+      // appointmentBlockingFlags it summarizes, and ONLY then — on
+      // central-gate vetoes (address_not_validated, off_hour_start) the
+      // route result's appointmentBlockingFlags falls back to ALL merged
+      // flags (routeForV2 `route.appointmentBlockingFlags || flags`), so
+      // counting them there would treat advisory/SMS-only flags as holds
+      // (pre-push codex P1).
       const allowed = new Set(normalizeExpectedArray(expect.current_block_reasons_subset_of));
       const actualHolds = [];
       if (!result.current.wouldAutoRoute) {
         const reason = result.current.routeReason;
-        if (reason && reason !== 'triage_flags') actualHolds.push(reason);
-        actualHolds.push(...(result.current.appointmentBlockingFlags || []));
+        if (reason === 'triage_flags') {
+          actualHolds.push(...(result.current.appointmentBlockingFlags || []));
+        } else if (reason) {
+          actualHolds.push(reason);
+        }
         if (!actualHolds.length) actualHolds.push(reason || 'unknown_block_reason');
       }
       const offenders = [...new Set(actualHolds)].filter((hold) => !allowed.has(hold));
