@@ -323,8 +323,20 @@ async function markEnRoute(serviceId, opts = {}) {
     // sides agree — rewriting it would undo the caller's own transition
     // and fabricate an en_route→confirmed history row.
     const liveOpStatus = String(svc.status) === 'on_site';
+    // The CAS carries the FULL observed snapshot (status, schedule day, and
+    // every lifecycle/SMS field via trackLifecycleCasPredicate — which
+    // includes track_state): staleFieldClears was derived from this read,
+    // and a concurrent same-state lifecycle write can replace an old stamp
+    // with a current-attempt value that a narrower match would then null.
+    // Any change makes the heal miss; the re-entry below reloads.
+    const { trackLifecycleCasPredicate } = require('./rebooker');
     const healWrite = (conn) => conn('scheduled_services')
-      .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
+      .where({
+        id: serviceId,
+        status: svc.status,
+        scheduled_date: svc.scheduled_date ?? null,
+        ...trackLifecycleCasPredicate(svc),
+      })
       .update({
         track_state: 'scheduled',
         ...staleFieldClears,
@@ -519,13 +531,20 @@ async function markEnRoute(serviceId, opts = {}) {
       // sendTechEnRoute can return undefined (opt-out path), falsy results,
       // or { success, sid }. Only mark sent on a positive signal.
       if (result && result.success) {
-        // Conditional on the attempt still standing: a reschedule that
-        // rewound the row between the flip and this stamp must not get an
-        // old-attempt guard written over its reset — that would suppress
-        // the NEW attempt's text. The SMS did go out; if the guard write
-        // misses, the fresh attempt re-sending is the intended behavior.
+        // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
+        // the schedule tuple), not just track_state — a same-day reschedule
+        // can rewind the row and a FRESH attempt can reach en_route while
+        // this Twilio call was in flight, and a state-only match would
+        // stamp the old attempt's guard onto the new attempt, suppressing
+        // its notification. The SMS did go out; if the guard write misses,
+        // the fresh attempt re-sending is the intended behavior.
         await db('scheduled_services')
-          .where({ id: serviceId, track_state: 'en_route' })
+          .where({
+            id: serviceId,
+            track_state: 'en_route',
+            en_route_at: now,
+            scheduled_date: svc.scheduled_date ?? null,
+          })
           .update({ track_sms_sent_at: new Date() });
         smsSent = true;
       }
@@ -612,19 +631,28 @@ function classifyArrivalSend(result) {
  * not funnel a suppressed signal here — the flip leaves the guard NULL so a
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
-async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
+async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
   if (svc.arrival_sms_sent_at) return;
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
   // means "handled", so an arrival under a disabled gate is recorded, not sent.
+  // The claim is ATTEMPT-scoped, not just state-scoped: it matches the
+  // effective arrival timestamp the caller observed/wrote plus the schedule
+  // tuple, so a delayed invocation from an old attempt cannot claim a
+  // rescheduled-and-re-arrived row (which would suppress the new attempt's
+  // real arrival text). The claim value is THIS invocation's stamp, so the
+  // retry release below can release exactly this claim and never a later
+  // attempt's.
+  const claimStamp = new Date();
   const claimed = await db('scheduled_services')
-    // Conditional on the row still being on_property: a reschedule that
-    // rewound the tracker between the caller's read and this claim must
-    // not get an arrival guard stamped over its reset — that would
-    // suppress the rescheduled visit's real arrival text.
-    .where({ id: serviceId, track_state: 'on_property' })
+    .where({
+      id: serviceId,
+      track_state: 'on_property',
+      arrived_at: claimArrivedAt ?? null,
+      scheduled_date: svc.scheduled_date ?? null,
+    })
     .whereNull('arrival_sms_sent_at')
-    .update({ arrival_sms_sent_at: new Date() });
+    .update({ arrival_sms_sent_at: claimStamp });
   if (!claimed) return;
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
@@ -645,8 +673,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
   }
   if (outcome === 'retry') {
     try {
+      // Release ONLY the exact claim this invocation created — an id-only
+      // release could erase a later attempt's claim and double-send.
       await db('scheduled_services')
-        .where({ id: serviceId })
+        .where({ id: serviceId, arrival_sms_sent_at: claimStamp })
         .update({ arrival_sms_sent_at: null });
     } catch (err) {
       logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
@@ -681,6 +711,10 @@ async function markOnProperty(serviceId, opts = {}) {
   // through the one maybeSendArrivalSms call at the tail, which self-serializes
   // via the arrival_sms_sent_at CAS so concurrent signals never double-send.
   let arrivalRow = null;
+  // The effective arrival timestamp of THIS attempt (the value the row
+  // carries after this invocation's writes) — scopes the SMS claim so a
+  // delayed old-attempt signal can never claim a re-arrived row.
+  let claimArrivedAt = null;
   let result;
 
   if (svc.track_state === 'on_property') {
@@ -711,15 +745,17 @@ async function markOnProperty(serviceId, opts = {}) {
     }
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     arrivalRow = svc;
+    claimArrivedAt = svc.arrived_at || lifecycleUpdates.arrived_at || null;
     result = { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   } else {
     const now = new Date();
+    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, now);
     const updated = await db('scheduled_services')
       .where({ id: serviceId })
       .whereIn('track_state', ['scheduled', 'en_route'])
       .update({
         track_state: 'on_property',
-        ...buildOnSiteLifecycleUpdates(svc, now),
+        ...onSiteUpdates,
         updated_at: now,
       });
     if (updated === 0) {
@@ -741,7 +777,10 @@ async function markOnProperty(serviceId, opts = {}) {
           logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
         }
       }
-      if (fresh?.track_state === 'on_property') arrivalRow = fresh;
+      if (fresh?.track_state === 'on_property') {
+        arrivalRow = fresh;
+        claimArrivedAt = fresh.arrived_at || null;
+      }
       result = { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
     } else {
       try {
@@ -762,6 +801,7 @@ async function markOnProperty(serviceId, opts = {}) {
       }
       emitCustomerTrackRefresh(svc, 'on_property', now);
       arrivalRow = svc;
+      claimArrivedAt = svc.arrived_at || onSiteUpdates.arrived_at || null;
       result = { ok: true, state: 'on_property', arrivedAt: now };
     }
   }
@@ -771,7 +811,7 @@ async function markOnProperty(serviceId, opts = {}) {
   // the flip leaves the guard NULL so a later real arrival still sends.
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
   if (arrivalRow && !opts.suppressArrivalSms) {
-    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId);
+    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
   }
   return result;
 }

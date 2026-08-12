@@ -163,9 +163,16 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(result.alreadyEnRoute).toBe(false);
     expect(result.enRouteAt).toEqual(expect.any(Date));
     // The heal rewound the tracker and cleared exactly the STALE fields,
-    // guarded on the observed state. (Per-field: null columns are not
+    // guarded on the FULL observed snapshot (status, schedule day, and
+    // every lifecycle/SMS field). (Per-field: null columns are not
     // "stale", so they are simply absent from the write.)
-    expect(healUpdate.where).toHaveBeenCalledWith({ id: 'job-stale', track_state: 'on_property', status: 'pending' });
+    expect(healUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'job-stale',
+      track_state: 'on_property',
+      status: 'pending',
+      scheduled_date: todayStr,
+      actual_start_time: expect.anything(),
+    }));
     const healPayload = healUpdate.update.mock.calls[0][0];
     expect(healPayload).toMatchObject({
       track_state: 'scheduled',
