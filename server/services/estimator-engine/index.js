@@ -24,10 +24,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const { buildCallContext, existingDraftForCall } = require('./context-builder');
-const {
-  resolvePropertyFacts, normalizeParcelView,
-  _private: { pricingSafePropertyType },
-} = require('./source-arbitration');
+const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
 
 // A wrong-premise lookup poisons the RECORD leg too, not just the enriched
@@ -1548,8 +1545,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // RE-GATHERED record's own type describes the quoted property, so a
     // reliably identified condo/townhome keeps its pricing adjustment
     // instead of being nulled to 'unknown' and parked (codex r32 P1).
-    const regatheredPropertyType = (crossPropertyRegather && effectiveParcelOk)
-      ? pricingSafePropertyType(effectiveSignals.propertyRecord?.propertyType)
+    // resolvePropertyFacts derives propertyType from the RECORD first and
+    // the extraction only as a fallback, so a record that carries a type is
+    // what produced propertyFacts.propertyType (already pricing-safe) — no
+    // re-normalization, and no extra import to break suites that mock the
+    // arbitration module.
+    const regatheredPropertyType = (crossPropertyRegather && effectiveParcelOk
+      && effectiveSignals.propertyRecord?.propertyType)
+      ? (propertyFacts.propertyType || null)
       : null;
     const scopeFacts = crossPropertyRegather
       ? { ...propertyFacts, tenant: false, propertyType: regatheredPropertyType || null }
