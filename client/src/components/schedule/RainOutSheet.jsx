@@ -346,7 +346,11 @@ function predictedCustomBody(compose, message, option) {
   for (const [key, value] of Object.entries(vars)) {
     body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), () => value);
   }
-  return body;
+  // Same whitespace tidy the renderer applies after substitution
+  // (admin-sms-templates.js getTemplate): blank-line runs collapse and the
+  // ends trim — counting whitespace the server never sends would disable
+  // Move at the boundary (codex r4 P2).
+  return body.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // Sentinel selection key for the custom-time option (distinct from the preset
