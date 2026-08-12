@@ -3850,6 +3850,17 @@ const EstimateConverter = {
       // the rewritten row span two lines. Aligning multi-service reserved
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
+      // A separately-sold ONE-TIME palm injection item claims a
+      // one-time-keyed reserved row (codex r23 P1): with BOTH palm
+      // programs sold, the reserved one-time visit keeps its own
+      // schedule/billing and the recurring program promotes its own
+      // parent — the accepted-line association disambiguates. Shared by
+      // the promotion recognition and the reserved binding below.
+      let estimateHasOneTimePalmItem = false;
+      try {
+        estimateHasOneTimePalmItem = estimateOneTimeItemsFromData(estimateData)
+          .some((item) => isPalmInjectionFamily(item));
+      } catch { estimateHasOneTimePalmItem = false; }
       try {
         const { combos, standalone: reservedStandalone, remaining } = combinedScheduling;
         // Standalone units (sold rodent bait) must schedule in reserved
@@ -4004,8 +4015,11 @@ const EstimateConverter = {
               // seeding branch relinks it to the semiannual identity, so it
               // IS the program's first visit; promoting beside it would put
               // two first visits in the same slot. Nutritional labels stay
-              // excluded (isPalmInjectionFamily), so a reserved nutritional
-              // visit still never suppresses the sold injection series.
+              // excluded (isPalmInjectionFamily). EXCEPT: with a
+              // separately-sold one-time palm item (codex r23 P1), a
+              // one-time-keyed reserved row is THAT item's visit — only the
+              // exact semiannual identity suppresses the promotion then.
+              if (estimateHasOneTimePalmItem && reservedKey === 'palm_injection') return identityMatch;
               return identityMatch
                 || reservedKey === 'palm_injection'
                 || isPalmInjectionFamily({}, { service_type: row.service_type });
@@ -4231,8 +4245,24 @@ const EstimateConverter = {
         // catch is deliberately fail-soft (log and keep the acceptance),
         // which would swallow this refusal and complete the accept anyway
         // (pre-push P0 r9).
-        const reservedGuardSvc = reservedSeedSvc
+        let reservedGuardSvc = reservedSeedSvc
           || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+        // With a separately-sold one-time palm item, a one-time-keyed
+        // reserved row is the ONE-TIME item's visit (codex r23 P1) — the
+        // recurring palm line must not bind to it (no relink, no seeding
+        // onto it); the promotion above creates the program's own parent.
+        // Fail-soft: an errored lookup keeps the binding (prior behavior).
+        if (estimateHasOneTimePalmItem
+          && reservedGuardSvc && isPalmInjectionFamily(reservedGuardSvc, reservedStart)) {
+          try {
+            const reservedRowKey = reservedStart.service_id
+              ? (await database('services').where({ id: reservedStart.service_id }).first('service_key'))?.service_key
+              : (String(reservedStart.service_key_snapshot || '') || null);
+            if (reservedRowKey === 'palm_injection') reservedGuardSvc = null;
+          } catch (bindErr) {
+            logger.warn(`[estimate-converter] reserved palm binding check failed (binding kept): ${bindErr.message}`);
+          }
+        }
         const reservedSeedingPattern = converterFollowUpSeedingPattern(
           reservedGuardSvc || {}, reservedStart, inferredFrequencyKey,
         );

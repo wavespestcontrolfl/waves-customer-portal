@@ -397,7 +397,12 @@ function serviceCatalogMatch(line, serviceIndex) {
   // unmatched when cadence DATA is present but invalid; a bare explicit
   // selection (no line cadence data to contradict it) keeps the
   // operator's choice.
-  if (explicitKey === 'palm_injection_semiannual') {
+  // The raw `service` field carries the key too (codex r23 P1): a stored
+  // { service: 'palm_injection_semiannual', frequency: 'monthly' } line
+  // has no explicit key or name, but the candidate loop would match the
+  // semiannual row — same validation applies.
+  if (explicitKey === 'palm_injection_semiannual'
+    || (!explicitKey && rawKey === 'palm_injection_semiannual')) {
     try {
       const {
         converterFollowUpSeedingPattern, visitsPerYearForRecurringService,
