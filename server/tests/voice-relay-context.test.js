@@ -320,6 +320,21 @@ describe('GATE ON — account tools', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  // ⭐ THE ARRIVAL WINDOW IS window_start + 2h, FROM THE SHARED HELPER.
+  // AGENTS.md pins customer-facing arrival copy to arrivalWindowRange() and
+  // says report "next appointment" displays follow the same +2h rule — the
+  // phone is one, and it must not drift from the reminders, the track page or
+  // get_today_eta. (The DB column is a `time`, so a real row is 'HH:MM:SS'.)
+  test('the next-appointment window is the shared start + 2h range, never the bare start', async () => {
+    primeDb({
+      scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '09:00:00', window_end: '15:00:00', status: 'confirmed' }],
+    });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
+    expect(out).toContain('arrival window 9:00 AM to 11:00 AM');
+    expect(out).not.toContain('window starting');
+    expect(out).not.toContain('3:00 PM'); // window_end is duration data, never spoken
+  });
+
   test('matched caller → get_account_overview returns plan/appt/visit/balance from the readers', async () => {
     primeDb({
       scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],

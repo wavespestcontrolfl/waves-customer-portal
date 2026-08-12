@@ -415,7 +415,20 @@ async function loadNextAppointment(customerId) {
   return {
     date: speakDate(row.scheduled_date),
     service: promptSafeUntrusted(normalizeServiceType(row.service_type) || row.service_type, 60) || null,
-    window: row.window_start ? promptSafe(String(row.window_start), 20) : null,
+    // Customer-facing arrival copy is window_start → +120 min via the shared
+    // arrivalWindowRange(), never the raw start and never window_end (AGENTS.md:
+    // "report 'next appointment' displays follow the same +2h rule"). Same
+    // helper the reminders, the track page and get_today_eta use, so the four
+    // cannot drift.
+    window: (() => {
+      const { arrivalWindowRange } = require('../../utils/sms-time-format');
+      const range = arrivalWindowRange(row.window_start);
+      if (!range) return null;
+      const [start, end] = range.split('-');
+      const spokenStart = speakClock(clockMinutes(start));
+      const spokenEnd = speakClock(clockMinutes(end));
+      return spokenStart && spokenEnd ? promptSafe(`${spokenStart} to ${spokenEnd}`, 30) : null;
+    })(),
   };
 }
 
@@ -652,7 +665,7 @@ async function accountOverviewText(customerId, { tier = 'redacted' } = {}) {
   const parts = [
     `Active recurring services: ${services.length ? services.join('; ') : 'none on file'}.`,
     nextAppointment && nextAppointment.date
-      ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${!redacted && nextAppointment.window ? `, window starting ${nextAppointment.window}` : ''}.`
+      ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${!redacted && nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
       : 'No upcoming appointment on the schedule.',
     lastVisit && lastVisit.date
       ? `Last completed visit: ${lastVisit.date}${lastVisit.service ? ` (${lastVisit.service})` : ''}.`
