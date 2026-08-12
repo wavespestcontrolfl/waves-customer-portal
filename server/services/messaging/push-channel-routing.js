@@ -54,8 +54,11 @@ const PUSH_ROUTING_POLICY = {
   receipt: 'push_first',
   appointment_reminder: 'push_and_sms',
   reminder_72h: 'push_and_sms',
-  appointment_confirmation: 'push_and_sms',
-  appointment_cancelled: 'push_and_sms',
+  // appointment_confirmation / appointment_cancelled are deliberately
+  // ABSENT: admin-schedule/admin-dispatch trigger those through shared
+  // helpers that carry no operatorInitiated provenance, so routing them
+  // would push staff-initiated actions. Add them back only once the
+  // shared helpers thread the marker.
   billing_reminder: 'push_and_sms',
   payment_failure: 'push_and_sms',
   autopay: 'push_and_sms',
@@ -69,8 +72,6 @@ const PRESENTATION = {
   receipt: { title: 'Payment receipt', link: '/?tab=billing', category: 'billing' },
   appointment_reminder: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
   reminder_72h: { title: 'Appointment reminder', link: '/?tab=visits', category: 'service' },
-  appointment_confirmation: { title: 'Appointment confirmed', link: '/?tab=visits', category: 'service' },
-  appointment_cancelled: { title: 'Appointment update', link: '/?tab=visits', category: 'service' },
   billing_reminder: { title: 'Billing update', link: '/?tab=billing', category: 'billing' },
   payment_failure: { title: 'Payment issue', link: '/?tab=billing', category: 'billing' },
   autopay: { title: 'Billing update', link: '/?tab=billing', category: 'billing' },
@@ -101,16 +102,15 @@ async function hasActivePushDevice(customerId, knex = db) {
   return Boolean(row);
 }
 
-// messageType → the notification_prefs channel column governing its family.
-// Every type in PUSH_ROUTING_POLICY must map here (test-enforced) so a
-// saved customer channel choice always wins.
+// messageType → the LIVE notification_prefs channel column the actual
+// senders consult (appointment-reminders.js, twilio.js en-route,
+// scheduler.js receipts). Every type in PUSH_ROUTING_POLICY must map here
+// (test-enforced) so a customer channel choice always wins.
 const PREF_CHANNEL_COLUMN = {
   tech_en_route: 'en_route_channel',
   receipt: 'payment_receipt_channel',
-  appointment_reminder: 'service_reminder_channel',
-  reminder_72h: 'service_reminder_channel',
-  appointment_confirmation: 'service_reminder_channel',
-  appointment_cancelled: 'service_reminder_channel',
+  appointment_reminder: 'service_reminder_24h_channel',
+  reminder_72h: 'service_reminder_72h_channel',
   billing_reminder: 'billing_channel',
   payment_failure: 'billing_channel',
   autopay: 'billing_channel',
@@ -128,59 +128,82 @@ function normalizeDigits(phone) {
  *      customer id; replacing THEIR text with a push to the account
  *      holder's devices would notify the wrong person (and push_and_sms
  *      would duplicate contact-personalized pushes onto one account).
- *   2. A SAVED notification_prefs row is an explicit customer channel
- *      choice — the prefs vocabulary has no 'push' value yet, so any
- *      saved row governing this message family keeps the customer's
- *      chosen channel untouched. Customers who never saved prefs (no
- *      row) route normally.
+ *   2. A NON-DEFAULT channel value ('email' or 'both') on the account's
+ *      PRIMARY-profile prefs row is an unambiguous explicit choice and
+ *      vetoes routing. Rows at the seeded 'sms' default (or absent)
+ *      route normally — presence and timestamps are not provenance
+ *      (rows were globally backfilled; unrelated writes restamp them).
  */
 async function pushEligibleRuntime(customerId, to, messageType, knex = db) {
   const toDigits = normalizeDigits(to);
   if (toDigits.length < 10) return false;
   const customer = await knex('customers')
     .where({ id: customerId })
-    .first('phone')
+    .first('phone', 'account_id')
     .catch(() => null);
   if (!customer || normalizeDigits(customer.phone) !== toDigits) return false;
+  const accountId = customer.account_id;
 
   const col = PREF_CHANNEL_COLUMN[messageType];
   if (col) {
+    // Channel prefs are ACCOUNT-level and live on the account's primary
+    // profile (the same resolver the portal prefs surface uses) — a token
+    // registered while a secondary property was selected must not dodge
+    // the choice saved on the primary profile.
+    const { resolvePrimaryProfileId } = require('../../routes/notifications');
+    const prefsOwnerId = await resolvePrimaryProfileId(
+      { accountId: accountId || null, customerId },
+      knex,
+    ).catch(() => customerId);
     const ERR = Symbol('prefs-lookup-failed');
     const prefsRow = await knex('notification_prefs')
-      .where({ customer_id: customerId })
-      .first(col, 'created_at', 'updated_at')
+      .where({ customer_id: prefsOwnerId })
+      .first(col)
       .catch(() => ERR);
     if (prefsRow === ERR) return false; // unknown preference → SMS
-    // Provenance, not presence: existing customers were globally BACKFILLED
-    // with default rows, and creation paths seed them too — treating any
-    // row as a choice would veto nearly every customer and make the gate
-    // inert. The portal save handler stamps updated_at on every customer
-    // save, while seeded rows keep updated_at == created_at, so a
-    // meaningful gap = the customer actually saved preferences → honor
-    // their chosen channel and stay on SMS.
-    if (prefsRow) {
-      const created = new Date(prefsRow.created_at).getTime();
-      const updated = new Date(prefsRow.updated_at).getTime();
-      const customerTouched = !Number.isFinite(created) || !Number.isFinite(updated)
-        ? true // unparseable provenance → fail toward SMS
-        : (updated - created) > 2000;
-      if (customerTouched) return false;
-    }
+    // Value-vs-seeded-default, NOT row presence or timestamps: every
+    // mapped column seeds 'sms' (rows were globally backfilled, and
+    // unrelated writes restamp updated_at), so only a non-default value —
+    // 'email' or 'both' — is an unambiguous explicit choice, and it vetoes.
+    // Known limit until prefs grow a 'push' option: re-selecting the 'sms'
+    // default is indistinguishable from never choosing.
+    const value = prefsRow ? String(prefsRow[col] || '').toLowerCase() : '';
+    if (value === 'email' || value === 'both') return false;
   }
   return true;
 }
 
+// Hard ceiling on the whole push fan-out: the APNs/FCM senders carry no
+// request timeout and sendToCustomer walks devices sequentially, so a hung
+// provider connection would otherwise pin a push_first message forever
+// instead of taking the promised SMS fallback.
+const PUSH_ATTEMPT_TIMEOUT_MS = 10000;
+
 async function sendPush(customerId, messageType, body) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
-  const stats = await PushService.sendToCustomer(customerId, {
-    title,
-    body,
-    url: link,
-    category,
-    tag: `push-routed:${messageType}`,
-  });
-  return { stats, delivered: Number(stats && stats.sent) > 0 };
+  let timer;
+  try {
+    const stats = await Promise.race([
+      PushService.sendToCustomer(customerId, {
+        title,
+        body,
+        url: link,
+        category,
+        tag: `push-routed:${messageType}`,
+      }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), PUSH_ATTEMPT_TIMEOUT_MS);
+      }),
+    ]);
+    if (stats === null) {
+      logger.warn(`[push-routing] ${messageType}: push fan-out exceeded ${PUSH_ATTEMPT_TIMEOUT_MS}ms — treating as undelivered`);
+      return { stats: null, delivered: false };
+    }
+    return { stats, delivered: Number(stats && stats.sent) > 0 };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Durable in-app record, written only AFTER delivery is proven so retry
@@ -215,7 +238,7 @@ async function recordBell(customerId, messageType, body) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return { delivered: false };
     if (!(await hasActivePushDevice(customerId))) return { delivered: false };
@@ -239,7 +262,15 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber 
         twilio_sid: null,
         status: 'sent',
         message_type: messageType,
-        metadata: JSON.stringify({ channel: 'push', push_notification_id: notificationId }),
+        // scheduled_sms_log_id keeps recoverStaleScheduledSmsClaims able to
+        // find this row as proof-of-send — without it a crash between this
+        // insert and the scheduler settling its 'sending' row would
+        // reschedule the message and duplicate the push.
+        metadata: JSON.stringify({
+          channel: 'push',
+          push_notification_id: notificationId,
+          ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+        }),
       });
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);

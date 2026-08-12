@@ -410,10 +410,12 @@ async function accountPropertyIds(req) {
 // account's primary profile — so a customer switched to a secondary property
 // still reads/writes the one shared channel. Falls back to the current customer
 // when no primary profile resolves.
-async function resolvePrimaryProfileId(req) {
+// knex is injectable so non-request callers (push-channel-routing) can reuse
+// this exact resolver with a `{ accountId, customerId }`-shaped arg.
+async function resolvePrimaryProfileId(req, knex = db) {
   const accountId = req.accountId || req.customer?.account_id || req.customerId;
   if (!accountId) return req.customerId;
-  const primary = await db('customers')
+  const primary = await knex('customers')
     .where({ account_id: accountId, is_primary_profile: true })
     .first('id')
     .catch(() => null);
@@ -776,5 +778,9 @@ router._private = {
   CHANNEL_DB_COLUMNS,
   SERVICE_CONTACT_CONSENT_VERSION,
 };
+
+// First-class export (not _private): push-channel-routing reuses this exact
+// resolver so channel-preference reads always target the primary profile.
+router.resolvePrimaryProfileId = resolvePrimaryProfileId;
 
 module.exports = router;

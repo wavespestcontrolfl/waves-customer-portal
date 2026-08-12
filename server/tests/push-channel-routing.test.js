@@ -47,6 +47,13 @@ describe('decidePushRoute', () => {
     }
   });
 
+  it('keeps operator-triggered appointment actions out of the policy', () => {
+    // admin-schedule/admin-dispatch fire these via shared helpers that carry
+    // no operatorInitiated provenance — they must stay sms_only.
+    expect(decidePushRoute({ ...base, messageType: 'appointment_confirmation' })).toBe('sms_only');
+    expect(decidePushRoute({ ...base, messageType: 'appointment_cancelled' })).toBe('sms_only');
+  });
+
   it('routes low-stakes informational templates push-first', () => {
     expect(decidePushRoute({ ...base, messageType: 'tech_en_route' })).toBe('push_first');
     expect(decidePushRoute({ ...base, messageType: 'receipt' })).toBe('push_first');
@@ -60,48 +67,68 @@ describe('decidePushRoute', () => {
 });
 
 describe('pushEligibleRuntime', () => {
-  // Minimal chainable knex stub: knex(table).where(...).first(...) resolves
-  // the fixture (or throws when the fixture is an Error).
-  const stubKnex = (tables) => (name) => ({
-    where() { return this; },
-    async first() {
-      const v = tables[name];
-      if (v instanceof Error) throw v;
-      return v;
-    },
-  });
-  const T0 = '2026-08-01T12:00:00Z';
+  // Minimal chainable knex stub. A fixture value may be an object (row), an
+  // Error (throwing lookup), or a function of the LAST where() arg — the
+  // function form lets `customers` serve both the phone lookup (where by id)
+  // and the primary-profile resolver (where by account_id).
+  const stubKnex = (tables) => (name) => {
+    let lastWhere;
+    return {
+      where(arg) { lastWhere = arg; return this; },
+      async first() {
+        let v = tables[name];
+        if (typeof v === 'function') v = v(lastWhere);
+        if (v instanceof Error) throw v;
+        return v;
+      },
+    };
+  };
 
-  it('routes when the recipient is the account holder and prefs are seeded defaults', async () => {
+  it('routes when the recipient is the account holder and prefs sit at the seeded sms default', async () => {
     const knex = stubKnex({
-      customers: { phone: '+1 (941) 555-0123' },
-      notification_prefs: { en_route_channel: 'sms', created_at: T0, updated_at: T0 },
+      customers: { phone: '+1 (941) 555-0123', account_id: null },
+      notification_prefs: { en_route_channel: 'sms' },
     });
     await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(true);
   });
 
   it('routes when no prefs row exists at all', async () => {
-    const knex = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: undefined });
+    const knex = stubKnex({ customers: { phone: '9415550123', account_id: null }, notification_prefs: undefined });
     await expect(_test.pushEligibleRuntime('c-1', '+19415550123', 'tech_en_route', knex)).resolves.toBe(true);
   });
 
-  it('vetoes when the customer actually saved preferences (updated_at moved)', async () => {
+  it('vetoes on an explicit non-default channel choice (email/both)', async () => {
+    for (const value of ['email', 'both']) {
+      const knex = stubKnex({
+        customers: { phone: '9415550123', account_id: null },
+        notification_prefs: { en_route_channel: value },
+      });
+       
+      await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
+    }
+  });
+
+  it('reads the channel choice from the account PRIMARY profile, not the selected property', async () => {
     const knex = stubKnex({
-      customers: { phone: '9415550123' },
-      notification_prefs: { en_route_channel: 'sms', created_at: T0, updated_at: '2026-08-03T09:00:00Z' },
+      customers: (where) => (where && where.account_id
+        ? { id: 'primary-1' } // resolver: primary profile of the account
+        : { phone: '9415550123', account_id: 'acct-1' }),
+      notification_prefs: (where) => (where && where.customer_id === 'primary-1'
+        ? { en_route_channel: 'both' } // primary profile's explicit choice
+        : { en_route_channel: 'sms' }),
     });
-    await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
+    await expect(_test.pushEligibleRuntime('c-2', '9415550123', 'tech_en_route', knex)).resolves.toBe(false);
   });
 
   it('vetoes secondary-contact recipients (to is not the account holder phone)', async () => {
-    const knex = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: undefined });
+    const knex = stubKnex({ customers: { phone: '9415550123', account_id: null }, notification_prefs: undefined });
     await expect(_test.pushEligibleRuntime('c-1', '9415559999', 'tech_en_route', knex)).resolves.toBe(false);
   });
 
   it('vetoes on customer or prefs lookup failure', async () => {
     const bad = stubKnex({ customers: new Error('db down') });
     await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', bad)).resolves.toBe(false);
-    const badPrefs = stubKnex({ customers: { phone: '9415550123' }, notification_prefs: new Error('db down') });
+    const badPrefs = stubKnex({ customers: { phone: '9415550123', account_id: null }, notification_prefs: new Error('db down') });
     await expect(_test.pushEligibleRuntime('c-1', '9415550123', 'tech_en_route', badPrefs)).resolves.toBe(false);
   });
 });
