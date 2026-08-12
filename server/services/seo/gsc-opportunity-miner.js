@@ -3599,7 +3599,23 @@ class GscOpportunityMiner {
       opp.score = total;
       opp.score_breakdown = breakdown;
       opp.action_type = actionForOpportunity(opp);
-      opp.dedupe_key = dedupeKey(opp);
+      // TARGET-keyed on the city-service route. dedupeKey falls back to the
+      // QUERY when a row has no page_url, so N distinct weak queries for one
+      // (service, city) mint N keys that all create-or-refresh the SAME
+      // page — the runner then drafts that page N times. This is the
+      // per-query collapse above, one level up: that one dedupes the
+      // classifier splits OF a query, this one dedupes the queries OF a
+      // target. Keying on the target lets persistAll's existing
+      // highest-score collapse elect one row per page instead of adding a
+      // parallel arbitration (uncapped pre-push audit P1).
+      //
+      // The blog route stays QUERY-keyed: cityless candidates each become
+      // their own post, so collapsing them would silently drop demand. It
+      // cannot collide with a city-service key either — the blog route only
+      // fires when the city is absent, and a query is never empty.
+      opp.dedupe_key = opp.action_type === 'create_or_refresh_city_service_page'
+        ? dedupeKey({ ...opp, query: null })
+        : dedupeKey(opp);
       out.push(opp);
     }
     if (uncovered) {

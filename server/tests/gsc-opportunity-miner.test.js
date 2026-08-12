@@ -469,6 +469,45 @@ describe('freshness + split-collapse contracts (source shape)', () => {
     expect(src).toMatch(/\(persistable && !existing\.persistable\)/);
   });
 
+  test('no_content_yet keys city-service rows on the TARGET, not the query', () => {
+    // The collapse above dedupes the classifier splits OF one query. This is
+    // the level above it: N DISTINCT queries for one (service, city) all
+    // create-or-refresh the SAME page, so query-keyed rows would each mint
+    // their own queue row and the runner would draft that page N times.
+    const cityService = (query) => {
+      const opp = {
+        bucket: 'no_content_yet', query, page_url: null, service: 'termite', city: 'sarasota',
+      };
+      opp.action_type = actionForOpportunity(opp);
+      return opp;
+    };
+    const a = cityService('termite treatment cost sarasota');
+    const b = cityService('termite inspection sarasota fl');
+    expect(a.action_type).toBe('create_or_refresh_city_service_page');
+    expect(b.action_type).toBe('create_or_refresh_city_service_page');
+    // Same target ⇒ ONE key, so persistAll's highest-score collapse elects
+    // a single row per page.
+    expect(dedupeKey({ ...a, query: null })).toBe(dedupeKey({ ...b, query: null }));
+    // Query-keyed — what the bug looked like — would have split them.
+    expect(dedupeKey(a)).not.toBe(dedupeKey(b));
+
+    // The blog route must STAY per-query: each cityless candidate is its own
+    // post, so collapsing them would silently drop demand.
+    const blogA = {
+      bucket: 'no_content_yet', query: 'what do termite swarmers look like', page_url: null, service: 'termite', city: null,
+    };
+    const blogB = { ...blogA, query: 'how to identify termite damage' };
+    expect(actionForOpportunity(blogA)).toBe('new_supporting_blog');
+    expect(dedupeKey(blogA)).not.toBe(dedupeKey(blogB));
+    // …and a blog key can never collide with a target key: the blog route
+    // only fires with no city, and a query is never empty.
+    expect(dedupeKey(blogA)).not.toBe(dedupeKey({ ...a, query: null }));
+  });
+
+  test('the city-service branch drops the query from the key in mineNoContentYet', () => {
+    expect(src).toMatch(/opp\.dedupe_key = opp\.action_type === 'create_or_refresh_city_service_page'[\s\S]{0,160}dedupeKey\(\{ \.\.\.opp, query: null \}\)/);
+  });
+
   test('freshness is proven BEFORE an empty mine is accepted as "no signal"', () => {
     // A long enough sync outage empties the 28-day window entirely; an
     // early `return []` before the coverage guard would look like a clean
@@ -1042,6 +1081,44 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
       dedupe_key: 'listicle_family::fam::ants+florida+kinds',
     }]);
     expect(persisted).toBe(0);
+  });
+
+  test('two no_content_yet queries for one city-service target persist as ONE row', async () => {
+    // End-to-end proof of the target-keyed dedupe: the highest-score
+    // candidate wins the existing winners-map collapse, so the runner gets
+    // one create-or-refresh for the page instead of one per query.
+    const db = require('../models/db');
+    const calls = [];
+    db.raw = jest.fn((sql, bindings) => {
+      calls.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
+    });
+    const { GscOpportunityMiner, _internals } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const target = (query, score) => {
+      const opp = {
+        bucket: 'no_content_yet',
+        action_type: 'create_or_refresh_city_service_page',
+        query,
+        page_url: null,
+        service: 'termite',
+        city: 'sarasota',
+        score,
+        score_breakdown: { base: score },
+        signal_metadata: { impressions: 80 },
+      };
+      opp.dedupe_key = _internals.dedupeKey({ ...opp, query: null });
+      return opp;
+    };
+    const persisted = await miner.persistAll([
+      target('termite treatment cost sarasota', 52),
+      target('termite inspection sarasota fl', 61),
+    ]);
+    expect(persisted).toBe(1);
+    expect(calls.length).toBe(1);
+    // The surviving row is the higher-scoring candidate.
+    expect(calls[0].bindings).toContain(61);
+    expect(calls[0].bindings).not.toContain(52);
   });
 });
 
