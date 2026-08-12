@@ -47,9 +47,11 @@ const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-
 
 const LEAD_DAYS = 3;
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
-// Mirror of CALL_OUTBOUND_REVIEW_SOURCE_ACTION (call-booking-source-actions)
+// Mirror of OFFICE_REVIEW_PENDING_SOURCE_ACTIONS (call-booking-source-actions)
 // — required at module top to avoid a cycle with call-recording-processor.
-const OUTBOUND_REVIEW_SOURCE_ACTION = require('./call-booking-source-actions').CALL_OUTBOUND_REVIEW_SOURCE_ACTION;
+// Voice-agent bookings share the outbound-review treatment: pending rows stay
+// excluded from the sweep; the office confirmation is the clearance decision.
+const OFFICE_REVIEW_SOURCE_ACTIONS = require('./call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS;
 const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const BATCH_CAP = 25;
 
@@ -156,10 +158,10 @@ async function runSweep(dbh = db) {
       .where((nonCall) => nonCall
         .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
         .whereNull('s.source_call_log_id')
-        .where((sa) => sa.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION)))
+        .where((sa) => sa.whereNull('s.source_action').orWhereNotIn('s.source_action', OFFICE_REVIEW_SOURCE_ACTIONS)))
       .orWhereNotNull('s.call_sms_cleared_at')
       .orWhere((outboundConfirmed) => outboundConfirmed
-        .where('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION)
+        .whereIn('s.source_action', OFFICE_REVIEW_SOURCE_ACTIONS)
         .where('s.status', 'confirmed')))
     // Freshly created visits are excluded for one run (codex r2 P2): the
     // realistic cross-path double-invite is a booking-time trigger still in
@@ -220,7 +222,7 @@ async function runSweep(dbh = db) {
       status: visit.status,
       isCallback: visit.is_callback === true,
       reServiceLabel: isAlwaysFreeServiceType(visit.service_type),
-      outboundReviewPending: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && visit.status !== 'confirmed',
+      outboundReviewPending: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && visit.status !== 'confirmed',
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
     });

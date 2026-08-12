@@ -381,12 +381,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // idempotent belt (onConflict ignore).
     if (String(toStatus || '') === 'confirmed') {
       try {
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+        // Voice-agent bookings share the lifecycle: office confirmation is
+        // their booking moment too (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).
+        const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
         const confirmedRow = await t('scheduled_services')
           .where({ id: jobId })
           .first('source_action', 'customer_id');
         if (confirmedRow
-          && confirmedRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(confirmedRow.source_action)
           && confirmedRow.customer_id) {
           await require('./inspection-credit').markBookingForInspectionCredit(t, {
             customerId: confirmedRow.customer_id,

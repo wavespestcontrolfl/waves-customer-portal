@@ -3307,12 +3307,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // day-of transition — advancing it straight to en_route texts the customer a
     // tracking link, bypassing the review (and its reminder-arming confirm hook).
     {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+      // Covers outbound-callback bookings AND voice-agent bookings — same
+      // office-review lifecycle (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).
+      const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
+      if (isPendingOutboundReviewBooking(svc) && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
         return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          error: 'This AI-created booking is pending office review — confirm it before dispatching.',
           code: 'outbound_review_unconfirmed',
         });
       }
@@ -3621,8 +3621,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // outbound_booking_review card) — shared hook so the two can't drift.
     // Post-commit + best-effort, same as every other block below.
     {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+      // Voice-agent bookings share the lifecycle (OFFICE_REVIEW_PENDING_
+      // SOURCE_ACTIONS): office confirm is what arms reminders for them too.
+      const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)) {
         const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
         await runOutboundReviewConfirmHook(db, svc, 'admin-dispatch');
       }
@@ -12347,13 +12349,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // without the confirmation hook's reminder/lead/triage side effects. Confirm
     // it first, then reschedule.
     {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      // Covers outbound-callback bookings AND voice-agent bookings — same
+      // office-review lifecycle (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).
+      const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
       const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
         .first('source_action', 'status', 'customer_confirmed');
-      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
+      if (isPendingOutboundReviewBooking(reviewRow)) {
         return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
+          error: 'This AI-created booking is pending office review — confirm it before rescheduling.',
           code: 'outbound_review_unconfirmed',
         });
       }

@@ -628,10 +628,10 @@ async function moveStopsToDay(input) {
         // no handleReschedule cover (which would claim its still-pending
         // confirmation slot) — the office reviews it first, same guard as
         // the dispatch routes.
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../call-booking-source-actions');
-        const unreviewedCallback = s.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-          && String(s.status) === 'pending'
-          && !s.customer_confirmed;
+        // Covers outbound-callback AND voice-agent bookings — same
+        // office-review lifecycle (see call-booking-source-actions).
+        const { isPendingOutboundReviewBooking } = require('../call-booking-source-actions');
+        const unreviewedCallback = isPendingOutboundReviewBooking(s);
         if (unreviewedCallback) {
           notificationFailures.push({ id: s.id, reason: 'Pending office review (outbound-callback booking) — not texted' });
         } else if (!start) {

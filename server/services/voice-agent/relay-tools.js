@@ -189,14 +189,45 @@ const CONTEXT_TOOLS = [
 ];
 const CONTEXT_TOOL_NAMES = CONTEXT_TOOLS.map((t) => t.name);
 
+// Phase B's ONE write — registered only while BOTH gates are on
+// (VOICE_RELAY_CONTEXT_ENABLED + GATE_VOICE_AI_BOOKING, each fail-closed).
+// It places a PENDING office-review booking, never a confirmed appointment,
+// and sends nothing to the customer. Body lives in relay-booking.js.
+const BOOKING_TOOLS = [
+  {
+    name: 'request_booking',
+    description:
+      'Place a booking REQUEST for a slot that find_slots or get_availability ' +
+      'returned on THIS call, for the matched caller\'s account or a ' +
+      'customer_ref from lookup_customer. This does NOT confirm an appointment ' +
+      '— it creates a pending request a Waves team member reviews and confirms ' +
+      'with the customer. The slot is re-checked against live availability ' +
+      'first; if it is gone, offer fresh times. Never tell the caller the time ' +
+      'is locked in — a team member will text or call to confirm.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'The chosen slot\'s date, exactly as the availability tool returned it (YYYY-MM-DD)' },
+        time: { type: 'string', description: 'The chosen slot\'s start time, exactly as returned (e.g. "9:00 AM")' },
+        service: { type: 'string', description: 'What the caller wants, in their own words (mapped to a real Waves service; unclear asks book a Waves Assessment)' },
+        customer_ref: { type: 'string', description: 'A customer_ref from lookup_customer on THIS call, when booking for a looked-up account. Omit for the matched caller\'s own account.' },
+      },
+      required: ['date', 'time'],
+    },
+  },
+];
+
 /**
  * The tool set to register for a relay session. Context tools appear ONLY
- * while the context gate is on (checked at call time, not module load, so an
+ * while the context gate is on; request_booking additionally needs
+ * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
 function activeTools() {
   const { isContextEnabled } = require('./relay-context');
-  return isContextEnabled() ? [...TOOLS, ...CONTEXT_TOOLS] : TOOLS;
+  if (!isContextEnabled()) return TOOLS;
+  const { isBookingEnabled } = require('./relay-booking');
+  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS] : [...TOOLS, ...CONTEXT_TOOLS];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -301,6 +332,13 @@ function availabilityResultToText(res) {
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (name === 'request_booking') {
+      // Both gates re-checked inside (fail closed, defense in depth); the
+      // body re-validates the slot through the live availability engine and
+      // creates ONLY a pending office-review row — no customer comms.
+      const { requestBookingText } = require('./relay-booking');
+      return await requestBookingText(input, ctx);
+    }
     if (CONTEXT_TOOL_NAMES.includes(name)) {
       const relayContext = require('./relay-context');
       // Double gate (defense in depth): even if a stale tool list registered
@@ -410,6 +448,10 @@ async function executeTool(name, input = {}, ctx = {}) {
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }
+    if (name === 'request_booking') {
+      return 'The booking request could not be placed — NOTHING was booked. Tell the caller a Waves '
+        + 'team member will call to schedule, and capture the lead with their preferred time.';
+    }
     if (CONTEXT_TOOL_NAMES.includes(name)) {
       return 'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
     }
@@ -417,4 +459,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText };

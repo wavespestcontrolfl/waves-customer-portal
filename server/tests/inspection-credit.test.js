@@ -1105,7 +1105,9 @@ describe('closeout route wiring — source contracts (the completion route is to
     const markerAt = jobStatus.indexOf('markBookingForInspectionCredit(t, {', confirmAt);
     expect(confirmAt).toBeGreaterThan(-1);
     expect(markerAt).toBeGreaterThan(confirmAt); // marker inside the confirm branch, on the trx
-    expect(jobStatus).toContain('CALL_OUTBOUND_REVIEW_SOURCE_ACTION'); // scoped to outbound-review rows
+    // Scoped to the office-review pending set (outbound-review + voice-agent
+    // bookings — call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).
+    expect(jobStatus).toContain('OFFICE_REVIEW_PENDING_SOURCE_ACTIONS'); // scoped to office-review rows
   });
 
   it('the dispatch feed serializes the lookup-failed marker beside credit availability (r33 P2)', () => {

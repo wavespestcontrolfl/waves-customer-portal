@@ -124,13 +124,35 @@ function contextPromptAddendum() {
   ].join('\n');
 }
 
+// Appended ONLY while GATE_VOICE_AI_BOOKING is also on (relay-booking.js,
+// both gates fail-closed). With the booking gate off the prompt is identical
+// to the context-only prompt and request_booking is not registered.
+function bookingPromptAddendum() {
+  return [
+    '',
+    'BOOKING REQUESTS (request_booking):',
+    '- After the caller picks a time that find_slots or get_availability returned on THIS',
+    '  call, you may call request_booking with that exact date and time. It places a',
+    '  PENDING REQUEST the office reviews — it does NOT confirm an appointment.',
+    '- Tell the caller a Waves team member will text or call shortly to confirm the final',
+    '  time. NEVER say the time is locked in, booked, confirmed, or guaranteed.',
+    '- If the tool says the time is gone, run find_slots again and offer fresh options.',
+    '- Booking needs an account: the matched caller\'s own, or a customer_ref from',
+    '  lookup_customer. For a brand-new caller, capture the lead with their preferred time',
+    '  instead — a team member will call to book them.',
+  ].join('\n');
+}
+
 /**
  * The base system prompt for a session. contextEnabled=false returns the
  * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
+ * The booking addendum appears only while GATE_VOICE_AI_BOOKING is ALSO on.
  */
 function buildBasePrompt(contextEnabled) {
   if (!contextEnabled) return SYSTEM_PROMPT;
-  return SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
+  const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
+  const { isBookingEnabled } = require('./relay-booking');
+  return isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base;
 }
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
