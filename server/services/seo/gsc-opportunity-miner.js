@@ -1573,12 +1573,18 @@ class GscOpportunityMiner {
   }
 
   // The mapped page a low-CTR query actually ranks with, per query — see
-  // pickCtrRewriteTargetPage for the selection rule.
-  async _rankingPageByQuery(queries, since) {
-    if (!queries.length) return new Map();
+  // pickCtrRewriteTargetPage for the selection rule. Rows from domains
+  // without FRESH map coverage are excluded: syncQueryPageMap swallows
+  // per-domain failures, so a stale row could otherwise nominate an
+  // obsolete page and aim an automated rewrite at the wrong URL (audit
+  // P1 #7). No covered domains → empty map → every candidate fails closed
+  // to do_not_publish.
+  async _rankingPageByQuery(queries, since, coveredDomains = new Set()) {
+    if (!queries.length || !coveredDomains.size) return new Map();
     const rows = await db('gsc_query_page_map')
       .where('date_from', '>=', since)
       .whereIn('query', queries)
+      .whereRaw('lower(domain) = ANY(?)', [Array.from(coveredDomains)])
       .select('query')
       .select(db.raw(`${CANON_URL_SQL} as page_url`))
       .sum('impressions as impressions')
@@ -1742,6 +1748,10 @@ class GscOpportunityMiner {
       .where('date', '>=', since)
       .where('is_branded', false)
       .select('query', 'service_category', 'city_target')
+      // Contributing domains — the rewrite target is trustworthy only if
+      // EVERY one of them has fresh map coverage (same rule as
+      // no_content_yet).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
@@ -1757,16 +1767,19 @@ class GscOpportunityMiner {
     // Target the page the query ACTUALLY ranks with (true query→page
     // rows), not the service+city segment's biggest page: a rewrite PR
     // must edit the URL whose snippet is losing the clicks. Unmapped
-    // query → null page → do_not_publish (fail closed, nothing to
-    // rewrite).
+    // query, or any contributing domain without fresh map coverage →
+    // null page → do_not_publish (fail closed, nothing to rewrite).
+    const covered = await this._queryPageMapCoveredDomains(since);
     const rankingPages = await this._rankingPageByQuery(
-      filtered.map((r) => r.query), since
+      filtered.map((r) => r.query), since, covered
     );
 
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
-      const pageUrl = rankingPages.get(r.query) || null;
+      const pageUrl = queryDomainsCovered(r.domains, covered)
+        ? (rankingPages.get(r.query) || null)
+        : null;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
