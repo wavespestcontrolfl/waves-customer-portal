@@ -188,6 +188,37 @@ describe('customer pricing AI helpers', () => {
     expect(option.estimatedPlanMonthly).toBeNull();
     expect(option.notes.some(note => note.includes('current billing differs'))).toBe(true);
   });
+
+  test('partial lookup evidence merges seeded features FIELD-BY-FIELD (pre-push #3367 r11 P0)', async () => {
+    // Low-graded imagery with a county-backed pool: only the record-backed
+    // pool is adopted from the lookup, and every other feature field must
+    // stay open to the accepted-estimate seed. The old all-or-nothing
+    // featuresFromLookup flag discarded the whole seed whenever ANY lookup
+    // feature was adopted, pricing a bare-property rate for a home whose
+    // accepted estimate carried the modifiers.
+    const lowTrustPoolLookup = async () => ({
+      enriched: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+        pool: 'YES', poolSource: 'county', aiConfidence: 30,
+      },
+      propertyRecord: {},
+    });
+    const run = (features) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lowTrustPoolLookup,
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-seed-merge' }),
+      propertySeed: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        ...(features ? { features } : {}),
+      },
+    });
+    const withSeededCage = await run({ poolCage: true, poolCageSize: 'large' });
+    const bareSeed = await run(null);
+    expect(withSeededCage.options.length).toBeGreaterThan(0);
+    expect(bareSeed.options.length).toBeGreaterThan(0);
+    expect(withSeededCage.options[0].perVisit).toBeGreaterThan(bareSeed.options[0].perVisit);
+  });
 });
 
 describe('count-based WaveGuard tier truth', () => {

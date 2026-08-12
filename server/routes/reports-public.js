@@ -1091,7 +1091,12 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
           || !clickedMode || clickedMode !== crossSell.mode
           || (crossSell.mode === 'priced'
             ? !(clickedPer !== null && clickedPer > 0
-              && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005)
+              && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005
+              // The clicked OPTION must be the recomputed option too
+              // (pre-push codex r11 P1): a preferred-variant change that
+              // happens to keep the same per-application price must not
+              // snapshot a different cadence/tier than the customer saw.
+              && String(metadata.optionId || '') === String(crossSell.option?.id || ''))
             : !(rawPer === null || rawPer === undefined));
         if (offerMismatch) {
           return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });

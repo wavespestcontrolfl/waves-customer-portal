@@ -326,13 +326,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       label: OFFER_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
       // Server-trusted copy stance (codex #3367 PR r2): a customer with no
-      // recurring ownership at all (one-time treatment, nothing seeded, no
-      // plan-rate row) has no plan to "add" to — the card, CTA, and stored
-      // request subject all say "Start" instead. NOTE: the modeled
-      // current-service inventory (result.currentServices) deliberately
-      // never rides this payload — it's a public bearer-token surface and
-      // the card has no use for it.
-      relationship: evidencedOwnedKeys.length ? 'add' : 'start',
+      // recurring ownership at all (one-time treatment, nothing seeded)
+      // has no plan to "add" to — the card, CTA, and stored request
+      // subject all say "Start" instead. Derived from PROPERTY-SCOPED
+      // evidence only (pre-push r11 P1): a stale or other-property ledger
+      // row must not flip the copy any more than the ladder. NOTE: the
+      // modeled current-service inventory (result.currentServices)
+      // deliberately never rides this payload — it's a public bearer-token
+      // surface and the card has no use for it.
+      relationship: ladderEvidence.length ? 'add' : 'start',
       // Card-only serialization (codex #3367 r7): this rides a PUBLIC
       // customer payload governed by the per-application rule, so monthly/
       // annual/plan-total figures and the panel's "$X/mo" request prose

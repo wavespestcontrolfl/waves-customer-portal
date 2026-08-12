@@ -408,10 +408,15 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     complexity: 'moderate',
     irrigation: false,
   };
-  // Whether ANY feature evidence was adopted from the lookup (trusted vision
+  // WHICH feature fields carried adopted lookup evidence (trusted vision
   // read or record-backed pool/cage). Read by the seed block below: seeded
-  // feature evidence may only stand in when the lookup provided none.
-  let featuresFromLookup = false;
+  // feature evidence fills FIELD-BY-FIELD into the gaps the lookup left
+  // (pre-push codex r11 P0: the old all-or-nothing flag let a lone
+  // record-backed pool discard the seed's shrub/tree/complexity/irrigation
+  // evidence that priced the accepted estimate — a bare-property rate
+  // would price-lock for a home whose accepted estimate carried the
+  // modifiers).
+  const lookupFeatureKeys = new Set();
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -565,15 +570,33 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       if (!featuresTrusted) {
         if (poolFeaturesAreRecordBacked(p)) {
           features.pool = p.pool === 'YES' || features.pool;
-          featuresFromLookup = true;
+          lookupFeatureKeys.add('pool');
         }
         if (poolCageIsRecordBacked(p)) {
           features.poolCage = true;
-          if (p.poolCageSize) features.poolCageSize = String(p.poolCageSize).toLowerCase();
-          featuresFromLookup = true;
+          lookupFeatureKeys.add('poolCage');
+          if (p.poolCageSize) {
+            features.poolCageSize = String(p.poolCageSize).toLowerCase();
+            lookupFeatureKeys.add('poolCageSize');
+          }
         }
       } else {
-        featuresFromLookup = true;
+        // A field is lookup-backed only when the trusted payload actually
+        // carried a value for it — a silent field keeps its default here
+        // and stays open for the seed's fill below.
+        for (const [key, present] of Object.entries({
+          pool: !!p.pool,
+          poolCage: !!p.poolCage,
+          poolCageSize: !!p.poolCageSize,
+          nearWater: !!p.nearWater,
+          shrubs: !!p.shrubDensity,
+          trees: !!p.treeDensity,
+          complexity: !!p.landscapeComplexity,
+          irrigation: p.irrigationVisible !== undefined && p.irrigationVisible !== null,
+          treeCount: lookupTreeCountIsTrustworthy(p),
+        })) {
+          if (present) lookupFeatureKeys.add(key);
+        }
       }
       features = !featuresTrusted ? features : {
         ...features,
@@ -631,15 +654,21 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       stories = propertySeed.stories;
       storiesFromSeed = true;
     }
-    // Non-dimensional pricing evidence replays too (codex #3367 PR r1):
-    // features (pool/cage/densities), property type, and structural facts
-    // all move money — pricing a seeded property against the resolver's
-    // non-observational defaults would price-lock a bare-property rate for
-    // a home whose accepted estimate carried the modifiers. Same fill-only
-    // doctrine: lookup/profile evidence always wins.
-    if (!featuresFromLookup && propertySeed.features
+    // Non-dimensional pricing evidence replays too (codex #3367 PR r1,
+    // field-by-field per pre-push r11 P0): features (pool/cage/densities),
+    // property type, and structural facts all move money — pricing a
+    // seeded property against the resolver's non-observational defaults
+    // would price-lock a bare-property rate for a home whose accepted
+    // estimate carried the modifiers. Fill-only, PER FIELD: a lookup-backed
+    // field always wins; every other field takes the seed's evidence over
+    // the bare default.
+    if (propertySeed.features
       && typeof propertySeed.features === 'object' && !Array.isArray(propertySeed.features)) {
-      features = { ...features, ...propertySeed.features };
+      for (const [key, value] of Object.entries(propertySeed.features)) {
+        if (value === undefined || value === null || value === '') continue;
+        if (lookupFeatureKeys.has(key)) continue;
+        features[key] = value;
+      }
     }
     if (!customer.property_type && propertyType === 'single_family'
       && typeof propertySeed.propertyType === 'string' && propertySeed.propertyType) {
