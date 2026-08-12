@@ -581,8 +581,47 @@ async function pricingText(input = {}) {
     + 'Quote ONLY these numbers — never negotiate, discount, or estimate beyond them.';
 }
 
+// ── get_services_catalog — the admin catalog's customer-facing names ───────
+
+/**
+ * The services Waves offers, from the admin catalog. Public information (no
+ * tier gate beyond the context gate) — the brand-new prospect asking "what do
+ * you do?" is exactly who this is for.
+ *
+ * Reuses loadBookableCallServices (services/call-booking-catalog.js) — the
+ * same is_active + booking_enabled catalog read the call pipeline books
+ * against, so the agent can never name a service the office can't book.
+ *
+ * NAMES ONLY, deliberately: services.description is admin-editable free text
+ * that is neither compliance-curated nor price-synced (a live row once carried
+ * a banned "safe ... treatment" claim and a stale embedded price schedule),
+ * which is why the anonymous-agent surface (routes/public-mcp.js) excludes it
+ * too. Prices are absent here for the same reason the catalog's own resolver
+ * returns NULL rather than 0 for an unpriced row — get_pricing is the only
+ * price path.
+ */
+async function servicesCatalogText() {
+  const db = require('../../models/db');
+  const { loadBookableCallServices } = require('../call-booking-catalog');
+  const rows = await loadBookableCallServices(db);
+  const names = [...new Set(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => promptSafe(row && (row.name || row.short_name), 60))
+      .filter(Boolean),
+  )];
+  if (!names.length) {
+    return 'The service list is not available right now. Describe what Waves does in general terms only — '
+      + 'pest control, lawn care, mosquito, tree and shrub, termite and rodent work — and let a team member '
+      + 'confirm specifics. Do not invent a service name.';
+  }
+  return `Services Waves offers (customer-facing names, straight from the catalog): ${names.join('; ')}. `
+    + 'Name only what is on this list — never invent or promise a service. For what something costs, call '
+    + 'get_pricing; this list carries no prices.';
+}
+
 module.exports = {
   isContextEnabled,
+  servicesCatalogText,
   resolveCallerContext,
   findUniqueCustomerByAni,
   buildKnownCallerBlock,

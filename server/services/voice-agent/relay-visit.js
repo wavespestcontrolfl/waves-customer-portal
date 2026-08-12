@@ -1,0 +1,289 @@
+/**
+ * Voice-relay Phase D — visit-day surfaces: get_today_eta and
+ * get_service_report. READ-ONLY, gated (VOICE_RELAY_CONTEXT_ENABLED, checked
+ * in relay-tools before either body runs).
+ *
+ * get_today_eta answers the #1 existing-customer call — "when is the tech
+ * getting here?". It reads the SAME row shape the customer-facing surfaces do:
+ *   - scheduled_date is a DATE and the window lives in
+ *     scheduled_services.window_start/window_end (TIME) — the fields
+ *     routes/schedule.js (GET /api/schedule, /next) and routes/track-public.js
+ *     render. When a row carries no window, appointment_reminders
+ *     .appointment_time (the reminder rail's stamped clock time, cancelled =
+ *     false) is the fallback, mirroring how the reminder/appointment emails
+ *     source the spoken time.
+ *   - "today" is TODAY IN ET via etDateString() — never a naive UTC
+ *     comparison (the timestamptz window leak; scheduled_date is a DATE so an
+ *     exact ET-day string equality is the correct predicate).
+ *   - the dispatch-owned pending guard (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+ *     is the same one GET /api/schedule/next applies: a never-confirmed
+ *     dispatch-created row is not the customer's appointment.
+ *
+ * EN-ROUTE is a READ-ONLY PEEK at the tracker lifecycle columns the
+ * track/en-route work writes (scheduled_services.track_state + en_route_at /
+ * arrived_at, the columns applyTrackLifecycleCas in services/rebooker.js CASes
+ * on and track-transitions.markEnRoute stamps). It mirrors track-public.js's
+ * customer-facing state derivation: terminal OPERATIONAL status wins over a
+ * stale track_state (a cancelled/completed visit whose track_state was never
+ * moved must never be announced as "on the way"). Nothing here writes.
+ *
+ * get_service_report deepens Phase A's visit summary along the SAME
+ * customer-facing shaping helpers:
+ *   - the typedReportDelivery suppression predicate (routes/services.js
+ *     suppressesCustomerArtifacts) — anything but auto_send keeps findings,
+ *     products and notes off customer surfaces, and the phone is one;
+ *   - customerSafeServiceNotes (services/project-types.js) for the note text;
+ *   - service_findings + service_products, the SAME tables the customer
+ *     report renders from (services/service-report/report-data.js), never raw
+ *     internal notes and never field_flags (internal QA markers);
+ *   - COMPLIANCE LANGUAGE IS NEVER COMPOSED HERE: re-entry wording comes only
+ *     from buildReentryContext().customerSummary
+ *     (services/service-report/reentry.js) — the one sanctioned sentence —
+ *     and product/application wording says "per application", never
+ *     "per visit". No re-entry claim is invented, and nothing is ever called
+ *     "safe".
+ */
+
+const logger = require('../logger');
+
+const SERVICE_REPORT_FINDING_LIMIT = 6;
+const SERVICE_REPORT_APPLICATION_LIMIT = 6;
+
+// The tracker lifecycle values the customer-facing track page treats as live.
+const EN_ROUTE_TRACK_STATE = 'en_route';
+const ON_PROPERTY_TRACK_STATES = new Set(['on_property', 'on_site']);
+// Terminal OPERATIONAL statuses that outrank a stale track_state (same
+// precedence as routes/track-public.js).
+const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+
+/** 'HH:MM:SS' | '9:00 AM' | Date → speakable clock time, else null. */
+function speakClock(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const { formatETTime } = require('../../utils/datetime-et');
+    return formatETTime(value) || null;
+  }
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return /^\d{1,2}(:\d{2})?\s*(AM|PM)$/i.test(raw) ? raw.toUpperCase() : null;
+  let hour = parseInt(m[1], 10);
+  const minute = m[2];
+  if (!Number.isFinite(hour) || hour > 23) return null;
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12 || 12;
+  return minute === '00' ? `${hour} ${suffix}` : `${hour}:${minute} ${suffix}`;
+}
+
+// ── get_today_eta ──────────────────────────────────────────────────────────
+
+/**
+ * Today's (ET) appointment for this customer, with a read-only peek at the
+ * tracker lifecycle. Returns model-facing text; never writes.
+ */
+async function todayEtaText(customerId, { tier = 'full' } = {}) {
+  const redacted = tier !== 'full';
+  const db = require('../../models/db');
+  const { etDateString } = require('../../utils/datetime-et');
+  const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../call-booking-source-actions');
+  const today = etDateString();
+  const row = await db('scheduled_services')
+    .where({ customer_id: customerId })
+    // Exact ET-day equality: scheduled_date is a DATE column, so this is the
+    // whole of "today in ET" with no timestamptz window to leak.
+    .where('scheduled_date', today)
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .where((qb) => qb
+      .whereNull('source_action')
+      .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+      .orWhereNot('status', 'pending')
+      .orWhere('customer_confirmed', true))
+    .orderBy('window_start', 'asc')
+    .first('id', 'status', 'service_type', 'window_start', 'window_end',
+      'track_state', 'en_route_at', 'arrived_at', 'customer_confirmed');
+  if (!row) {
+    return 'No appointment on the schedule for this account today. Do NOT guess at a time and do NOT '
+      + 'claim a technician has left — check get_account_overview for the next scheduled visit instead.';
+  }
+
+  // Looked-up account: existence only. Same doctrine as the redacted account
+  // tier (which already withholds the appointment window) — and live
+  // technician position is never disclosed to an unverified voice.
+  if (redacted) {
+    return 'There IS a visit on today\'s schedule for that account. Do not state the time window and do not '
+      + 'describe the technician\'s live status — the account holder can see it in the portal, or the office '
+      + 'can go over it with them directly.';
+  }
+
+  let windowStart = speakClock(row.window_start);
+  let windowEnd = speakClock(row.window_end);
+  if (!windowStart) {
+    // Fallback to the reminder rail's stamped clock time (the same
+    // appointment_time the confirmation/reminder messages speak).
+    const reminder = await db('appointment_reminders')
+      .where({ scheduled_service_id: row.id, cancelled: false })
+      .orderBy('appointment_time', 'asc')
+      .first('appointment_time')
+      .catch(() => null);
+    if (reminder && reminder.appointment_time) windowStart = speakClock(reminder.appointment_time);
+  }
+
+  const { promptSafe } = require('./relay-context');
+  const service = promptSafe(row.service_type, 60);
+  const parts = [];
+  if (windowStart && windowEnd) parts.push(`Today's appointment window is ${windowStart} to ${windowEnd}`);
+  else if (windowStart) parts.push(`Today's appointment starts around ${windowStart}`);
+  else parts.push('There is an appointment on the schedule for today, but no time window is set on it');
+  if (service) parts[0] += ` for ${service}`;
+  parts[0] += '.';
+
+  // READ-ONLY tracker peek. Terminal operational status outranks a stale
+  // track_state — a completed or cancelled visit is never "on the way".
+  const status = String(row.status || '');
+  if (TERMINAL_STATUSES.has(status)) {
+    parts.push(status === 'completed'
+      ? 'That visit is already marked complete for today.'
+      : 'That visit is no longer active on today\'s schedule — do not promise an arrival; a team member can sort it out.');
+  } else if (ON_PROPERTY_TRACK_STATES.has(String(row.track_state))) {
+    parts.push('The technician is already at the property.');
+  } else if (String(row.track_state) === EN_ROUTE_TRACK_STATE) {
+    parts.push('The technician is EN ROUTE right now — on the way to the property.');
+  } else {
+    parts.push('The technician has not started toward the property yet, so there is no live arrival time. '
+      + 'Give the window only; never invent a more precise ETA.');
+  }
+  return parts.join(' ');
+}
+
+// ── get_service_report ─────────────────────────────────────────────────────
+
+/** Resolve a knex query builder, failing toward an empty list. */
+function safeRows(query) {
+  return Promise.resolve(query).catch(() => []);
+}
+
+function parseJson(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseArray(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The customer-facing detail for one completed visit: findings, applications
+ * (per APPLICATION — never "per visit"), the customer-safe note, and the
+ * sanctioned re-entry sentence. Suppressed entirely for typed reports whose
+ * delivery posture is anything but auto_send.
+ */
+async function serviceReportText(customerId, { visitDate = null } = {}) {
+  const db = require('../../models/db');
+  const { promptSafe, speakDate } = require('./relay-context');
+
+  const query = db('service_records')
+    .where({ customer_id: customerId })
+    .where((qb) => qb.whereNull('status').orWhere('status', 'completed'))
+    .orderBy('service_date', 'desc')
+    .orderBy('id', 'desc');
+  const wanted = String(visitDate || '').trim().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(wanted)) query.where('service_date', wanted);
+  const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
+    'structured_notes', 'status', 'started_at', 'ended_at', 'advisory');
+  if (!record) {
+    return wanted
+      ? 'No completed visit on file for that date on this account. Do not describe a visit that is not on file.'
+      : 'No completed visits on file for this account yet.';
+  }
+
+  const structured = parseJson(record.structured_notes);
+  // Same predicate as routes/services.js suppressesCustomerArtifacts: any
+  // typed delivery posture other than auto_send keeps the report detail off
+  // customer surfaces — and the phone is a customer surface.
+  if (structured.typedReportDelivery && structured.typedReportDelivery !== 'auto_send') {
+    return `A visit is on file for ${speakDate(record.service_date) || 'that date'}, but its detailed report is not `
+      + 'released for customer delivery. Do NOT describe findings or products. Offer to have the office follow up '
+      + 'with the report.';
+  }
+
+  const [findings, products] = await Promise.all([
+    safeRows(db('service_findings')
+      .where({ service_record_id: record.id })
+      .orderBy('created_at', 'asc')
+      .limit(SERVICE_REPORT_FINDING_LIMIT)
+      .select('category', 'severity', 'title', 'detail', 'recommendation')),
+    safeRows(db('service_products')
+      .where({ service_record_id: record.id })
+      .orderBy('created_at', 'asc')
+      .limit(SERVICE_REPORT_APPLICATION_LIMIT)
+      .select('product_name', 'application_area', 'application_method', 'targets')),
+  ]);
+
+  const { customerSafeServiceNotes } = require('../project-types');
+  const noteText = promptSafe(customerSafeServiceNotes(record.technician_notes, structured), 240);
+
+  const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`
+    + `${record.service_type ? ` — ${promptSafe(record.service_type, 60)}` : ''}.`];
+
+  if (findings.length) {
+    const rendered = findings
+      .map((f) => {
+        const head = promptSafe(f.title, 80);
+        const detail = promptSafe(f.detail, 140);
+        return [head, detail].filter(Boolean).join(': ');
+      })
+      .filter(Boolean);
+    if (rendered.length) lines.push(`What the technician found: ${rendered.join(' | ')}.`);
+    const recs = findings.map((f) => promptSafe(f.recommendation, 120)).filter(Boolean);
+    if (recs.length) lines.push(`Recommended next steps: ${recs.join(' | ')}.`);
+  }
+
+  if (products.length) {
+    const rendered = products
+      .map((p) => {
+        const name = promptSafe(p.product_name, 60);
+        if (!name) return null;
+        const area = promptSafe(p.application_area, 40);
+        const targets = parseArray(p.targets).map((t) => promptSafe(t, 30)).filter(Boolean).slice(0, 4);
+        // Owner rule: "per application", never "per visit".
+        return `${name}${area ? ` applied to the ${area}` : ''}${targets.length ? ` for ${targets.join(', ')}` : ''}`;
+      })
+      .filter(Boolean);
+    if (rendered.length) {
+      lines.push(`Products used on this application: ${rendered.join('; ')}.`);
+    }
+  }
+
+  if (noteText) lines.push(`Technician's customer note: ${noteText}`);
+
+  // COMPLIANCE: the ONLY re-entry wording allowed is the shaping helper's own
+  // customerSummary. Never composed, never paraphrased, never "safe".
+  try {
+    const { buildReentryContext } = require('../service-report/reentry');
+    const reentry = await buildReentryContext({ record, knex: db });
+    const summary = promptSafe(reentry && reentry.customerSummary, 160);
+    if (summary) lines.push(`Re-entry guidance, stated exactly as written: "${summary}"`);
+  } catch (err) {
+    logger.warn(`[voice-relay-visit] re-entry context skipped: ${err.message}`);
+  }
+
+  lines.push('Report only what is above. Do not add findings, products, timings, or re-entry advice of your '
+    + 'own, and never tell a caller an area or product is "safe".');
+  return lines.join(' ');
+}
+
+module.exports = {
+  todayEtaText,
+  serviceReportText,
+  speakClock,
+  SERVICE_REPORT_FINDING_LIMIT,
+  SERVICE_REPORT_APPLICATION_LIMIT,
+};

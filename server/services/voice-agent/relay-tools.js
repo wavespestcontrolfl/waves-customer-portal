@@ -160,6 +160,79 @@ const CONTEXT_TOOLS = [
     },
   },
   {
+    name: 'get_today_eta',
+    description:
+      'Check whether this account has an appointment TODAY, what the arrival ' +
+      'window is, and whether the technician is already on the way. READ-ONLY ' +
+      '— it never changes the schedule. Use it whenever the caller asks when ' +
+      'the tech is coming, where the tech is, or how much longer. With no ' +
+      'input it reads the MATCHED caller\'s own account; a customer_ref from ' +
+      'lookup_customer returns only whether a visit is on today\'s schedule ' +
+      '(no window, no live technician status). Quote only what it returns.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ref: { type: 'string', description: 'A customer_ref returned by lookup_customer on THIS call. Omit for the matched caller\'s own account.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_service_report',
+    description:
+      'The customer-facing detail from a completed visit: what the technician ' +
+      'found, what was applied, the customer note, and any re-entry guidance. ' +
+      'READ-ONLY. Use it when the caller asks what was done on a visit. Omit ' +
+      'the date for the most recent visit, or pass one (YYYY-MM-DD) from ' +
+      'get_service_history. Read back ONLY what this tool returns — never add ' +
+      'findings, products, or timings of your own. Matched caller\'s own ' +
+      'account only.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        visit_date: { type: 'string', description: 'The visit date as YYYY-MM-DD, exactly as get_service_history reported it. Omit for the most recent completed visit.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_open_estimates',
+    description:
+      'Outstanding (sent, not yet accepted) estimates on an account, with the ' +
+      'prices they were SENT at. READ-ONLY. Quote those numbers exactly — ' +
+      'they are honoured as sent; never re-price, discount, or update them. ' +
+      'With no input it reads the MATCHED caller\'s own account (line items ' +
+      'and amounts); a customer_ref from lookup_customer returns only that an ' +
+      'estimate exists and when it was sent, never amounts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ref: { type: 'string', description: 'A customer_ref returned by lookup_customer on THIS call. Omit for the matched caller\'s own account.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_invoice_history',
+    description:
+      'Invoices on the MATCHED caller\'s own account: numbers, dates, amounts, ' +
+      'what is paid, what is unpaid, and the total open balance. READ-ONLY — ' +
+      'it never takes or moves a payment. Matched caller only; it does not ' +
+      'work for looked-up accounts. It returns no payment links or codes: ' +
+      'point the caller to the Waves customer portal or the office, and never ' +
+      'take a card number on this call.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_services_catalog',
+    description:
+      'The list of services Waves offers, by their customer-facing names. ' +
+      'READ-ONLY and public information — use it for ANY caller, including a ' +
+      'brand-new prospect asking "what do you do?". It returns names only; ' +
+      'for what something costs, call get_pricing.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'get_call_history',
     description:
       'Summaries of past phone calls between Waves and the number THIS call is ' +
@@ -374,6 +447,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (name === 'get_pricing') {
         return await relayContext.pricingText(input);
       }
+      // The service catalog is public information too (same rationale as
+      // pricing): no tier gate beyond the context gate, names only.
+      if (name === 'get_services_catalog') {
+        return await relayContext.servicesCatalogText();
+      }
       // lookup_customer: find any account (spouse/landlord/parent calling
       // about a shared one). Output shaping + the session ref registry
       // (ctx.rememberLookup) keep this from ever dumping a record.
@@ -398,6 +476,36 @@ async function executeTool(name, input = {}, ctx = {}) {
         const relayHistory = require('./relay-history');
         if (name === 'get_call_history') return await relayHistory.callHistoryText(ctx.from);
         return await relayHistory.messageHistoryText(ctx.customerId, ctx.from);
+      }
+      // Invoices are ANI-matched-caller only: itemized billing detail belongs
+      // to the account holder, and the redacted tier already withholds
+      // amounts. No pay/receipt link or token ever rides the reply.
+      if (name === 'get_invoice_history') {
+        if (String(input.customer_ref || '').trim()) {
+          return 'Invoice detail is only available for the account the caller\'s own phone number matches. '
+            + 'For a looked-up account you can say only whether a balance is open, never amounts.';
+        }
+        if (!ctx.customerId) {
+          return 'No customer account matches the number this call is coming from, so there are no invoices '
+            + 'to read. Do NOT guess at amounts owed. Offer to have the office follow up, and capture the lead.';
+        }
+        const { invoiceHistoryText } = require('./relay-money');
+        return await invoiceHistoryText(ctx.customerId);
+      }
+      // get_service_report is per-visit detail — strictly MORE than the visit
+      // summary the redacted tier already withholds, so it is matched-caller
+      // only. (Property-specific findings belong to the account holder.)
+      if (name === 'get_service_report') {
+        if (String(input.customer_ref || '').trim()) {
+          return 'Visit reports are only available for the account the caller\'s own phone number matches. '
+            + 'For a looked-up account you can confirm visit dates and service names, nothing further.';
+        }
+        if (!ctx.customerId) {
+          return 'No customer account matches the number this call is coming from, so there is no visit report '
+            + 'to read. Do NOT describe any visit. Offer to have the office follow up, and capture the lead.';
+        }
+        const { serviceReportText } = require('./relay-visit');
+        return await serviceReportText(ctx.customerId, { visitDate: input.visit_date });
       }
       // Account tools — two disclosure tiers, enforced HERE, not in prompt
       // language:
@@ -428,6 +536,14 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       if (name === 'get_account_overview') return await relayContext.accountOverviewText(targetCustomerId, { tier });
       if (name === 'get_service_history') return await relayContext.serviceHistoryText(targetCustomerId, { tier });
+      if (name === 'get_today_eta') {
+        const { todayEtaText } = require('./relay-visit');
+        return await todayEtaText(targetCustomerId, { tier });
+      }
+      if (name === 'get_open_estimates') {
+        const { openEstimatesText } = require('./relay-money');
+        return await openEstimatesText(targetCustomerId, { tier });
+      }
     }
     if (name === 'capture_lead') {
       // Robocall/spam: do NOT write it to the lead pipeline (createLeadFromExtraction
