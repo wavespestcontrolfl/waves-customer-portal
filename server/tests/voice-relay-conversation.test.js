@@ -279,6 +279,36 @@ describe('RelayConversation — explicit end after capture', () => {
   // ⭐ PROMPT-CACHING ORDERING. Caching is a strict prefix match, so the system
   // prompt must be byte-identical every turn — which is exactly why the CLOCK,
   // re-rendered per turn by definition, cannot live in it.
+  // ⭐ THE GREETING *IS* THE FL §934.03 DISCLOSURE. A keyword-only check
+  // accepted the exact opposite of what it guards, so an env-var edit could
+  // have deleted both required statements.
+  describe('VOICE_RELAY_GREETING override validation', () => {
+    const { buildRelayTwiML } = require('../services/voice-agent/relay-protocol');
+    afterEach(() => { delete process.env.VOICE_RELAY_GREETING; });
+
+    test('a NEGATED disclosure never passes verbatim — the canonical line is appended', () => {
+      process.env.VOICE_RELAY_GREETING = 'Hi! This call is not recorded and you are speaking with a human assistant.';
+      const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
+      expect(xml).toMatch(/this call may be recorded/i);
+      expect(xml).toMatch(/automated assistant/i);
+    });
+
+    test('an affirmative override that states BOTH is left exactly as written', () => {
+      const good = 'Thanks for calling Waves! This call may be recorded and you are speaking with our automated assistant.';
+      process.env.VOICE_RELAY_GREETING = good;
+      const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
+      expect(xml).toContain(good);
+      expect(xml).not.toMatch(/Just so you know/);
+    });
+
+    test('a greeting missing the automated-assistant half gets it appended', () => {
+      process.env.VOICE_RELAY_GREETING = 'Thanks for calling Waves! This call may be recorded.';
+      const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
+      expect(xml).toMatch(/Just so you know/);
+      expect(xml).toMatch(/automated assistant/i);
+    });
+  });
+
   describe('prompt caching', () => {
     test('system blocks + tools are built once and carry a cache breakpoint', async () => {
       process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';

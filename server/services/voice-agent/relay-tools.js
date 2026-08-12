@@ -755,7 +755,19 @@ async function executeTool(name, input = {}, ctx = {}) {
             capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),
           });
           if (suppression && suppression.ok) {
-            logger.info(`[voice-relay] verbal do-not-contact honoured — suppression recorded callSid=${ctx.callSid || 'n/a'}`);
+            // ⭐ SMS ONLY, AND THE LOG SAYS SO. `messaging_suppression` is
+            // phone-keyed: it stops texts, and nothing else. A caller who said
+            // "stop emailing me" has NOT been opted out of email by this write
+            // — that ledger (`email_suppressions`, group-keyed) is a different
+            // mechanism and a human's call, exactly like every other stated
+            // preference in this lane. Logging it as "honoured" without that
+            // distinction is how a half-done opt-out reads as a finished one.
+            const mentionsEmail = /\bemail(s|ing)?\b/i.test(String(input.contact_preference || ''))
+              || String(input.preferred_contact_method || '') === 'email';
+            logger.info(
+              `[voice-relay] verbal do-not-contact — SMS suppression recorded callSid=${ctx.callSid || 'n/a'}`
+              + (mentionsEmail ? ' ⚠️ the caller also referenced EMAIL: that opt-out is NOT applied here and is pending a human' : '')
+            );
           } else {
             logger.error(
               `[voice-relay] verbal do-not-contact NOT recorded callSid=${ctx.callSid || 'n/a'} `

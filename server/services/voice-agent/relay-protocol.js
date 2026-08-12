@@ -90,14 +90,25 @@ const DEFAULT_WELCOME_GREETING =
 // mention recording, and it must disclose the automated assistant. Anything
 // short of that gets the missing half appended rather than being rejected —
 // refusing would strand live calls on a bad env value.
-const RECORDING_DISCLOSURE_RE = /\brecord(ed|ing)\b/i;
-const AI_DISCLOSURE_RE = /\b(automated|virtual|AI|assistant|bot)\b/i;
+// ⭐ AFFIRMATIVE, AND NOT NEGATED. A keyword test alone accepted the exact
+// opposite of the disclosure it was guarding: "this call is not recorded;
+// you're speaking with a human assistant" contains both keywords and would
+// have passed verbatim, deleting BOTH required statements with an env edit.
+// So the override must positively state that the call is/may be recorded and
+// that the caller is speaking with an automated assistant — and any negation
+// of either fails the check, which appends the canonical line rather than
+// rejecting (refusing would strand live calls on a bad env value).
+const RECORDING_DISCLOSURE_RE = /\b(?:is|are|may\s+be|might\s+be|will\s+be|being|gets?)\s+record(?:ed|ing)\b/i;
+const AI_DISCLOSURE_RE = /\b(?:automated|virtual|AI|artificial)\b[^.!?]{0,30}\b(?:assistant|agent|receptionist)\b/i;
+const DISCLOSURE_NEGATION_RE = /\b(?:not|never|isn'?t|aren'?t|won'?t|no)\b[^.!?]{0,40}\b(?:record(?:ed|ing)|automated|virtual|AI|bot)\b/i;
 const DISCLOSURE_SUFFIX = 'Just so you know, this call may be recorded, and you\'re speaking with our automated assistant.';
 
 function defaultWelcomeGreeting() {
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
   if (!override) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
-  if (RECORDING_DISCLOSURE_RE.test(override) && AI_DISCLOSURE_RE.test(override)) return override;
+  if (RECORDING_DISCLOSURE_RE.test(override)
+    && AI_DISCLOSURE_RE.test(override)
+    && !DISCLOSURE_NEGATION_RE.test(override)) return override;
   return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX}`;
 }
 

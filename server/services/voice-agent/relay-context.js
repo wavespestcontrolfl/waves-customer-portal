@@ -679,10 +679,18 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
 async function resolveCallerContext(from, { callSid = null, onVerified = null } = {}) {
   // Reported to the SESSION, not returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
-  // WS client that declared an ANI may not), and this fires only after EVERY
-  // rule below has had its say — including the attestation requirement. It
-  // stays unfired on the timeout path, so the session's flag remains false.
-  const reportVerified = (ok) => {
+  // WS client that declared an ANI may not), and it is decided only after
+  // EVERY rule below has had its say — including the attestation requirement.
+  //
+  // ⭐ AND IT IS LATCHED, NOT PUBLISHED, until the work WINS ITS RACE. Firing
+  // the callback from inside the work let a verified-but-slow resolution set
+  // the session's flag and then time out: the caller came back UNKNOWN while
+  // `callerVerified` stayed true, which is precisely the fail-closed promise
+  // the timeout exists to make. The loser of the race — timeout or a late
+  // straggler — publishes nothing, so the flag stays false.
+  let verifiedLatch = false;
+  const reportVerified = (ok) => { verifiedLatch = ok === true; };
+  const publishVerified = (ok) => {
     if (typeof onVerified === 'function') {
       try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
     }
@@ -765,10 +773,14 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
     }, CONTEXT_RESOLVE_TIMEOUT_MS);
     timer.unref?.();
   });
+  let won = false;
   try {
-    return await Promise.race([work, timeout]);
+    const result = await Promise.race([work.then((r) => { won = true; return r; }), timeout]);
+    publishVerified(won && verifiedLatch);
+    return result;
   } catch (err) {
     logger.warn(`[voice-relay-context] context resolve failed for ${maskPhone(from)} — treating as unknown: ${err.message}`);
+    publishVerified(false);
     return null;
   } finally {
     clearTimeout(timer);

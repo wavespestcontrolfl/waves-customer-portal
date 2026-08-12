@@ -400,6 +400,20 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).not.toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415557777' }));
   });
 
+  // The write is phone-keyed: it stops TEXTS. An email opt-out is a different
+  // ledger and a human's call — so the record must not read as finished.
+  test('an email opt-out is recorded as SMS-only, with the email half flagged pending', async () => {
+    const logger = require('../services/logger');
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop emailing.',
+      contact_preference: 'stop emailing me, I get too many',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/SMS suppression recorded/));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/EMAIL: that opt-out is NOT applied here/));
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringMatching(/do-not-contact honoured/));
+  });
+
   test('a preference that is NOT an opt-out records nothing', async () => {
     await executeTool('capture_lead', {
       first_name: 'Pat',
