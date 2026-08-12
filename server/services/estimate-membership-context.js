@@ -43,6 +43,7 @@ const {
   toQualifyingKeys,
   qualifyingKeysForRow,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   filterRowsToStreet,
 } = require('./waveguard-existing-services');
@@ -736,22 +737,23 @@ function rowServicePrice(row = {}, addonRowIds) {
 // projection; if it degrades (schema lag on a cadence column, say) while the
 // narrower identity query still works, folding identity into it would silently
 // revert the panel to stale service_type — recreating, with the tier gate on,
-// exactly the tier-vs-label divergence this is meant to remove. Two queries,
-// two failure domains. Degrades to an empty Map, which simply means "no
-// catalog identity" and defers to service_type.
+// exactly the tier-vs-label divergence this is meant to remove.
+//
+// The QUERY is waveguard-existing-services' loadCatalogFieldsByRowId — the
+// same mechanism tier qualification classifies enriched rows with (codex
+// #3359 r3: an independent copy here meant one could transiently fail while
+// the other succeeded, splitting the tier and spend paths onto different
+// identities — the divergence this module exists to remove). This wrapper
+// only adapts shape and failure policy for DISPLAY: the shared loader's null
+// (join failed) degrades to an empty Map — "no catalog identity", defer to
+// service_type — per this panel's never-break-the-snapshot rule.
 async function loadCatalogIdentityByRowId(database, customerId) {
-  try {
-    const rows = await database('scheduled_services as s')
-      .leftJoin('services as svc', 's.service_id', 'svc.id')
-      .where({ 's.customer_id': customerId })
-      .select('s.id', 'svc.service_key', 'svc.name as service_name');
-    return new Map(rows.map((row) => [row.id, {
-      serviceKey: row.service_key || null,
-      serviceName: row.service_name || null,
-    }]));
-  } catch {
-    return new Map();
-  }
+  const catalogFields = await loadCatalogFieldsByRowId(database, customerId);
+  if (!catalogFields) return new Map();
+  return new Map([...catalogFields].map(([id, row]) => [id, {
+    serviceKey: row.service_key || null,
+    serviceName: row.service_name || null,
+  }]));
 }
 
 // The annual-prepay terms backing a customer's active rows, by id. The TERM
@@ -959,7 +961,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       contractGroups = [{ address: null, rows: serviceRows }];
     }
     const contracts = contractGroups.map(({ address, rows: contractRows }) => {
-      // The NEXT upcoming priced appointment, not whichever row the unordered
+      // The NEXT upcoming appointment, not whichever row the unordered
       // query happened to return first (codex #3353 r11). Mixed-price
       // contracts are a supported shape — a newly repriced future visit sits
       // beside older ones — so "first positive row" could present either
@@ -973,8 +975,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // is today's work and stays eligible — same live-in-progress exception the
       // ownership path makes.
       const LIVE_IN_PROGRESS = new Set(['en_route', 'on_site', 'in_progress']);
+      // The next visit is selected by DATE, then its price is read — never
+      // "the next visit that happens to have a usable price" (codex #3359
+      // r3). Skipping an unattributable next visit to quote a later one
+      // reports a scheduled basis the customer's actual next application
+      // does not pay; a null basis on the true next visit withholds the
+      // contract instead. Callback visits are excluded EXPLICITLY (the same
+      // exclusion the frozen appointment list applies): a free callback is
+      // not an application, and before this reordering the price filter only
+      // dropped it by accident.
       const scheduled = [...contractRows]
-        .filter((row) => rowServicePrice(row, addonRowIds) != null)
+        .filter((row) => !isCallbackServiceRow(row))
         .filter((row) => {
           if (LIVE_IN_PROGRESS.has(String(row.status || '').toLowerCase())) return true;
           const day = visitDateKey(row.scheduled_date);

@@ -499,6 +499,7 @@ module.exports = {
   toQualifyingKeys,
   filterRowsToStreet,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysForRow,
   qualifyingKeysFromRows,

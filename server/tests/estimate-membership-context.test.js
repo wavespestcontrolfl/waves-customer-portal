@@ -2009,6 +2009,46 @@ describe('current-spend cadence and stamped billing basis', () => {
     expect(spend.currentServices[0].currentPerVisit).toBeNull();
   });
 
+  test('an unattributable NEXT visit withholds the contract rather than quoting a later visit', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        // The customer's actual next application: composite with an
+        // appointment-level discount, so its basis is deliberately withheld.
+        {
+          id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05',
+          estimated_price: 157.5, primary_line_price: 100, line_discount_dollars: 0,
+          discount_type: 'percentage', discount_amount: 10, discount_dollars: 17.5,
+        },
+        // A later clean visit must not stand in as "what the customer pays".
+        { id: 'z9', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 100 },
+      ],
+      addonRows: [{ scheduled_service_id: 'a1' }],
+      catalogRows: [{ id: 'a1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('a free callback visit never withholds the contract as the "next" visit', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        // Sorts first by date but is not an application.
+        { id: 'cb', service_type: 'pest_control', scheduled_date: '2099-01-02', estimated_price: 0, is_callback: true },
+        { id: 'r1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      catalogRows: [{ id: 'r1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(120);
+  });
+
   test('a composite visit with an appointment-level discount withholds instead of quoting the undiscounted primary', async () => {
     const database = fakeDb({
       scheduledRows: [{
