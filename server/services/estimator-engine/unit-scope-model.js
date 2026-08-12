@@ -56,8 +56,18 @@ function unitScopeGuardrailsEnabled() {
 // hyphenated ranges ("123-125 Main St") pass.
 const PRIMARY_STREET_NUMBER_RE = /^\s*\d+[a-z]?(?:[-/]\w+)?\s+\S/i;
 
+// A UNIT-FIRST address is complete: "Unit 7, 123 Main St" and "Apt 4 at 123
+// Main Street" both carry the primary street number, and red-laning them
+// asked the customer for an address they had already supplied (codex r41
+// P2). Only a recognized designator may lead — "62nd Avenue East, Unit 7"
+// still (correctly) has no street number.
+const LEADING_SUBPREMISE_RE = /^\s*(?:unit|apt|apartment|ste|suite|#)\s*#?\s*[\w-]+\s*(?:,\s*|\s+at\s+|\s+)/i;
+
 function hasPrimaryStreetNumber(address) {
-  return PRIMARY_STREET_NUMBER_RE.test(String(address || ''));
+  const raw = String(address || '');
+  if (PRIMARY_STREET_NUMBER_RE.test(raw)) return true;
+  const withoutLeadingUnit = raw.replace(LEADING_SUBPREMISE_RE, '');
+  return withoutLeadingUnit !== raw && PRIMARY_STREET_NUMBER_RE.test(withoutLeadingUnit);
 }
 
 // ── Category conflict (commercial signal on a residential draft) ─
@@ -448,6 +458,12 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   // stated area IS suite-scoped and stays.
   const BUILDING_SCOPE_HOME_SOURCES = new Set([
     'county_assessed', 'property_lookup_estimate', 'subdivision_median', 'customer_profile',
+    // With GATE_PROPERTY_FACTS_V2 on, V2 rewrites the source to
+    // 'property_facts_v2' while still carrying the county BUILDING area it
+    // selected under the pre-promotion scope — so the whole-building figure
+    // survived into a unit-scoped draft (codex r41 P1). The condo per-unit
+    // folio exemption below still protects a genuinely unit-scoped value.
+    'property_facts_v2',
   ]);
   // A residential UNIT needs the same treatment (codex r29 P1) — with ONE
   // exception: a CONDO's county record is a per-unit parcel with its own

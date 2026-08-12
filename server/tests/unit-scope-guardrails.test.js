@@ -50,6 +50,11 @@ describe('hasPrimaryStreetNumber', () => {
     expect(hasPrimaryStreetNumber('7 Palm Ave')).toBe(true);
     expect(hasPrimaryStreetNumber('728 132nd Street Circle NE')).toBe(true);
   });
+  test('UNIT-FIRST addresses are complete (r41 P2)', () => {
+    expect(hasPrimaryStreetNumber('Unit 7, 123 Main St, Bradenton, FL 34201')).toBe(true);
+    expect(hasPrimaryStreetNumber('Apt 4 at 123 Main Street')).toBe(true);
+    expect(hasPrimaryStreetNumber('#12 900 Bayview Ter')).toBe(true);
+  });
   test('ordinal street NAMES without a house number fail (the number-less ordinal-street class)', () => {
     expect(hasPrimaryStreetNumber('62nd Avenue East, Unit 7, FL 34221')).toBe(false);
     expect(hasPrimaryStreetNumber('Palm Ave')).toBe(false);
@@ -629,6 +634,10 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     const flatFacts = { home: { value: 3400, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(flatFacts, flattened);
     expect(flatFacts.home.value).toBeNull();
+    // The V2-rewritten source is building-scoped too (codex r41 P1).
+    const v2Facts = { home: { value: 3400, source: 'property_facts_v2', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(v2Facts, flattened);
+    expect(v2Facts.home.value).toBeNull();
     // …and the audit's size basis follows the mutation (r29 P2).
     expect(flattened.sizeBasis).toBe('unresolved');
 
