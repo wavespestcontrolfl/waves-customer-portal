@@ -775,6 +775,16 @@ async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  // Terminal operational status rejects on EVERY load (same guard as
+  // markEnRoute): the stale-attempt repair below reloads and re-enters,
+  // and a completion can commit its status between the heal and that
+  // reload — the row then reads status='completed' with
+  // track_state='scheduled', and without this guard the re-entry would
+  // flip a finished visit to on_property and could text an arrival.
+  if (['completed', 'skipped', 'no_show'].includes(String(svc.status))) {
+    return { ok: false, reason: `terminal_status: ${svc.status}` };
+  }
+  if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }

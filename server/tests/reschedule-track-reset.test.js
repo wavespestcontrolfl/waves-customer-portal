@@ -746,6 +746,25 @@ describe('markOnProperty stale-attempt repair (arrival-first signals)', () => {
     });
   });
 
+  test('completion racing the arrival heal cannot be flipped on_property (status-first window)', async () => {
+    const racedSvc = {
+      id: 'job-op-raced',
+      customer_id: 'cust-22',
+      technician_id: null,
+      status: 'completed',
+      track_state: 'scheduled',
+      scheduled_date: todayStr,
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(racedSvc));
+
+    const result = await trackTransitions.markOnProperty('job-op-raced');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('terminal_status: completed');
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
   test('flip CAS miss with a non-on_property fresh row surfaces a conflict', async () => {
     const svc = {
       id: 'job-op-conflict',
