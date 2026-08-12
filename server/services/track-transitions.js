@@ -519,8 +519,13 @@ async function markEnRoute(serviceId, opts = {}) {
       // sendTechEnRoute can return undefined (opt-out path), falsy results,
       // or { success, sid }. Only mark sent on a positive signal.
       if (result && result.success) {
+        // Conditional on the attempt still standing: a reschedule that
+        // rewound the row between the flip and this stamp must not get an
+        // old-attempt guard written over its reset — that would suppress
+        // the NEW attempt's text. The SMS did go out; if the guard write
+        // misses, the fresh attempt re-sending is the intended behavior.
         await db('scheduled_services')
-          .where({ id: serviceId })
+          .where({ id: serviceId, track_state: 'en_route' })
           .update({ track_sms_sent_at: new Date() });
         smsSent = true;
       }
@@ -613,7 +618,11 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
   // means "handled", so an arrival under a disabled gate is recorded, not sent.
   const claimed = await db('scheduled_services')
-    .where({ id: serviceId })
+    // Conditional on the row still being on_property: a reschedule that
+    // rewound the tracker between the caller's read and this claim must
+    // not get an arrival guard stamped over its reset — that would
+    // suppress the rescheduled visit's real arrival text.
+    .where({ id: serviceId, track_state: 'on_property' })
     .whereNull('arrival_sms_sent_at')
     .update({ arrival_sms_sent_at: new Date() });
   if (!claimed) return;

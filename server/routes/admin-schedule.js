@@ -4551,14 +4551,12 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   scheduled_date: prevDate,
                   window_start: svc.window_start ?? null,
                   window_end: svc.window_end ?? null,
-                  // Tracker state joins the CAS: the rewind decision above
-                  // came from this trx's read, and a geofence/manual En
-                  // Route flip advances track_state WITHOUT touching status
-                  // (the operational sync is opt-in) — a status-only match
-                  // would move the visit carrying freshly written lifecycle
-                  // state. A tracker change makes this miss; the batch
-                  // reports the conflict.
-                  track_state: svc.track_state ?? null,
+                  // Full observed tracker/lifecycle snapshot joins the CAS:
+                  // the rewind decision above came from this trx's read,
+                  // and tracker writers advance state, stamps, and SMS
+                  // guards without touching status. Any of it makes this
+                  // miss; the batch reports the conflict.
+                  ...require('../services/rebooker').trackLifecycleCasPredicate(svc),
                 })
                 .update(updates);
               if (updatedRows === 0) {
@@ -5947,7 +5945,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   id: child.id,
                   status: child.status,
                   scheduled_date: child.scheduled_date,
-                  track_state: child.track_state ?? null,
+                  ...require('../services/rebooker').trackLifecycleCasPredicate(child),
                 })
                 .update(childUpdates);
               if (childUpdated === 0) {
@@ -6018,7 +6016,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     id: booster.id,
                     status: booster.status,
                     scheduled_date: booster.scheduled_date,
-                    track_state: booster.track_state ?? null,
+                    ...require('../services/rebooker').trackLifecycleCasPredicate(booster),
                   })
                   .update(boosterUpdates);
                 if (boosterUpdated === 0) {

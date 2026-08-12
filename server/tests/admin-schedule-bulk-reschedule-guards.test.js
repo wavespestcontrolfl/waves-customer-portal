@@ -562,6 +562,12 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   expect(updateChain.where).toHaveBeenCalledWith({
     scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
     track_state: null,
+    en_route_at: null,
+    arrived_at: null,
+    actual_start_time: null,
+    check_in_time: null,
+    track_sms_sent_at: null,
+    arrival_sms_sent_at: null,
   });
   // No audit row for a move that did not happen.
   expect(trx).not.toHaveBeenCalledWith('reschedule_log');

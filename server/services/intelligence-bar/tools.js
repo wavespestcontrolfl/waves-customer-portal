@@ -1756,15 +1756,21 @@ async function rescheduleAppointment(input) {
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
   const {
-    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects, needsLifecycleRewind,
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
+    needsLifecycleRewind, trackLifecycleCasPredicate,
   } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   // Rewind on stale evidence too, not just live status — see
   // needsLifecycleRewind in rebooker.js. The status flip and the history
   // append stay keyed on wasLive; an evidence-only rewind still gets the
   // post-commit tracker cleanup below (tech pointer + customer refresh)
-  // without recording a status transition that never happened.
-  const trackRewound = !wasLive && needsLifecycleRewind(appt);
+  // without recording a status transition that never happened. Gated on
+  // the DATE actually changing: a same-date window edit of a visit with
+  // genuine same-day tracker state must not erase the active attempt.
+  const apptDay = appt.scheduled_date instanceof Date
+    ? appt.scheduled_date.toISOString().slice(0, 10)
+    : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
+  const trackRewound = !wasLive && dateStr !== apptDay && needsLifecycleRewind(appt);
   const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
 
   // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
@@ -1799,14 +1805,12 @@ async function rescheduleAppointment(input) {
       scheduled_date: observedDate,
       window_start: appt.window_start ?? null,
       window_end: appt.window_end ?? null,
-      // Tracker state is in the CAS too: a geofence/manual En Route flip
-      // between the read and this write advances track_state WITHOUT
-      // touching status (markEnRoute writes the tracker before the opt-in
-      // status sync), so status/date/window alone would still match and
-      // move the visit without rewinding the freshly written lifecycle
-      // state. A tracker change makes this miss instead; the caller
-      // reports the conflict and can retry on fresh state.
-      track_state: appt.track_state ?? null,
+      // The full observed tracker/lifecycle snapshot is in the CAS: a
+      // geofence/manual transition between the read and this write can
+      // advance track_state, add stamps to a same-state row, or stamp an
+      // SMS guard — any of it must make this miss instead of moving the
+      // visit on a stale snapshot. See trackLifecycleCasPredicate.
+      ...trackLifecycleCasPredicate(appt),
     })
     .update({
       scheduled_date: dateStr,

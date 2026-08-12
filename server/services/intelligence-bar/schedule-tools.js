@@ -483,7 +483,8 @@ async function moveStopsToDay(input) {
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const {
-    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects, needsLifecycleRewind,
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
+    needsLifecycleRewind, trackLifecycleCasPredicate,
   } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
@@ -537,11 +538,10 @@ async function moveStopsToDay(input) {
         scheduled_date: observedDate,
         window_start: s.window_start ?? null,
         window_end: s.window_end ?? null,
-        // Tracker state in the CAS: a concurrent En Route flip advances
-        // track_state without touching status (the status sync is opt-in),
-        // so the stop would otherwise move with freshly written lifecycle
-        // state left un-rewound. See reschedule_appointment in tools.js.
-        track_state: s.track_state ?? null,
+        // Full observed tracker/lifecycle snapshot in the CAS — any
+        // concurrent lifecycle or SMS-guard write must make this miss.
+        // See reschedule_appointment in tools.js.
+        ...trackLifecycleCasPredicate(s),
       })
       .update({
         scheduled_date: dateStr,

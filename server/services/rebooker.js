@@ -69,6 +69,26 @@ const LIVE_LIFECYCLE_RESET = {
 // customer report's visit timeline (live incident 2026-08-11).
 const LIVE_TRACK_STATES = new Set(['en_route', 'on_property']);
 
+// Observed tracker/lifecycle snapshot for a mover's CAS. track_state alone
+// is not enough: markOnProperty can add lifecycle timestamps to an
+// already-on_property row, and the en-route SMS completion stamps
+// track_sms_sent_at without changing state — a mover matching only
+// track_state could reset the row from a stale snapshot and still let an
+// old-attempt guard write land afterward, suppressing the new attempt's
+// text. Matching the full observed snapshot makes ANY concurrent lifecycle
+// write miss the move instead (knex object-form null renders IS NULL).
+function trackLifecycleCasPredicate(row = {}) {
+  return {
+    track_state: row.track_state ?? null,
+    en_route_at: row.en_route_at ?? null,
+    arrived_at: row.arrived_at ?? null,
+    actual_start_time: row.actual_start_time ?? null,
+    check_in_time: row.check_in_time ?? null,
+    track_sms_sent_at: row.track_sms_sent_at ?? null,
+    arrival_sms_sent_at: row.arrival_sms_sent_at ?? null,
+  };
+}
+
 // Should a date move rewind this row's tracker lifecycle? True on live
 // operational status, live track_state, or any leftover lifecycle stamp.
 // Callers gate movability separately (terminal rows never reach this).
@@ -331,8 +351,14 @@ class SmartRebooker {
     // Evidence-based rewind test — broader than wasLive (live track_state
     // or stale stamps under a non-live status). Drives the lifecycle reset
     // AND the post-commit tracker cleanup below; movability stays
-    // status-based.
-    const lifecycleRewound = needsLifecycleRewind(service);
+    // status-based. For NON-live rows the rewind is additionally gated on
+    // the DATE actually changing: a same-date window edit of a visit with
+    // genuine same-day tracker state must not erase the active attempt.
+    const sameDayTarget = String(newDate || '').split('T')[0]
+      === String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date || '').slice(0, 10);
+    const lifecycleRewound = wasLive || (!sameDayTarget && needsLifecycleRewind(service));
 
     // A past target date moves the job where no "upcoming" query will ever
     // find it — silently never serviced. Stale SMS replies and freeform
@@ -493,14 +519,14 @@ class SmartRebooker {
       }
 
       const updated = await trx('scheduled_services')
-        // track_state is in the CAS: the lifecycleRewound decision above
-        // came from the outer read, and markEnRoute advances the tracker
-        // WITHOUT touching status (its operational sync is opt-in) — a
-        // status-only match would let this move commit while carrying the
-        // freshly written lifecycle state onto the new date. A tracker
-        // change makes the write miss and surface the concurrent-change
-        // 409 below instead.
-        .where({ id: serviceId, status: service.status, track_state: service.track_state ?? null })
+        // The full observed tracker/lifecycle snapshot is in the CAS (see
+        // trackLifecycleCasPredicate): the lifecycleRewound decision above
+        // came from the outer read, and tracker writers advance state and
+        // stamps WITHOUT touching status — a status-only match would let
+        // this move commit while carrying freshly written lifecycle state
+        // onto the new date. Any tracker change makes the write miss and
+        // surface the concurrent-change 409 below instead.
+        .where({ id: serviceId, status: service.status, ...trackLifecycleCasPredicate(service) })
         .whereIn('status', Array.from(allowedStatuses))
         // Optional caller-supplied expected-state predicate (e.g. auto-dispatch
         // passing the locked/excluded flags + original date) so a concurrent
@@ -920,7 +946,13 @@ class SmartRebooker {
           ? newDate
           : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
 
-        const sibRewound = isLiveAnchor || needsLifecycleRewind(sib);
+        // Non-live rows rewind only when this row's date actually changes
+        // (same-date landings keep a genuine same-day attempt intact).
+        const sibDateChanges = String(date || '').split('T')[0]
+          !== String(sib.scheduled_date instanceof Date
+            ? sib.scheduled_date.toISOString()
+            : sib.scheduled_date || '').slice(0, 10);
+        const sibRewound = isLiveAnchor || (sibDateChanges && needsLifecycleRewind(sib));
         const updateData = {
           scheduled_date: date,
           window_start: win.start || sib.window_start,
@@ -1091,10 +1123,9 @@ class SmartRebooker {
             // must invalidate the match, not be steamrolled.
             window_end: sib.window_end ?? null,
             technician_id: sib.technician_id ?? null,
-            // Tracker state too: the sibRewound decision came from this
-            // read, and a concurrent En Route flip advances track_state
-            // without touching status — see the single-job CAS above.
-            track_state: sib.track_state ?? null,
+            // Full tracker/lifecycle snapshot too: the sibRewound decision
+            // came from this read — see the single-job CAS above.
+            ...trackLifecycleCasPredicate(sib),
           })
           .update(updateData);
         if (updated === 0) {
@@ -1285,6 +1316,7 @@ module.exports = new SmartRebooker();
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
 module.exports.needsLifecycleRewind = needsLifecycleRewind;
+module.exports.trackLifecycleCasPredicate = trackLifecycleCasPredicate;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
