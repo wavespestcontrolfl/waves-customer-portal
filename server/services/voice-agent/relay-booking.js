@@ -591,13 +591,24 @@ async function requestBookingText(input = {}, ctx = {}) {
   let propertyLinkage = null;
   try {
     const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
+    // `active`, not a soft-delete column — customer_properties has no
+    // `deleted_at`, so filtering on one made Postgres reject the query and the
+    // catch below scored EVERY account as zero properties. That is the guard
+    // failing OPEN, which is the one thing it must not do: fail closed on an
+    // unanswerable count (-1 is not "no properties", it is "ask a human").
     const propertyCount = await db('customer_properties')
-      .where({ customer_id: customerId })
-      .whereNull('deleted_at')
+      .where({ customer_id: customerId, active: true })
       .count('* as count')
       .first()
       .then((r) => parseInt((r && r.count) || 0, 10))
-      .catch(() => 0);
+      .catch((err) => {
+        logger.error(`[voice-relay-booking] property count failed for ${customerId} — refusing the booking: ${err.message}`);
+        return -1;
+      });
+    if (propertyCount < 0) {
+      return 'I could not confirm which property this account has on file, so nothing was booked. Capture the '
+        + 'lead with the address they mean and their preferred time; a Waves team member will call to confirm.';
+    }
     if (propertyCount > 1) {
       return 'This account has more than one property on file, and I cannot tell which one this visit is for, '
         + 'so nothing was booked. Capture the lead with the property they mean and their preferred time, and '

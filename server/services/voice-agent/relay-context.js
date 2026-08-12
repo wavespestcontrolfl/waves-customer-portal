@@ -676,18 +676,26 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null, verification: preVerified = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, onVerified = null } = {}) {
+  // Reported to the SESSION, not returned: a caller can be verified and still
+  // match no account (an unmatched-but-real caller may use lookup_customer; a
+  // WS client that declared an ANI may not), and this fires only after EVERY
+  // rule below has had its say — including the attestation requirement. It
+  // stays unfired on the timeout path, so the session's flag remains false.
+  const reportVerified = (ok) => {
+    if (typeof onVerified === 'function') {
+      try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
+    }
+  };
   if (!isContextEnabled()) return null;
   const work = (async () => {
     // The WS setup frame is unverified input — cross-check it against the
     // signature-verified /voice webhook's call_log row BEFORE any account read.
-    // A caller may hand us the result it already has: the session needs to know
-    // whether the call was verified even when NOTHING matched (an unmatched but
-    // real caller can still use lookup_customer; a WS client that never proved
-    // a call cannot), and verifying twice would burn the single-use claim on
-    // the first pass and fail the second.
-    const verification = preVerified || await verifyInboundCaller({ callSid, from });
+    // Verification happens HERE, inside the bounded work: a stalled call_log
+    // read or claim must degrade to "unknown caller", never hang the first turn.
+    const verification = await verifyInboundCaller({ callSid, from });
     if (!verification.verified) {
+      reportVerified(false);
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
       return null;
     }
@@ -714,8 +722,13 @@ async function resolveCallerContext(from, { callSid = null, verification: preVer
         `[voice-relay-context] caller ${maskPhone(from)} has attestation=${verification.attestation || 'none'} `
         + 'and VOICE_RELAY_REQUIRE_ATTESTATION is on — treating as unknown, no account access'
       );
+      // NOT verified for the session either: "no recognition and no account
+      // reads" has to include lookup_customer, which is the one tool that does
+      // not need a matched customer id.
+      reportVerified(false);
       return null;
     }
+    reportVerified(true);
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([

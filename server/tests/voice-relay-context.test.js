@@ -369,6 +369,30 @@ describe('GATE ON — caller recognition', () => {
       expect(ctx && ctx.customer.id).toBe(CUSTOMER.id);
     });
 
+    // ⭐ AND THE SESSION FLAG FOLLOWS THE RULING. lookup_customer is the one
+    // tool that does not need a matched customer id, so "no recognition and no
+    // account reads" only holds if the verified flag the session hands the
+    // tools is false too.
+    test('on: a demoted call reports NOT verified to the session (no lookup either)', async () => {
+      process.env.VOICE_RELAY_REQUIRE_ATTESTATION = 'true';
+      primeDb({
+        customers: [CUSTOMER],
+        callLog: [{ ...VERIFIED_CALL_ROW, metadata: JSON.stringify({ stir_verstat: 'No-TN-Validation' }) }],
+      });
+      const seen = [];
+      expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID, onVerified: (ok) => seen.push(ok) }))
+        .toBeNull();
+      expect(seen).toEqual([false]);
+    });
+
+    test('off: a verified-but-unmatched caller still reports verified (lookup stays open)', async () => {
+      primeDb({ customers: [] }); // real call, number not on file
+      const seen = [];
+      expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID, onVerified: (ok) => seen.push(ok) }))
+        .toBeNull();
+      expect(seen).toEqual([true]);
+    });
+
     test('only a PASSED-A counts — a passed B or C does not', () => {
       expect(relayContext.isFullAttestation('TN-Validation-Passed-A')).toBe(true);
       expect(relayContext.isFullAttestation('A')).toBe(true);

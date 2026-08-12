@@ -456,18 +456,22 @@ class RelayConversation {
       // A replayed setup frame simply resolves to no caller context: a
       // stranger's session, not an error.
       //
-      // The verification runs HERE, once, and its result is threaded into
-      // resolveCallerContext rather than re-derived: the session needs
-      // `_callerVerified` even when no account matched, because that is what
-      // separates a real caller whose number is not on file (may still use
-      // lookup_customer) from a WS client that declared an ANI and never
-      // proved a call (may not).
-      const { verifyInboundCaller } = require('./relay-context');
-      this._contextReady = verifyInboundCaller({ callSid: this.callSid, from: this.from })
-        .then((verification) => {
-          this._callerVerified = verification && verification.verified === true;
-          return resolveCallerContext(this.from, { callSid: this.callSid, verification });
-        })
+      // The session needs to know whether the CALL was verified even when no
+      // account matched — that is what separates a real caller whose number is
+      // not on file (may still use lookup_customer) from a WS client that
+      // declared an ANI and never proved a call (may not). It arrives by
+      // callback rather than by awaiting the verification here, for two
+      // reasons the last cut got wrong: awaiting it first put the call_log
+      // read and the claim OUTSIDE resolveCallerContext's timeout, so a stalled
+      // query would hang the caller's first turn forever; and it set the flag
+      // from raw verification, BEFORE the attestation rule had its say, so a
+      // non-attested call under VOICE_RELAY_REQUIRE_ATTESTATION lost its
+      // context but kept a verified flag that still opened lookup_customer.
+      // The callback fires inside the bounded work, after every rule.
+      this._contextReady = resolveCallerContext(this.from, {
+        callSid: this.callSid,
+        onVerified: (ok) => { this._callerVerified = ok === true; },
+      })
         .then((ctx) => { this._callerContext = ctx; })
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');

@@ -109,6 +109,29 @@ describe('transcript composition (pure)', () => {
     expect(() => relayTranscript.buildTranscriptUpdate({ turns: boom })).not.toThrow();
   });
 
+  // ⭐ A SPOKEN CARD NUMBER NEVER LANDS IN A DURABLE COLUMN. Sandy is told
+  // never to take a card, but the caller holds the phone — "let me just give
+  // you the number" happens and STT transcribes it. These turns land in the
+  // SAME call_log.transcription the recording pipeline scrubs before writing.
+  test('a PAN volunteered by the caller is scrubbed before storage', () => {
+    const text = relayTranscript.buildTranscriptText([
+      { role: 'caller', text: 'my card is 4111 1111 1111 1111, take it now' },
+      { role: 'agent', text: 'I cannot take a card on this call.' },
+    ]);
+    expect(text).not.toContain('4111111111111111');
+    expect(text).not.toContain('4111 1111 1111 1111');
+    expect(text).toMatch(/take it now/);          // the rest of the turn survives
+    expect(text).toMatch(/I cannot take a card/); // …and so does the agent's line
+
+    // The summary path is the same column family and takes the same scrub.
+    const summary = relayTranscript.buildCallSummary({
+      modelSummary: 'Caller read out 4111 1111 1111 1111 before I stopped them.',
+      turns: [],
+      leadCaptured: true,
+    });
+    expect(summary).not.toContain('4111 1111 1111 1111');
+  });
+
   test('transcript is bounded (a runaway loop can never write an unbounded column)', () => {
     const turns = Array.from({ length: 5000 }, () => ({ role: 'caller', text: 'x'.repeat(500) }));
     const text = relayTranscript.buildTranscriptText(turns);

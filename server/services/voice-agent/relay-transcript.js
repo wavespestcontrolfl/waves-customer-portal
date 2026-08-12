@@ -98,11 +98,35 @@ function clean(value, max) {
  */
 function scrubForStorage(text) {
   if (!text) return text;
+  let out = text;
+  // ⭐ PAN SCRUB FIRST, AND IT IS NOT OPTIONAL. The prompt tells Sandy never to
+  // take a card, but the caller is the one holding the phone: "let me just give
+  // you the number" happens, and Twilio's STT transcribes it. Everything the
+  // recording pipeline persists goes through this same scrubber
+  // (call-recording-processor.scrubTranscriptArtifacts) precisely so a spoken
+  // card number never lands in a durable column — and these turns land in the
+  // SAME `call_log.transcription` those transcripts do. redactAccessCodes is a
+  // gate-code scrub and does not touch PANs.
+  try {
+    const { scrubPansDetailed } = require('../../utils/pan-scrub');
+    const scrubbed = scrubPansDetailed(out);
+    if (scrubbed && typeof scrubbed.text === 'string') {
+      if (scrubbed.count > 0) {
+        logger.warn(`[voice-relay-transcript] scrubbed ${scrubbed.count} card-number candidate(s) from a relay turn before storage`);
+      }
+      out = scrubbed.text;
+    }
+  } catch (err) {
+    // A scrubber that cannot run must not be silently skipped: without it the
+    // stored text is unverified, so drop the turn rather than persist it.
+    logger.error(`[voice-relay-transcript] PAN scrub unavailable — dropping the turn rather than storing it unscrubbed: ${err.message}`);
+    return '';
+  }
   try {
     const { redactAccessCodes } = require('../context-aggregator');
-    return typeof redactAccessCodes === 'function' ? redactAccessCodes(text) : text;
+    return typeof redactAccessCodes === 'function' ? redactAccessCodes(out) : out;
   } catch {
-    return text;
+    return out;
   }
 }
 

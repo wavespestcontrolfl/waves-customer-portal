@@ -840,6 +840,13 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoCreateWrites();
   });
 
+  test('a property count that cannot be answered refuses too (the guard fails CLOSED)', async () => {
+    builders.customer_properties.first = jest.fn(() => Promise.reject(new Error('column does not exist')));
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/could not confirm which property/i);
+    assertNoCreateWrites();
+  });
+
   test('a single-property account stamps the resolved property and address on the visit', async () => {
     const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
     expect(out).toMatch(/Booking REQUEST submitted/);
