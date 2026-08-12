@@ -113,7 +113,10 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // possessive/article forms above miss indefinite phrasings that are
     // unambiguously about a commercial premises when anchored to the
     // service ask).
-    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza)\\b',
+    // The premises noun must sit DIRECTLY after the optional article, so
+    // "…for the home office" (a residential room) still does not match
+    // while "…for an office" (codex r23 P1) does.
+    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store)\\b',
   ].join('|'),
   'i',
 );

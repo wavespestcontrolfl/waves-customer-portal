@@ -69,6 +69,11 @@ describe('commercialTextSignal', () => {
     // Suite identifiers are alphabetic as often as numeric (codex r21 P1).
     expect(commercialTextSignal('Need pest control for Suite A')).toBe(true);
     expect(commercialTextSignal('roaches in suite B-2')).toBe(true);
+    // Service-qualified premises incl. offices (codex r23 P1).
+    expect(commercialTextSignal('Need pest control for an office')).toBe(true);
+    expect(commercialTextSignal('pest control for a warehouse')).toBe(true);
+    // …but a residential HOME office is still not a commercial premises.
+    expect(commercialTextSignal('need pest control for the home office')).toBe(false);
   });
   test('stays quiet on residential prose that mentions work', () => {
     expect(commercialTextSignal('ants in my home office and the kitchen')).toBe(false);
