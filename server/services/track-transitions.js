@@ -336,19 +336,26 @@ async function markEnRoute(serviceId, opts = {}) {
     // rule; applyLiveMoveHistory's transaction contract) — a history-insert
     // failure rolls the rewind back. The tracker-only heal needs no history
     // and stays a single write.
-    const healed = liveOpStatus
-      ? await db.transaction(async (trx) => {
-        const updated = await healWrite(trx);
-        if (updated > 0) {
-          const { applyLiveMoveHistory } = require('./rebooker');
-          await applyLiveMoveHistory(trx, svc, { actor: opts.actorId || null });
-        }
-        return updated;
-      }).catch((err) => {
-        logger.error(`[track-transitions] stale-heal status-rewind failed for ${serviceId}: ${err.message}`);
-        return 0;
-      })
-      : await healWrite(db);
+    // A transaction/history error is a FAILURE, not a CAS loss: recursing
+    // with the heal disabled would let the idempotent branch report ok on
+    // the still-stale row — the tap would claim success while healing
+    // nothing. Surface it so the caller 409s and the tech can retry.
+    let healed;
+    try {
+      healed = liveOpStatus
+        ? await db.transaction(async (trx) => {
+          const updated = await healWrite(trx);
+          if (updated > 0) {
+            const { applyLiveMoveHistory } = require('./rebooker');
+            await applyLiveMoveHistory(trx, svc, { actor: opts.actorId || null });
+          }
+          return updated;
+        })
+        : await healWrite(db);
+    } catch (err) {
+      logger.error(`[track-transitions] stale-heal failed for ${serviceId}: ${err.message}`);
+      return { ok: false, reason: 'stale_heal_failed' };
+    }
     if (healed > 0) {
       logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
     } else {

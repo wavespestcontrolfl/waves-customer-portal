@@ -4551,6 +4551,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   scheduled_date: prevDate,
                   window_start: svc.window_start ?? null,
                   window_end: svc.window_end ?? null,
+                  // Tracker state joins the CAS: the rewind decision above
+                  // came from this trx's read, and a geofence/manual En
+                  // Route flip advances track_state WITHOUT touching status
+                  // (the operational sync is opt-in) — a status-only match
+                  // would move the visit carrying freshly written lifecycle
+                  // state. A tracker change makes this miss; the batch
+                  // reports the conflict.
+                  track_state: svc.track_state ?? null,
                 })
                 .update(updates);
               if (updatedRows === 0) {
@@ -5920,14 +5928,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
               if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
               if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
+              let childRewound = false;
               if (childDateChanged) {
                 const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
                 if (needsLifecycleRewind(child)) {
                   Object.assign(childUpdates, LIVE_LIFECYCLE_RESET);
-                  rewoundSeriesRows.push(child);
+                  childRewound = true;
                 }
               }
-              await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
+              // CAS on the observed status/date/track_state: the rewind
+              // decision came from the unlocked read above, and a
+              // concurrent En Route transition can make the row live after
+              // it — an id-only write would move it without the rewind. A
+              // miss skips the row (it changed under us; the next edit
+              // re-reads).
+              const childUpdated = await trx('scheduled_services')
+                .where({
+                  id: child.id,
+                  status: child.status,
+                  scheduled_date: child.scheduled_date,
+                  track_state: child.track_state ?? null,
+                })
+                .update(childUpdates);
+              if (childUpdated === 0) continue;
+              if (childRewound) rewoundSeriesRows.push(child);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
                   trx,
@@ -5972,14 +5996,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
+                let boosterRewound = false;
                 if (boosterDateChanged) {
                   const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
                   if (needsLifecycleRewind(booster)) {
                     Object.assign(boosterUpdates, LIVE_LIFECYCLE_RESET);
-                    rewoundSeriesRows.push(booster);
+                    boosterRewound = true;
                   }
                 }
-                await trx('scheduled_services').where({ id: booster.id }).update(boosterUpdates);
+                // Same CAS as the child rewrite above.
+                const boosterUpdated = await trx('scheduled_services')
+                  .where({
+                    id: booster.id,
+                    status: booster.status,
+                    scheduled_date: booster.scheduled_date,
+                    track_state: booster.track_state ?? null,
+                  })
+                  .update(boosterUpdates);
+                if (boosterUpdated === 0) continue;
+                if (boosterRewound) rewoundSeriesRows.push(booster);
                 if (boosterDateChanged) {
                   await resetAppointmentReminderForScheduleRewrite(
                     trx,

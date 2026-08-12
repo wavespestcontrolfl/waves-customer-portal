@@ -493,7 +493,14 @@ class SmartRebooker {
       }
 
       const updated = await trx('scheduled_services')
-        .where({ id: serviceId, status: service.status })
+        // track_state is in the CAS: the lifecycleRewound decision above
+        // came from the outer read, and markEnRoute advances the tracker
+        // WITHOUT touching status (its operational sync is opt-in) — a
+        // status-only match would let this move commit while carrying the
+        // freshly written lifecycle state onto the new date. A tracker
+        // change makes the write miss and surface the concurrent-change
+        // 409 below instead.
+        .where({ id: serviceId, status: service.status, track_state: service.track_state ?? null })
         .whereIn('status', Array.from(allowedStatuses))
         // Optional caller-supplied expected-state predicate (e.g. auto-dispatch
         // passing the locked/excluded flags + original date) so a concurrent
@@ -1084,6 +1091,10 @@ class SmartRebooker {
             // must invalidate the match, not be steamrolled.
             window_end: sib.window_end ?? null,
             technician_id: sib.technician_id ?? null,
+            // Tracker state too: the sibRewound decision came from this
+            // read, and a concurrent En Route flip advances track_state
+            // without touching status — see the single-job CAS above.
+            track_state: sib.track_state ?? null,
           })
           .update(updateData);
         if (updated === 0) {

@@ -294,6 +294,26 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(db).toHaveBeenCalledTimes(1); // no heal UPDATE
   });
 
+  test('a failed heal transaction surfaces an error, not phantom idempotent success', async () => {
+    const staleSvc = {
+      id: 'job-heal-err',
+      customer_id: 'cust-16',
+      technician_id: null,
+      status: 'on_site',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      arrived_at: isoDaysAgo(7),
+      cancelled_at: null,
+    };
+    db.mockReturnValueOnce(query(staleSvc));
+    db.transaction = jest.fn(async () => { throw new Error('history insert boom'); });
+
+    const result = await trackTransitions.markEnRoute('job-heal-err');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale_heal_failed');
+  });
+
   test('CAS miss with the row still scheduled surfaces a conflict, not success', async () => {
     // A concurrent reschedule moved the status/date tuple between the read
     // and the flip while track_state stayed 'scheduled': nobody went en

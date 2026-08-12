@@ -477,6 +477,10 @@ describe('live-status reschedule override (allowLive)', () => {
       window_start: '09:00:00',
       window_end: '11:00:00',
       technician_id: null,
+      // Tracker state joined the CAS alongside the scheduling fields — a
+      // concurrent En Route flip advances track_state without touching
+      // status, and the rewind decision came from this read.
+      track_state: null,
     });
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();
