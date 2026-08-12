@@ -362,6 +362,63 @@ describe('miner persistAll action-aware gate', () => {
     expect(retirements[0].notIn).toBe(null);
   });
 
+  test('a BELOW-FLOOR candidate does not defend its stored row (stale higher score would stay claimable)', async () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    const updates = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 40, // under the 60 floor → persistAll drops it
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/new-page/',
+        dedupe_key: 'ctr::weak',
+      }),
+    ]);
+
+    const retirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved');
+    expect(retirements.length).toBeGreaterThanOrEqual(1);
+    // Nothing persisted, so nothing defends the query: no key exclusion.
+    expect(retirements[0].notIn).toBe(null);
+  });
+
+  test("a decay_refresh parent's companion is protected even when the per-run cap omitted it", async () => {
+    const updates = reconcileHarness([staleRow]);
+
+    await miner.persistAll([
+      opp({
+        score: 87,
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'plaster bagworm',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/new-page/',
+        dedupe_key: 'ctr::new-page',
+      }),
+      // Live decay_refresh parent on the OLD page — its link-boost
+      // companion shares the stale row's companion key and must survive,
+      // even though LINK_BOOST_MAX_PER_RUN emitted no link_boost row.
+      opp({
+        score: 87,
+        bucket: 'decay_refresh',
+        action_type: 'refresh_existing_page',
+        query: null,
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/old-page/',
+        dedupe_key: 'decay::old-page',
+      }),
+    ]);
+
+    const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
+      && u.filters?.bucket === 'link_boost');
+    expect(companionRetirements).toHaveLength(0);
+  });
+
   test('a companion still referenced by another live candidate is preserved', async () => {
     // Two queries legitimately target the same page; the companion key
     // carries no query, so retiring it for one query would delete the
@@ -397,6 +454,45 @@ describe('miner persistAll action-aware gate', () => {
     const companionRetirements = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_target_moved'
       && u.filters?.bucket === 'link_boost');
     expect(companionRetirements).toHaveLength(0);
+  });
+
+  test('recovered-query sweep expires pending rewrites the bucket no longer emits', async () => {
+    // A query whose CTR climbed back, or whose impressions/position left
+    // the gates, vanishes from mineCtrRewrite entirely — per-query
+    // reconciliation never sees it, so the lane sweep must.
+    const updates = reconcileHarness([staleRow]);
+
+    await miner._sweepRecoveredCtrRewrites([
+      opp({
+        bucket: 'ctr_rewrite',
+        action_type: 'rewrite_title_meta',
+        query: 'still qualifying',
+        service: 'pest',
+        city: null,
+        page_url: 'https://x/live/',
+        dedupe_key: 'ctr::live',
+      }),
+    ]);
+
+    const sweeps = updates.filter((u) => u.updates.skip_reason === 'ctr_rewrite_signal_recovered');
+    expect(sweeps.length).toBeGreaterThanOrEqual(1);
+    expect(sweeps[0].filters).toMatchObject({ bucket: 'ctr_rewrite', status: 'pending' });
+    // Only queries the bucket no longer emits are swept.
+    expect(sweeps[0].notIn).toEqual(['query', ['still qualifying']]);
+    expect(sweeps[0].updates.status).toBe('expired'); // revivable when the signal returns
+  });
+
+  test('recovered-query sweep rethrows so a failure rolls back the persist transaction', async () => {
+    db.mockImplementation(() => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
+        select: jest.fn(() => Promise.reject(new Error('boom'))),
+      };
+      return q;
+    });
+
+    await expect(miner._sweepRecoveredCtrRewrites([])).rejects.toThrow('boom');
   });
 
   test('demoted near-me candidate below floor expires its stale pending blog row (rollout hygiene)', async () => {

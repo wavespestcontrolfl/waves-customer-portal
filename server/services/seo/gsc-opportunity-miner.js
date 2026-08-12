@@ -1088,6 +1088,28 @@ function linkBoostCap() {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LINK_BOOST_MAX_PER_RUN;
 }
 
+// Companion dedupe keys the CURRENT batch still stands behind. A link_boost
+// key is (bucket, service, city, page) with NO query in it, so companions
+// are shared across queries and across source buckets — retiring one on a
+// stale ctr_rewrite row's account would delete work another live parent
+// still needs. Protection is synthesized from EVERY live link-boost-eligible
+// parent (rewrite_title_meta AND refresh_existing_page), not just the
+// emitted link_boost rows: LINK_BOOST_MAX_PER_RUN can drop a companion whose
+// page is still actively targeted, and a decay_refresh parent sharing a page
+// with a stale rewrite row must not lose its companion (audit P1 ×2).
+function companionProtectionKeys(opportunities = []) {
+  const keys = new Set();
+  for (const o of opportunities) {
+    if (o.bucket === 'link_boost' && o.dedupe_key) keys.add(o.dedupe_key);
+    if (o.page_url && LINK_BOOST_SOURCE_ACTIONS.has(o.action_type)) {
+      keys.add(dedupeKey({
+        bucket: 'link_boost', service: o.service, city: o.city, page_url: o.page_url,
+      }));
+    }
+  }
+  return keys;
+}
+
 function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new Set() } = {}) {
   if (!cap) return [];
   const byKey = new Map();
@@ -1476,6 +1498,20 @@ class GscOpportunityMiner {
             revalidated,
             trx,
             familyExemptions
+          );
+        }
+        // ctr_rewrite lane sweep, same doctrine as the family one: a query
+        // that RECOVERS (CTR back above threshold, impressions or position
+        // out of range) simply vanishes from the bucket, so per-query
+        // reconciliation inside persistAll never sees it and its pending
+        // rewrite would stay claimable for the full 14 days — optimizing a
+        // page that is now performing fine. Guarded on a successful bucket
+        // run: with an error, an empty/short bucket means "didn't run", not
+        // "no signal", and sweeping would retire valid queued work.
+        if (!errors.ctr_rewrite) {
+          await this._sweepRecoveredCtrRewrites(
+            revalidated.filter((o) => o.bucket === 'ctr_rewrite'),
+            trx
           );
         }
       });
@@ -3387,27 +3423,20 @@ class GscOpportunityMiner {
     for (const o of opportunities) {
       if (o.bucket !== 'ctr_rewrite' || !o.query) continue;
       if (!activeKeysByQuery.has(o.query)) activeKeysByQuery.set(o.query, new Set());
-      // Only an actionable rewrite defends its row; a demoted candidate
-      // (no resolvable/material target) leaves an empty set, retiring
-      // every pending row for the query.
-      if (o.page_url && o.action_type === 'rewrite_title_meta') {
+      // Only an actionable rewrite that will ACTUALLY PERSIST defends its
+      // row. A demoted candidate (no resolvable/material target) leaves an
+      // empty set, retiring every pending row for the query — and so does
+      // a below-floor candidate: persistAll skips it, so the stored row
+      // keeps its stale higher score and would stay claimable on evidence
+      // the current mine no longer supports (audit P1).
+      if (o.page_url && o.action_type === 'rewrite_title_meta'
+        && o.score >= minScoreToActFor(o.action_type)) {
         activeKeysByQuery.get(o.query).add(o.dedupe_key);
       }
     }
     if (!activeKeysByQuery.size) return;
 
-    // Companion keys the CURRENT batch still stands behind — derived from
-    // live rewrite candidates (not just emitted link_boost rows, which the
-    // per-run cap may have dropped) plus any link_boost in the batch.
-    const protectedCompanionKeys = new Set();
-    for (const o of opportunities) {
-      if (o.bucket === 'link_boost' && o.dedupe_key) protectedCompanionKeys.add(o.dedupe_key);
-      if (o.bucket === 'ctr_rewrite' && o.page_url && o.action_type === 'rewrite_title_meta') {
-        protectedCompanionKeys.add(dedupeKey({
-          bucket: 'link_boost', service: o.service, city: o.city, page_url: o.page_url,
-        }));
-      }
-    }
+    const protectedCompanionKeys = companionProtectionKeys(opportunities);
 
     for (const [query, activeKeys] of activeKeysByQuery) {
       try {
@@ -3441,6 +3470,63 @@ class GscOpportunityMiner {
       } catch (err) {
         logger.warn(`[gsc-opp-miner] ctr_rewrite stale-target retirement failed (${query}): ${err.message}`);
       }
+    }
+  }
+
+  /**
+   * Lane sweep for queries that RECOVERED. _reconcileCtrRewriteTargets can
+   * only reason about queries the bucket still emits; a query whose CTR
+   * climbed back over the threshold — or whose impressions or position
+   * left the gates — vanishes from the bucket entirely, so its pending
+   * rewrite would sit claimable for the full 14 days and optimize a page
+   * that is now performing fine (audit P1).
+   *
+   * Mirrors the family sweep's contract: the CALLER guards on a successful
+   * bucket run (an errored bucket's empty output means "didn't run", not
+   * "no signal"), only PENDING rows are touched, and retirement is
+   * 'expired' — revivable the moment the signal returns. Companions follow
+   * their parent, minus anything the current batch still stands behind.
+   */
+  async _sweepRecoveredCtrRewrites(ctrOpportunities = [], trx = null) {
+    const runner = trx || db;
+    const liveQueries = new Set(
+      ctrOpportunities.filter((o) => o.query).map((o) => String(o.query))
+    );
+    try {
+      let staleQ = runner('opportunity_queue')
+        .where({ bucket: 'ctr_rewrite', status: 'pending' });
+      if (liveQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(liveQueries));
+      const stale = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+      if (!stale.length) return;
+
+      let expireQ = runner('opportunity_queue')
+        .where({ bucket: 'ctr_rewrite', status: 'pending' });
+      if (liveQueries.size) expireQ = expireQ.whereNotIn('query', Array.from(liveQueries));
+      await expireQ.update({
+        status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
+      });
+
+      const protectedKeys = companionProtectionKeys(ctrOpportunities);
+      const companionKeys = stale
+        .filter((r) => r.page_url)
+        .map((r) => dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        }))
+        .filter((k) => !protectedKeys.has(k));
+      if (companionKeys.length) {
+        await runner('opportunity_queue')
+          .where({ bucket: 'link_boost', status: 'pending' })
+          .whereIn('dedupe_key', companionKeys)
+          .update({
+            status: 'expired', skip_reason: 'ctr_rewrite_signal_recovered', updated_at: new Date(),
+          });
+      }
+      logger.info(`[gsc-opp-miner] ctr_rewrite sweep: ${stale.length} recovered-query row(s) expired`);
+    } catch (err) {
+      // Inside the persist transaction the caller owns rollback semantics;
+      // rethrow so a failed sweep cannot leave half-reconciled state.
+      logger.warn(`[gsc-opp-miner] ctr_rewrite recovered-query sweep failed: ${err.message}`);
+      throw err;
     }
   }
 
