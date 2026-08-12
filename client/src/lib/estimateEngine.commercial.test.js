@@ -109,6 +109,20 @@ describe("client estimate engine commercial safety fallback", () => {
       isCommercial: "NO",
       commercialSubtype: "",
     });
+    // An UNRESOLVED lookup type explicitly CLEARS the form so a prior
+    // address's classification (and commercial flag) cannot price a new
+    // property (codex r28 P1).
+    expect(resolveLookupPropertyTypeAutofill("Unknown", "RESIDENTIAL")).toEqual({
+      propertyType: "",
+      isCommercial: "NO",
+      commercialSubtype: "",
+    });
+    // …but a COMMERCIAL category still classifies.
+    expect(resolveLookupPropertyTypeAutofill("Unknown", "COMMERCIAL")).toEqual({
+      propertyType: "Commercial",
+      isCommercial: "YES",
+    });
+
     expect(resolveLookupPropertyTypeAutofill("", "COMMERCIAL")).toEqual({
       propertyType: "Commercial",
       isCommercial: "YES",

@@ -376,6 +376,34 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
     // it doesn't own alone — the resolvable lot is the development's
     // (codex pre-push P1, same family as the r8 owner-occupied suite fix).
     || model.subpremiseSignal === true;
+  // A commercial SUITE's building-sourced area describes the whole
+  // building, never the suite — the V1 arbitration rejects county sqft only
+  // for TENANTS, so an owner-occupied suite still carried it and
+  // buildEngineInput forwarded it as the measured commercial footprint: a
+  // sub-10k building would price the whole thing for one suite (codex r28
+  // P1 — the same overquote class the tenant rung exists for). Caller-
+  // stated area IS suite-scoped and stays.
+  const SUITE_INCOMPATIBLE_HOME_SOURCES = new Set([
+    'county_assessed', 'property_lookup_estimate', 'subdivision_median', 'customer_profile',
+  ]);
+  if (model.serviceScope === 'commercial_suite'
+    && Number(propertyFacts?.home?.value) > 0
+    && SUITE_INCOMPATIBLE_HOME_SOURCES.has(String(propertyFacts.home.source || ''))) {
+    const priorHome = Number(propertyFacts.home.value);
+    propertyFacts.home = {
+      value: null,
+      source: 'unresolved',
+      confidence: 'none',
+      rejected: [
+        ...(propertyFacts.home.rejected || []),
+        {
+          value: priorHome,
+          source: propertyFacts.home.source,
+          reason: 'commercial suite scope — this area covers the whole building, not the suite',
+        },
+      ],
+    };
+  }
   if (unitScoped && noIndividualLot) {
     const priorValue = Number(propertyFacts?.lot?.value) > 0 ? Number(propertyFacts.lot.value) : null;
     propertyFacts.lot = {

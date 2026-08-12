@@ -468,6 +468,29 @@ describe('resolveUnitScopeModel — the apartment-tenant shape', () => {
     expect(facts.lot.source).toMatch(/^not_applicable:/);
   });
 
+  test('a suite scope clears a building-sourced area but keeps caller-stated (r28)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: true, address: '4801 Industrial Way, Suite 7, Parrish FL 34219' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '4801 Industrial Way, Suite 7, Parrish FL 34219',
+    });
+    expect(model.serviceScope).toBe('commercial_suite');
+    // County building area → cleared (it prices the whole building).
+    const countyFacts = { home: { value: 14250, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(countyFacts, model);
+    expect(countyFacts.home.value).toBeNull();
+    expect(countyFacts.home.source).toBe('unresolved');
+    expect(countyFacts.home.rejected[0]).toEqual(
+      expect.objectContaining({ value: 14250, source: 'county_assessed' }),
+    );
+    // Caller-stated area IS suite-scoped and survives.
+    const statedFacts = { home: { value: 1590, source: 'caller_stated', confidence: 'medium' } };
+    applyUnitScopeToPropertyFacts(statedFacts, model);
+    expect(statedFacts.home.value).toBe(1590);
+  });
+
   test('commercial tenant classifies as a suite', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,

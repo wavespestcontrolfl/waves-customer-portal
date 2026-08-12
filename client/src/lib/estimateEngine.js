@@ -282,8 +282,22 @@ const LOOKUP_PROPERTY_TYPE_LABELS = {
   condo_upper: "Condo Upper",
 };
 
+// The server surfaces 'Unknown' when a lookup resolved no trusted type
+// (GATE_UNIT_SCOPE_GUARDRAILS). That is an explicit "no classification",
+// not an unrecognized label: returning {} merged nothing into the form, so
+// looking up a second unresolved address left the PRIOR address's Condo /
+// Single Family / Commercial classification — and its commercial flag —
+// active on the new property (codex r28 P1).
+const UNKNOWN_LOOKUP_PROPERTY_TYPES = new Set(["unknown", "unresolved"]);
+
 export function resolveLookupPropertyTypeAutofill(propertyType, category) {
   const normalizedPropertyType = normalizePropertyType(propertyType);
+  // A COMMERCIAL category still classifies (the branch below) — only an
+  // unresolved type with no commercial category clears the form.
+  if (UNKNOWN_LOOKUP_PROPERTY_TYPES.has(normalizedPropertyType)
+    && normalizePropertyType(category) !== "commercial") {
+    return { propertyType: "", isCommercial: "NO", commercialSubtype: "" };
+  }
   if (normalizedPropertyType === "commercial") {
     return { propertyType: "Commercial", isCommercial: "YES" };
   }
