@@ -300,7 +300,7 @@ async function markEnRoute(serviceId, opts = {}) {
     // sides agree — rewriting it would undo the caller's own transition
     // and fabricate an en_route→confirmed history row.
     const liveOpStatus = String(svc.status) === 'on_site';
-    const healed = await db('scheduled_services')
+    const healWrite = (conn) => conn('scheduled_services')
       .where({ id: serviceId, track_state: svc.track_state, status: svc.status })
       .update({
         track_state: 'scheduled',
@@ -308,16 +308,26 @@ async function markEnRoute(serviceId, opts = {}) {
         ...(liveOpStatus ? { status: 'confirmed' } : {}),
         updated_at: new Date(),
       });
+    // The status rewind is a REAL operational transition, so its
+    // job_status_history row must be atomic with it (AGENTS.md audit-trail
+    // rule; applyLiveMoveHistory's transaction contract) — a history-insert
+    // failure rolls the rewind back. The tracker-only heal needs no history
+    // and stays a single write.
+    const healed = liveOpStatus
+      ? await db.transaction(async (trx) => {
+        const updated = await healWrite(trx);
+        if (updated > 0) {
+          const { applyLiveMoveHistory } = require('./rebooker');
+          await applyLiveMoveHistory(trx, svc, { actor: opts.actorId || null });
+        }
+        return updated;
+      }).catch((err) => {
+        logger.error(`[track-transitions] stale-heal status-rewind failed for ${serviceId}: ${err.message}`);
+        return 0;
+      })
+      : await healWrite(db);
     if (healed > 0) {
       logger.warn(`[track-transitions] healed stale ${svc.track_state} attempt on ${serviceId} (lifecycle evidence predates its scheduled date ${scheduledDayStr}); proceeding with fresh en-route flip`);
-      if (liveOpStatus) {
-        try {
-          const { applyLiveMoveHistory } = require('./rebooker');
-          await applyLiveMoveHistory(db, svc, { actor: opts.actorId || null });
-        } catch (err) {
-          logger.error(`[track-transitions] stale-heal status-rewind history append failed for ${serviceId}: ${err.message}`);
-        }
-      }
     } else {
       logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; re-entering on fresh state`);
     }

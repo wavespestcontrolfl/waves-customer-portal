@@ -95,6 +95,9 @@ describe('needsLifecycleRewind', () => {
 describe('markEnRoute stale-attempt self-heal', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // The status-rewind heal runs its write + history insert in one trx;
+    // the mock hands the same db queue to the callback.
+    db.transaction = jest.fn(async (fn) => fn(db));
   });
 
   test('stale on_property from an earlier ET day is rewound and the flip proceeds', async () => {
