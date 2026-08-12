@@ -405,11 +405,14 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         // ET calendar discipline (pre-push P1): service_date is a DATE —
         // compare ET calendar days, never UTC-midnight milliseconds, or
         // the suppress/offer boundary moves hours early around DST.
-        const { etDateString } = require('../../utils/datetime-et');
-        const rawDate = service.service_date || service.created_at || null;
-        const dayKey = rawDate instanceof Date
-          ? etDateString(rawDate)
-          : String(rawDate || '').slice(0, 10);
+        // service_date is a DATE (hydrates as 'YYYY-MM-DD' or UTC-midnight
+        // Date) → etCalendarDayOf reads it literally; created_at is a real
+        // timestamp → etDateString converts through the ET wall clock.
+        // Using the wrong one shifts the boundary a full day (pre-push P1).
+        const { etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
+        const dayKey = service.service_date
+          ? etCalendarDayOf(service.service_date)
+          : (service.created_at ? etDateString(new Date(service.created_at)) : '');
         const toUtcNoonMs = (key) => {
           const [y, m, d] = key.split('-').map(Number);
           return Date.UTC(y, m - 1, d, 12);

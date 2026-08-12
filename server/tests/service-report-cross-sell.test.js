@@ -543,6 +543,22 @@ describe('buildReportCrossSell', () => {
     }
   });
 
+  test('a UTC-midnight Date service_date reads as its own ET calendar day, not the day before', async () => {
+    // pg DATE columns hydrate as UTC-midnight Dates; running one through
+    // etDateString would shift it to the PREVIOUS Eastern day and expire
+    // the 90-day ambiguity guard a day early (pre-push P1). A report dated
+    // exactly 90 ET days ago must still suppress.
+    const ninetyDaysAgo = new Date(Date.UTC(
+      new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() - 90, 0, 0, 0, 0,
+    ));
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Quarterly Pest Control', service_date: ninetyDaysAgo });
+    expect(await buildReportCrossSell(service, db, { propertyLookup: missLookup })).toBeNull();
+  });
+
   test('an old report + a stale ADVISORY ledger component never becomes a lawn request (gate off)', async () => {
     // The advisory component is not corroboration (it may be stale or
     // another property's), so the old report's pest identity drops; pest
