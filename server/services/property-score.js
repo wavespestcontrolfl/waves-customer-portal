@@ -28,7 +28,7 @@
  */
 
 const db = require('../models/db');
-const { lawnOverall, hasCustomerLawnCare } = require('./lawn-health-shared');
+const { lawnOverall } = require('./lawn-health-shared');
 const {
   loadActiveConfig,
   loadHistoryForCustomer,
@@ -80,10 +80,12 @@ async function hasActiveRecurringLine(customerId, line, knex) {
 
 async function lawnComponent(customerId, knex) {
   const base = { key: 'lawn', label: 'Lawn' };
+  // created_at tie-break: same-day confirmed assessments are allowed and
+  // UUID ids carry no chronology.
   const rows = await knex('lawn_assessments')
     .where({ customer_id: customerId, confirmed_by_tech: true })
     .orderBy('service_date', 'desc')
-    .orderBy('id', 'desc')
+    .orderBy('created_at', 'desc')
     .limit(2)
     .catch(() => []);
   if (rows.length) {
@@ -100,7 +102,10 @@ async function lawnComponent(customerId, knex) {
       asOf: dateOnlyString(rows[0].service_date),
     };
   }
-  const monitored = await hasCustomerLawnCare(customerId, knex).catch(() => false);
+  // Pending only on ACTIVE recurring lawn coverage — hasCustomerLawnCare
+  // treats any waveguard_tier as lawn evidence, which promises pest-only
+  // WaveGuard customers a lawn score that will never come.
+  const monitored = await hasActiveRecurringLine(customerId, 'lawn', knex);
   if (monitored) {
     return { ...base, status: 'pending', reason: 'Your lawn score appears after the first confirmed lawn assessment.' };
   }
@@ -213,6 +218,12 @@ async function termiteComponent(customerId, knex) {
       reason: `${stations} monitoring station${stations === 1 ? '' : 's'} active on your property.`,
     };
   }
+  // Recurring-only termite coverage (e.g. foam_recurring) carries no bond
+  // row and may predate any station rows — still protection.
+  const recurring = await hasActiveRecurringLine(customerId, 'termite', knex);
+  if (recurring) {
+    return { ...base, status: 'active', reason: 'Recurring termite protection active.' };
+  }
   return { ...base, status: 'not_monitored', reason: 'No termite protection on file.' };
 }
 
@@ -291,6 +302,17 @@ async function irrigationComponent(customerId, knex) {
       status: 'status',
       waterStatus: snap.status, // low | balanced | high
       reason: IRRIGATION_COPY[snap.interpretation] || null,
+      asOf: dateOnlyString(snap.service_date),
+    };
+  }
+  if (snap) {
+    // A snapshot exists but resolved 'unknown' (rain/irrigation/target data
+    // unavailable) — the customer IS serviced; say the data is still
+    // building, never "tracking starts with your first service".
+    return {
+      ...base,
+      status: 'pending',
+      reason: 'Watering data for your lawn is still being collected.',
       asOf: dateOnlyString(snap.service_date),
     };
   }
