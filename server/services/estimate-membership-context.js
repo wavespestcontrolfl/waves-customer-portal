@@ -739,16 +739,17 @@ function rowServicePrice(row = {}, addonRowIds) {
 // revert the panel to stale service_type — recreating, with the tier gate on,
 // exactly the tier-vs-label divergence this is meant to remove.
 //
-// The QUERY is waveguard-existing-services' loadCatalogFieldsByRowId — the
-// same mechanism tier qualification classifies enriched rows with (codex
-// #3359 r3: an independent copy here meant one could transiently fail while
-// the other succeeded, splitting the tier and spend paths onto different
-// identities — the divergence this module exists to remove). This wrapper
-// only adapts shape and failure policy for DISPLAY: the shared loader's null
-// (join failed) degrades to an empty Map — "no catalog identity", defer to
-// service_type — per this panel's never-break-the-snapshot rule.
-async function loadCatalogIdentityByRowId(database, customerId) {
-  const catalogFields = await loadCatalogFieldsByRowId(database, customerId);
+// The RESULT is waveguard-existing-services' loadCatalogFieldsByRowId — the
+// same mechanism tier qualification classifies enriched rows with, loaded
+// ONCE per snapshot and passed to qualification too (codex #3359 r3/r4: an
+// independent copy, and then an independent second call, each meant one
+// lookup could transiently fail while the other succeeded, splitting the
+// tier and spend paths onto different identities — the divergence this
+// module exists to remove). This adapter only reshapes that one result for
+// DISPLAY: null (join failed) degrades to an empty Map — "no catalog
+// identity", defer to service_type — per this panel's never-break-the-
+// snapshot rule, and qualification saw the same null.
+function catalogIdentityMapFrom(catalogFields) {
   if (!catalogFields) return new Map();
   return new Map([...catalogFields].map(([id, row]) => [id, {
     serviceKey: row.service_key || null,
@@ -846,12 +847,17 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     currentDiscountPct: 0,
   };
 
+  // ONE catalog lookup for the whole snapshot — qualification, row/label
+  // display, and linked-invoice classification all read this same result
+  // (codex #3359 r4), so a transient failure degrades every path together
+  // instead of splitting them onto different identities.
+  const catalogFieldsByRowId = await loadCatalogFieldsByRowId(database, customerId);
   const rows = Array.isArray(existingRows)
     ? existingRows
     : await loadActiveRecurringServiceRows(database, customerId);
   const qualifyingRows = Array.isArray(existingRows)
     ? existingRows
-    : await loadExistingRecurringQualifyingRows(database, customerId);
+    : await loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId });
   // qualifyingKeysForRow, not a re-derivation from service_type text: it is
   // the SAME catalog-authoritative reducer loadExistingRecurringQualifyingRows
   // qualified these rows with, so the tier families here match the ones that
@@ -863,9 +869,10 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const cadenceByRowId = await loadCadenceByRowId(database, customerId);
-  const catalogIdentityByRowId = await loadCatalogIdentityByRowId(database, customerId);
-  // AFTER the identity load: paid invoices resolve their family through the
-  // visit they were minted for, under the same gated rule as the rows.
+  const catalogIdentityByRowId = catalogIdentityMapFrom(catalogFieldsByRowId);
+  // Paid invoices resolve their family through the visit they were minted
+  // for, from the same shared identity result, under the same gated rule as
+  // the rows.
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId, catalogIdentityByRowId);
   const addonRowIds = await loadAddonRowIds(database, rows);
   // ET calendar day — scheduled_date is a pg DATE column, read as the stored

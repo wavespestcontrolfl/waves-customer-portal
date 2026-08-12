@@ -244,7 +244,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+// opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
+// identity (the spend panel) passes its already-loaded map — including a
+// null from a failed load — so qualification and that caller's own
+// classification are guaranteed to see the SAME catalog snapshot (codex
+// #3359 r4: two sequential loads meant one could transiently fail while the
+// other succeeded, splitting tier and spend onto different identities).
+// Omitted (every other caller), the loader fetches its own.
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
@@ -261,7 +268,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+  const catalogById = (catalogFieldsByRowId !== undefined
+    ? catalogFieldsByRowId
+    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the

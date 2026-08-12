@@ -2156,6 +2156,42 @@ describe('current-spend cadence and stamped billing basis', () => {
     mockAutoTierGate = false;
   });
 
+  test('the catalog identity loads ONCE, shared by qualification, display, and invoices', async () => {
+    mockAutoTierGate = true;
+    const inner = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+    // Count identity-shaped catalog queries (service_key projected, no
+    // cadence columns). Two sequential loads — qualification's and the
+    // panel's — could transiently disagree; one shared result cannot.
+    let identityQueries = 0;
+    const database = (table) => {
+      const builder = inner(table);
+      if (table === 'scheduled_services as s') {
+        const originalSelect = builder.select;
+        builder.select = async (...cols) => {
+          const flat = cols.flat().map(String);
+          if (flat.some((c) => c.includes('service_key')) && !flat.some((c) => c.includes('recurring_pattern'))) {
+            identityQueries += 1;
+          }
+          return originalSelect(...cols);
+        };
+      }
+      return builder;
+    };
+    database.fn = inner.fn;
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].key).toBe('lawn_care');
+    expect(identityQueries).toBe(1);
+    mockAutoTierGate = false;
+  });
+
   test('with the tier gate OFF a linked invoice keeps its own text, matching the rows', async () => {
     const database = fakeDb({
       scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
