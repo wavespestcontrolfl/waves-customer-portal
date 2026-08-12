@@ -365,13 +365,17 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
     }
-    const notificationId = await recordBell(customerId, messageType, body);
-    const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
-    // History parity: status stays 'sent' (legacy predicates filter on
-    // queued/sent/delivered); the channel marker lives in from_phone +
-    // metadata.
+    // PROOF FIRST, bell second: this sms_log row is what
+    // recoverStaleScheduledSmsClaims reads as durable proof-of-send — a
+    // crash inside the bell insert before the proof exists would let the
+    // sweep resend a push the customer already received. History parity:
+    // status stays 'sent' (legacy predicates filter on queued/sent/
+    // delivered); the channel marker lives in from_phone + metadata. The
+    // bell is a courtesy record; its id back-fills into metadata
+    // best-effort afterward.
+    let proofRowId = null;
     try {
-      await db('sms_log').insert({
+      const inserted = await db('sms_log').insert({
         customer_id: customerId,
         direction: 'outbound',
         from_phone: 'push',
@@ -380,18 +384,28 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         twilio_sid: null,
         status: 'sent',
         message_type: messageType,
-        // scheduled_sms_log_id keeps recoverStaleScheduledSmsClaims able to
-        // find this row as proof-of-send — without it a crash between this
-        // insert and the scheduler settling its 'sending' row would
-        // reschedule the message and duplicate the push.
         metadata: JSON.stringify({
           channel: 'push',
-          push_notification_id: notificationId,
           ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
         }),
-      });
+      }).returning('id');
+      proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
+    }
+    const notificationId = await recordBell(customerId, messageType, body);
+    const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
+    if (proofRowId && notificationId) {
+      await db('sms_log')
+        .where({ id: proofRowId })
+        .update({
+          metadata: JSON.stringify({
+            channel: 'push',
+            push_notification_id: notificationId,
+            ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+          }),
+        })
+        .catch(() => {});
     }
     // Same unified-history writer the SMS path uses, threaded into the
     // customer's SMS conversation so staff surfaces show the message inline.

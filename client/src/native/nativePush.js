@@ -238,19 +238,31 @@ async function revokeRegistrationForDeniedPermission() {
 export function flushNativePushToken() {
   if (!isNativeApp()) return;
   // A revocation owed from a signed-out/offline denied-permission launch
-  // retries now that credentials exist. Serialized through the SAME latch
-  // postToken awaits (inflightDeactivation) — firing it unawaited would
-  // race the re-subscribe, and a subscribe landing last would re-activate
-  // a token the OS will never present.
-  const revocation = retryPendingRevocation();
+  // retries now that credentials exist. Two ordering rules:
+  //   1. CHAIN onto any in-flight logout unsubscribe rather than replacing
+  //      the latch — clobbering it would let this flush's subscribe bypass
+  //      that unsubscribe.
+  //   2. Snapshot pendingToken only AFTER the retry settles — the retry
+  //      clears it when permission is denied, and a pre-captured token
+  //      would re-subscribe a token the OS will never present.
+  const prior = inflightDeactivation;
+  const revocation = (async () => {
+    if (prior) {
+      try { await prior; } catch { /* prior latch settles regardless */ }
+    }
+    await retryPendingRevocation();
+  })();
   inflightDeactivation = revocation;
   revocation.finally(() => {
     if (inflightDeactivation === revocation) inflightDeactivation = null;
   });
-  if (!pendingToken) return;
-  const token = pendingToken;
-  pendingToken = null;
-  postToken(token);
+  void (async () => {
+    try { await revocation; } catch { /* retry never throws, belt-and-suspenders */ }
+    if (!pendingToken) return;
+    const token = pendingToken;
+    pendingToken = null;
+    postToken(token);
+  })();
 }
 
 async function retryPendingRevocation() {
