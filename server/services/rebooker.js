@@ -1193,8 +1193,11 @@ class SmartRebooker {
     if (wasLive || anchorRewound) {
       // The trx-fresh anchor row wins over the outer snapshot: a concurrent
       // reassignment between the two reads would otherwise clear the OLD
-      // tech (or none) and leave the current tech pinned to the moved visit.
-      const anchorTechId = (rewoundAnchorRow || service).technician_id;
+      // tech (or none) and leave the current tech pinned to the moved
+      // visit. Falls back to the outer read when the fresh row carries no
+      // tech — clearTechCurrentJob is conditional on the job pointer, so a
+      // stale fallback is a no-op at worst.
+      const anchorTechId = rewoundAnchorRow?.technician_id ?? service.technician_id;
       if (anchorTechId) {
         try {
           await clearTechCurrentJob({
