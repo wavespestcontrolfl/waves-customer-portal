@@ -386,6 +386,14 @@ describe('kill-switch isolation from the V2 gate (r12)', () => {
     })).toBe('leased_suite');
     // Lane OFF keeps the legacy leased_suite for every commercial tenant.
     expect(shadowPrivate.inferOwnershipType({ ...args, tenant: true })).toBe('leased_suite');
+    // A commercial CONDO is one unit of a larger building even with no
+    // Unit/Suite suffix on the address (codex r43 P1).
+    expect(shadowPrivate.hasPartBuildingEvidence({
+      subpremiseSignal: false, aggregated: false, propertyType: 'Commercial Condo',
+    })).toBe(true);
+    expect(shadowPrivate.hasPartBuildingEvidence({
+      subpremiseSignal: false, aggregated: false, propertyType: 'Restaurant',
+    })).toBe(false);
     // An AGGREGATE apartment complex bought whole is an association job, not
     // a suite — unitSignal is true for any apartment-typed record, so the
     // suite branch must not swallow it (codex r42 P1).

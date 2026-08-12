@@ -137,9 +137,17 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     // our warehouse" + a generic body), and the classifier already reads
     // it — excluding it here let that inquiry pass readiness as residential
     // (codex r40 P1).
+    // The commercial-scope evidence can live in an EARLIER message of the
+    // thread: an initial "pest control for our warehouse" email that lacked
+    // a phone becomes a lead, and the reply that supplies the phone carries
+    // no premises wording. The lead row persists the original prose
+    // (description holds its subject; transcript_summary the classifier's
+    // summary), so the follow-up scan reads those too (codex r43 P1).
     message: [
       String(email?.subject || '').trim(),
       emailProseForScan(email?.body_text || email?.snippet || ''),
+      String(lead?.description || '').trim(),
+      String(lead?.transcript_summary || '').trim(),
     ].filter(Boolean).join('\n'),
     normalizedAddress: {
       line1: addr.line1,

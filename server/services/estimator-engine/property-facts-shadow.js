@@ -118,8 +118,13 @@ function hasUnitSignal({ tenant, address, extraction, enhanced = false }) {
 // P1). Shared by the unit-scope lane and the V2 scope inference so both
 // paths agree.
 function hasPartBuildingEvidence({ subpremiseSignal, aggregated, propertyType }) {
+  // 'condo' counts: a commercial CONDOMINIUM is by definition one unit of a
+  // larger building even when the address carries no Unit/Suite suffix —
+  // without it the model called such a tenant a whole-building lease and V2
+  // overwrote their stated unit size with the county building area (codex
+  // r43 P1).
   return subpremiseSignal === true || aggregated === true
-    || /multiple\s*unit|multi.?tenant|suite|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || ''));
+    || /multiple\s*unit|multi.?tenant|suite|condo|strip\s*(?:mall|center)|plaza/i.test(String(propertyType || ''));
 }
 
 function inferServiceScope({
