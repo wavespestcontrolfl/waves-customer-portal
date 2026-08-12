@@ -350,10 +350,10 @@ async function commitVoiceBooking({
           .ignore();
       } else if (created) {
         // LOUD: a pending row with no review card is invisible to the office
-        // confirm queue. Only reachable on the sandbox path (no call_log row
-        // for this CallSid) — a transient lookup failure refuses to book at
-        // all (requestBookingText) — but if it ever happens in production the
-        // row needs finding by hand.
+        // confirm queue. requestBookingText refuses to reach this state at all
+        // (no call_log row ⇒ no booking), so this is a defensive guard for any
+        // other caller of this exported writer — if it ever fires, the row
+        // needs finding by hand.
         logger.error(
           `[voice-relay-booking] pending booking ${created.id} for customer ${customerId} created with NO `
           + 'outbound_booking_review card (no call_log row for this call) — it is invisible to the office confirm queue'
@@ -562,6 +562,21 @@ async function requestBookingText(input = {}, ctx = {}) {
         + 'Tell the caller a Waves team member will call to schedule, and capture the lead with their '
         + 'preferred time. Do NOT say anything is booked.';
     }
+  }
+  // NO CARD, NO BOOKING. The outbound_booking_review card is the office's only
+  // view of a pending voice booking — a row without one sits on the dispatch
+  // calendar hidden from the confirm queue that is supposed to make it real,
+  // and the customer can't see it either (dispatch-owned). The card FKs
+  // call_log, so no call_log row means no card: refuse rather than commit an
+  // invisible appointment. In production this is unreachable (the
+  // signature-verified /voice webhook writes the row at call start); the
+  // TwiML-Bin sandbox path has no call_log row and now declines to book, which
+  // is the right answer for a harness that cannot surface the request either.
+  if (!callLogId) {
+    logger.warn(`[voice-relay-booking] no call_log row for callSid=${ctx.callSid || 'n/a'} — refusing to book (the review card is what makes a pending booking real)`);
+    return 'I cannot put a booking request in front of the office on this call, so NOTHING was booked. '
+      + 'Capture the lead with the caller\'s preferred time and tell them a Waves team member will call '
+      + 'to schedule. Do NOT say anything is booked.';
   }
 
   const { maskPhone } = require('./relay-protocol');

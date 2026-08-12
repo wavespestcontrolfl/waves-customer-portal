@@ -540,12 +540,21 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoComms();
   });
 
-  test('missing call_log row (sandbox path) → booking still lands, just without a triage card', async () => {
+  // ⭐ NO CARD, NO BOOKING. The outbound_booking_review card is the office's
+  // ONLY view of a pending voice booking (the customer can't see it either —
+  // the row is dispatch-owned), and the card FKs call_log. A row committed
+  // without one is an appointment nobody can confirm, so the writer declines
+  // instead. Reachable only on the TwiML-Bin sandbox path, which has no
+  // call_log row and could not surface the request anyway.
+  test('no call_log row for the call → refuses to book rather than commit an office-invisible row', async () => {
     primeDb({ callLog: [] });
-    await executeTool('request_booking', GOOD_INPUT, slotCtx());
-    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
-    expect(row.source_call_log_id).toBeNull();
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/NOTHING was booked/);
+    expect(out).toMatch(/capture the lead/i);
+    expect(out).toMatch(/Do NOT say anything is booked/i);
+    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
     expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+    assertNoComms();
   });
 
   // ⭐ THE CURATED-LIST BUG. buildBookingAvailability().slots is curateSlots()

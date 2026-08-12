@@ -131,8 +131,16 @@ async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
       + 'claim a technician has left — check get_account_overview for the next scheduled visit instead.';
   }
 
-  let windowStart = speakClock(row.window_start);
-  let windowEnd = speakClock(row.window_end);
+  // ⭐ CUSTOMER-FACING ARRIVAL COPY IS window_start → +120 MIN, NEVER
+  // window_end (AGENTS.md): window_end is scheduling/overlap data — it carries
+  // the service's duration and can be anything from 30 minutes to a full day —
+  // and every other customer surface (reminders, the track page) derives the
+  // spoken range from the shared arrivalWindowRange() so they cannot drift.
+  // The phone is a customer surface, so it uses the same helper.
+  const { arrivalWindowRange } = require('../../utils/sms-time-format');
+  const arrivalRange = arrivalWindowRange(row.window_start);
+  let windowStart = speakClock(arrivalRange ? arrivalRange.split('-')[0] : row.window_start);
+  const windowEnd = arrivalRange ? speakClock(arrivalRange.split('-')[1]) : null;
   if (!windowStart) {
     // Fallback to the reminder rail's stamped clock time (the same
     // appointment_time the confirmation/reminder messages speak).

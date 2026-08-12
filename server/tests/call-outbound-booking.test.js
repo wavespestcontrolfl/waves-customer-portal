@@ -662,6 +662,34 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     }));
   });
 
+  // ⭐ A VOICE CARD WITH NO lead_id IS AN ANSWER, NOT A GAP. The fallback above
+  // exists for cards written before the payload carried lead_id; a voice card
+  // always carries the key, so a null means the call identified no lead
+  // (capture_lead never ran, or it matched an existing customer and created
+  // none). Guessing "their single active lead" would mark an unrelated open
+  // quote WON — a booked ants visit closing a termite estimate.
+  test('a voice card with no lead_id converts NOTHING (no single-active-lead guess)', async () => {
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: null },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'estimate_sent' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).not.toHaveBeenCalled();
+    // The rest of the confirm still runs — this is a lead decision, not a halt.
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(db._state.triageResolved).toBe(true);
+  });
+
+  test('a voice card that DOES carry a lead still converts exactly that lead', async () => {
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: 'lead-v9' },
+      leadRow: { status: 'new' },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'new' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({ leadId: 'lead-v9' }));
+  });
+
   test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
     // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
     // card in person, so the funnel leg is skipped on the tech-track path —

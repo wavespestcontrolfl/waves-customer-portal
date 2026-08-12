@@ -238,6 +238,8 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     const CallProc = require('./call-recording-processor');
     let leadId = null;
     let keepOpenForQuote = false;
+    // A VOICE card with no lead_id is an ANSWER, not a gap — see below.
+    let noLeadIdentifiedOnCall = false;
     if (svc.source_call_log_id) {
       const card = await db('triage_items')
         .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
@@ -249,7 +251,20 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       if (payload?.lead_id) {
         leadId = payload.lead_id;
         keepOpenForQuote = payload.keep_open_for_quote === true;
+      } else if (payload && payload.origin === 'voice_agent') {
+        // ⭐ NO LEAD ON A VOICE CARD MEANS NO LEAD — DO NOT GUESS ONE.
+        // The single-active-lead fallback below exists for PRE-PAYLOAD
+        // outbound-review rows, where a missing lead_id only meant the card
+        // predates the field. A voice card always carries the key, so a null
+        // is the call's own answer: capture_lead either never ran or matched
+        // an existing customer and created no lead. Falling back would mark
+        // whatever unrelated quote that customer happens to have open as WON —
+        // a booked ants visit closing an open termite estimate.
+        noLeadIdentifiedOnCall = true;
       }
+    }
+    if (noLeadIdentifiedOnCall) {
+      logger.info(`[${routeTag}] voice booking ${svc.id} identified no lead on the call — skipping the single-active-lead fallback`);
     }
     if (leadId) {
       // Preserve a promised-quote follow-up: beyond the booking-time flag, a
@@ -257,7 +272,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       // booking doesn't hide an owed quote.
       const lead = await db('leads').where({ id: leadId }).first('status');
       keepOpenForQuote = keepOpenForQuote || /estimate|quote/i.test(String(lead?.status || ''));
-    } else {
+    } else if (!noLeadIdentifiedOnCall) {
       // Pre-payload fallback: only when EXACTLY ONE active lead maps to this
       // customer (avoids converting the wrong lead when ambiguous).
       const activeLeads = await db('leads')

@@ -131,13 +131,25 @@ describe('get_today_eta', () => {
     expect(out).not.toMatch(/EN ROUTE|window is/i);
   });
 
-  test('window comes from window_start/window_end, spoken', async () => {
+  test('the spoken window is window_start + 2h (arrivalWindowRange), spoken', async () => {
     primeDb({ scheduled_services: [VISIT_TODAY] });
     const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(out).toContain('9 AM to 11 AM');
     expect(out).toContain('Pest Control');
     expect(out).toMatch(/has not started toward the property yet/i);
     expect(out).toMatch(/never invent a more precise ETA/i);
+  });
+
+  // ⭐ window_end IS NOT AN ARRIVAL WINDOW. It carries the service's duration
+  // (a 4-hour termite job, a 30-minute callback) and drives scheduling/overlap;
+  // AGENTS.md pins customer-facing arrival copy to window_start + 120 min via
+  // the shared arrivalWindowRange(), so the phone cannot drift from the
+  // reminders and the track page.
+  test('a long service does NOT get its duration read out as the arrival window', async () => {
+    primeDb({ scheduled_services: [{ ...VISIT_TODAY, window_start: '09:00:00', window_end: '15:00:00' }] });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
+    expect(out).toContain('9 AM to 11 AM'); // start + 2h, not the 3 PM end
+    expect(out).not.toContain('3 PM');
   });
 
   test('no window on the row → falls back to appointment_reminders.appointment_time', async () => {
