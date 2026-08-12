@@ -232,6 +232,23 @@ describe('buildReportCrossSell', () => {
     const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('lawn_care');
+    // Report-only ownership means the pricing baseline can't include the
+    // pest plan (the panel reloads ownership itself and sees no upcoming
+    // rows), so the offer must NOT show a standalone-priced number — the
+    // combined WaveGuard tier would be missing from it (codex r8 P0).
+    expect(result.mode).toBe('quote_cta');
+    expect(result.option).toBeNull();
+  });
+
+  test('an explicitly commercial report identity suppresses the card even with a blank property type', async () => {
+    const db = dbFor({
+      customer: CUSTOMER({ property_type: null }),
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Commercial Pest Control' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
   });
 
   test('one-time report identities (cockroach cleanout) do NOT count as owned pest', async () => {

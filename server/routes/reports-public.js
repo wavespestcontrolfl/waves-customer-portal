@@ -1033,14 +1033,19 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
         // for something the customer never saw. Client metadata is only
         // COMPARED against server truth here, never persisted as the offer.
         const clickedKey = String(metadata.serviceKey || '').trim();
+        const clickedMode = String(metadata.offerMode || '').trim();
         const clickedPer = Number(metadata.perApplication);
         const serverPer = Number(crossSell?.option?.perVisit);
+        // Key AND mode must match, and a priced offer must match to the
+        // cent (codex #3367 r8: a quote-only card that became priced before
+        // the click must not record "shown $X" the customer never saw; a
+        // priced card whose price moved must re-render first).
         const offerMismatch = !crossSell
-          || (clickedKey && clickedKey !== crossSell.serviceKey)
-          || (Number.isFinite(clickedPer) && clickedPer > 0 && (
-            !(Number.isFinite(serverPer) && serverPer > 0)
-            || Math.abs(clickedPer - serverPer) > serverPer * 0.01
-          ));
+          || !clickedKey || clickedKey !== crossSell.serviceKey
+          || !clickedMode || clickedMode !== crossSell.mode
+          || (crossSell.mode === 'priced'
+            ? !(Number.isFinite(clickedPer) && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005)
+            : (Number.isFinite(clickedPer) && clickedPer > 0));
         if (offerMismatch) {
           return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
         }

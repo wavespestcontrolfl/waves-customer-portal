@@ -177,9 +177,14 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
 
     // Commercial properties never get the card: the engine refuses real
     // prices there (quoteRequired manual review) and commercial expansion is
-    // a proposal conversation, not a report card.
+    // a proposal conversation, not a report card. Checked on the stored
+    // column here, on the report's OWN service identity (codex #3367 r8: an
+    // explicitly commercial report with a blank property_type column must
+    // not fall through to the single_family default), and again on the
+    // lookup-resolved type after pricing.
     const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
     if (isCommercialProperty({ propertyType: customer.property_type })) return null;
+    if (/\bcommercial\b/i.test(String(service.service_type || ''))) return null;
 
     // The pricing panel prices the customer's PRIMARY property. A report for
     // a visit stamped at a different address (rental, secondary home) must
@@ -223,6 +228,14 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     const reportFamilies = ownershipKeysForRow({ service_type: service.service_type });
 
     const targetKey = pickOfferTarget([...ownedKeys, ...reportFamilies]);
+    // When a family is owned ONLY through the report's identity (no upcoming
+    // rows yet), the pricing panel's own baseline reload won't see it — the
+    // engine would price the offer STANDALONE instead of at the combined
+    // WaveGuard tier, and that wrong per-application number would be shown
+    // and price-locked (codex #3367 r8 P0). The ladder still advances past
+    // the family, but the offer demotes to the unpriced CTA.
+    const ownedSet = offerVocabulary(ownedKeys);
+    const baselineIncomplete = [...offerVocabulary(reportFamilies)].some((key) => !ownedSet.has(key));
     // Owns the whole ladder → nothing to offer; the report still shows the
     // referral card, which is client-side and needs no payload.
     if (!targetKey) return null;
@@ -261,7 +274,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
-    const priced = optionIsPriceable(option);
+    const priced = optionIsPriceable(option) && !baselineIncomplete;
 
     return {
       serviceKey: targetKey,
