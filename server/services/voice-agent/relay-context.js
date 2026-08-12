@@ -60,6 +60,45 @@ function isFullAttestation(value) {
 // a live call: on timeout the caller is simply treated as unknown.
 const CONTEXT_RESOLVE_TIMEOUT_MS = 4000;
 
+// How recent the signature-verified /voice call_log row must be for its
+// CallSid to identify a LIVE relay session (replay bound — see
+// verifyInboundCaller). The relay socket opens seconds after the webhook
+// writes the row; 10 minutes is slack, not a window.
+const VERIFY_CALL_MAX_AGE_MS = 10 * 60 * 1000;
+// CallSids that have already opened a relay session. In-process by design:
+// the sessions it guards are in-process too, and the freshness bound above
+// covers a restart. Bounded so a long-lived instance cannot grow it without
+// limit.
+const CLAIMED_CALL_SIDS = new Map(); // callSid -> claimed-at ms
+const CLAIMED_CALL_SID_MAX = 5000;
+
+/**
+ * Claim a CallSid for ONE relay session. Returns false when this CallSid has
+ * already been claimed — a replayed setup frame, which must not be verified
+ * again. Called once per session (relay-conversation), never per turn.
+ */
+function beginRelaySessionClaim(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return false;
+  const now = Date.now();
+  // Opportunistic prune: anything older than the freshness bound can never
+  // verify again anyway, so it has nothing left to protect.
+  if (CLAIMED_CALL_SIDS.size >= CLAIMED_CALL_SID_MAX) {
+    for (const [sid, at] of CLAIMED_CALL_SIDS) {
+      if (now - at > VERIFY_CALL_MAX_AGE_MS) CLAIMED_CALL_SIDS.delete(sid);
+    }
+    // Still full (a burst of live calls): drop the oldest to stay bounded.
+    while (CLAIMED_CALL_SIDS.size >= CLAIMED_CALL_SID_MAX) {
+      const oldest = CLAIMED_CALL_SIDS.keys().next().value;
+      if (oldest === undefined) break;
+      CLAIMED_CALL_SIDS.delete(oldest);
+    }
+  }
+  if (CLAIMED_CALL_SIDS.has(key)) return false;
+  CLAIMED_CALL_SIDS.set(key, now);
+  return true;
+}
+
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -365,6 +404,29 @@ async function findUniqueCustomerByAni(phone) {
  * caller. (Absence also covers the TwiML-Bin sandbox path, which has no
  * call_log row — correctly, since nothing there is signature-verified either.)
  *
+ * ⭐ AND THE ROW MUST BE THIS CALL, NOT A CALL. A `call_log` row is permanent;
+ * matching one only proves the pair (CallSid, from) was real ONCE. Whoever
+ * holds the leaked key could otherwise replay any historical CallSid — one
+ * they were legitimately party to, say — and keep unlocking that customer's
+ * context, history and invoices indefinitely, with no phone call at all. Two
+ * bounds close that, both here rather than in prompt text:
+ *
+ *   1. FRESHNESS — the row must have been written within
+ *      `VERIFY_CALL_MAX_AGE_MS`. A ConversationRelay socket opens seconds
+ *      after /voice writes the row (the TwiML that names this endpoint IS the
+ *      webhook's response), so minutes of slack is generous; a day-old CallSid
+ *      is not a live call by any reading.
+ *   2. SINGLE USE — a CallSid that has already opened a relay session cannot
+ *      open another. In-process, which is exactly the lifetime of the sessions
+ *      it protects; a restart forgets the set, but the freshness bound still
+ *      holds. `beginRelaySessionClaim` is called once per session by
+ *      relay-conversation, never per turn.
+ *
+ * The definitive fix is a single-use nonce minted by /voice into the
+ * ConversationRelay URL, so possession of the shared key proves nothing on its
+ * own. That touches the live voice path and is an owner-scheduled change; these
+ * two bounds are what this lane carries until then.
+ *
  * FOLLOW-UP (not implemented here): the row's `metadata.stir_verstat` carries
  * the carrier's STIR/SHAKEN attestation. Gating the FULL tier on attestation A
  * — i.e. requiring the carrier to vouch that the calling number really belongs
@@ -382,10 +444,15 @@ async function verifyInboundCaller({ callSid, from } = {}) {
     const db = require('../../models/db');
     const row = await db('call_log')
       .where({ twilio_call_sid: callSid })
-      .first('from_phone', 'direction', 'metadata');
+      .first('from_phone', 'direction', 'metadata', 'created_at');
     if (!row) return { verified: false, reason: 'no_call_log_row' };
     if (String(row.direction || 'inbound') !== 'inbound') return { verified: false, reason: 'not_inbound' };
     if (lastTenDigits(row.from_phone) !== aniKey) return { verified: false, reason: 'ani_mismatch' };
+    // A permanent row is not a live call — bound it to one (see the header).
+    const startedAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+    if (!Number.isFinite(startedAt) || Date.now() - startedAt > VERIFY_CALL_MAX_AGE_MS) {
+      return { verified: false, reason: 'call_not_current' };
+    }
     let attestation = null;
     try {
       const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
@@ -1102,6 +1169,7 @@ module.exports = {
   isContextEnabled,
   requiresAttestation,
   isFullAttestation,
+  beginRelaySessionClaim,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

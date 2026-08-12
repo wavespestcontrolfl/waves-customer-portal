@@ -53,7 +53,10 @@ const FROM = '+19415550142';
 // The WS setup frame is unverified input; the SIGNATURE-VERIFIED /voice webhook's
 // call_log row is what proves this CallSid is a real inbound call from that number.
 const CALL_SID = 'CA-relay-1';
-const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }) };
+// `created_at` is NOT decoration: the relay only accepts a call_log row that is
+// CURRENT (replay bound in verifyInboundCaller), so it is stamped relative to
+// now, never a literal date.
+const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }), created_at: new Date() };
 // `phone` is the ONE authenticating column. A fixture without it is a
 // contact-slot recognition and fails closed to the redacted tier.
 const CUSTOMER = { id: 'c-1111', first_name: 'Pat', member_since: '2023-04-01T00:00:00Z', pipeline_stage: 'active_customer', phone: FROM };
@@ -261,6 +264,33 @@ describe('GATE ON — caller recognition', () => {
     // on attestation A is a documented follow-up, not implemented here.
     expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
       .toEqual({ verified: true, attestation: 'TN-Validation-Passed-A' });
+  });
+
+  // ⭐ A call_log ROW IS PERMANENT; A CALL IS NOT. Matching one only proves the
+  // pair was real once — so whoever holds the leaked WS key could otherwise
+  // replay an old CallSid forever.
+  describe('replay bounds on the verified CallSid', () => {
+    test('a call_log row older than the freshness window does not verify', async () => {
+      const stale = { ...VERIFIED_CALL_ROW, created_at: new Date(Date.now() - 60 * 60 * 1000) };
+      primeDb({ customers: [CUSTOMER], callLog: [stale] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+        .toEqual({ verified: false, reason: 'call_not_current' });
+      expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
+    });
+
+    test('a row with no created_at at all fails closed', async () => {
+      primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, created_at: null }] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+        .toEqual({ verified: false, reason: 'call_not_current' });
+    });
+
+    test('a CallSid can open exactly ONE relay session', () => {
+      const sid = `CA-claim-${Math.floor(Date.now() % 1e6)}`;
+      expect(relayContext.beginRelaySessionClaim(sid)).toBe(true);
+      expect(relayContext.beginRelaySessionClaim(sid)).toBe(false);
+      // A blank CallSid never claims anything.
+      expect(relayContext.beginRelaySessionClaim('')).toBe(false);
+    });
   });
 
   // ⭐ THE ANTI-SPOOFING LEVER. A signature-verified webhook proves Twilio sent

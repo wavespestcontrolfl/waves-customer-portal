@@ -446,7 +446,23 @@ class RelayConversation {
     this._officeHours = null;
     this._officeHoursReady = null;
     if (isContextEnabled()) {
-      this._contextReady = resolveCallerContext(this.from, { callSid: this.callSid })
+      // ONE relay session per CallSid. The socket is guarded by a static
+      // shared secret that rides in a URL query param Twilio logs, so a leaked
+      // key would otherwise let a historical (CallSid, from) pair be replayed
+      // to re-open a customer's context forever. The claim is taken HERE —
+      // once per session object, never per turn — and a losing claim simply
+      // yields a stranger's session: no context block, no account tools.
+      const { beginRelaySessionClaim } = require('./relay-context');
+      const claimed = beginRelaySessionClaim(this.callSid);
+      if (!claimed) {
+        logger.warn(
+          `[voice-relay] callSid=${this.callSid} already opened a relay session — `
+          + 'replayed setup frame, continuing with NO caller context'
+        );
+      }
+      this._contextReady = (claimed
+        ? resolveCallerContext(this.from, { callSid: this.callSid })
+        : Promise.resolve(null))
         .then((ctx) => { this._callerContext = ctx; })
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');

@@ -47,7 +47,10 @@ const { buildBasePrompt } = require('../services/voice-agent/relay-conversation'
 
 const FROM = '+19415550142';
 const CALL_SID = 'CA-relay-1';
-const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: null };
+// `created_at` is NOT decoration: the relay only accepts a call_log row that is
+// CURRENT (replay bound in verifyInboundCaller), so it is stamped relative to
+// now, never a literal date.
+const VERIFIED_CALL_ROW = { twilio_call_sid: CALL_SID, from_phone: FROM, direction: 'inbound', metadata: null, created_at: new Date() };
 const CUSTOMER_ID = 'c-1111';
 // `phone` is the ONE authenticating column — a fixture without it is a
 // contact-slot recognition and caps at the redacted tier (fail-closed).

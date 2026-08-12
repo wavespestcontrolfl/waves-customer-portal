@@ -54,6 +54,13 @@ function isBookingGateOn() {
   return String(process.env.GATE_VOICE_AI_BOOKING || '').toLowerCase() === 'true';
 }
 
+// Sub-gate: may an UNVERIFIED requester (a looked-up account, or an ANI that
+// matched only a service-contact slot) have a booking written for them? Off by
+// default — see the call site. Same exact-'true' shape as every gate here.
+function allowsThirdPartyBooking() {
+  return String(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING || '').toLowerCase() === 'true';
+}
+
 /** Both gates, fail closed. */
 function isBookingEnabled() {
   const { isContextEnabled } = require('./relay-context');
@@ -509,6 +516,23 @@ async function requestBookingText(input = {}, ctx = {}) {
   const unverifiedTier = matchedCallerTier(ctx) !== 'full';
   const lookedUpAccount = customerId !== (ctx.customerId || null);
   thirdParty = lookedUpAccount || unverifiedTier;
+  // …AND THE STAMP IS NOT AN AUTHORIZATION CONTROL, SO IT NO LONGER STANDS
+  // ALONE. lookup_customer needs two criteria and is budgeted per session, but
+  // a name and a street are not a secret: without a switch in front of it, a
+  // caller who has both can put a pending row on a stranger's calendar, and a
+  // dispatcher moving that row is enough to arm reminders and the card-on-file
+  // funnel toward the real customer. So an unverified requester's booking is
+  // now itself gated, and the gate ships OFF: by default only a FULL ANI match
+  // (the calling number IS `customers.phone`) may write a booking, and everyone
+  // else — looked-up refs and contact-slot matches alike — is captured as a
+  // lead for a human to call back. `VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING=true`
+  // restores the spouse/landlord case, with the UNVERIFIED stamps below as the
+  // human-facing signal. Owner decision, one flag, either way reviewable.
+  if (thirdParty && !allowsThirdPartyBooking()) {
+    return 'Booking requests are only placed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with the caller\'s name, the account they are calling about and their preferred '
+      + 'time, and tell them a Waves team member will call to confirm. Do NOT tell the caller anything is booked.';
+  }
 
   // The OPAQUE SLOT REF the availability tools handed the model. Refs, not an
   // echoed 'YYYY-MM-DD' + '9:00 AM' pair: speakSlot says "Tuesday August 18 at

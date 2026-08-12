@@ -121,7 +121,10 @@ const SENT_ESTIMATE = {
   service_type: 'Quarterly Pest Control',
   created_at: '2026-07-20T12:00:00Z',
   sent_at: '2026-07-21T12:00:00Z',
-  expires_at: '2026-08-20T12:00:00Z',
+  // RELATIVE, never a near-today literal (AGENTS.md): the viewability predicate
+  // compares this against the real clock, so a fixed date turns this suite into
+  // a time bomb that fails on a day nobody changed any code.
+  expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   monthly_total: 41.5,
   annual_total: 498,
   onetime_total: 99,
@@ -293,7 +296,11 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   // moment it passes. Quoting one would put a price on the call the customer's
   // own page will not show.
   test('an EXPIRED estimate is not quoted — the customer-facing predicate decides', async () => {
-    const expired = { ...SENT_ESTIMATE, id: 'est-expired', expires_at: '2026-08-01T12:00:00Z' };
+    const expired = {
+      ...SENT_ESTIMATE,
+      id: 'est-expired',
+      expires_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    };
     primeDb({ estimates: [expired] });
     const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full' });
     expect(isEstimateCustomerViewable).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-expired' }));

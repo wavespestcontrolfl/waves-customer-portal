@@ -164,6 +164,10 @@ describe('prompt wiring', () => {
         { slot_ref: 'S1' },
         {
           customerId: 'c-1',
+          // The ACCOUNT HOLDER called: booking writes are full-tier-only unless
+          // VOICE_RELAY_ALLOW_THIRD_PARTY_BOOKING is on, and the authorization
+          // refusal comes before the time floor.
+          customerTier: 'full',
           resolveSlotRef: () => ({ date: '2026-08-20', startMinutes: 450, lat: 27.4, lng: -82.5 }),
         }
       );
