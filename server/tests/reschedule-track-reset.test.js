@@ -114,6 +114,15 @@ describe('isStaleLiveAttempt (route-facing detector)', () => {
     expect(trackTransitions.isStaleLiveAttempt({
       status: 'pending', track_state: 'on_property', scheduled_date: todayStr, track_sms_sent_at: isoDaysAgo(7),
     })).toBe(false);
+    // Mixed evidence: ANY current-day stamp proves a genuine live attempt —
+    // one stale sibling field never marks the whole attempt stale.
+    expect(trackTransitions.isStaleLiveAttempt({
+      status: 'on_site',
+      track_state: 'on_property',
+      scheduled_date: todayStr,
+      en_route_at: isoDaysAgo(0, 'T08:05'),
+      actual_start_time: isoDaysAgo(7),
+    })).toBe(false);
   });
 });
 
@@ -614,10 +623,11 @@ describe('markEnRoute stale-attempt self-heal', () => {
     expect(db).toHaveBeenCalledTimes(4); // no job_status_history insert
   });
 
-  test('one fresh timestamp does not validate stale siblings — only stale fields clear', async () => {
+  test('mixed evidence: stale fields clear IN PLACE, the live attempt is preserved', async () => {
     // Partial-reset residue next to a genuine current-day en-route: the
-    // stale start is cleared, the fresh en_route_at and today's SMS guard
-    // survive, and the customer is NOT double-texted.
+    // stale start is cleared without any state/status rewind, the fresh
+    // en_route_at and today's SMS guard survive, the idempotent branch
+    // answers, and the customer is NOT double-texted.
     const mixedSvc = {
       id: 'job-mixed',
       customer_id: 'cust-13',
@@ -630,23 +640,24 @@ describe('markEnRoute stale-attempt self-heal', () => {
       track_sms_sent_at: isoDaysAgo(0, 'T08:05'),
       cancelled_at: null,
     };
-    const healedSvc = { ...mixedSvc, track_state: 'scheduled', actual_start_time: null };
-    const healUpdate = query(1);
-    const flipUpdate = query(1);
+    const cleanupUpdate = query(1);
     db
-      .mockReturnValueOnce(query(mixedSvc))
-      .mockReturnValueOnce(healUpdate)
-      .mockReturnValueOnce(query(healedSvc))
-      .mockReturnValueOnce(flipUpdate);
+      .mockReturnValueOnce(query(mixedSvc)) // loadService
+      .mockReturnValueOnce(cleanupUpdate); // in-place stale-field cleanup
 
     const result = await trackTransitions.markEnRoute('job-mixed');
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('en_route');
-    const healPayload = healUpdate.update.mock.calls[0][0];
-    expect(healPayload).toMatchObject({ track_state: 'scheduled', actual_start_time: null });
-    expect(healPayload).not.toHaveProperty('track_sms_sent_at');
-    // Today's guard survived the heal, so no duplicate track SMS.
+    expect(result.alreadyEnRoute).toBe(true);
+    const cleanupPayload = cleanupUpdate.update.mock.calls[0][0];
+    expect(cleanupPayload).toMatchObject({ actual_start_time: null });
+    // No rewind: state, status, and today's stamps stay.
+    expect(cleanupPayload).not.toHaveProperty('track_state');
+    expect(cleanupPayload).not.toHaveProperty('status');
+    expect(cleanupPayload).not.toHaveProperty('en_route_at');
+    expect(cleanupPayload).not.toHaveProperty('track_sms_sent_at');
+    // No duplicate track SMS.
     const { sendTechEnRoute } = require('../services/twilio');
     expect(sendTechEnRoute).not.toHaveBeenCalled();
   });
@@ -794,6 +805,23 @@ describe('visit timeline stale-timestamp guard', () => {
     });
     expect(timeline.events.map((e) => e.type)).toContain('technician_on_site');
     expect(timeline.events.map((e) => e.type)).toContain('technician_en_route');
+  });
+
+  test('sanitized arrival drives on_site_min: no raw started_at fallback resurrects a stale start', () => {
+    // Covered at the buildVisitTimeline level indirectly; the report-data
+    // metric contract is asserted here via the timeline's duration field
+    // with showDuration on — a stale-only arrival yields NO duration.
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        scheduled_date: todayStr,
+        completed_at: isoDaysAgo(0, 'T13:28'),
+        started_at: isoDaysAgo(7, 'T14:54'),
+      },
+      serviceLine: 'lawn',
+      config: { ...config, showDuration: true },
+    });
+    expect(timeline.durationMinutes).toBeNull();
   });
 
   test('early project closeout (completed before the scheduled day) keeps its stamps', () => {

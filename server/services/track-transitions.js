@@ -105,13 +105,33 @@ function staleLifecycleFieldClears(svc = {}) {
   return clears;
 }
 
-// Route-facing: does this row carry a stale live attempt markEnRoute's
-// self-heal will rewind? tech-track uses it to delegate the legacy
-// status='on_site' shape instead of 409ing before the heal can run.
+// Split the row's lifecycle stamps into stale clears and a current-attempt
+// signal. hasCurrentLifecycle — any lifecycle stamp on/after the scheduled
+// day — proves a GENUINE current attempt: a partially reset legacy row can
+// hold a current-day en_route_at next to an old actual_start_time, and one
+// stale sibling must not be read as proof the whole attempt is old.
+function classifyLifecycleEvidence(svc = {}) {
+  const day = scheduledDayOf(svc);
+  const clears = staleLifecycleFieldClears(svc);
+  const hasStaleLifecycle = LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in clears);
+  const hasCurrentLifecycle = Boolean(day) && LIFECYCLE_EVIDENCE_COLUMNS.some((col) => {
+    const value = svc[col];
+    if (!value) return false;
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) && etDateString(new Date(ms)) >= day;
+  });
+  return { clears, hasStaleLifecycle, hasCurrentLifecycle };
+}
+
+// Route-facing: does this row carry an ENTIRELY-old live attempt that
+// markEnRoute's self-heal will fully rewind? tech-track uses it to delegate
+// the legacy status='on_site' shape instead of 409ing before the heal can
+// run. Mixed evidence (any current-day stamp) is a genuine live attempt —
+// never delegated, never rewound.
 function isStaleLiveAttempt(svc = {}) {
   if (!['en_route', 'on_property'].includes(String(svc.track_state))) return false;
-  const clears = staleLifecycleFieldClears(svc);
-  return LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in clears);
+  const { hasStaleLifecycle, hasCurrentLifecycle } = classifyLifecycleEvidence(svc);
+  return hasStaleLifecycle && !hasCurrentLifecycle;
 }
 
 function customerRoom(customerId) {
@@ -307,10 +327,18 @@ async function markEnRoute(serviceId, opts = {}) {
   // path, as does same-day evidence. No-evidence advanced states are left
   // alone — nothing proves them stale. Never heals complete/cancelled.
   const scheduledDayStr = scheduledDayOf(svc) || '';
-  const staleFieldClears = staleLifecycleFieldClears(svc);
-  // The heal keys off stale LIFECYCLE evidence (a stale SMS guard alone is
-  // cleaned by the flip below but does not prove an aborted attempt).
-  const staleEvidence = LIFECYCLE_EVIDENCE_COLUMNS.some((col) => col in staleFieldClears);
+  const {
+    clears: staleFieldClears,
+    hasStaleLifecycle,
+    hasCurrentLifecycle,
+  } = classifyLifecycleEvidence(svc);
+  // The FULL heal keys off an ENTIRELY-old attempt: stale lifecycle
+  // evidence with NO current-day stamp (a stale SMS guard alone is cleaned
+  // by the flip below but does not prove an aborted attempt, and any
+  // current-day stamp proves a genuine live attempt that must not be
+  // regressed). Mixed shapes get an in-place cleanup of just the stale
+  // fields further down, with the live state preserved.
+  const staleEvidence = hasStaleLifecycle && !hasCurrentLifecycle;
   if (!opts._afterStaleHeal
     && staleEvidence
     && ['en_route', 'on_property'].includes(svc.track_state)) {
@@ -389,6 +417,28 @@ async function markEnRoute(serviceId, opts = {}) {
     }
     logger.info(`[track-transitions] stale-heal on ${serviceId} lost a concurrent transition; retrying on fresh state (attempt ${attempts})`);
     return markEnRoute(serviceId, { ...opts, _staleHealAttempts: attempts });
+  }
+
+  // Mixed shape: a genuine current-day attempt carrying stale residue from
+  // an earlier aborted one (e.g. a current en_route_at next to a week-old
+  // actual_start_time a partial reset left behind). Clear ONLY the stale
+  // fields in place — no state or status change, no SMS side effects — so
+  // completion duration doesn't measure from the old attempt. Best-effort
+  // behind the full-snapshot CAS; a miss means the row changed under us
+  // and the next signal retries.
+  if (hasStaleLifecycle && hasCurrentLifecycle
+    && Object.keys(staleFieldClears).length > 0
+    && ['en_route', 'on_property'].includes(svc.track_state)) {
+    try {
+      const { applyTrackLifecycleCas } = require('./rebooker');
+      await applyTrackLifecycleCas(
+        db('scheduled_services')
+          .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null }),
+        svc,
+      ).update({ ...staleFieldClears, updated_at: new Date() });
+    } catch (err) {
+      logger.error(`[track-transitions] mixed-evidence stale-field cleanup failed for ${serviceId}: ${err.message}`);
+    }
   }
 
   // Idempotent: if already en_route (or beyond), treat as success but don't

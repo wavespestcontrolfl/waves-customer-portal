@@ -3525,7 +3525,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   const onSiteMin = computeOnSiteMin({
     ...service,
-    started_at: arrivalTime || service.started_at,
+    // arrivalTime is the SANITIZED anchor (stale pre-reschedule stamps
+    // filtered; raw started_at was already one of its candidates) — falling
+    // back to raw service.started_at here would reintroduce the rejected
+    // timestamp and book a multi-day on_site_min. Null = honest unknown.
+    started_at: arrivalTime,
     ended_at: completionTime || service.ended_at,
     timeOnSite: structured.timeOnSite,
   });
