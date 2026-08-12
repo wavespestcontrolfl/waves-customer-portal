@@ -222,6 +222,10 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     || propertyFacts?.propertyType
     || null;
 
+  // Relationship first — the scope rules below read it. (propertyFacts
+  // .tenant came from the same extraction field; keep the two consistent
+  // when the string variant wasn't recognized.)
+  const relationship = resolveCustomerRelationship(extraction);
   const modelAddress = address || propertyRecord?.formattedAddress || intent?.address;
   const unitSignal = shadowPrivate.hasUnitSignal({
     tenant,
@@ -243,18 +247,22 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // (single-family/duplex/townhome/villa/mobile — the V2 bridge's own
   // whole-structure vocabulary) is respected over the address token.
   const WHOLE_STRUCTURE_TYPES = /single_?\s?family|duplex|triplex|quadplex|townhou|town\s?home|villa|mobile_?\s?home|manufactured/i;
+  // The whole-structure type VETOES the address token only for an owner (or
+  // an unknown relationship): a whole-house renter's address rarely carries
+  // a unit line, so a TENANT of an explicitly addressed subpremise is a
+  // unit occupant even on a generic single-family record — a subdivided
+  // house, or a multifamily record the provider flattened. Without this,
+  // lot-driven work could be sized to the entire property (codex r20 P1).
+  const tenantOfSubpremise = subpremiseSignal && relationship === 'tenant';
   if (!isCommercial && subpremiseSignal
     && serviceScope === 'entire_residential_structure'
-    && !WHOLE_STRUCTURE_TYPES.test(String(propertyType || ''))) {
+    && (tenantOfSubpremise || !WHOLE_STRUCTURE_TYPES.test(String(propertyType || '')))) {
     serviceScope = 'residential_unit';
   }
   const ownershipType = shadowPrivate.inferOwnershipType({
     propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites: true,
   });
 
-  // propertyFacts.tenant came from the same extraction field; keep the two
-  // consistent when the string variant wasn't recognized.
-  const relationship = resolveCustomerRelationship(extraction);
   return {
     propertyUse: resolvePropertyUse({
       propertyType,

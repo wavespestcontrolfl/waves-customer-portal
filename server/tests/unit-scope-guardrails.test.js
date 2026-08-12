@@ -320,6 +320,18 @@ describe('resolveUnitScopeModel — subpremise on a type-less residential job', 
     });
     expect(model.serviceScope).toBe('residential_unit');
   });
+  test('a TENANT of an explicit subpremise is a unit even on a single_family record (r20)', () => {
+    // A subdivided house, or a multifamily record the provider flattened:
+    // a whole-house renter's address rarely carries a unit line.
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      intent: { is_commercial: false, address: '900 Bayview Ter, Apt B, Venice, FL 34285' },
+      propertyFacts: { tenant: true, home: { source: 'county_assessed' } },
+      address: '900 Bayview Ter, Apt B, Venice, FL 34285',
+    });
+    expect(model.serviceScope).toBe('residential_unit');
+  });
   test('a positively whole-structure type is respected over the address token', () => {
     const model = resolveUnitScopeModel({
       propertyRecord: null,
