@@ -2925,3 +2925,58 @@ describe('local_gap anchoring + sweep provenance + segment coverage (round-8 clo
     expect(bb).toMatch(/opportunity\.bucket === 'no_content_yet' \|\| opportunity\.bucket === 'local_gap'/);
   });
 });
+
+describe('inventory truth + money-family exclusion + full twin merge (round-9 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('coverage consults the LIVE sitemap, fail-closed, classified with own helpers', () => {
+    // gsc_pages only proves a page RANKED — a zero-traffic live hub page
+    // must still count as covered.
+    expect(lg).toMatch(/getSitemapManager\(\)\.listUrls\(\)/);
+    expect(lg).toMatch(/live sitemap parsed to zero URLs/);
+    expect(lg).toMatch(/livePairs\.has\(ownPageKey\(pair\.service, pair\.city\)\)/);
+  });
+
+  test('a missing money-family page is EXCLUDED at mine time, single-source slug map', () => {
+    // The runner pattern-blocks /pest-control-{city}-fl/ unconditionally —
+    // emitting the pair guarantees a protected skip that freezes the
+    // target-stable key forever.
+    expect(lg).toMatch(/localGapMoneyFamilyPair\(pair\.service, pair\.city\)/);
+    expect(src).toMatch(/require\('\.\.\/content\/content-brief-builder'\)\._internals/);
+    expect(src).toMatch(/require\('\.\.\/content\/protected-pages'\)/);
+    // Fail CLOSED: an unanswerable check treats the pair as protected.
+    expect(src).toMatch(/money-family check failed[\s\S]{0,60}pair treated as protected/);
+  });
+
+  test('a dropped local twin donates queries, impressions, AND specialty topic', () => {
+    const winner = {
+      bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page',
+      query: 'pest control sarasota', dedupe_key: 'w', page_url: null,
+      service: 'pest', city: 'sarasota', score: 60,
+      signal_metadata: { impressions: 80 },
+    };
+    const twin = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page',
+      query: null, dedupe_key: 't', page_url: null,
+      service: 'pest', city: 'sarasota', score: 56,
+      signal_metadata: {
+        impressions: 300,
+        representative_query: 'wasp removal sarasota',
+        contributing_queries: ['wasp removal sarasota', 'wasp nest sarasota'],
+        specialty_topic: 'wasp',
+      },
+    };
+    const out = arbitrateCityServiceTargets([winner, twin]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+    expect(out[0].signal_metadata.segment_impressions).toBe(300);
+    expect(out[0].signal_metadata.contributing_queries).toEqual([
+      'pest control sarasota', 'wasp nest sarasota', 'wasp removal sarasota',
+    ]);
+    // The twin's blocked topic survives — the merged brief covers wasp
+    // phrasings, so the FAQ mandate must strip.
+    expect(out[0].signal_metadata.specialty_topic).toBe('wasp');
+  });
+});

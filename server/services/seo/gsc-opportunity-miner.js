@@ -78,6 +78,13 @@ const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTrans
 // The SAME list-shape grammar the brief-builder's listicle overlay uses —
 // guarantees a listicle_family opportunity actually receives the overlay.
 const { isListicleQuery } = require('../content/listicle-query');
+// Lazy: sitemap-manager pulls fetch plumbing this module doesn't need at
+// load time, and tests stub it via the getter seam.
+let _sitemapManager = null;
+function getSitemapManager() {
+  if (!_sitemapManager) _sitemapManager = require('./sitemap-manager');  
+  return _sitemapManager;
+}
 
 // ── normalization helpers (pure, test-friendly) ─────────────────────
 
@@ -1235,6 +1242,30 @@ function isHumanTerminalSkip(status, skipReason) {
   return r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
 }
 
+// Does the (service, city) pair derive a money-family path the runner's
+// protected-page guard would block unconditionally? Uses the
+// brief-builder's SERVICE_CITY_SLUG (the ONE slug map) and protected-pages'
+// own pattern test — lazy requires to keep module load acyclic.
+function localGapMoneyFamilyPair(service, city) {
+  try {
+     
+    const { SERVICE_CITY_SLUG } = require('../content/content-brief-builder')._internals;
+    const { isProtectedByPattern } = require('../content/protected-pages');
+     
+    const slug = SERVICE_CITY_SLUG?.[service];
+    if (!slug) return false;
+    const citySlug = String(city || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!citySlug) return false;
+    const verdict = isProtectedByPattern(`${slug}-${citySlug}-fl`);
+    return !!verdict?.protected;
+  } catch (err) {
+    // Fail CLOSED: if we cannot tell, treat the pair as money-family —
+    // skipping a mine beat freezing a key on a guaranteed protected skip.
+    logger.warn(`[gsc-opp-miner] money-family check failed (${err.message}) — pair treated as protected`);
+    return true;
+  }
+}
+
 // The CANONICAL identity of a city-service target, shared by the
 // arbitration and the in-flight fence. Buckets disagree on service
 // spelling — local_gap emits canonical 'tree-shrub'/'pest' while
@@ -1305,7 +1336,28 @@ function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new S
     const localTwin = group.find((o) => o !== winner && o.bucket === 'local_gap');
     if (localTwin) {
       winner.signal_metadata = winner.signal_metadata || {};
-      winner.signal_metadata.segment_impressions = localTwin.signal_metadata?.impressions ?? null;
+      const twinMeta = localTwin.signal_metadata || {};
+      winner.signal_metadata.segment_impressions = twinMeta.impressions ?? null;
+      // The twin's query coverage and specialty evidence ride along too
+      // (cloud P1): its contributing queries helped the pair clear
+      // admission and the brief must bind them, and a blocked topic on a
+      // twin query ('wasp' under broad pest) must still strip the FAQ
+      // mandate — winner's own evidence stays first.
+      const mergedQueries = new Set([
+        ...(Array.isArray(winner.signal_metadata.contributing_queries) ? winner.signal_metadata.contributing_queries : []),
+        ...(winner.query ? [winner.query] : []),
+        ...(Array.isArray(twinMeta.contributing_queries) ? twinMeta.contributing_queries : []),
+        ...(twinMeta.representative_query ? [twinMeta.representative_query] : []),
+      ]);
+      if (mergedQueries.size > 1) {
+        winner.signal_metadata.contributing_queries = [...mergedQueries].sort();
+        winner.signal_metadata.contributing_impressions =
+          (winner.signal_metadata.contributing_impressions ?? winner.signal_metadata.impressions ?? 0)
+          + (twinMeta.impressions ?? 0);
+      }
+      if (!winner.signal_metadata.specialty_topic && twinMeta.specialty_topic) {
+        winner.signal_metadata.specialty_topic = twinMeta.specialty_topic;
+      }
     }
     out.push(winner);
   }
@@ -2613,6 +2665,27 @@ class GscOpportunityMiner {
       throw new Error('gsc_pages/gsc_queries hub snapshot is missing or stale — refusing to mine city-service coverage or run its sweep');
     }
 
+    // LIVE INVENTORY, classified with the miner's own helpers (cloud P1:
+    // gsc_pages only proves a page RANKED — Search Analytics omits live
+    // pages with no recent impressions, so a zero-traffic hub page would
+    // read as missing and be drafted again). The sitemap is the existence
+    // truth: every hub URL is classified to a (service, city) pair and
+    // any pair present is COVERED regardless of traffic. Fail closed,
+    // same as the competitor-gap miner's sitemap read.
+    const sitemapUrls = await getSitemapManager().listUrls();
+    if (!Array.isArray(sitemapUrls) || !sitemapUrls.length) {
+      throw new Error('live sitemap parsed to zero URLs — refusing to judge city-service coverage without inventory');
+    }
+    const livePairs = new Set();
+    for (const u of sitemapUrls) {
+      const svc = inferServiceFromUrl(u);
+      const cty = inferCityFromUrl(u);
+      if (svc && cty) {
+        const c = canonicalizeServiceCategory(svc) || svc;
+        livePairs.add(ownPageKey(c, cty));
+      }
+    }
+
     // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
     // be validated against each query's own text before its impressions
     // count toward a pair (cloud P1 — the sync's SERVICE_PATTERNS are
@@ -2696,6 +2769,20 @@ class GscOpportunityMiner {
     for (const pair of byPair.values()) {
       // The impressions floor, applied to the canonical MERGED total.
       if (pair.impressions < THRESHOLDS.minImpressionsToScore) continue;
+      // Live-inventory coverage: the page EXISTS, traffic or not.
+      if (livePairs.has(ownPageKey(pair.service, pair.city))) continue;
+      // MONEY-FAMILY exclusion (cloud P1): the runner's protected-page
+      // guard pattern-blocks the pest-control city family UNCONDITIONALLY
+      // — emitting such a pair guarantees a claim → protected skip that
+      // freezes the target-stable key forever. A MISSING money page is
+      // operator territory, not an autonomous lane; log it loudly (pair
+      // only, no query text) and leave the pair unmined. Path derivation
+      // reuses the brief-builder's SERVICE_CITY_SLUG (lazy require — one
+      // slug map, never a copy) and protected-pages' own pattern test.
+      if (localGapMoneyFamilyPair(pair.service, pair.city)) {
+        logger.info(`[gsc-opp-miner] local_gap: ${pair.service}/${pair.city} (${pair.impressions} imp) is a MISSING money-family page — operator decision, not auto-mined`);
+        continue;
+      }
       const opp = {
         bucket: 'local_gap',
         query: null,
