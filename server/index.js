@@ -1147,6 +1147,19 @@ httpServer.listen(PORT, () => {
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {
+              // Populate the KB↔wiki bridge BEFORE the analytics run: the
+              // contradiction detector walks knowledge_bridge pairs, and
+              // nothing else creates them automatically — without this the
+              // detector processes an empty set forever. Deterministic name
+              // matching, idempotent (createLink upserts with onConflict
+              // ignore), no LLM calls. A failure never blocks analytics.
+              try {
+                const KnowledgeBridge = require('./services/knowledge-bridge');
+                const linkStats = await KnowledgeBridge.autoLink();
+                logger.info(`[cron] Knowledge bridge auto-link: ${JSON.stringify(linkStats)}`);
+              } catch (err) {
+                logger.error(`[cron] Knowledge bridge auto-link failed: ${err.message}`);
+              }
               const analytics = require('./services/assessment-analytics');
               const results = await analytics.runAll();
               logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);

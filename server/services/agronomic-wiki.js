@@ -491,6 +491,17 @@ const AgronomicWiki = {
 
       const month = new Date(treatmentDate).getMonth() + 1;
 
+      // 6b. Treatment-day weather. linkTreatmentOutcome runs at confirm /
+      // completion time (same day as the treatment), so a current FAWN
+      // snapshot approximates the application conditions. Null-safe: the
+      // canonical service returns null when the station is unavailable, and
+      // these columns stay null rather than blocking the link.
+      let fawn = null;
+      try {
+        fawn = await require('./fawn-weather').getCurrent();
+        if (fawn?.station === 'unavailable') fawn = null;
+      } catch { /* weather is enrichment, never a link blocker */ }
+
       // 7. Insert treatment_outcome
       const [outcome] = await db('treatment_outcomes').insert({
         customer_id: customerId,
@@ -525,6 +536,13 @@ const AgronomicWiki = {
 
         days_between_assessments: daysBetween,
         season: getSeason(month),
+
+        // Treatment-day FAWN snapshot (single reading, not a window average —
+        // the column names predate this writer). rainfall_in is the 7-day
+        // accumulation the station reports.
+        avg_temperature: fawn?.temp_f ?? null,
+        avg_humidity: fawn?.humidity_pct ?? null,
+        total_rainfall: fawn?.rainfall_in ?? null,
 
         grass_type: grassContext.grassType || null,
         property_sqft: grassContext.propertySqft || null,

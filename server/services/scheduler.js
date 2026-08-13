@@ -5052,7 +5052,13 @@ function initScheduledJobs() {
     let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
-      const result = await wiki.weeklyRefreshIfDue();
+      // runExclusive: the 6-day update-log guard inside weeklyRefreshIfDue is
+      // check-then-act, not atomic — during a rolling deploy two instances can
+      // both pass it and double-run the refresh. Same hazard the digest leg
+      // already locks against; a lease_held skip means another instance owns
+      // this tick's whole chain, so bail out of legs 2-3 too.
+      const result = await runExclusive('wiki-weekly-refresh', () => wiki.weeklyRefreshIfDue());
+      if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
       if (result?.error) refreshFailed = true;
       else if (!result.skipped) {
         logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
@@ -5079,7 +5085,7 @@ function initScheduledJobs() {
     }
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
-      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      const result = await runExclusive('wiki-kb-sync', () => KnowledgeBridge.syncToClaudeopediaIfDue());
       if (!result.skipped) {
         logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
       }

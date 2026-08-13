@@ -64,7 +64,8 @@ function composeYellowDigest(queue) {
   const blockedCount = (queue.blocked || []).length;
   if (!yellow.length && !pending.length) return null;
 
-  const reviewUrl = `${adminPortalUrl()}/admin/kb`;
+  // /admin/knowledge is the routed SPA page (App.jsx); /admin/kb is not a route.
+  const reviewUrl = `${adminPortalUrl()}/admin/knowledge`;
   const parts = [`Agronomic brain — weekly review digest`];
   const sections = [];
   if (pending.length) {

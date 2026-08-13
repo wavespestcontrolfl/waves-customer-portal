@@ -135,8 +135,9 @@ router.get('/:slug(*)', async (req, res, next) => {
 
 // =========================================================================
 // POST /update/:slug(*) — trigger manual update for a page
+// requireAdmin: each update burns a DEEP-model generation call
 // =========================================================================
-router.post('/update/:slug(*)', async (req, res, next) => {
+router.post('/update/:slug(*)', requireAdmin, async (req, res, next) => {
   try {
     const page = await wiki.getPage(req.params.slug);
     if (!page) return res.status(404).json({ error: 'Page not found' });
@@ -173,8 +174,9 @@ router.post('/update/:slug(*)', async (req, res, next) => {
 // =========================================================================
 // POST /generate — generate a new page
 // Body: { category, subject }
+// requireAdmin: each generation burns a DEEP-model call
 // =========================================================================
-router.post('/generate', async (req, res, next) => {
+router.post('/generate', requireAdmin, async (req, res, next) => {
   try {
     const { category, subject } = req.body;
     if (!category || !subject) {
