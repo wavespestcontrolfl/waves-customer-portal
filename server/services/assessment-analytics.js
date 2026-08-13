@@ -667,18 +667,29 @@ async function detectContradictions() {
       const kbName = kbEntry.title.replace(/^Product:\s*/i, '').toLowerCase();
       const content = (kbEntry.content || '').toLowerCase();
 
-      // Prefer the curated KB↔wiki pair (populated by KnowledgeBridge.autoLink
+      // Prefer the curated KB↔wiki pairs (populated by KnowledgeBridge.autoLink
       // in this same weekly run) for wiki attribution — the slug-ilike lookup
       // below stays only as a fallback, since free-text product names make it
-      // fragmentation-prone (the alias-matching lesson).
-      const bridged = await db('knowledge_bridge')
+      // fragmentation-prone (the alias-matching lesson). One KB entry can
+      // bridge to several wiki product pages (substring matches: Bifen I/T vs
+      // Bifen XTS), so the pair is resolved per efficacy product, never once
+      // per KB entry: exact wiki-slug match first, a single unambiguous pair
+      // second, otherwise no bridge attribution.
+      const bridgePairs = await db('knowledge_bridge')
         .where({ kb_entry_id: kbEntry.id })
         .whereNotNull('wiki_entry_id')
         .orderBy('relevance_score', 'desc')
-        .first();
+        .select('wiki_entry_id', 'wiki_slug');
+      const bridgeFor = (productName) => {
+        const exact = bridgePairs.find((b) => b.wiki_slug === `product/${slugify(productName)}`);
+        if (exact) return exact;
+        return bridgePairs.length === 1 ? bridgePairs[0] : null;
+      };
 
       for (const eff of efficacy) {
         if (!eff.product_name.toLowerCase().includes(kbName) && !kbName.includes(eff.product_name.toLowerCase())) continue;
+
+        const bridged = bridgeFor(eff.product_name);
 
         // Check: KB claims "best for" or "effective" but data shows negative delta
         if (eff.avg_delta_overall != null && eff.avg_delta_overall < -5 && eff.application_count >= 5) {

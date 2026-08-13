@@ -100,6 +100,49 @@ test('claim_vs_data prefers the bridge pair for wiki attribution over slug match
   }));
 });
 
+test('with multiple bridge pairs, the exact wiki-slug match for the efficacy product wins', async () => {
+  const dbMock = makeDb({
+    product_efficacy: [{ ...NEGATIVE_EFFICACY, product_name: 'Bifen XTS' }],
+    knowledge_base: [{ ...KB_PRODUCT, title: 'Product: Bifen', content: 'Bifen products are effective.' }],
+    // Substring auto-links: one KB entry bridged to two wiki product pages,
+    // both at relevance 0.95 — relevance can't disambiguate.
+    knowledge_bridge: [
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-it', wiki_slug: 'product/bifen-i-t', relevance_score: 0.95 },
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-xts', wiki_slug: 'product/bifen-xts', relevance_score: 0.95 },
+    ],
+    knowledge_entries: [{ id: 'wiki-slug-match' }],
+    knowledge_contradictions: [],
+  });
+  global.__analyticsDbMock = dbMock;
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(1);
+  // The efficacy row is Bifen XTS → its exact slug pair, not the first row
+  expect(dbMock.state.inserts.knowledge_contradictions[0].wiki_entry_id).toBe('wiki-bifen-xts');
+});
+
+test('with multiple bridge pairs and no exact slug match, attribution falls back to slug-ilike', async () => {
+  const dbMock = makeDb({
+    // "Bifen Granular" has no wiki page of its own — no exact slug pair
+    product_efficacy: [{ ...NEGATIVE_EFFICACY, product_name: 'Bifen Granular' }],
+    knowledge_base: [{ ...KB_PRODUCT, title: 'Product: Bifen', content: 'Bifen products are effective.' }],
+    knowledge_bridge: [
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-it', wiki_slug: 'product/bifen-i-t', relevance_score: 0.95 },
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-xts', wiki_slug: 'product/bifen-xts', relevance_score: 0.95 },
+    ],
+    knowledge_entries: [{ id: 'wiki-slug-match' }],
+    knowledge_contradictions: [],
+  });
+  global.__analyticsDbMock = dbMock;
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(1);
+  // Ambiguous bridge — never guess between pairs; the slug fallback decides.
+  expect(dbMock.state.inserts.knowledge_contradictions[0].wiki_entry_id).toBe('wiki-slug-match');
+});
+
 test('claim_vs_data falls back to slug match when no bridge pair exists', async () => {
   const dbMock = makeDb({
     product_efficacy: [NEGATIVE_EFFICACY],
