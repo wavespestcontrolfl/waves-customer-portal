@@ -2398,6 +2398,46 @@ describe('rain-out service', () => {
       expect(result.routeConflicts).toEqual([]);
     });
 
+    test('route scope: a null-end DAY-move sibling is not warned — commit runs no gate for it', async () => {
+      // Deliberate boundary, not an oversight. On a day move this row lands
+      // with a null end, and rebooker.reschedule computes
+      // `windowEnd = win.end || service.window_end` (both null) with both
+      // occupancy checks behind `if (updates.window_start && windowEnd)` —
+      // so commit cannot SLOT_TAKEN on it and "the schedule will block this
+      // move" would be a false positive. The gate skip itself is a real
+      // latent double-book, but it is pre-existing on main and reaches every
+      // reschedule caller. Contrast the same-day case above, where commit's
+      // windowless-mover fallback gives the row a real span.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2026-06-11',
+              window_start: '09:00', window_end: '10:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [{
+              id: 'svc-2', window_start: '09:00:00', window_end: null,
+              estimated_duration_minutes: 60, route_order: 2,
+            }],
+          }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
+        target: { date: '2026-06-20', window: { start: '09:00', end: '10:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([]);
+      // And no probe was spent on a landing commit never checks.
+      const probed = findConflictingVisits.mock.calls.map((c) => c[0].windowStart);
+      expect(probed).toEqual(['09:00']); // the anchor's own target only
+    });
+
     test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {
       findConflictingVisits.mockResolvedValue([]);
       wireDb({

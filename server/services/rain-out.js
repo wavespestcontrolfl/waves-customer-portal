@@ -768,6 +768,20 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
     }
     const start = toHHMM(job.window_start);
     const end = toHHMM(job.window_end);
+    // A day-move row with a start but NO stored end lands with a null end,
+    // and commit runs no conflict gate for it at all: rebooker.reschedule
+    // computes `windowEnd = win.end || service.window_end` (both null here)
+    // and both occupancy checks sit behind `if (updates.window_start &&
+    // windowEnd)`. So there is nothing for this advisory to pre-warn — it
+    // cannot SLOT_TAKEN, and telling the dispatcher "the schedule will
+    // block this move" would be a false positive. Modeled as no landing
+    // deliberately; do NOT "fix" this into a derived span without first
+    // fixing the gate it is mirroring. That gate skip is a real latent
+    // double-booking hole, but it is PRE-EXISTING on main and reaches every
+    // reschedule caller (customer links, dispatch board, series shifts) —
+    // out of scope for a warn-only advisory, tracked for its own lane.
+    // (Same-day is different: commit's windowless-mover fallback hands the
+    // row `target.window`, a real span, which the branch above returns.)
     return (start && end) ? { start, end } : null;
   });
   // Member-vs-member collisions: simulate commit()'s own sweep. commit
