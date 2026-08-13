@@ -35,11 +35,6 @@ const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
-// The tools whose RESULT changes what may be said: text emitted on the same
-// model turn as one of these is suppressed until the write's outcome is known
-// (a "that's submitted!" spoken before a stale-slot rejection is a false
-// promise the corrective turn cannot unsay).
-const WRITE_TOOL_NAMES = new Set(['capture_lead', 'request_booking', 'request_reservice']);
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
 const MAX_TOKENS = 1024; // voice replies are short
@@ -866,23 +861,34 @@ class RelayConversation {
         clearTimeout(streamTimer);
       }
 
-      this.messages.push({ role: 'assistant', content: msg.content });
-
       const text = msg.content
         .filter((b) => b.type === 'text')
         .map((b) => b.text)
         .join(' ')
         .trim();
       // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool
-      // turn around request_booking/request_reservice/capture_lead would speak
-      // its text ("that's submitted!") BEFORE the write ran — a false success
-      // when the tool then hits a stale slot, fails, or times out
+      // turn around a WRITE_TOOLS member (the same canonical set the timeout /
+      // in-flight-idempotency handling keys on — one list, never two) would
+      // speak its text ("that's submitted!") BEFORE the write ran — a false
+      // success when the tool then hits a stale slot, fails, or times out
       // indeterminate. Text on a write-tool turn is suppressed; the model
       // speaks after it has seen the tool result (and the MAX_TOOL_ROUNDS
       // exhaustion fallback covers the never-speaks case). Read-only tool
       // turns keep their filler text — there is nothing to falsely promise.
       const hasPendingWrite = msg.stop_reason === 'tool_use'
-        && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOL_NAMES.has(b.name));
+        && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOLS.has(b.name));
+      // ⭐ AND THE HISTORY MUST AGREE WITH THE AIR. Storing the full assistant
+      // message while suppressing its speech left the model believing the
+      // caller already HEARD that text — its post-result turn could then be an
+      // empty end_turn, ending the exchange with no confirmation spoken at
+      // all. Suppressed turns are stored tool-use-only, so the follow-up round
+      // knows nothing has been said yet and states the outcome itself.
+      this.messages.push({
+        role: 'assistant',
+        content: hasPendingWrite && text
+          ? msg.content.filter((b) => b.type !== 'text')
+          : msg.content,
+      });
       if (text && !hasPendingWrite) this.say(text);
       else if (text && hasPendingWrite) {
         logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);

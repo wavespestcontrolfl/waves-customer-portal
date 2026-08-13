@@ -473,6 +473,12 @@ describe('RelayConversation — explicit end after capture', () => {
     const spoken = send.mock.calls.map(([t]) => String(t)).join(' ');
     expect(spoken).not.toMatch(/booking is submitted/i);
     expect(spoken).toMatch(/just taken/i);
+    // ⭐ THE HISTORY AGREES WITH THE AIR: the suppressed turn is stored
+    // tool-use-only, so the follow-up round knows nothing was spoken yet and
+    // must state the outcome itself (a full stored message let the model
+    // believe the caller had already heard the pre-write text).
+    const storedAssistant = convo.messages.find((m) => m.role === 'assistant');
+    expect(storedAssistant.content.every((b) => b.type !== 'text')).toBe(true);
   });
 
   test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {
