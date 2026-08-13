@@ -1173,6 +1173,18 @@ httpServer.listen(PORT, () => {
               if (autoLinkError) {
                 throw new Error(`knowledge bridge auto-link failed: ${autoLinkError}`);
               }
+              // Each analytics leg catches internally and returns { error }
+              // rather than throwing — including detectContradictions'
+              // corrective un-gate, whose failure can leave a page blocked
+              // with no open-row path back. Surface any failed leg so the
+              // run is recorded unhealthy instead of nesting the error
+              // inside a "successful" result.
+              const failedLegs = Object.entries(results || {})
+                .filter(([, r]) => r && r.error)
+                .map(([leg, r]) => `${leg}: ${r.error}`);
+              if (failedLegs.length) {
+                throw new Error(`assessment analytics leg(s) failed: ${failedLegs.join('; ')}`);
+              }
             });
           } catch (err) {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);

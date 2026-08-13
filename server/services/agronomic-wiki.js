@@ -690,14 +690,18 @@ const AgronomicWiki = {
     const stats = { checked: 0, enriched: 0 };
     try {
       // Enrichment can only succeed on the treatment's own ET day — bound
-      // the scan to the last day (with slack for pg DATE at UTC midnight);
-      // over-selecting is safe because the backfill's gates fail closed.
+      // the scan to yesterday's ET calendar date. treatment_date is a pg
+      // DATE, so compare against an ET date string, not an instant: a UTC
+      // instant cutoff lands after ET midnight in the evening and would
+      // skip every current-day outcome after 8 PM ET. Over-selecting is
+      // safe because the backfill's gates fail closed.
+      const { etDateString: etDay, addETDays: addDays } = require('../utils/datetime-et');
       const rows = await db('treatment_outcomes')
         .whereNull('avg_temperature')
         .whereNull('avg_humidity')
         .whereNull('total_rainfall')
         .whereNotNull('post_assessment_id')
-        .where('treatment_date', '>=', daysFrom(new Date(), -1))
+        .where('treatment_date', '>=', etDay(addDays(new Date(), -1)))
         .orderBy('treatment_date', 'desc')
         .limit(limit);
       for (const row of rows) {
