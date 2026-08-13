@@ -1721,7 +1721,7 @@ describe('rain-out service', () => {
         ],
       });
 
-      const options = await RainOut.getOptions('svc-1');
+      const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
       expect(options.ok).toBe(true);
       // Offers probe the same one-hour block commit() books (codex P2).
@@ -1766,7 +1766,7 @@ describe('rain-out service', () => {
           customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })],
         });
 
-        const options = await RainOut.getOptions('svc-1');
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
         expect(options.ok).toBe(true);
         expect(options.sameDay).toHaveLength(2);
@@ -1823,7 +1823,7 @@ describe('rain-out service', () => {
           customers: [customersQuery],
         });
 
-        const options = await RainOut.getOptions('svc-1');
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
         expect(options.sameDay[0].conflicts).toEqual([{
           id: 'svc-8',
@@ -1869,7 +1869,7 @@ describe('rain-out service', () => {
           ],
         });
 
-        const options = await RainOut.getOptions('svc-1');
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
         expect(options.days[0].conflicts).toBeUndefined();
         expect(options.days[0].routeConflicts).toEqual([
@@ -1895,7 +1895,7 @@ describe('rain-out service', () => {
           ],
         });
 
-        const options = await RainOut.getOptions('svc-1');
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
         expect(options.ok).toBe(true);
         expect(options.sameDay).toHaveLength(2);
@@ -1918,7 +1918,7 @@ describe('rain-out service', () => {
           ],
         });
 
-        const options = await RainOut.getOptions('svc-1');
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
 
         expect(options.ok).toBe(true);
         expect(options.extraReasonsEnabled).toBe(true);
@@ -1948,6 +1948,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
       });
 
@@ -1985,6 +1986,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2008,6 +2010,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2049,6 +2052,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2092,6 +2096,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2130,6 +2135,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2168,6 +2174,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2200,12 +2207,102 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
       // Both shift +5h onto the same 15:00-16:00 landing.
       expect(result.routeConflicts).toEqual([expect.objectContaining({
         isRouteSelfCollision: true, windowStart: '15:00', windowEnd: '16:00',
+      })]);
+    });
+
+    test('a tech asking about ANOTHER tech\'s service gets no names at all', async () => {
+      // The admin dispatch options/target-check routes are requireTechOrAdmin
+      // with no assignment check by design, so the name policy has to key on
+      // the CALLER. Scoping to the service's own technician_id would hand
+      // tech-2 every name on tech-1's route just by naming tech-1's service.
+      findConflictingVisits.mockResolvedValue([{
+        id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Mosquito Treatment', window_start: '14:00:00', window_end: '15:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]);
+      const customersQuery = chain({ rows: [{ id: 'cust-9', first_name: 'cust-9', last_name: null }] });
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1' }) }),
+          chain({ rows: [] }), // remaining route: empty
+        ],
+        customers: [customersQuery],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        caller: { isAdmin: false, technicianId: 'tech-2' },
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toEqual([expect.objectContaining({
+        customerName: null, serviceType: null, windowStart: '14:00',
+      })]);
+      expect(customersQuery.whereIn).not.toHaveBeenCalled();
+    });
+
+    test('an unidentified caller gets no names (fail closed)', async () => {
+      findConflictingVisits.mockResolvedValue([{
+        id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Mosquito Treatment', window_start: '14:00:00', window_end: '15:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]);
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1' }) }),
+          chain({ rows: [] }), // remaining route: empty
+        ],
+        customers: [chain({ rows: [] })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts[0].customerName).toBeNull();
+    });
+
+    test('route scope: a sibling with a null window_end still OCCUPIES its derived span', async () => {
+      // occupancy.js COALESCEs a null window_end to
+      // window_start + estimated_duration_minutes (60 default), so this row
+      // is occupied 08:00-09:30 — treating it as windowless would let the
+      // anchor's projected 09:00 landing look clear.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(),
+              window_start: '10:00', window_end: '11:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [{
+              id: 'svc-2', window_start: '08:00:00', window_end: null,
+              estimated_duration_minutes: 90, route_order: 2,
+            }],
+          }),
+        ],
+      });
+
+      // +1h push: the anchor targets 11:00 and svc-2 (start but no end ⇒
+      // commit's windowless-mover fallback) takes the anchor's target too.
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
+        target: { date: etDateString(), window: { start: '11:00', end: '12:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([expect.objectContaining({
+        isRouteSelfCollision: true, windowStart: '11:00', windowEnd: '12:00',
       })]);
     });
 
@@ -2232,6 +2329,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '10:00', end: '11:00' } },
       });
 
@@ -2265,6 +2363,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2292,6 +2391,7 @@ describe('rain-out service', () => {
 
       const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: etDateString(), window: { start: '15:00', end: '16:00' } },
       });
 
@@ -2320,6 +2420,7 @@ describe('rain-out service', () => {
 
       await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-06-20', window: { start: '14:00', end: '15:00' } },
       });
 
@@ -2336,6 +2437,7 @@ describe('rain-out service', () => {
       });
       const clear = await RainOut.checkTarget({
         serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
       });
       expect(clear).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
@@ -2590,7 +2692,7 @@ describe('rain-out service', () => {
           chain({ first: jest.fn().mockResolvedValue({ is_active: true }) }),
         ],
       });
-      let options = await RainOut.getOptions('svc-1');
+      let options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
       expect(options.customReasonEnabled).toBe(true);
       // No render payload — the counter is server-rendered on demand via
       // previewCustomSms (codex r9 P1); this is only the availability flag.
@@ -2606,7 +2708,7 @@ describe('rain-out service', () => {
           chain({ first: jest.fn().mockResolvedValue({ is_active: false }) }),
         ],
       });
-      options = await RainOut.getOptions('svc-1');
+      options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
       expect(options.customCompose).toBeNull();
 
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
@@ -2616,7 +2718,7 @@ describe('rain-out service', () => {
           chain({ rows: [] }),
         ],
       });
-      options = await RainOut.getOptions('svc-1');
+      options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
       expect(options.customReasonEnabled).toBe(false);
       expect(options.customCompose).toBeNull();
     });

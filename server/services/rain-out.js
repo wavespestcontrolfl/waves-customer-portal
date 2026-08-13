@@ -560,6 +560,9 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
     .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
     .select(
       'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
+      // Feeds the route-scope simulation's effective-end derivation for
+      // rows with a start but no stored end.
+      'estimated_duration_minutes',
       // Stamped service-address fields feed the moved-SMS forecast copy.
       'lat', 'lng', 'service_address_zip',
       // Collective anchoring needs recurrence membership for EVERY route
@@ -633,6 +636,22 @@ function sameDayOptions(now = new Date()) {
 // non-identifying, and they're what makes the warning actionable.
 const TARGET_CONFLICT_LIMIT = 3;
 const NAME_ALL = Symbol('rain-out:name-all');
+// WHO IS ASKING decides who gets named — never the row's own assignment.
+// The admin dispatch options route is requireTechOrAdmin with NO
+// assignment check by design ("any dispatcher may rain-out a stop on a
+// tech's behalf"), so scoping names to the SERVICE's technician would let
+// tech A read tech B's customers just by requesting B's service (codex
+// #3375 P1). Admin sees every name; the assigned tech sees their own
+// stops (already visible on their route) and nothing else; anyone else,
+// and any caller that forgot to identify itself, gets no names at all.
+function nameScopeFor(caller, service) {
+  if (caller?.isAdmin) return NAME_ALL;
+  const techId = caller?.technicianId;
+  if (techId && service?.technician_id && String(techId) === String(service.technician_id)) {
+    return String(techId);
+  }
+  return null;
+}
 async function conflictsForTarget(serviceId, date, window, {
   routeSiblingIds = null, nameScope = null, excludeServiceIds = null,
 } = {}) {
@@ -766,10 +785,22 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
   // second meets the first at its landed position. These are the shapes
   // commit() documents as deliberately loud; now they are loud BEFORE the
   // tap. The reported span is the INTERSECTION: the slice contested.
+  // Mirror the predicate's EFFECTIVE end: window_end is nullable and
+  // occupancy.js COALESCEs it to window_start + estimated_duration_minutes
+  // (60 default). Treating a null end as "windowless" would drop a row the
+  // predicate says is occupied, so a member could land on it unwarned
+  // (codex #3375 P1). Same derivation conflictsForTarget uses.
   const cur = (row) => {
-    const start = toHHMM(row.window_start);
-    const end = toHHMM(row.window_end);
-    return (start && end) ? { start, end } : null;
+    const start = toHHMM(row?.window_start);
+    if (!start) return null;
+    const end = toHHMM(row?.window_end);
+    if (end) return { start, end };
+    const startMin = hhmmToMinutes(start);
+    if (startMin == null) return null;
+    const duration = Number(row.estimated_duration_minutes) > 0
+      ? Number(row.estimated_duration_minutes)
+      : 60;
+    return { start, end: minutesToHHMM(startMin + duration) };
   };
   const members = [
     { id: String(serviceId), current: cur(service), landing: target.window },
@@ -850,7 +881,7 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
  * custom time re-checks on every date/hour change). Never blocks anything —
  * commit's locked probe is the enforcer.
  */
-async function checkTarget({ serviceId, target }) {
+async function checkTarget({ serviceId, target, caller = null }) {
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
@@ -859,16 +890,15 @@ async function checkTarget({ serviceId, target }) {
     // window_end too: the route-scope simulation needs the anchor's CURRENT
     // occupied span, not just its start — a sibling can land on the row the
     // anchor has not vacated yet.
-    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'route_order');
+    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
+      'estimated_duration_minutes', 'route_order');
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
   const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
   const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window, {
     routeSiblingIds: new Set(route.map((j) => String(j.id))),
-    // Admin-only route (requireAdmin) — the dispatcher needs the name to
-    // decide, and this is the ONLY path that resolves names globally.
-    nameScope: NAME_ALL,
+    nameScope: nameScopeFor(caller, service),
   });
   // Returned alongside (not merged): the sheet shows these only while the
   // scope toggle is on "this + rest of route", the one case commit moves
@@ -877,7 +907,7 @@ async function checkTarget({ serviceId, target }) {
   let routeConflicts = [];
   try {
     routeConflicts = await routeScopeConflicts({
-      serviceId, service, route, target, nameScope: NAME_ALL,
+      serviceId, service, route, target, nameScope: nameScopeFor(caller, service),
     });
   } catch (err) {
     logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
@@ -890,7 +920,7 @@ async function checkTarget({ serviceId, target }) {
  * route-scored day options with rain badges, the remaining-route count
  * for the scope toggle, and today's outlook for the header.
  */
-async function getOptions(serviceId) {
+async function getOptions(serviceId, { caller = null } = {}) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
 
@@ -949,9 +979,7 @@ async function getOptions(serviceId) {
     try {
       opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window, {
         routeSiblingIds,
-        // Tech-reachable payload: only THIS technician's own stops are
-        // named; another tech's customer stays "another appointment".
-        nameScope: service.technician_id || null,
+        nameScope: nameScopeFor(caller, service),
       });
     } catch (err) {
       logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
@@ -965,7 +993,7 @@ async function getOptions(serviceId) {
         service,
         route,
         target: { date: opt.date, window: opt.window },
-        nameScope: service.technician_id || null,
+        nameScope: nameScopeFor(caller, service),
       });
     } catch (err) {
       logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
@@ -988,7 +1016,7 @@ async function getOptions(serviceId) {
         service,
         route,
         target: { date: opt.date, window: opt.window },
-        nameScope: service.technician_id || null,
+        nameScope: nameScopeFor(caller, service),
       });
     } catch (err) {
       logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date}: ${err.message}`);

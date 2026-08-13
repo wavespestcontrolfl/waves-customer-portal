@@ -542,7 +542,11 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
     }
 
     const RainOut = require('../services/rain-out');
-    const options = await RainOut.getOptions(req.params.id);
+    // Assignment already enforced above, so this tech gets names for their
+    // own stops; every other technician's row comes back window-only.
+    const options = await RainOut.getOptions(req.params.id, {
+      caller: { isAdmin: false, technicianId: req.technicianId },
+    });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
     }
