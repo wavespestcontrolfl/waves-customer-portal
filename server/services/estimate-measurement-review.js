@@ -227,26 +227,44 @@ async function sendOfficeNotification(database, { subject, description, customer
     claimed = await database('service_requests')
       .where({ id: requestId })
       .whereRaw("COALESCE(pricing_revision->>'notifiedAt', '') = ''")
+      .whereRaw(
+        "(COALESCE(pricing_revision->>'notifyLeaseAt', '') = '' OR (pricing_revision->>'notifyLeaseAt')::timestamptz < NOW() - interval '10 minutes')"
+      )
       .update({
         pricing_revision: database.raw(
-          "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifiedAt}', to_jsonb(NOW()::text))"
+          "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifyLeaseAt}', to_jsonb(NOW()::text))"
         ),
       });
   } catch (err) {
-    logger.warn(`[estimate-measurement-review] notify claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
+    logger.warn(`[estimate-measurement-review] notify lease claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
     return;
   }
-  if (!claimed) return; // another sender owns delivery
+  if (!claimed) return; // another sender holds a fresh lease or delivery is done
 
-  const clearClaim = async () => {
+  const markDelivered = async () => {
     try {
       await database('service_requests')
         .where({ id: requestId })
         .update({
-          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifiedAt'"),
+          pricing_revision: database.raw(
+            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt', '{notifiedAt}', to_jsonb(NOW()::text))"
+          ),
         });
     } catch (err) {
-      logger.warn(`[estimate-measurement-review] notify claim clear failed for request ${requestId}: ${err.message}`);
+      // The fresh lease still guards double-rings for its window; a later
+      // retry after expiry re-sends — an extra bell beats a lost one.
+      logger.warn(`[estimate-measurement-review] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
+    }
+  };
+  const releaseLease = async () => {
+    try {
+      await database('service_requests')
+        .where({ id: requestId })
+        .update({
+          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt'"),
+        });
+    } catch (err) {
+      logger.warn(`[estimate-measurement-review] notify lease release failed for request ${requestId}: ${err.message}`);
     }
   };
 
@@ -256,12 +274,13 @@ async function sendOfficeNotification(database, { subject, description, customer
   // (codex #3376 final head P3). The claim stays: suppression IS delivery.
   if (first?.suppressed) {
     logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+    await markDelivered();
     return;
   }
-  if (first?.id) return;
+  if (first?.id) { await markDelivered(); return; }
   const second = await attempt();
-  if (second?.suppressed || second?.id) return;
-  await clearClaim();
+  if (second?.suppressed || second?.id) { await markDelivered(); return; }
+  await releaseLease();
   logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
 }
 
