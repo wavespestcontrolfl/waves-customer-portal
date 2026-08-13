@@ -575,21 +575,29 @@ async function runDeterministicMatching({ limit } = {}) {
         // below the D+4 midnight so the window matches its documentation.
         .where('arrival_date', '>=', new Date(`${addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`))
         .andWhere('arrival_date', '<', new Date(`${addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`))
-        .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+        // NO amount filter in SQL: a reconciled payout's true banked amount
+        // is its confirmed actual_amount, which SQL can't see here — an
+        // expected-amount filter could drop the real candidate and make a
+        // different payout look uniquely matchable. Amounts are compared in
+        // JS over the whole (naturally small) date window.
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
         .select('id', 'amount', 'arrival_date', 'reconciled')
-        // 8 is a parking cap, not a uniqueness cap: auto-link still demands
-        // candidates.length === 1, so a cap-hidden extra can only PREVENT a
-        // link, never fake "exactly one".
-        .limit(8);
+        .limit(50); // safety net far above any real 7-day payout count
       if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
       const fetched = await payoutQuery;
       // reconciled candidates compare against their confirmed ACTUAL amount
-      const candidates = [];
-      for (const c of fetched) candidates.push({ ...c, effective_amount: await effectivePayoutAmount(c) });
+      const withEffective = [];
+      for (const c of fetched) withEffective.push({ ...c, effective_amount: await effectivePayoutAmount(c) });
+      const candidates = withEffective.filter(c => withinCandidateTolerance(c.effective_amount, row.amount));
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
+      if (fetched.length === 50) {
+        // cap hit = the window wasn't fully surveyed; uniqueness would be a
+        // guess — park by treating the set as plural
+        summary.ambiguous++;
+        continue;
+      }
       if (candidates.length === 1 && exact.length === 1) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
@@ -641,7 +649,7 @@ async function runDeterministicMatching({ limit } = {}) {
         summary.ambiguous++;
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
           suggestion: suggestionMerge({
-            payoutCandidates: candidates.map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
+            payoutCandidates: candidates.slice(0, 8).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
           }),
           updated_at: new Date(),

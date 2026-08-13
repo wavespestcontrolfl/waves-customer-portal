@@ -577,16 +577,23 @@ describe('runDeterministicMatching', () => {
   });
 
   test('a reconciled payout with a DISCREPANT confirmed amount matches by its actual banked amount', async () => {
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     // Stripe expected 2418.66, but a human confirmed 2400.00 actually landed
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true }];
     state.reconRows = [{ status: 'confirmed', actual_amount: '2400.00' }];
-    const summary = await runDeterministicMatching();
-    // the expected-amount coincidence does NOT auto-link…
+
+    // a credit matching only the EXPECTED amount is not explained by it
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    let summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(0);
-    // …and the parked candidate shows the true banked amount
-    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
-    expect(sugOf(parked).payoutCandidates[0].amount).toBe(2400);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+
+    // a credit matching the ACTUAL banked amount links — the old SQL
+    // expected-amount filter would have dropped this candidate entirely
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2400.0, direction: 'credit', account_type: 'bank', suggestion: null }];
+    summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout').patch.matched_payout_id).toBe('po-1');
   });
 
   test('a linked-but-unreconciled row with NO human rejection gets its pending marker restored', async () => {
