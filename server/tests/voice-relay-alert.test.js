@@ -415,6 +415,26 @@ describe('GATE ON — the alert', () => {
     expect(body).toContain('[card ending');
   });
 
+  // ⭐ FAIL CLOSED: a scrub that cannot run must DROP the field, never pass
+  // the raw text through — an unscrubbed PAN in the feed is the P0 card-data
+  // rule broken; a missing detail line is an inconvenience.
+  test('a scrub failure drops the field instead of sending unscrubbed text', async () => {
+    const panScrub = require('../utils/pan-scrub');
+    const spy = jest.spyOn(panScrub, 'scrubPans').mockImplementation(() => { throw new Error('scrub broken'); });
+    try {
+      await relayAlert.alertOwnerHotLead({
+        ...HOT_LEAD,
+        urgency_reason: 'card 4111 1111 1111 1111 was read aloud',
+      }, { callSid: 'CA-pan-fail' });
+      expect(TwilioService.sendSMS).toHaveBeenCalled();
+      const body = TwilioService.sendSMS.mock.calls[0][1];
+      expect(body).not.toContain('4111');
+      expect(body).toContain('[detail unavailable]');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('the alert body never leaks the caller phone into LOGS (masked there only)', async () => {
     await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-mask' });
     const logged = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls].flat().join(' ');

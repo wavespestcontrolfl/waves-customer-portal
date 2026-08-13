@@ -67,11 +67,16 @@ function alertSafe(value, max = 80) {
   // a card number read aloud would ride them into the notification feed and
   // push delivery, bypassing the same scrub the transcript deliberately takes.
   // Scrub BEFORE the truncation so a cut cannot split a number past detection.
+  // ⭐ FAIL CLOSED: if the scrub itself cannot run, the field is DROPPED — an
+  // alert missing its detail line is an inconvenience; an unscrubbed PAN in
+  // the durable notification feed is the AGENTS.md P0 card-data rule broken.
   let text = String(value == null ? '' : value);
   try {
     const { scrubPans } = require('../../utils/pan-scrub');
     text = scrubPans(text);
-  } catch { /* scrub unavailable — fall through to the flattened raw text */ }
+  } catch {
+    return '[detail unavailable]';
+  }
   return text
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
