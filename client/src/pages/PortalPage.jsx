@@ -670,6 +670,23 @@ function usePropertyRecommendations() {
 }
 
 // =========================================================================
+// PROPERTY ALERTS HOOK — recent advisories from the daily alerts sweep
+// (dark behind GATE_PROPERTY_ALERTS; gate-off answers available:false and
+// the card renders nothing). Best-effort: a failed load just hides the card.
+// =========================================================================
+function usePropertyAlerts() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.getPropertyAlerts()
+      .then(d => { if (!cancelled && d?.available && d.alerts?.length) setData(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return data;
+}
+
+// =========================================================================
 // BEFORE / AFTER PHOTO COMPARISON SLIDER — real S3 photos or gradient fallback
 // =========================================================================
 function BeforeAfterSlider({ beforeAfter }) {
@@ -1072,6 +1089,60 @@ function RecommendationsCard({ data }) {
             </div>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+// =========================================================================
+// PROPERTY ALERTS CARD — recent advisories from the daily alerts sweep
+// (portal roadmap bet 6, owner ruling 2026-08-13: push + bell). Read-only:
+// the same rows already delivered as bell + native push; this card keeps
+// them visible on the home after the notification moment passes. All copy
+// is SERVER-composed at fire time.
+// =========================================================================
+const PROPERTY_ALERT_ICONS = {
+  rain_skip_irrigation: 'cloudRain',
+  lawn_inspection_reassurance: 'sun',
+};
+
+function formatAlertWhen(firedAt) {
+  const d = new Date(firedAt);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+function PropertyAlertsCard({ data }) {
+  if (!data?.alerts?.length) return null;
+  const muted = PORTAL_SHELL.muted;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{
+          fontSize: 14, fontWeight: 850, color: B.glassNavy,
+          textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: FONTS.heading,
+        }}>
+          Property alerts
+        </div>
+        <div style={{ fontSize: 14, color: muted }}>Based on weather and your visit history</div>
+      </div>
+      <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+        {data.alerts.map((alert) => (
+          <div key={alert.id} style={{
+            display: 'flex', gap: 12, alignItems: 'flex-start',
+            padding: '12px 14px', borderRadius: 10,
+            background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+          }}>
+            <ShellIconTile icon={PROPERTY_ALERT_ICONS[alert.ruleKey] || 'bell'} size={36} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{alert.title}</div>
+                <div style={{ fontSize: 14, color: muted, whiteSpace: 'nowrap' }}>{formatAlertWhen(alert.firedAt)}</div>
+              </div>
+              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>{alert.body}</div>
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -1895,6 +1966,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // and the load succeeds, so the card costs nothing while dark.
   const propertyScore = usePropertyScore();
   const propertyRecommendations = usePropertyRecommendations();
+  const propertyAlerts = usePropertyAlerts();
   const tier = TIER[customer.tier];
   // 0% is not a perk — the At-a-Glance sub shows the plan name instead of
   // advertising "0% discount" (eyeball 07-12). >0% keeps the discount line.
@@ -2244,6 +2316,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       <PropertyScoreCard data={propertyScore} compact={compact} />
 
       <RecommendationsCard data={propertyRecommendations} />
+
+      <PropertyAlertsCard data={propertyAlerts} />
 
       {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
@@ -4190,6 +4264,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // retired 2026-08-06 — offering Email/Both here would show a
                 // choice the server no longer honors.
                 { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                // Weather & property advisories (portal roadmap bet 6, owner
+                // ruling 2026-08-13: push + bell). A NEW alert type must ship
+                // with its self-service opt-out on the live settings surface
+                // (codex #3390 P1) — this is a deliberate, single-item
+                // extension of the 2026-07-09 "stops at appointment alerts"
+                // ruling, which predates this lane. No channelKey: these are
+                // app/bell advisories only — never SMS or email.
+                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked

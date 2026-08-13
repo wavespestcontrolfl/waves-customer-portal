@@ -489,6 +489,8 @@ app.use('/api/property-score', require('./routes/property-score'));
 // Portal home recommendations — dark behind GATE_PROPERTY_RECOMMENDATIONS
 // (request-time read).
 app.use('/api/property-recommendations', require('./routes/property-recommendations'));
+// Property alerts — dark behind GATE_PROPERTY_ALERTS (request-time read).
+app.use('/api/property-alerts', require('./routes/property-alerts'));
 app.use('/api/customer-pricing', customerPricingAiRoutes);
 app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);

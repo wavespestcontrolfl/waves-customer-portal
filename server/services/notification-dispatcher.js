@@ -268,3 +268,6 @@ const NotificationDispatcher = {
 module.exports = NotificationDispatcher;
 // Deferred-replay registry hook (replay-time preference recheck).
 module.exports.deferredNotificationStillWanted = deferredNotificationStillWanted;
+// Shared with the property-alerts sweep so both surfaces enforce the same
+// customer quiet-hours window shape.
+module.exports.inCustomerQuietHours = inCustomerQuietHours;

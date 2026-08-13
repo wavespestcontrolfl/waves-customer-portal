@@ -10,6 +10,9 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'tech_arrived',
   'service_completed',
   'payment_confirmation_sms',
+  // Weather/property advisories (property-alerts engine). Column exists
+  // since 20260401000104_notification_prefs_enhanced, default true.
+  'weather_alerts',
 ]);
 
 async function customerPreferenceEnabled(customerId, preferenceKey) {
