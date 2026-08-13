@@ -329,7 +329,9 @@ function fieldEvidenceItems(propertyRecord, field) {
   return entries.filter(Boolean);
 }
 
-function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope }) {
+function buildMeasurementEvidence({
+  propertyRecord, extraction, isCommercial, tenant, serviceScope, condoUnitFolio = false,
+}) {
   const out = [];
   const parcel = propertyRecord?._parcel || {};
   const aggregated = parcel.aggregated === true;
@@ -345,6 +347,12 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   // stays 'building' so a residential_unit selection goes unresolved unless
   // unit-scoped evidence (caller-stated) exists.
   const unitScoped = !isCommercial && CONDO_TYPES.test(String(propertyRecord?.propertyType || ''));
+  // A COMMERCIAL condominium's county record is a per-unit folio too — its
+  // sqft is the SUITE's own area, and emitting it building-scoped meant the
+  // V2 suite selection could never use the one authoritative measurement
+  // the county holds (codex r58 P1). Lane-gated via the caller-computed
+  // flag so the kill switch keeps prior V2 evidence exactly.
+  const suiteScoped = isCommercial && condoUnitFolio === true;
   // The uncapped actual SUPERSEDES the pricing-capped legacy value IN PLACE:
   // both describe the same underlying record, so emitting them as separate
   // evidence would dedupe-collapse on the shared source URL and the stable
@@ -359,7 +367,8 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   let actualApplied = false;
   for (const item of fieldEvidenceItems(propertyRecord, 'squareFootage')) {
     if (!positive(item.value)) continue;
-    const scope = aggregated ? 'association' : (unitScoped ? 'unit' : 'building');
+    const scope = aggregated ? 'association'
+      : (unitScoped ? 'unit' : (suiteScoped ? 'suite' : 'building'));
     let value = Number(item.value);
     if (actualBuilding && actualBuildingMeasured
       && (item.sourceType === 'county' || item.sourceType === 'cadastral' || item.sourceType === 'verified')
@@ -378,7 +387,7 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
       sourceType: item.sourceType || 'unknown',
       sourceUrl: item.url || null,
       exactAddressMatch: true,
-      exactSubpremiseMatch: unitScoped,
+      exactSubpremiseMatch: unitScoped || suiteScoped,
       extractionConfidence: item.providerConfidence || item.confidence || 'medium',
       warnings: [],
     });
@@ -590,7 +599,13 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
       condoRecord, association,
     });
-    const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
+    const evidence = buildMeasurementEvidence({
+      propertyRecord, extraction, isCommercial, tenant, serviceScope,
+      // The commercial-condo per-unit folio is suite evidence ONLY under
+      // the lane (kill-switch doctrine) and only when the scope actually
+      // resolved a suite for a unit occupant (codex r58 P1).
+      condoUnitFolio: unitScopeSuites && condoRecord && serviceScope === 'commercial_suite',
+    });
     if (!evidence.length) return null;
 
     const facts = selectPropertyFactsV2({

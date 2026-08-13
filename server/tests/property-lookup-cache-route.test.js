@@ -149,6 +149,12 @@ describe('performPropertyLookup cache integration', () => {
     // The attempt lifecycle DID stamp the row (owner ruling 2026-08-11):
     // a record-less lookup must still leave a countable, segmentable row.
     expect(writes.some(([, payload]) => payload && payload.last_attempt_status)).toBe(true);
+    // …and the stamp never rewrites DATA freshness: updated_at is what the
+    // route reports as meta.cachedAt, and moving it on every attempt made
+    // months-old property data read as newly cached (codex r58 P2).
+    expect(writes
+      .filter(([, payload]) => payload && payload.last_attempt_status)
+      .every(([, payload]) => payload.updated_at === undefined)).toBe(true);
   });
 
   it('hit serves the cached row with key-by-key response shape parity', async () => {

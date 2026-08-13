@@ -83,7 +83,11 @@ function hasPrimaryStreetNumber(address) {
 // type ('single tenant office', 'office villa') red-lanes to a human
 // (codex r3 P1). 'home office' as free text conflicts too; conservative
 // direction: red = operator look, never a silently wrong price.
-const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex/;
+// government/municipal/school/daycare mirror detectCategory's own premises
+// list (property-lookup-v2) — the lookup types those COMMERCIAL, and the
+// guard missing them let a municipal-building extraction reach a
+// residential draft (codex r58 P1).
+const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex|government|municipal|school|daycare/;
 
 // Free-text commercial signal for intake paths that carry prose instead of
 // a structured type (lead webhook notes / call summaries). Conservative:
@@ -515,8 +519,14 @@ function applyUnitScopeToPropertyFacts(propertyFacts, model) {
   // measurements (codex r38 P1).
   const suiteIsPartOfBuilding = model.serviceScope === 'commercial_suite'
     && model.partBuildingEvidence === true;
-  const buildingAreaIncompatible = suiteIsPartOfBuilding
-    || (model.serviceScope === 'residential_unit' && !perUnitCountyRecord);
+  // The condo per-unit-folio exemption applies to the COMMERCIAL suite
+  // exactly as to the residential unit (codex r58 P1): a non-aggregated
+  // condominium's county record is that unit's own folio, so its area IS
+  // the suite — clearing it left an owner/tenant with no caller-stated
+  // size unmeasured and undraftable. A plaza/strip suite (propertyUse
+  // retail/office/…) still clears: its county record covers the building.
+  const buildingAreaIncompatible = !perUnitCountyRecord
+    && (suiteIsPartOfBuilding || model.serviceScope === 'residential_unit');
   if (buildingAreaIncompatible
     && Number(propertyFacts?.home?.value) > 0
     && BUILDING_SCOPE_HOME_SOURCES.has(String(propertyFacts.home.source || ''))) {

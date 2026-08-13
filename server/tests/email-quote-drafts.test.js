@@ -400,6 +400,26 @@ describe('maybeDraftEstimateFromEmailLead', () => {
       expect(scannedMessage()).toContain('12,000 sq ft');
     });
 
+    test('the read is scoped to THIS lead — a stranger sharing the thread never carries (r58)', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Re: following up', body_text: 'Here is my number.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      const emailWheres = mockState.wheres.filter((w) => w.table === 'emails').map((w) => w.args);
+      expect(emailWheres).toEqual(expect.arrayContaining([['lead_id', 'lead-1']]));
+    });
+
+    test('no lead id means no thread read at all', async () => {
+      mockState.threadEmails = [{ subject: 'warehouse ask', body_text: 'our warehouse', snippet: null }];
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: { ...LEAD, id: null },
+      });
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+
     test('a thread with no earlier mail scans this message alone', async () => {
       await maybeDraftEstimateFromEmailLead({
         email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },

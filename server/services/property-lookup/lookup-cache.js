@@ -389,11 +389,15 @@ async function markLookupAttempt(address, status, reason = null) {
   if (!LOOKUP_ATTEMPT_STATUSES.has(status)) return;
   try {
     const { hash, normalizedAddress } = addressKey(address);
+    // Attempt timing lives in last_attempt_at ONLY — updated_at is the
+    // DATA freshness the route reports as meta.cachedAt, and stamping it
+    // on every cache hit made months-old property data read as newly
+    // cached (codex r58 P2). saveLookup keeps writing updated_at on real
+    // data mutations.
     const stamp = {
       last_attempt_at: db.fn.now(),
       last_attempt_status: status,
       last_attempt_reason: reason ? String(reason).slice(0, 250) : null,
-      updated_at: db.fn.now(),
     };
     await db('property_lookups')
       .insert({

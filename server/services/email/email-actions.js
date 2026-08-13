@@ -178,12 +178,20 @@ const PRIOR_THREAD_SCAN_MESSAGES = 5;
 // land in `emails` with a null classification (email-sync 'outbound_skipped'),
 // and our own reply prose is not the customer's ask; blocked-sender spam is
 // excluded for the same reason.
-async function priorThreadProseForScan(email) {
+async function priorThreadProseForScan(email, lead) {
   const threadId = String(email?.gmail_thread_id || '').trim();
-  if (!threadId) return '';
+  // Same LEAD only: automated form mailers thread every notification
+  // together, so an unrelated prior submission's commercial wording could
+  // block another prospect's valid residential draft (codex r58 P2). The
+  // lead is how email-sync identifies the prospect — an earlier message of
+  // the SAME inquiry carries this lead's id (the r47 case), a different
+  // prospect's never does. No lead id ⇒ nothing to scope to ⇒ scan this
+  // message alone.
+  if (!threadId || !lead?.id) return '';
   try {
     let query = db('emails')
       .where('gmail_thread_id', threadId)
+      .where('lead_id', lead.id)
       .whereNot('id', email.id)
       .whereNotNull('classification')
       .whereNot('classification', 'spam');
@@ -233,7 +241,7 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     return { created: false, skipped: 'no_usable_phone' };
   }
   const addr = parseExtractedAddress(extracted.address);
-  const priorThreadProse = await priorThreadProseForScan(email);
+  const priorThreadProse = await priorThreadProseForScan(email, lead);
   const intake = {
     email: lead.email || null,
     rawPhone: phone,

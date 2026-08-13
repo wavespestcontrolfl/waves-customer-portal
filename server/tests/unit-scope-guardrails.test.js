@@ -1349,11 +1349,29 @@ describe('an owner-occupied commercial condo is a unit without any address suffi
     expect(model.lotApplicability).toBe('common_master_parcel');
   });
 
-  test('the whole-building county area never prices the unit', () => {
+  test('the condo folio county area IS the suite area and survives (r58)', () => {
+    // A non-aggregated condominium's county record is the unit's own folio
+    // (the same doctrine as the residential per-unit exemption) — clearing
+    // it left an owner with no caller-stated size undraftable (codex r58
+    // P1 revised the r49 expectation here).
     const facts = { home: { value: 24000, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(facts, condoOwner());
+    expect(facts.home.value).toBe(24000);
+  });
+
+  test('a plaza suite (non-condo record) still clears the building area (r28)', () => {
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Retail Strip Plaza' },
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: true, address: '200 Plaza Dr Suite 200, Sarasota, FL 34232' },
+      propertyFacts: { tenant: false, home: { value: 40000, source: 'county_assessed' } },
+      address: '200 Plaza Dr Suite 200, Sarasota, FL 34232',
+    });
+    expect(model.serviceScope).toBe('commercial_suite');
+    const facts = { home: { value: 40000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.home.value).toBeNull();
-    expect((facts.home.rejected || []).some((r) => r.value === 24000)).toBe(true);
+    expect((facts.home.rejected || []).some((r) => r.value === 40000)).toBe(true);
   });
 
   test('county land-use text carries the same evidence as the type', () => {
@@ -1576,5 +1594,50 @@ describe('GH r57 — resident prose, lot-only line2, unit-first email parse', ()
     expect(withLine2('Space 12')).toBe(false);
     expect(withLine2('Apt 4')).toBe(true);
     expect(withLine2('7B')).toBe(true);
+  });
+});
+
+describe('GH r58 — municipal premises conflict; commercial-condo folio reaches V2 as suite evidence', () => {
+  test('a government/municipal extraction type conflicts with a residential intent', () => {
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'municipal building' } },
+      intent: { is_commercial: false },
+    })).toBeTruthy();
+    expect(commercialCategoryConflict({
+      extraction: { property: { property_type: 'government office' } },
+      intent: { is_commercial: false },
+    })).toBeTruthy();
+  });
+
+  test('the condo folio sqft is suite-scoped evidence under the lane, building-scoped off it', () => {
+    const { computePropertyFactsV2Shadow } = require('../services/estimator-engine/property-facts-shadow');
+    const args = {
+      propertyRecord: {
+        propertyType: 'Commercial Condo',
+        squareFootage: 1400,
+        _fieldEvidence: {
+          squareFootage: [{ value: 1400, sourceType: 'county', provider: 'Sarasota PAO' }],
+        },
+      },
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { is_commercial: true },
+      propertyFacts: { tenant: false },
+      address: '3400 Cattlemen Rd, Sarasota, FL 34232',
+    };
+    withGate('true', () => {
+      const { facts } = computePropertyFactsV2Shadow(args);
+      expect(facts.serviceScope).toBe('commercial_suite');
+      // The folio area satisfies the suite selection — the one
+      // authoritative measurement the county holds is used, not discarded.
+      expect(facts.structureArea.value).toBe(1400);
+      expect(facts.structureArea.kind).toBe('commercial_suite_area_sqft');
+    });
+    withGate(undefined, () => {
+      const { facts } = computePropertyFactsV2Shadow(args);
+      // Kill switch: prior V2 evidence exactly — building-scoped, and the
+      // legacy scope inference (no lane) never resolves a suite here.
+      expect(facts.serviceScope).not.toBe('commercial_suite');
+      expect((facts.evidence || []).every((e) => e.scope !== 'suite')).toBe(true);
+    });
   });
 });
