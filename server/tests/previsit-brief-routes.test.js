@@ -211,6 +211,42 @@ describe('POST /:id/regenerate-brief', () => {
     });
   });
 
+  test('jsonb-object pre_service_brief (node-postgres) does not 500 the regenerate response — visit branch', async () => {
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({
+      scheduled_services: {
+        ...VISIT_BRIEF_ROW,
+        // node-postgres returns jsonb columns as OBJECTS, not strings.
+        pre_service_brief: { version: 'visit_brief_v1', priorities: ['Check garage'] },
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.brief.priorities).toEqual(['Check garage']);
+    });
+  });
+
+  test('jsonb-object pre_service_brief does not 500 the regenerate response — WDO branch', async () => {
+    stubTables({
+      scheduled_services: {
+        id: 'svc-1',
+        service_type: 'WDO Inspection',
+        pre_service_brief: { risk_score: 'High' },
+        pre_service_brief_type: 'wdo_inspection',
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.brief.risk_score).toBe('High');
+    });
+  });
+
   test('tech who does not own the visit gets 404', async () => {
     stubTables({ scheduled_services: VISIT_BRIEF_ROW }, { ownsVisit: false });
     await withServer(async (base) => {

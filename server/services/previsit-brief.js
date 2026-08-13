@@ -53,7 +53,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { compilePropertyAlerts } = require('./property-alerts');
 const { normalizeServiceType, detectServiceCategory } = require('../utils/service-normalizer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 
 // Exact stored type strings. WDO_BRIEF_TYPE mirrors
 // appointment-tagger.js triggerWDOPrep (pre_service_brief_type:
@@ -92,14 +92,30 @@ function cleanText(value, max = 400) {
   return s ? s.slice(0, max) : null;
 }
 
-function dateOnly(value) {
+// Calendar day of a pg DATE value (scheduled_date, service_date) —
+// node-postgres materializes DATE columns as UTC-midnight Dates, and the
+// server runs UTC on Railway, so process-local getters are wrong twice a
+// day. etCalendarDayOf handles exactly this shape (see datetime-et.js).
+function calendarDay(value) {
   if (!value) return null;
-  if (value instanceof Date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  try {
+    return etCalendarDayOf(value);
+  } catch {
+    return null; // unparseable input — omit rather than mislabel the day
   }
-  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
-  return m ? m[1] : null;
+}
+
+// ET calendar day of a REAL timestamp (created_at etc.) — a post-8pm-ET
+// event on a UTC box must not label as the next day.
+function timestampDay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  try {
+    return etDateString(d);
+  } catch {
+    return null;
+  }
 }
 
 function parseStoredBrief(raw) {
@@ -179,28 +195,102 @@ async function loadProductHistory(dbh, recordIds) {
     .catch(() => []);
 }
 
-// Lawn visits: ONLY the products active for the current protocol window
-// (month + grass track scoped) — the owner's bounded-product constraint.
-async function loadLawnWindowGuidance(dbh, customerId, scheduledDate) {
+// One protocol-window product → the deterministic brief entry.
+function shapeWindowProduct(p) {
+  const gates = (p.gates && typeof p.gates === 'object') ? p.gates : {};
+  return {
+    name: cleanText(p.productName, 120),
+    role: cleanText(p.role, 60),
+    applicationMode: cleanText(p.applicationMode, 40),
+    ratePer1000: p.ratePer1000,
+    rateUnit: cleanText(p.rateUnit, 20),
+    // Conditional rows carry their trigger (the plan engine's
+    // base/conditional split) so the section never presents an optional
+    // product as fixed guidance.
+    trigger: cleanText(gates.trigger, 120),
+  };
+}
+
+const NO_LAWN_GUIDANCE = Object.freeze({
+  source: 'lawn_protocol_window',
+  available: false,
+  window: null,
+  products: [],
+  conditional_products: [],
+});
+
+// Lawn visits: ONLY the products active for the visit's protocol window —
+// the owner's bounded-product constraint. Window resolution order:
+//   1. the visit's ASSIGNED window (scheduled_services.lawn_protocol_
+//      window_key + lawn_protocol_key/version, same columns dynamic-context
+//      and the plan engine read) — catch-up/rescheduled/manual assignments
+//      must not be re-derived from the calendar;
+//   2. otherwise month-of-service on the customer's KNOWN grass track.
+// FAIL CLOSED: an unknown grass track (and no assignment) yields NO product
+// guidance rather than a guessed St. Augustine window. The window's
+// products split base (default_in_plan) vs conditional (gated/optional,
+// each labeled with its trigger) mirroring the plan engine's
+// base/conditional split — conditional rows are never presented as fixed.
+async function loadLawnWindowGuidance(dbh, svc) {
   try {
     const { loadCustomerGrassContext } = require('./lawn-grass-context');
     const { getProtocolWindowContext, summarizeProtocolContext } = require('./lawn-protocol-operating-layer');
-    const grass = await loadCustomerGrassContext(customerId, dbh);
-    const serviceDate = scheduledDate
-      ? new Date(`${dateOnly(scheduledDate)}T12:00:00-05:00`)
-      : new Date();
-    const context = await getProtocolWindowContext(dbh, {
-      serviceDate,
-      grassTrack: grass.trackKey || 'st_augustine',
-    });
+    const grass = await loadCustomerGrassContext(svc.customer_id, dbh);
+    const scheduledDay = calendarDay(svc.scheduled_date);
+    const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
+
+    const assignedWindowKey = svc.lawn_protocol_window_key || null;
+    const query = { serviceDate };
+    if (assignedWindowKey) {
+      query.windowKey = assignedWindowKey;
+      // Resolve the assigned protocol row (key + version, newest match —
+      // mirrors dynamic-context.resolveAssignedProtocolId) so the window
+      // key is looked up on the protocol it was assigned FROM.
+      if (svc.lawn_protocol_key) {
+        const protocolQuery = dbh('lawn_protocols').where({ protocol_key: svc.lawn_protocol_key });
+        if (svc.lawn_protocol_version) protocolQuery.where({ version: svc.lawn_protocol_version });
+        const protocolRow = await protocolQuery
+          .orderBy('effective_from', 'desc')
+          .orderBy('created_at', 'desc')
+          .first('id')
+          .catch(() => null);
+        if (protocolRow?.id) {
+          query.protocolId = protocolRow.id;
+        } else if (!grass.trackKey) {
+          // Assigned protocol unresolvable AND no known track to fall back
+          // to — fail closed rather than resolving the key against an
+          // arbitrary active protocol.
+          return { ...NO_LAWN_GUIDANCE, reason: 'assigned_protocol_unresolved' };
+        } else {
+          query.grassTrack = grass.trackKey;
+        }
+      } else if (grass.trackKey) {
+        query.grassTrack = grass.trackKey;
+      } else {
+        return { ...NO_LAWN_GUIDANCE, reason: 'unknown_grass_track' };
+      }
+    } else {
+      // No assignment: month-of-service on the KNOWN track only — never
+      // default a missing track to st_augustine.
+      if (!grass.trackKey) {
+        return { ...NO_LAWN_GUIDANCE, reason: 'unknown_grass_track' };
+      }
+      query.grassTrack = grass.trackKey;
+    }
+
+    const context = await getProtocolWindowContext(dbh, query);
     const summary = summarizeProtocolContext(context);
     if (!summary) {
-      return { source: 'lawn_protocol_window', available: false, window: null, products: [] };
+      return { ...NO_LAWN_GUIDANCE, reason: 'no_active_protocol' };
     }
+    const shaped = (summary.products || [])
+      .map((p) => ({ shapedEntry: shapeWindowProduct(p), defaultInPlan: p.defaultInPlan === true }))
+      .filter((p) => p.shapedEntry.name);
     return {
       source: 'lawn_protocol_window',
       available: !!summary.window,
       grassTrack: grass.trackKey || null,
+      assignedWindowKey,
       window: summary.window ? {
         key: summary.window.key,
         month: summary.window.month,
@@ -208,18 +298,18 @@ async function loadLawnWindowGuidance(dbh, customerId, scheduledDate) {
         visitType: summary.window.visitType,
         goal: cleanText(summary.window.goal, 300),
       } : null,
-      products: (summary.products || []).map((p) => ({
-        name: cleanText(p.productName, 120),
-        role: cleanText(p.role, 60),
-        applicationMode: cleanText(p.applicationMode, 40),
-        ratePer1000: p.ratePer1000,
-        rateUnit: cleanText(p.rateUnit, 20),
-        defaultInPlan: p.defaultInPlan === true,
-      })).filter((p) => p.name),
+      // Fixed guidance = the window's default-in-plan products only.
+      products: shaped.filter((p) => p.defaultInPlan).map(({ shapedEntry }) => {
+        const { trigger: _trigger, ...fixed } = shapedEntry;
+        return fixed;
+      }),
+      // Optional/gated products, clearly conditional with their trigger.
+      conditional_products: shaped.filter((p) => !p.defaultInPlan)
+        .map((p) => ({ ...p.shapedEntry, conditional: true })),
     };
   } catch (err) {
     logger.warn(`[previsit-brief] lawn protocol window lookup failed: ${err.message}`);
-    return { source: 'lawn_protocol_window', available: false, window: null, products: [] };
+    return { ...NO_LAWN_GUIDANCE, reason: 'lookup_failed' };
   }
 }
 
@@ -307,7 +397,7 @@ async function assembleGrounding(svc, dbh = db) {
     try {
       const { buildSinceLastVisitContext } = require('./service-report/since-last-visit');
       sinceLastVisit = await buildSinceLastVisitContext({
-        record: { ...lastVisitRecord, service_date: dateOnly(lastVisitRecord.service_date) },
+        record: { ...lastVisitRecord, service_date: calendarDay(lastVisitRecord.service_date) },
         knex: dbh,
       }) || null;
     } catch (err) {
@@ -320,7 +410,7 @@ async function assembleGrounding(svc, dbh = db) {
   // from history only (deduped by name, newest first).
   let productGuidance;
   if (category === 'lawn') {
-    productGuidance = await loadLawnWindowGuidance(dbh, svc.customer_id, svc.scheduled_date);
+    productGuidance = await loadLawnWindowGuidance(dbh, svc);
   } else {
     const seen = new Set();
     const products = [];
@@ -350,12 +440,12 @@ async function assembleGrounding(svc, dbh = db) {
   const llmFacts = {
     visit: {
       serviceType: normalizedType,
-      scheduledDate: dateOnly(svc.scheduled_date),
+      scheduledDate: calendarDay(svc.scheduled_date),
       isRecurring: !!svc.is_recurring,
       newCustomer: genuinelyNew,
     },
     lastVisit: lastVisitRecord ? {
-      date: dateOnly(lastVisitRecord.service_date),
+      date: calendarDay(lastVisitRecord.service_date),
       serviceType: cleanText(lastVisitRecord.service_type, 120),
       productNames: lastVisitProducts.map((p) => p.name).filter(Boolean),
       sinceLastVisit: sinceLastVisit ? {
@@ -366,7 +456,7 @@ async function assembleGrounding(svc, dbh = db) {
     } : null,
     serviceHistory: (context?.serviceHistory || []).map((s) => ({
       type: cleanText(s.type, 120),
-      date: dateOnly(s.date),
+      date: calendarDay(s.date),
       notes: cleanText(s.notes, 500),
     })),
     propertyProfile: context?.propertyProfile || null,
@@ -376,18 +466,21 @@ async function assembleGrounding(svc, dbh = db) {
       detail: cleanText(f.detail, 200),
     })),
     recentCalls: (context?.recentCalls || []).map((c) => ({
-      date: dateOnly(c.date),
+      date: timestampDay(c.date),
       direction: c.direction || null,
       summary: cleanText(c.summary, 500),
     })),
     recentInteractions: (context?.recentInteractions || []).map((i) => ({
       type: i.type,
       subject: cleanText(i.subject, 160),
-      date: dateOnly(i.date),
+      date: timestampDay(i.date),
     })),
     openScope,
     productGuidance: {
       source: productGuidance.source,
+      // FIXED products only — conditional/gated rows are never handed to
+      // the LLM as fixed guidance (they live, labeled, in the stored
+      // brief's conditional_products).
       productNames: (productGuidance.products || []).map((p) => p.name).filter(Boolean),
       window: productGuidance.window || null,
     },
@@ -578,7 +671,7 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     watch_items: body.watch_items,
     last_visit: {
       // date + products are DETERMINISTIC fields — never the LLM's.
-      date: grounding.lastVisitRecord ? dateOnly(grounding.lastVisitRecord.service_date) : null,
+      date: grounding.lastVisitRecord ? calendarDay(grounding.lastVisitRecord.service_date) : null,
       summary: body.last_visit_summary,
       products: grounding.lastVisitProducts,
     },

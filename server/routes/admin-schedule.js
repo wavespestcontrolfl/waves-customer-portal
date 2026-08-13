@@ -9505,13 +9505,18 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     const target = await db('scheduled_services').where({ id: req.params.id }).first('id', 'service_type', 'pre_service_brief_type');
     if (!target) return res.status(404).json({ error: 'Scheduled service not found' });
 
+    // pre_service_brief is jsonb — node-postgres hands it back as an
+    // OBJECT, so a bare JSON.parse would 500 after the write already
+    // committed. Same string-or-object handling as the GET route above.
+    const briefValue = (raw) => (raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null);
+
     const PrevisitBrief = require('../services/previsit-brief');
     const isWdo = AppointmentTagger.classifyAppointmentType(target.service_type).tag === 'wdo_inspection'
       || String(target.pre_service_brief_type || '') === PrevisitBrief.WDO_BRIEF_TYPE;
     if (isWdo) {
       await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
       const svc = await db('scheduled_services').where({ id: req.params.id }).first();
-      return res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
+      return res.json({ success: true, brief: briefValue(svc.pre_service_brief) });
     }
 
     if (!PrevisitBrief.briefGateEnabled()) {
@@ -9522,7 +9527,7 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     res.json({
       success: true,
       unchanged: outcome.reason === 'unchanged',
-      brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null,
+      brief: briefValue(svc.pre_service_brief),
     });
   } catch (err) { next(err); }
 });

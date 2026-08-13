@@ -276,6 +276,36 @@ describe('access codes', () => {
   });
 });
 
+describe('ET calendar-day labeling (UTC host)', () => {
+  test('pg DATE values keep their calendar day; late-ET timestamps do not roll to the next day', async () => {
+    mockGetContext.mockResolvedValueOnce({
+      serviceHistory: [],
+      propertyProfile: null,
+      flags: [],
+      // 2026-08-14T01:30Z is 2026-08-13 9:30pm ET — must label as 08-13.
+      recentCalls: [{ summary: 'Evening call about ants', direction: 'inbound', date: new Date('2026-08-14T01:30:00Z') }],
+      recentInteractions: [],
+      pendingEstimate: null,
+    });
+    const state = useDb(baseResponses({
+      // pg DATE columns materialize as UTC-midnight Dates on a UTC box.
+      scheduled_services: [{ ...SVC, scheduled_date: new Date('2026-08-13T00:00:00Z') }],
+      service_records: [{ ...SERVICE_RECORD, service_date: new Date('2026-07-15T00:00:00Z') }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+
+    const { brief } = storedBrief(state);
+    expect(brief.last_visit.date).toBe('2026-07-15');
+
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.visit.scheduledDate).toBe('2026-08-13');
+    expect(facts.lastVisit.date).toBe('2026-07-15');
+    expect(facts.recentCalls[0].date).toBe('2026-08-13');
+  });
+});
+
 describe('LLM failure fallback', () => {
   test('provider miss stores the deterministic template brief', async () => {
     global.__dispatch = jest.fn(async () => ({ ok: false, reason: 'all_providers_down' }));
@@ -363,6 +393,77 @@ describe('lawn bounded product section', () => {
     // The history product must NOT leak into the guidance list.
     expect(JSON.stringify(brief.product_guidance)).not.toContain('Bifen IT');
     expect(mockWindowContext).toHaveBeenCalled();
+    // Track came from the customer's profile, never a default.
+    expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
+  });
+
+  test('unknown grass track (no assignment) fails CLOSED — no guessed window', async () => {
+    mockGrassContext.mockResolvedValueOnce({ trackKey: null });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.available).toBe(false);
+    expect(brief.product_guidance.reason).toBe('unknown_grass_track');
+    expect(brief.product_guidance.products).toEqual([]);
+    expect(brief.product_guidance.conditional_products).toEqual([]);
+    expect(mockWindowContext).not.toHaveBeenCalled();
+  });
+
+  test('an assigned protocol window wins over date derivation (unknown track included)', async () => {
+    mockGrassContext.mockResolvedValueOnce({ trackKey: null });
+    mockSummarize.mockReturnValue({
+      window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
+      products: [
+        { productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: { requiresZeroNP: true } },
+      ],
+    });
+    const state = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        service_type: 'Lawn Care Service',
+        lawn_protocol_window_key: 'jun_blackout_stress',
+        lawn_protocol_key: 'sa_swfl',
+        lawn_protocol_version: 3,
+      }],
+      lawn_protocols: [{ id: 'proto-1' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const query = mockWindowContext.mock.calls[0][1];
+    expect(query.windowKey).toBe('jun_blackout_stress');
+    expect(query.protocolId).toBe('proto-1');
+    expect(query.grassTrack).toBeUndefined();
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.assignedWindowKey).toBe('jun_blackout_stress');
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
+  });
+
+  test('conditional/gated products are split out, labeled, and never sent to the LLM as fixed', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
+      products: [
+        { productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: { requiresZeroNP: true } },
+        { productName: 'Talstar P', role: 'insect_curative', applicationMode: 'spot', ratePer1000: 1.0, rateUnit: 'fl oz', defaultInPlan: false, gates: { trigger: 'confirmed_chinch_pressure' } },
+      ],
+    });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    // Fixed list = default-in-plan only.
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
+    // Conditional list is labeled with its trigger.
+    expect(brief.product_guidance.conditional_products).toEqual([
+      expect.objectContaining({ name: 'Talstar P', conditional: true, trigger: 'confirmed_chinch_pressure' }),
+    ]);
+    // The LLM's fixed product names exclude the conditional row.
+    const llmPayload = JSON.stringify(global.__dispatch.mock.calls[0]);
+    expect(llmPayload).toContain('Fe/Mn Micros');
+    expect(llmPayload).not.toContain('Talstar P');
   });
 
   test('non-lawn visits: history products only, forbidden targets filtered', async () => {
