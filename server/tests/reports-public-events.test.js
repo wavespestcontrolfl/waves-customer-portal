@@ -359,3 +359,228 @@ describe('storedRevisionMatches (cross-sell resubmit no-op, PR r11 P2)', () => {
     expect(storedRevisionMatches(undefined, snapshot)).toBe(false);
   });
 });
+
+describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share module fetches on the TAP)', () => {
+  const { isEnabled } = require('../config/feature-gates');
+  // The action limiter is token-keyed and its store outlives each test —
+  // every test gets its own token so one test's budget never bleeds into
+  // the next.
+  const tokenFor = (n) => `${n}`.repeat(32).slice(0, 32);
+
+  // The route lazy-requires the engine, so a doMock before each request is
+  // seen; the engine is NOT in the top-of-file mock set on purpose — these
+  // are the only tests that touch it.
+  const mockReferralEngine = {
+    getLiveSettings: jest.fn(),
+    enrollPromoter: jest.fn(),
+    getPromoterReferralLink: jest.fn(),
+  };
+  jest.mock('../services/referral-engine', () => mockReferralEngine);
+
+  const serviceRow = {
+    id: 'service-1',
+    customer_id: 'customer-1',
+    report_template_version: 'service_report_v1',
+  };
+
+  function mockDbWithService(row = serviceRow) {
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(row) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockReferralEngine.getLiveSettings.mockResolvedValue({
+      program_active: true,
+      referee_discount_cents: 2500,
+    });
+    mockReferralEngine.enrollPromoter.mockResolvedValue({
+      promoter: { id: 'promo-1', referral_code: 'WAVES-TEST01' },
+    });
+    mockReferralEngine.getPromoterReferralLink.mockReturnValue('https://wavespestcontrol.com/r/WAVES-TEST01');
+  });
+
+  test('dark gate answers the same 404 as an unknown token — not probeable', async () => {
+    isEnabled.mockReturnValue(false);
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const gated = await fetch(`${baseUrl}/reports/${tokenFor('a')}/referral-link`, { method: 'POST' });
+      expect(gated.status).toBe(404);
+      expect((await gated.json()).error).toBe('Report not found');
+    });
+    expect(mockReferralEngine.enrollPromoter).not.toHaveBeenCalled();
+  });
+
+  test('inactive program answers 404 and never enrolls', async () => {
+    isEnabled.mockReturnValue(true);
+    mockReferralEngine.getLiveSettings.mockResolvedValue({ program_active: false });
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('b')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(404);
+    });
+    expect(mockReferralEngine.enrollPromoter).not.toHaveBeenCalled();
+  });
+
+  test('tap enrolls through the portal mechanism and composes owner-voice share copy', async () => {
+    isEnabled.mockReturnValue(true);
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('c')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.code).toBe('WAVES-TEST01');
+      expect(body.link).toBe('https://wavespestcontrol.com/r/WAVES-TEST01');
+      // The friend's discount rides only because live settings grant it.
+      expect(body.smsBody).toContain('$25 off');
+      expect(body.smsBody).toContain('WAVES-TEST01');
+      // Portal-domain links drop the scheme in SMS bodies; email keeps it.
+      expect(body.smsBody).toContain('wavespestcontrol.com/r/WAVES-TEST01');
+      expect(body.smsBody).not.toContain('https://');
+      expect(body.emailBody).toContain('https://wavespestcontrol.com/r/WAVES-TEST01');
+      // Owner voice: zero emojis.
+      expect(/\p{Extended_Pictographic}/u.test(body.smsBody + body.emailBody)).toBe(false);
+    });
+    expect(mockReferralEngine.enrollPromoter).toHaveBeenCalledWith('customer-1');
+  });
+
+  test('fractional referee discounts format EXACTLY — never rounded up a dollar (pre-push P0)', async () => {
+    isEnabled.mockReturnValue(true);
+    mockReferralEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 4999 });
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/reports/${tokenFor('d')}/referral-link`, { method: 'POST' })).json();
+      // $49.99 stays $49.99 — advertising "$50" promises a dollar the
+      // engine never credits. Whole-dollar settings keep the clean "$25".
+      expect(body.smsBody).toContain('$49.99 off');
+      expect(body.smsBody).not.toContain('$50');
+      expect(body.emailSubject).toBe('$49.99 off Waves Pest Control');
+    });
+  });
+
+  test('the tap shares the 5/min token-keyed action limiter (pre-push P1: no eventName body must not exempt it)', async () => {
+    isEnabled.mockReturnValue(true);
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const statuses = [];
+      for (let i = 0; i < 6; i++) {
+        const response = await fetch(`${baseUrl}/reports/${tokenFor('e')}/referral-link`, { method: 'POST' });
+        statuses.push(response.status);
+      }
+      expect(statuses.slice(0, 5).every((code) => code === 200)).toBe(true);
+      expect(statuses[5]).toBe(429);
+      // Pre-DB bypass (round-2 P1): the over-limit 6th request must be
+      // rejected BEFORE any service_records read — 5 in-route reads for the
+      // 5 allowed requests, none from the param gate, none for the 429.
+      expect(serviceRead.first).toHaveBeenCalledTimes(5);
+    });
+  });
+
+  test('no referee discount configured → the copy asks to mention the code, never invents $ off', async () => {
+    isEnabled.mockReturnValue(true);
+    mockReferralEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 0 });
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/reports/${tokenFor('f')}/referral-link`, { method: 'POST' })).json();
+      expect(body.smsBody).not.toContain('$');
+      expect(body.smsBody).toContain('mention my code WAVES-TEST01');
+    });
+  });
+
+  test('sibling profile (23505) resolves the household promoter read-only, scoped to the account (r5)', async () => {
+    isEnabled.mockReturnValue(true);
+    const pgError = new Error('duplicate key value violates unique constraint "referral_promoters_customer_phone_key"');
+    pgError.code = '23505';
+    mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
+    // The endpoint then reads: customers (profile) → account-scoped join.
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+15555550100', account_id: 'acct-1' }) });
+    const joined = {
+      join: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 'promo-h', customer_id: 'cust-0', referral_code: 'WAVES-HOUSE01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-HOUSE01' }),
+    };
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      if (table === 'referral_promoters as rp') return joined;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    mockReferralEngine.getPromoterReferralLink.mockReturnValue('https://portal.wavespestcontrol.com/r/WAVES-HOUSE01');
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('7')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.code).toBe('WAVES-HOUSE01');
+    });
+    // Account boundary was applied to the join.
+    expect(joined.where).toHaveBeenCalledWith('c.account_id', 'acct-1');
+  });
+
+  test('cross-account phone collision stays a 503 — never a foreign code (r5 money posture)', async () => {
+    isEnabled.mockReturnValue(true);
+    const pgError = new Error('duplicate key value violates unique constraint');
+    pgError.code = '23505';
+    mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+15555550100', account_id: 'acct-1' }) });
+    const joined = { join: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      if (table === 'referral_promoters as rp') return joined;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('8')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(503);
+    });
+  });
+
+  test('engine failure answers 503, not a fake link — and the raw error never reaches the logs', async () => {
+    isEnabled.mockReturnValue(true);
+    // A PG unique-violation quotes the conflicting value — here, a phone
+    // number. The log line must carry the code, never the message.
+    const pgError = new Error('duplicate key value violates unique constraint "referral_promoters_customer_phone_key" Detail: Key (customer_phone)=(+19415551234) already exists.');
+    pgError.code = '23505';
+    mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
+    // 23505 first consults the household path — a legacy profile without
+    // account_id skips it and rethrows the original, which is what this
+    // test is about: the raw constraint text never reaching the logs.
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+19415551234', account_id: null }) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('0')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(503);
+    });
+    const logger = require('../services/logger');
+    const logged = logger.warn.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('code=23505');
+    expect(logged).not.toContain('9415551234');
+    expect(logged).not.toContain('duplicate key');
+  });
+
+  test('unknown token and non-v1 reports answer 404 before any engine read', async () => {
+    isEnabled.mockReturnValue(true);
+    mockDbWithService({ ...serviceRow, report_template_version: 'legacy' });
+    await withServer(async (baseUrl) => {
+      const nonV1 = await fetch(`${baseUrl}/reports/${tokenFor('9')}/referral-link`, { method: 'POST' });
+      expect(nonV1.status).toBe(404);
+      const badToken = await fetch(`${baseUrl}/reports/not-a-token/referral-link`, { method: 'POST' });
+      expect(badToken.status).toBe(404);
+    });
+    expect(mockReferralEngine.getLiveSettings).not.toHaveBeenCalled();
+  });
+});

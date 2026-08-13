@@ -77,7 +77,13 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // overlay keys on this bucket), so rerouting it to another asset type —
 // profiler upgrade or pre-sale customer-question demand — would silently
 // drop the listicle architecture the lane was mined for.
-const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family']);
+// local_gap joined 2026-08-13 (Codex P1 on #3378): its rows collapse ALL
+// demand for a (service, city) pair into one target-stable, queryless key
+// whose action IS the missing city-service page. Letting a blog-dominant
+// SERP on the representative query reroute it to an article would freeze
+// the key on completion without ever creating the page — and no later
+// mine could reopen it.
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap']);
 
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;

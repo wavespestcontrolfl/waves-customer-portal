@@ -293,6 +293,15 @@ finding and warns on P1. Reviewers must return JSON matching
   (owner rule re-affirmed 2026-07-23). Invoice/prepay surfaces and
   commercial proposals are exempt; true monthly-billed legacy plans keep
   "/mo". No service is ever presented as a flat monthly spread.
+  One owner-dictated exception (2026-08-13, iterated live on the rendered
+  page): the service-report cross-sell card HEADLINE shows the bare
+  per-application amount with no unit ("… protected for just $114!") —
+  the owner cut the unit deliberately after the "per visit" flag, and the
+  request flow behind the click confirms full per-application terms before
+  anything is scheduled (moving to the estimate page itself in the
+  click-to-estimate PR). The exception is the missing UNIT only: the
+  number is still the per-application amount, and "per visit" and monthly
+  spreads stay banned here like everywhere else.
 - **Appointment windows start on the hour.** `window_start` is always
   HH:00:00 (owner 2026-07-27) — flag any slot/window creation that can
   produce :15/:30 STARTS. `window_end` is duration-driven and may

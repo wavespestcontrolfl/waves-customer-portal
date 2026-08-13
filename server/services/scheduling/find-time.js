@@ -6,31 +6,27 @@
  * of feasible slots on each tech's day, scored by detour cost (extra drive
  * time added by inserting the new stop into an existing route).
  *
- * Uses haversine × 1.4 road factor at 30 mph for drive-time estimates — same
- * approximation the route-optimizer fallback uses. No API calls per request.
+ * Drive-time estimates come from route-optimizer's shared model — the same one
+ * auto-dispatch scores a visit's current placement with. Both sides MUST use
+ * it: auto-dispatch compares a current placement against the candidates this
+ * module produces, so a local copy of the constants here would put the two
+ * sides on different scales. No API calls per request.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { HQ, haversine } = require('../route-optimizer');
+const { HQ, haversine, milesToDriveMinutes } = require('../route-optimizer');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 
-const ROAD_FACTOR = 1.4;
-const AVG_MPH = 30;
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
 const DEFAULT_SERVICE_MIN = 60;
 
 /**
- * Convert straight-line miles to estimated drive minutes.
- */
-function milesToDriveMinutes(miles) {
-  return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
-}
-
-/**
- * Drive minutes between two {lat,lng} points.
+ * Drive minutes between two {lat,lng} points. Coordinate glue only — the
+ * miles→minutes model itself is route-optimizer's and MUST NOT be re-derived
+ * here, or this module and auto-dispatch would score on different scales.
  */
 function driveMin(a, b) {
   if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return 0;

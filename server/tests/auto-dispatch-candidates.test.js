@@ -2,9 +2,27 @@
 // blackout windows and deactivated-capability techs are dropped, and the row
 // being moved is excluded from its own occupancy.
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
-jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 1 }));
+jest.mock('../services/route-optimizer', () => ({
+  HQ: { lat: 27.39, lng: -82.39 },
+  haversine: () => 1,
+  // Keep the REAL miles->minutes model so this suite stays honest about the
+  // estimator (and its gate) while still pinning geometry to 1 mile a leg.
+  milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+}));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+
+// These assertions assume LEGACY drive times (see the mocked haversine above),
+// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
+// gate off so the suite does not depend on the ambient environment; the
+// calibrated model is covered by drive-time-calibration.test.js.
+const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
+beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
+afterAll(() => {
+  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
+});
+
 const {
   findValidCandidateSlots,
   inBlackout,
