@@ -548,6 +548,7 @@ describe('runDeterministicMatching', () => {
     reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_rejected' });
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
     state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.reconRows = [{ status: 'rejected', reconciled_by: 'adam' }]; // the locked re-check confirms the ruling still stands
     const summary = await runDeterministicMatching();
     expect(summary.reconcileRetried).toBe(0);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');

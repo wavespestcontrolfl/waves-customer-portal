@@ -20,6 +20,7 @@ const state = {
   payoutRow: null,
   accountTypeRow: null,
   listRows: null,
+  latestRecon: null,
   bankUpdateError: null,
   bankUpdateResult: 1,
   insertedBank: [],
@@ -92,6 +93,13 @@ const mockDb = jest.fn((table) => {
   if (table === 'expenses') return expensesBuilder();
   if (table === 'expense_categories') {
     return { where: jest.fn(() => ({ first: jest.fn(() => Promise.resolve(state.category)) })) };
+  }
+  if (table === 'bank_reconciliation') {
+    return {
+      where: jest.fn(function w() { return this; }),
+      orderBy: jest.fn(function o() { return this; }),
+      first: jest.fn(() => Promise.resolve(state.latestRecon)),
+    };
   }
   if (table === 'stripe_payouts') {
     return {
@@ -183,6 +191,7 @@ beforeEach(() => {
   state.payoutRow = null;
   state.accountTypeRow = null;
   state.listRows = null;
+  state.latestRecon = null;
   state.insertReturningQueue = null;
   reconcilePayout.mockReset();
   reconcilePayout.mockImplementation(async () => ({}));
@@ -560,6 +569,7 @@ describe('link-payout (gate on)', () => {
 
   test('a human-rejected reconciliation answers 409 — the helper reverted the link, never a silent success', async () => {
     reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-9', skipped: true, reason: 'human_rejected' });
+    state.latestRecon = { status: 'rejected', reconciled_by: 'adam' }; // locked re-check confirms the ruling
     const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
     expect(res.status).toBe(409);
     const body = await res.json();

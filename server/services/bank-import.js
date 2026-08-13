@@ -407,43 +407,34 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
       .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
       .forUpdate().first('id').then(Boolean),
   });
-  // A human's explicit REJECTION of this payout's reconciliation outranks
-  // the link itself: leaving the row matched would have Tax claiming a
-  // payout Banking keeps rejected, with no pending state to repair it.
-  // Revert the claim, remember the payout as rejected for this row (the
-  // matcher's exclusion list), and let the operator decide.
-  if (result && result.skipped && result.reason === 'human_rejected') {
-    const cur = await db('bank_transactions')
-      .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
-      .first('suggestion');
-    if (cur) {
-      const { reconcilePending, ...rest } = cur.suggestion || {};
-      await db('bank_transactions')
-        .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
-        .update({
-          status: 'unmatched',
-          matched_payout_id: null,
-          match_method: null,
-          matched_at: null,
-          suggestion: suggestionMerge({
-            rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), payoutId])],
-            autoRevert: { at: new Date().toISOString(), payoutId, reason: 'reconciliation rejected by a human on the Banking page' },
-          }, ['reconcilePending']),
-          updated_at: new Date(),
-        });
-    }
-    return result;
-  }
-  // A plain guard skip means the payout got reconciled by someone else
-  // between candidate validation and this echo. If its CONFIRMED banked
-  // amount no longer matches this row, the link is stale — finalizing it
-  // would block the credit's real explanation. Revert instead of clearing.
-  if (result && result.skipped && result.reason === 'guard') {
-    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'amount', 'reconciled');
-    if (payout) {
-      const effective = await effectivePayoutAmount(payout);
-      if (!withinCandidateTolerance(effective, amount)) {
-        const changed = await db('bank_transactions')
+  // A skip for human_rejected/guard demands a REVERT decision — but the
+  // reconcile transaction's payout lock is already released, so the state
+  // that justified the skip can change again. Re-check and act in ONE
+  // transaction that locks the payout first (same pattern as
+  // healUnreconciledLinks): a human confirming or correcting the payout
+  // mid-decision can never lose a valid link to a stale revert.
+  //  - human rejection still stands → revert + exclude the payout for this row
+  //  - payout reconciled with a non-matching banked amount → revert (stale link)
+  //  - otherwise resolved benignly → clear the pending flag
+  if (result && result.skipped && (result.reason === 'human_rejected' || result.reason === 'guard')) {
+    let outcome = null;
+    await db.transaction(async (trx) => {
+      const sp = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('id', 'amount', 'reconciled');
+      if (!sp) return; // payout gone — FK SET NULL + self-heal own this case
+      const latest = await trx('bank_reconciliation')
+        .where('payout_id', payoutId)
+        .orderBy('reconciled_at', 'desc')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .first('status', 'reconciled_by');
+      const humanRejected = latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import');
+      if (humanRejected) {
+        const cur = await trx('bank_transactions')
+          .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+          .first('suggestion');
+        if (!cur) return;
+        const rest = cur.suggestion || {};
+        const changed = await trx('bank_transactions')
           .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
           .update({
             status: 'unmatched',
@@ -451,13 +442,45 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
             match_method: null,
             matched_at: null,
             suggestion: suggestionMerge({
-              autoRevert: { at: new Date().toISOString(), payoutId, reason: 'payout was reconciled with a different banked amount after matching' },
+              rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), payoutId])],
+              autoRevert: { at: new Date().toISOString(), payoutId, reason: 'reconciliation rejected by a human on the Banking page' },
             }, ['reconcilePending']),
             updated_at: new Date(),
           });
-        if (changed) return { ...result, amountMismatchReverted: true };
+        if (changed) outcome = 'human_reverted';
+        return;
       }
-    }
+      if (sp.reconciled) {
+        const effective = await effectivePayoutAmount(sp, trx);
+        if (!withinCandidateTolerance(effective, amount)) {
+          const changed = await trx('bank_transactions')
+            .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+            .update({
+              status: 'unmatched',
+              matched_payout_id: null,
+              match_method: null,
+              matched_at: null,
+              suggestion: suggestionMerge({
+                autoRevert: { at: new Date().toISOString(), payoutId, reason: 'payout was reconciled with a different banked amount after matching' },
+              }, ['reconcilePending']),
+              updated_at: new Date(),
+            });
+          if (changed) outcome = 'amount_reverted';
+          return;
+        }
+      }
+      // benign: amount still matches (or nothing reconciled after all) —
+      // resolve the pending flag inside the same locked transaction
+      await trx('bank_transactions')
+        .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+        .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
+      outcome = 'cleared';
+    });
+    if (outcome === 'human_reverted') return { ...result, reason: 'human_rejected' };
+    if (outcome === 'amount_reverted') return { ...result, amountMismatchReverted: true, reason: 'guard' };
+    // re-check found the skip resolved benignly — report it as such so
+    // callers don't act on a stale reason
+    return { ...result, reason: 'resolved' };
   }
   // Any other guard skip resolves the intent too — either the payout is
   // already reconciled with a still-matching amount (nothing to echo) or
