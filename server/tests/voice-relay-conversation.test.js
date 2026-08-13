@@ -427,6 +427,95 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(spoken).toMatch(/anything else I can help/i);
   });
 
+  // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool turn
+  // around a write tool would speak "that's submitted!" BEFORE the write ran —
+  // a false success when the tool then rejects a stale slot or fails. The
+  // pre-write text is suppressed; the model speaks after seeing the result.
+  test('text on a write-tool turn is suppressed; the post-result text is what the caller hears', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      let call = 0;
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              finalMessage: async () => {
+                call += 1;
+                if (call === 1) {
+                  return {
+                    content: [
+                      { type: 'text', text: 'Great — your booking is submitted!' },
+                      { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+                    ],
+                    stop_reason: 'tool_use',
+                  };
+                }
+                return {
+                  content: [{ type: 'text', text: 'That time was just taken — want another option?' }],
+                  stop_reason: 'end_turn',
+                };
+              },
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [],
+        CONTEXT_TOOLS: [],
+        activeTools: () => [],
+        executeTool: jest.fn(async () => 'slot_gone'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-write-text', from: '+19415551234', send });
+    await convo._runLoop('book it').catch(() => {});
+    const spoken = send.mock.calls.map(([t]) => String(t)).join(' ');
+    expect(spoken).not.toMatch(/booking is submitted/i);
+    expect(spoken).toMatch(/just taken/i);
+  });
+
+  test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      let call = 0;
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              finalMessage: async () => {
+                call += 1;
+                if (call === 1) {
+                  return {
+                    content: [
+                      { type: 'text', text: 'One moment while I check the schedule.' },
+                      { type: 'tool_use', id: 't1', name: 'get_availability', input: {} },
+                    ],
+                    stop_reason: 'tool_use',
+                  };
+                }
+                return { content: [{ type: 'text', text: 'I have Tuesday open.' }], stop_reason: 'end_turn' };
+              },
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [],
+        CONTEXT_TOOLS: [],
+        activeTools: () => [],
+        executeTool: jest.fn(async () => 'slots'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-read-text', from: '+19415551234', send });
+    await convo._runLoop('when can you come?').catch(() => {});
+    const spoken = send.mock.calls.map(([t]) => String(t)).join(' ');
+    expect(spoken).toMatch(/one moment while I check/i);
+    expect(spoken).toMatch(/Tuesday open/i);
+  });
+
   // Contact-slot recognition must never reach the ctx as 'full'.
   test('customerTier on the tool ctx mirrors the ANI match column, failing closed', () => {
     const convo = new RelayConversation({ callSid: 'CA7', from: '+19415551234', send: jest.fn() });

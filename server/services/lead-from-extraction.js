@@ -345,15 +345,27 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // whoever owns it. Identity may come only from the caller's own ANI; the
   // callback number stays what it is — where to call back. Non-relay callers
   // (no aniPhone) keep the legacy phone lookup unchanged.
+  // ⭐ AND AN UNVERIFIED ANI RESOLVES NOTHING AT ALL. The setup frame's `from`
+  // is only an identity when it survived the call_log cross-check against the
+  // signature-verified /voice row (opts.aniVerified). A session whose frame
+  // failed that check — or whose verification never settled — is a CLAIMED
+  // number, and resolving it would attach this call's lead writes, language
+  // hint, and lifecycle contact notification to whichever account the claim
+  // named. Unverified relay sessions create only UNLINKED leads.
   let identityPhone = phone;
   if (!opts.identityCustomerId && opts.aniPhone) {
-    const ownAni = phoneDigits(opts.aniPhone).slice(-10);
-    const lookupNumber = phoneDigits(phone).slice(-10);
-    identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
+    if (opts.aniVerified !== true) {
+      identityPhone = null;
+      logger.info(`[voice-agent-lead] unverified relay session ${maskPhone(opts.aniPhone)} — creating an unlinked lead, no identity resolution`);
+    } else {
+      const ownAni = phoneDigits(opts.aniPhone).slice(-10);
+      const lookupNumber = phoneDigits(phone).slice(-10);
+      identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
+    }
   }
   let customer = opts.identityCustomerId
     ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
-    : await findCustomerByPhone(identityPhone);
+    : (identityPhone ? await findCustomerByPhone(identityPhone) : null);
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than

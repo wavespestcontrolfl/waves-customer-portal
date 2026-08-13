@@ -360,9 +360,11 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   ]);
 
   // The re-entry helper needs EVERY application (its anchor is the latest
-  // applied_at); the spoken list is capped for the phone.
+  // applied_at); the spoken list is capped for the phone — but the cap is
+  // applied AFTER the compliance screen (the estimates/invoices rule): six
+  // leading rows whose names all fail complianceSafe must not starve later
+  // compliant rows out of the spoken report.
   const reentryApplications = Array.isArray(allProducts) ? allProducts : [];
-  const products = reentryApplications.slice(0, SERVICE_REPORT_APPLICATION_LIMIT);
 
   // ⭐ PARSER-APPROVED COPY ONLY — this is a REPORT path.
   // AGENTS.md: "Raw `technician_notes` never egress on any report path
@@ -439,22 +441,32 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // where the text CAME FROM.
   const structuredFindings = findings.filter(
     (f) => String((f && f.detail) || '').trim() || String((f && f.recommendation) || '').trim(),
-  ).slice(0, SERVICE_REPORT_FINDING_LIMIT);
+  );
   if (structuredFindings.length) {
-    const rendered = structuredFindings
+    // ⭐ THE CAP RUNS AFTER BOTH SCREENS (provenance above, compliance here) —
+    // six leading findings whose every speakable field the compliance screen
+    // rejects must not consume the allowance and silence later valid ones. A
+    // finding counts toward the cap only when at least one of its fields
+    // actually renders.
+    const renderable = structuredFindings
       .map((f) => {
         const head = complianceSafe(f.title, 80);
         const detail = complianceSafe(f.detail, 140);
-        return [head, detail].filter(Boolean).join(': ');
+        return {
+          line: [head, detail].filter(Boolean).join(': ') || null,
+          rec: complianceSafe(f.recommendation, 120),
+        };
       })
-      .filter(Boolean);
+      .filter((x) => x.line || x.rec)
+      .slice(0, SERVICE_REPORT_FINDING_LIMIT);
+    const rendered = renderable.map((x) => x.line).filter(Boolean);
     if (rendered.length) lines.push(`What the technician found: ${rendered.join(' | ')}.`);
-    const recs = structuredFindings.map((f) => complianceSafe(f.recommendation, 120)).filter(Boolean);
+    const recs = renderable.map((x) => x.rec).filter(Boolean);
     if (recs.length) lines.push(`Recommended next steps: ${recs.join(' | ')}.`);
   }
 
-  if (products.length) {
-    const rendered = products
+  if (reentryApplications.length) {
+    const rendered = reentryApplications
       .map((p) => {
         // ⭐ THE SAME COMPLIANCE SCREEN THE FINDINGS TAKE. Product names and
         // technician-entered areas/targets are free text too — "Pet-Safe Barrier
@@ -467,7 +479,9 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
         // Owner rule: "per application", never "per visit".
         return `${name}${area ? ` applied to the ${area}` : ''}${targets.length ? ` for ${targets.join(', ')}` : ''}`;
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      // Cap AFTER the screen: only rows that actually render count against it.
+      .slice(0, SERVICE_REPORT_APPLICATION_LIMIT);
     if (rendered.length) {
       lines.push(`Products used on this application: ${rendered.join('; ')}.`);
     }

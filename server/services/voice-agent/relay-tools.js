@@ -1168,6 +1168,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         // The caller's OWN number, so the lead lookup can tell "their history"
         // from "an unclaimed lead on somebody else's callback number".
         aniPhone: ctx.from || null,
+        // …and whether that number is PROVEN or merely claimed. The setup
+        // frame's ANI only authenticates after the call_log cross-check; a
+        // session that failed it (or never settled) must resolve NO identity —
+        // its lead stays unlinked. Live getter: a late-landing verification
+        // upgrades this at read time.
+        aniVerified: ctx.callerVerified === true,
         // The lifecycle-customer notification must not tell staff "nothing was
         // changed" over a suppression that already landed.
         smsSuppressionApplied,

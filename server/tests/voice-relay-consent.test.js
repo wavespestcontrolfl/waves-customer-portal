@@ -222,6 +222,32 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeFalsy();
     expect(leadUpdate()).toBeTruthy(); // reused + updated in place
   });
+
+  // ⭐ AN UNVERIFIED ANI RESOLVES NOTHING. The setup frame's `from` is a CLAIM
+  // until the call_log cross-check passes — a failed or unsettled verification
+  // must not let a declared number attach this call's lead writes, language
+  // hint, or lifecycle contact notification to whichever account it named.
+  test('an UNVERIFIED relay session creates only an UNLINKED lead — no identity resolution at all', async () => {
+    primeDb();
+    tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);
+    const out = await createLeadFromExtraction(
+      { call_summary: 'Caller whose frame ANI failed the cross-check.' },
+      { phone: ANI, aniPhone: ANI, aniVerified: false, callSid: 'CA-unverified-1' },
+    );
+    expect(out.customerId).toBeNull();
+    expect(tables.customers.first).not.toHaveBeenCalled(); // the account was never even looked up
+    expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeTruthy(); // the lead still exists — unlinked
+  });
+
+  test('a VERIFIED relay session still resolves its own ANI to the account', async () => {
+    primeDb();
+    tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);
+    const out = await createLeadFromExtraction(
+      { call_summary: 'Verified caller.' },
+      { phone: ANI, aniPhone: ANI, aniVerified: true, callSid: 'CA-verified-1' },
+    );
+    expect(out.customerId).toBe('c-777');
+  });
 });
 
 describe('persistence through the lead pipeline', () => {
@@ -427,15 +453,16 @@ describe('existing-customer contact instructions still reach a human', () => {
   });
 
   // ⭐ THE CALLBACK NUMBER IS NOT AN IDENTITY. On a relay call with no
-  // handed-in identity (unverified / redacted tier), a model-controlled
-  // callback_phone must never resolve an ACCOUNT — identity may come only
-  // from the caller's own ANI.
-  test('an unverified caller\'s callback number never resolves account identity', async () => {
+  // handed-in identity (redacted tier), a model-controlled callback_phone
+  // must never resolve an ACCOUNT — identity may come only from the caller's
+  // own VERIFIED ANI. (An unverified session resolves nothing at all — the
+  // pins above.)
+  test('a verified caller\'s callback number never resolves account identity', async () => {
     const ANI = '+19415550142';
     const VICTIM_NUMBER = '+19415559999';
     await createLeadFromExtraction(
       { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
-      { phone: VICTIM_NUMBER, aniPhone: ANI, callSid: 'CA-cb-identity' },
+      { phone: VICTIM_NUMBER, aniPhone: ANI, aniVerified: true, callSid: 'CA-cb-identity' },
     );
     // The customers lookup ran against the ANI's digits, never the callback's.
     const lookups = tables.customers.whereRaw.mock.calls.map(([, bindings]) => JSON.stringify(bindings || []));

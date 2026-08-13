@@ -525,6 +525,47 @@ describe('get_service_report', () => {
     expect(Math.max(...limitArgs)).toBeGreaterThan(6);
   });
 
+  // ⭐ THE CAP RUNS AFTER THE COMPLIANCE SCREEN TOO. Six leading findings whose
+  // every speakable field is banned customer copy must not consume the spoken
+  // allowance and silence a later valid finding.
+  test('a compliant finding behind six banned-copy findings is still spoken', async () => {
+    const banned = Array.from({ length: 6 }, (_, i) => ({
+      category: 'other', severity: 'info',
+      title: `Ants eliminated at station ${i}`,
+      detail: 'Infestation eliminated — results guaranteed',
+      recommendation: 'Home is now pest-free, guaranteed',
+    }));
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_findings: [
+        ...banned,
+        { category: 'pest_activity', severity: 'info', title: 'Ant trail at kitchen slab', detail: 'Trail along the south wall', recommendation: 'Monitor at next visit' },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Ant trail at kitchen slab');
+    expect(out).not.toMatch(/eliminated|guaranteed/i);
+  });
+
+  test('a compliant product behind six banned-name products is still spoken', async () => {
+    const banned = Array.from({ length: 6 }, (_, i) => ({
+      product_name: `Pest-Free Guaranteed Spray ${i}`, application_area: 'perimeter',
+      application_method: 'spray', targets: null,
+    }));
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_products: [
+        ...banned,
+        { product_name: 'Termidor SC', application_area: 'exterior perimeter', application_method: 'spray', targets: JSON.stringify(['ants']) },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Termidor SC');
+    expect(out).not.toMatch(/pest-free|guaranteed/i);
+  });
+
   // ⭐ PAPER-COMPLIANCE ARTIFACTS ARE NOT VOICE MATERIAL. A WDO inspection or a
   // pre-treat certificate is a regulated, signed document; an AI paraphrase of
   // it over the phone is a new compliance surface nothing reviews.
