@@ -50,7 +50,10 @@ router.get('/', async (req, res, next) => {
       return res.json({ available: false, reason: 'disabled' });
     }
     const result = await buildPropertyRecommendations(req.customerId);
-    return res.json({ available: true, ...result });
+    // Server-computed one-tap availability (bet 3): the client shows the
+    // priced offer's purchase CTA only when this is true. Additive — the
+    // existing fields are untouched.
+    return res.json({ available: true, oneTap: gateEnvValue('GATE_ONE_TAP_PURCHASE'), ...result });
   } catch (err) {
     next(err);
   }

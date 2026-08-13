@@ -491,6 +491,8 @@ app.use('/api/property-score', require('./routes/property-score'));
 app.use('/api/property-recommendations', require('./routes/property-recommendations'));
 // Property alerts — dark behind GATE_PROPERTY_ALERTS (request-time read).
 app.use('/api/property-alerts', require('./routes/property-alerts'));
+// One-tap purchase — dark behind GATE_ONE_TAP_PURCHASE (request-time read).
+app.use('/api/one-tap', require('./routes/one-tap-purchase'));
 app.use('/api/customer-pricing', customerPricingAiRoutes);
 app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
