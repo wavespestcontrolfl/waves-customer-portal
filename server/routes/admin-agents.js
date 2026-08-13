@@ -5,7 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -250,6 +250,11 @@ function lifecycleActions(item, fingerprint) {
       variant: 'primary',
     });
   }
+
+  // Informational entries (autonomous run ledgers) carry no lifecycle — they
+  // are not work awaiting anyone, so no Done/Dismiss mutations (hands-off /
+  // exception-based rule: only exceptions surface as actionable).
+  if (item.status === 'info') return actions;
 
   const endpoint = `/admin/agents/tasks/${encodeURIComponent(item.id)}/state`;
   actions.push(
@@ -798,7 +803,7 @@ async function loadPlannerRunTasks() {
     .where('created_at', '>=', addETDays(new Date(), -7))
     .select('id', 'run_type', 'status', 'start_date', 'end_date', 'applied_count', 'skipped_count', 'failed_count', 'result', 'created_at')
     .orderBy('created_at', 'desc')
-    .limit(10);
+    .limit(3);
 
   return {
     count: rows.length,
@@ -809,13 +814,19 @@ async function loadPlannerRunTasks() {
         : 0;
       const savedMiles = savedMeters / 1609.344;
       const dayMoves = asNumber(result?.auto_dispatch?.run?.changed);
-      const dateLabel = String(row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at || '').slice(0, 10);
+      // ET calendar day, not UTC — an evening ET run must not label tomorrow.
+      const dateLabel = row.created_at ? etDateString(new Date(row.created_at)) : '';
+      const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed';
       return task({
         id: `planner_run:${row.id}`,
         agentId: 'dispatch',
         title: `Route run ${dateLabel}${row.run_type === 'route_tiers_nightly' ? ' (route tiers)' : ''}`,
         summary: `${row.applied_count || 0} reorders applied · ${row.skipped_count || 0} skipped · ${dayMoves} day-moves · ${savedMiles.toFixed(1)} mi saved`,
-        priority: asNumber(row.failed_count) > 0 || row.status === 'failed' ? 'high' : 'low',
+        priority: failedRun ? 'high' : 'low',
+        // Informational, not review work: a healthy autonomous run is nobody's
+        // task. Failed runs surface as exceptions (needs_review) — hands-off,
+        // exception-based.
+        status: failedRun ? 'needs_review' : 'info',
         source: 'route_optimization_planner_runs',
         sourceLabel: 'Route Planner',
         sourceId: row.id,
