@@ -1690,3 +1690,16 @@ describe('GH r59 — government prose conflicts; building stories never divide a
     expect(whole.stories).toBe(5);
   });
 });
+
+describe('r61 — commercial adjectives between article and noun still name a premises', () => {
+  test('modifier phrasings trip the scan', () => {
+    expect(commercialTextSignal('ants in our industrial warehouse')).toBe(true);
+    expect(commercialTextSignal('pest control for a commercial office')).toBe(true);
+    expect(commercialTextSignal('our medical office building has roaches')).toBe(true);
+  });
+  test('residential modifier prose stays quiet', () => {
+    // 'home' is not a commercial modifier — the r23 protection holds.
+    expect(commercialTextSignal('ants in the home office again')).toBe(false);
+    expect(commercialTextSignal('I work in a medical office but the ants are at my house')).toBe(true);
+  });
+});

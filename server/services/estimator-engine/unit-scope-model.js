@@ -105,9 +105,19 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // prose: "I work at the office downtown") need a possessive; strong
     // ones (warehouse/restaurant/clinic/storefront) accept the definite
     // article too (codex r7 P2).
-    '(?:my|our)\\s+(?:office|shop|store)\\b',
-    '(?:my|our|the)\\s+(?:warehouse|restaurant|clinic|storefront)\\b',
-    'industrial\\s+(?:building|park|unit|space|suite)',
+    // A recognized COMMERCIAL modifier may sit between the possessive/
+    // article and the noun — "our industrial warehouse", "a commercial
+    // office", "our medical office building" all name a commercial
+    // premises, and requiring the noun directly after the possessive let
+    // them price residential (codex r61 P1). 'home' is deliberately not a
+    // modifier: "the home office" stays residential prose.
+    '(?:my|our)\\s+(?:(?:commercial|industrial|medical|business|retail)\\s+)?(?:office|shop|store)\\b',
+    '(?:my|our|the)\\s+(?:(?:commercial|industrial|medical|business|retail)\\s+)?(?:warehouse|restaurant|clinic|storefront)\\b',
+    // An indefinite article works when the modifier itself is present —
+    // "a commercial office" is a premises, "an office" alone is covered by
+    // the service-qualified pattern below.
+    '(?:a|an)\\s+(?:commercial|industrial|medical)\\s+(?:office|shop|store|warehouse|building)\\b',
+    'industrial\\s+(?:building|park|unit|space|suite|warehouse)',
     'office\\s+(?:and|&|\\+)\\s+warehouse',
     'warehouse\\s+(?:and|&|\\+)\\s+office',
     'commercial\\s+(?:building|property|unit|space|suite|kitchen)',
@@ -170,15 +180,18 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // service ask).
     // The premises noun must sit DIRECTLY after the optional article, so
     // "…for the home office" (a residential room) still does not match
-    // while "…for an office" (codex r23 P1) does.
-    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+|our\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store|hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
+    // while "…for an office" (codex r23 P1) does. The optional commercial
+    // modifier (r61) deliberately EXCLUDES 'retail' on this indefinite
+    // path — "I bought spray at a retail store" is a shopping trip, not a
+    // premises (r33 pin); the possessive forms keep it.
+    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+|our\\s+)?(?:(?:commercial|industrial|medical|business)\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store|hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
     // "service our daycare" / "treat our hotel" — the possessive form with
     // a service verb in front (codex r33 P1).
     // Government/municipal premises join both service-qualified lists —
     // the type-family matcher covers property_type only, so "pest control
     // for our municipal building" in PROSE still auto-priced residential
     // (codex GH r59 P1).
-    '(?:service|treat|spray|exterminat\\w*)\\w*\\s+(?:my|our|the)\\s+(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|warehouse|restaurant|clinic|office|shop|store|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
+    '(?:service|treat|spray|exterminat\\w*)\\w*\\s+(?:my|our|the)\\s+(?:(?:commercial|industrial|medical|business|retail)\\s+)?(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|warehouse|restaurant|clinic|office|shop|store|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
   ].join('|'),
   'i',
 );
