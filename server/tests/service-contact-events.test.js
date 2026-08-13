@@ -144,6 +144,28 @@ describe('diffServiceContacts', () => {
     expect(events).toHaveLength(2);
   });
 
+  test('a shared household email does not misattribute a removal', () => {
+    // Jane and Bob share an email; Jane is deleted and Bob compacts 2→1.
+    // An email-any-match would pair Bob with Jane; the unique-only rule
+    // falls through to Bob's name and records Jane's removal.
+    const before = {
+      service_contact_name: 'Jane Smith',
+      service_contact_email: 'family@example.com',
+      service_contact2_name: 'Bob Smith',
+      service_contact2_email: 'family@example.com',
+    };
+    const after = {
+      service_contact_name: 'Bob Smith',
+      service_contact_email: 'family@example.com',
+    };
+    expect(diffServiceContacts(before, after)).toEqual([
+      expect.objectContaining({
+        action: 'service_contact_removed',
+        person: expect.objectContaining({ name: 'Jane Smith' }),
+      }),
+    ]);
+  });
+
   test('a phone newly shared with another listed contact does not swap identities', () => {
     // Jane changes her phone to Bob's existing household number. Her email
     // and name are unchanged — she must match herself (one phone update),

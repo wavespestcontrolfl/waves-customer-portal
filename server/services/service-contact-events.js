@@ -76,18 +76,20 @@ function slotPeople(customerRow) {
 }
 
 function matchPerson(person, candidates) {
-  // Identity preference: an exact email match is the strongest evidence — a
-  // phone can be a shared household line or newly transferred between
-  // people (Jane switching to Bob's existing number must not pair Jane with
-  // Bob). A phone match identifies on its own only when it is UNIQUE and no
-  // email evidence claimed the person first; name is the last resort before
-  // the ambiguous-phone fallback.
-  const emailMatch = candidates.find((c) => norm(person.email) && norm(person.email) === norm(c.email));
-  if (emailMatch) return emailMatch;
-  const phoneMatches = candidates.filter((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone));
-  if (phoneMatches.length === 1) return phoneMatches[0];
+  // Identity evidence, strongest first — but a shared identifier is not
+  // identity on its own: households legitimately share an email or a phone
+  // line, and a number can transfer between listed people (Jane switching
+  // to Bob's existing number must not pair Jane with Bob). An email or
+  // phone match therefore identifies only when it is UNIQUE among the
+  // candidates; ambiguous matches fall through to the name, and the
+  // ambiguous pool is the last resort when nothing else disambiguates.
+  const emailHits = candidates.filter((c) => norm(person.email) && norm(person.email) === norm(c.email));
+  if (emailHits.length === 1) return emailHits[0];
+  const phoneHits = candidates.filter((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone));
+  if (phoneHits.length === 1) return phoneHits[0];
   return candidates.find((c) => norm(person.name) && norm(person.name) === norm(c.name))
-    || phoneMatches[0]
+    || emailHits[0]
+    || phoneHits[0]
     || null;
 }
 
