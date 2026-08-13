@@ -173,6 +173,29 @@ const gates = {
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
 
+  // Switching an ALREADY-ACCEPTED per-application customer to annual prepay
+  // from the appointment sheet — the "changed their mind on site" case
+  // (owner ask 2026-08-12). Opens the same prepay-on-book preview + Customer
+  // 360 mint on an ESTIMATE-ORIGIN series, which the preview otherwise
+  // refuses because the accept flow owns that choice; once the estimate is
+  // accepted the quote is closed and its prepay door is gone, so this is the
+  // only door left. Owner ruling 2026-08-12: the $99 setup fee already
+  // invoiced on the accept-minted draft is WAIVED on the switch — the flow
+  // supersedes (voids) that unpaid invoice, so the prepaid year is exactly
+  // visits × per-visit price. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: the availability probe answers switchEnabled
+  // false, the sheet renders no prepay action, and the preview refuses
+  // estimate-origin series exactly as today. Kill switch: unset or any
+  // non-'true' value; nothing already minted is affected when it flips.
+  //
+  // Deliberate overlap with GATE_PREPAY_ON_BOOK: this gate also admits the
+  // preview's COMMITTED mode for a NON-estimate series, so the sheet's
+  // action works on a phone-booked recurring plan too (the on-site twin of
+  // prepay-on-book). It never admits the pre-save DRAFT probe — that stays
+  // the New Appointment modal's, behind its own gate. Both are read-only;
+  // every mint still goes through the Customer 360 route and its guards.
+  onsitePrepaySwitch: process.env.GATE_ONSITE_PREPAY_SWITCH === 'true',
+
   // Setting a recurring plan's LENGTH from Edit appointment. The count is not
   // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
   // live rows — so lowering it CANCELS real future visits, which is why it

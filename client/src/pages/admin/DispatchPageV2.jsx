@@ -2918,6 +2918,15 @@ export default function DispatchPageV2({
             });
             setShowNewAppt(true);
           }}
+          onBillingChanged={() => {
+            // The annual-prepay switch rewrote this visit's money state (lane,
+            // attached invoice, prepaid stamps). Refetch the day and bump the
+            // week cache so the sheet's billing card and the checkout amount
+            // stop showing the pre-switch figures — same pairing the terminal
+            // actions below use.
+            fetchSchedule(date, { silent: true });
+            setScheduleRefreshKey((k) => k + 1);
+          }}
           onCancelled={() => {
             // Silent only while the project editor is mounted underneath —
             // ordinary day-row sheets keep the loud gate so a failed

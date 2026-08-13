@@ -26,6 +26,7 @@ import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
+import PrepaySwitchSheet from './PrepaySwitchSheet';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
@@ -121,6 +122,10 @@ export default function MobileAppointmentDetailSheet({
   onBookNext,
   onCancelled,
   onRescheduled,
+  // Fired when an action inside the sheet changed this visit's money state
+  // (today: the annual-prepay switch) so the caller can refetch the row —
+  // its billing lane and attached invoice both moved.
+  onBillingChanged,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [savingNote, setSavingNote] = useState(false);
@@ -141,6 +146,12 @@ export default function MobileAppointmentDetailSheet({
   const [cardRequestInfo, setCardRequestInfo] = useState(null);
   const [cardLinkSending, setCardLinkSending] = useState(false);
   const [cardLinkNotice, setCardLinkNotice] = useState(null);
+  // On-site annual-prepay switch (GATE_ONSITE_PREPAY_SWITCH). Same rule as
+  // the prepay-on-book Billing control: render the action only when the lane
+  // is live, never an offered choice that silently no-ops. Fails closed — an
+  // unreachable probe leaves the action hidden.
+  const [prepaySwitchEnabled, setPrepaySwitchEnabled] = useState(false);
+  const [showPrepaySwitch, setShowPrepaySwitch] = useState(false);
 
   useEffect(() => {
     setCardRequestInfo(null);
@@ -169,6 +180,18 @@ export default function MobileAppointmentDetailSheet({
       setCardLinkSending(false);
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch('/admin/schedule/annual-prepay-availability')
+      .then((d) => { if (!cancelled) setPrepaySwitchEnabled(!!d?.switchEnabled); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    setShowPrepaySwitch(false);
+  }, [service?.id]);
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -240,6 +263,21 @@ export default function MobileAppointmentDetailSheet({
     visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
   );
   const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
+  // Coarse client-side pre-filter for the annual-prepay switch action: a
+  // recurring visit, a customer, and a lane where a prepaid year is a
+  // meaningful sale. Monthly members' visits are covered by dues (nothing per
+  // visit to prepay) and annual_prepay customers already bought one. Every
+  // finer rule — cadence support, add-ons, an overlapping term, what the year
+  // replaces, the price itself — is the preview endpoint's, so a visit that
+  // passes this filter and fails there gets the server's blockReason instead
+  // of a hidden button nobody can explain.
+  const prepayIneligibleLane = ['monthly_membership', 'annual_prepay'].includes(service.billingLane?.mode);
+  const prepaySwitchOffered = prepaySwitchEnabled
+    && !!service.customerId
+    && !!service.isRecurring
+    && !prepayIneligibleLane
+    && !prepaidCovered
+    && !service.billedToPayer;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required
@@ -622,6 +660,29 @@ export default function MobileAppointmentDetailSheet({
             sees the money outcome before the visit instead of after. */}
         <BillingLaneCard billingLane={service.billingLane} style={{ marginTop: 12 }} />
 
+        {/* Switch to annual prepay, on site (GATE_ONSITE_PREPAY_SWITCH). Only
+            offered where it can actually be sold: a recurring visit for a
+            customer who isn't already on prepay or monthly dues. Whether THIS
+            series qualifies (cadence, add-ons, an existing term, what the
+            prepaid year replaces) is the server's call — the sheet opens and
+            renders the preview's answer rather than second-guessing it. */}
+        {prepaySwitchOffered && (
+          <button
+            type="button"
+            onClick={() => setShowPrepaySwitch(true)}
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring"
+            style={{ padding: '13px 20px', fontSize: 15, marginTop: 10 }}
+          >
+            Switch to annual prepay
+          </button>
+        )}
+        {showPrepaySwitch && (
+          <PrepaySwitchSheet
+            service={service}
+            onClose={() => setShowPrepaySwitch(false)}
+            onSaved={() => onBillingChanged?.(service)}
+          />
+        )}
 
         {/* Date and time */}
         <section className="mt-8">

@@ -9085,9 +9085,16 @@ router.get('/card-request-availability', async (req, res, next) => {
 // requireAdmin, NOT the router-level tech gate (Codex #3161 r3 P2): the
 // preview below is admin-only, so a technician answered `true` here would be
 // shown a Billing control whose every price probe 403s.
+// `switchEnabled` is the SEPARATE on-site lane (GATE_ONSITE_PREPAY_SWITCH):
+// the appointment sheet's "switch this accepted customer to annual prepay"
+// action. Same rule as `enabled` — the sheet renders the action only on true,
+// never an offered choice that no-ops while the lane is dark.
 router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) => {
   try {
-    res.json({ enabled: isEnabled('prepayOnBook') });
+    res.json({
+      enabled: isEnabled('prepayOnBook'),
+      switchEnabled: isEnabled('onsitePrepaySwitch'),
+    });
   } catch (err) { next(err); }
 });
 
@@ -9123,8 +9130,13 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
   try {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
-    // /secure select-plan route.
-    if (!isEnabled('prepayOnBook')) return res.status(404).json({ error: 'Not found' });
+    // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
+    // preview for the on-site switch lane (an already-accepted customer
+    // changing their mind at the visit); it admits only COMMITTED mode —
+    // the draft probe stays the prepay-on-book modal's alone, so flipping
+    // one gate never widens the other's surface.
+    const switchLane = isEnabled('onsitePrepaySwitch');
+    if (!isEnabled('prepayOnBook') && !switchLane) return res.status(404).json({ error: 'Not found' });
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
@@ -9142,6 +9154,15 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // the cadence and the weekend rule, so a child row resolves to it.
     const scheduledServiceId = String(req.query.scheduledServiceId || '').trim();
     let input = null;
+    // Set only by the on-site switch lane: this series came from an accepted
+    // estimate, so accept already minted a per-application invoice that the
+    // prepaid year supersedes. Drives the supersede lookup below.
+    let isAcceptedSwitch = false;
+    // The rows an accept-minted invoice can hang off: the visit the operator
+    // is looking at and its series parent (the accept attaches its
+    // setup + first-application invoice to the FIRST scheduled service, which
+    // is the parent for every later child).
+    let supersedeVisitIds = [];
     if (scheduledServiceId) {
       const visit = await db('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -9159,8 +9180,37 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       const anchor = parent || visit;
       // An estimate-origin series already made its billing choice at accept —
       // that lane owns its own prepay control.
+      //
+      // …UNLESS the estimate is already ACCEPTED and the on-site switch lane
+      // is live (owner ask 2026-08-12). Once accepted, the quote's own prepay
+      // door is closed — "accept it as annual prepay from the estimate" is
+      // advice the operator can no longer follow — and the customer standing
+      // in front of them has changed their mind. The switch supersedes the
+      // per-application invoice that accept minted (below). Anything other
+      // than a cleanly accepted estimate keeps the original refusal: a still
+      // OPEN quote should be accepted as prepay through its own flow, which
+      // prices the year and discloses the terms the customer signs.
       if (anchor.source_estimate_id) {
-        return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+        if (!switchLane) {
+          return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+        }
+        let sourceEstimate;
+        try {
+          sourceEstimate = await db('estimates')
+            .where({ id: anchor.source_estimate_id })
+            .first('id', 'status', 'accepted_at');
+        } catch (estErr) {
+          logger.warn(`[schedule:prepay-preview] estimate lookup failed for series ${anchor.id}: ${estErr.message} — refusing`);
+          return blocked('couldn’t confirm the linked quote’s status — refresh and try again');
+        }
+        // Fail closed on a missing row: an unreadable origin is not a proven
+        // accept, and the whole point of the branch is that the accept
+        // already happened.
+        if (!sourceEstimate || !sourceEstimate.accepted_at || String(sourceEstimate.status || '').toLowerCase() !== 'accepted') {
+          return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+        }
+        isAcceptedSwitch = true;
+        supersedeVisitIds = [...new Set([visit.id, anchor.id].filter(Boolean).map(String))];
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
       // swallowing the error as "no add-ons" would let a transient blip
@@ -9215,6 +9265,10 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         windowStartRaw: anchor.window_start || null,
       };
     } else {
+      // Draft mode belongs to the prepay-on-book modal alone. The switch lane
+      // only ever previews a COMMITTED series, so its gate must not expose the
+      // pre-save probe (which prices from client-supplied query params).
+      if (!isEnabled('prepayOnBook')) return res.status(404).json({ error: 'Not found' });
       const draftCount = Number.parseInt(req.query.recurringCount, 10);
       input = {
         mode: 'draft',
@@ -9405,8 +9459,85 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}. Book the first visit after that date to sell the renewal`);
     }
 
+    // ── What the prepaid year SUPERSEDES (on-site switch lane only) ───────
+    // The accept minted a per-application invoice for this series (setup fee
+    // + first application). Owner ruling 2026-08-12: switching to prepay
+    // waives that fee, so the prepaid year replaces the invoice outright and
+    // the caller voids it once the prepay is settled. Reported here, never
+    // voided here — this endpoint is read-only, and a preview the operator
+    // abandons must leave the visit exactly as it found it.
+    //
+    // Fail CLOSED throughout: an unreadable invoice, money already collected
+    // or in flight, an applied credit, or a payer-billed row all refuse the
+    // switch rather than guess. Those cases are real AR decisions (refund,
+    // credit restore, third-party billing) that belong to the office, not to
+    // a one-tap field action.
+    const SUPERSEDE_DEAD_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
+    const SUPERSEDE_OPEN_STATUSES = new Set(['draft', 'sent', 'viewed', 'overdue']);
+    let supersedes = [];
+    if (isAcceptedSwitch && supersedeVisitIds.length > 0) {
+      let attachedInvoices;
+      try {
+        attachedInvoices = await db('invoices')
+          .whereIn('scheduled_service_id', supersedeVisitIds)
+          .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
+            'payer_id', 'annual_prepay_term_id', 'line_items');
+      } catch (invErr) {
+        logger.warn(`[schedule:prepay-preview] attached-invoice lookup failed for series ${supersedeVisitIds.join(',')}: ${invErr.message} — refusing`);
+        return blocked('couldn’t confirm what this visit is already invoiced for — refresh and try again');
+      }
+      for (const inv of attachedInvoices) {
+        const status = String(inv.status || '').toLowerCase();
+        if (SUPERSEDE_DEAD_STATUSES.has(status)) continue;
+        // Another term's prepay invoice: the overlap guard above owns that
+        // case, and voiding it here would cancel live coverage.
+        if (inv.annual_prepay_term_id) {
+          return blocked('already has an annual prepay invoice on this visit — collect or void that one first');
+        }
+        if (!SUPERSEDE_OPEN_STATUSES.has(status) || inv.paid_at) {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Refund or resolve it first, then mint the prepay from Customer 360`);
+        }
+        if (Number(inv.credit_applied || 0) > 0) {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360`);
+        }
+        if (inv.payer_id) {
+          return blocked('isn’t available — this visit’s invoice bills to a third-party payer');
+        }
+        const lines = (() => {
+          const raw = inv.line_items;
+          if (Array.isArray(raw)) return raw;
+          if (typeof raw === 'string') {
+            try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+          }
+          return [];
+        })();
+        supersedes.push({
+          id: inv.id,
+          invoiceNumber: inv.invoice_number || null,
+          status,
+          total: Math.round(Number(inv.total || 0) * 100) / 100,
+          lines: lines
+            .map((li) => ({
+              description: String(li?.description || ''),
+              amount: Number(li?.amount ?? li?.unit_price),
+            }))
+            .filter((li) => li.description && Number.isFinite(li.amount)),
+        });
+      }
+    }
+
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
     const planLabel = `${coverageServiceType} Annual Prepay`;
+
+    // The setup fee is only real — and therefore only waivable — when it is
+    // ACTUALLY on an invoice this switch supersedes. Derived from the line
+    // items, never assumed from the plan class (the manual prepay-on-book
+    // lane never writes the fee, so it has nothing to waive; see setupFee
+    // below).
+    const supersededSetupFee = supersedes
+      .flatMap((inv) => inv.lines)
+      .filter((li) => /setup fee/i.test(li.description))
+      .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
 
     res.json({
       eligible: true,
@@ -9426,7 +9557,18 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       // writes that fee, so a per-visit booking here never owes it and there
       // is nothing to waive — claiming otherwise sells a discount that does
       // not exist. (The class still drives the no-percentage rule above.)
-      setupFee: null,
+      //
+      // The on-site switch lane is the one case where the fee IS real: the
+      // accept already invoiced it, that invoice is superseded here, and the
+      // amount comes off its own line items rather than a constant. Zero
+      // superseded fee ⇒ null, same as every other lane.
+      setupFee: supersededSetupFee > 0
+        ? { amount: Math.round(supersededSetupFee * 100) / 100, waivedWithPrepay: true }
+        : null,
+      // Invoices the prepaid year replaces — the caller voids them AFTER the
+      // prepay settles (never before: an abandoned switch must leave the
+      // visit billable). Always an array; empty on every lane but the switch.
+      supersedes,
       termStart,
       // Ready-to-post body for the Customer 360 mint
       // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
@@ -9440,7 +9582,9 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         termStart,
         ...(firstVisitDate ? { firstVisitDate } : {}),
         ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
-        note: 'Annual prepay sold when the visit was booked.',
+        note: isAcceptedSwitch
+          ? 'Annual prepay sold at the visit — switched from per application.'
+          : 'Annual prepay sold when the visit was booked.',
       },
     });
   } catch (err) { next(err); }
