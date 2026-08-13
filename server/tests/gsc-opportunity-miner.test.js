@@ -2349,7 +2349,7 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
     expect(lg).toMatch(/canonicalizeServiceCategory\(q\.service_category\)/);
-    expect(lg).toMatch(/prev\.impressions \+= parseInt\(q\.impressions, 10\)/);
+    expect(lg).toMatch(/prev\.impressions \+= imp;/);
   });
 
   test('a batch with no city-service rows never touches the queue', async () => {
@@ -2505,9 +2505,11 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     // combined read — see the round-8 test for the read itself)…
     const read = src.slice(src.indexOf('let cityServiceFrozenTargets'), src.indexOf('const allOpportunities'));
     expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
-    // …and the in-lock fence never consults skipped rows at all.
+    // …and the in-lock fence consults skipped rows ONLY for the
+    // human-terminal reasons — runner skips stay key-only.
     const fenceSrc = src.slice(src.indexOf('async _revalidateCityServiceBatch'), src.indexOf('async _sweepStaleFamilyRows'));
-    expect(fenceSrc).not.toMatch(/'skipped'/);
+    expect(fenceSrc).toMatch(/'astro_pr_closed_unmerged'/);
+    expect(fenceSrc).toMatch(/'manual_dismiss:%'/);
     expect(fenceSrc).toMatch(/CANONICAL_MINE_PERIOD_DAYS/);
   });
 
@@ -2535,16 +2537,34 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets, frozenKeys: cityServiceFrozenKeys \}/);
   });
 
-  test('a SKIPPED occupant does not block the target in the fence', async () => {
+  test('HUMAN skips fence the target; RUNNER skips never do (Codex P1 on #3378)', () => {
+    const { isHumanTerminalSkip } = require('../services/seo/gsc-opportunity-miner')._internals;
+    // autonomous-review-queue writes manual_dismiss[:note]; the PR poller
+    // writes astro_pr_closed_unmerged when a human closes the PR unmerged.
+    expect(isHumanTerminalSkip('skipped', 'manual_dismiss')).toBe(true);
+    expect(isHumanTerminalSkip('skipped', 'manual_dismiss:not this market')).toBe(true);
+    expect(isHumanTerminalSkip('skipped', 'astro_pr_closed_unmerged')).toBe(true);
+    // Runner outcomes — query-specific, key-only.
+    expect(isHumanTerminalSkip('skipped', 'gate_fail')).toBe(false);
+    expect(isHumanTerminalSkip('skipped', 'protected_page:money_page')).toBe(false);
+    expect(isHumanTerminalSkip('skipped', null)).toBe(false);
+    expect(isHumanTerminalSkip('done', 'manual_dismiss')).toBe(false);
+  });
+
+  test('a human-dismissed occupant blocks the target for every sibling key', async () => {
     const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
     const miner = new GscOpportunityMiner();
-    // The fence's own select excludes skipped rows; simulate a stray one
-    // arriving anyway — it must classify as non-frozen and, being
-    // pending-not, non-blocking is decided by the ordinary rules. Here we
-    // assert the FROZEN set itself: only 'done'.
-    const src = require('fs').readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    expect(src).toMatch(/const FROZEN = new Set\(\['done'\]\);/);
-    expect(miner).toBeTruthy();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'skipped', skip_reason: 'manual_dismiss:no page for this pair', bucket: 'no_content_yet', query: 'old' }];
+    const trx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue(inflight),
+    }));
+    const out = await miner._revalidateCityServiceBatch(trx, [
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', score: 56, signal_metadata: {} },
+    ]);
+    expect(out).toHaveLength(0);
   });
 
   test('the in-flight fence re-checks the frozen-target rule under the lock', async () => {
@@ -2608,5 +2628,30 @@ describe('key-level frozen exclusion INSIDE the winner pool (round-8 P1)', () =>
     expect(read).toMatch(/whereIn\('status', \['done', 'skipped'\]\)/);
     expect(read).toMatch(/cityServiceFrozenKeys = new Set\(frozenRows\.map\(\(r\) => r\.dedupe_key\)\)/);
     expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
+  });
+});
+
+describe('local_gap representative query + label validation (Codex P1s on #3378)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('every query validates its label before its impressions count', () => {
+    // "mortgage rates north port" arrives labelled 'rodent' ('rat' inside
+    // 'rates'); boundary-safe evidence or contextual inference, else skip.
+    expect(lg).toMatch(/classifierQuerySupported\(q\.service_category, canon, q\.query\)/);
+    expect(lg).toMatch(/\|\| inferServiceFromQuery\(q\.query\)/);
+  });
+
+  test('the pair carries its top validated query as representative_query', () => {
+    expect(lg).toMatch(/representative_query: pair\.representative \|\| null/);
+    // …while the row's own query stays null (target-stable dedupe key).
+    expect(lg).toMatch(/query: null,/);
+  });
+
+  test('the brief builder falls back to representative_query for SERP + target_keyword', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/const serpKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
+    expect(bb).toMatch(/target_keyword: opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null,/);
   });
 });

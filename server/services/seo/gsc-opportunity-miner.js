@@ -1222,6 +1222,20 @@ function isPersistable(o) {
 // compose to one claimable row per target. In-flight (claimed /
 // pending_review) predecessors are handled under the persist transaction —
 // see _revalidateCityServiceBatch.
+// A skipped row that represents a HUMAN decision, not a runner outcome.
+// autonomous-review-queue records explicit dismissals as
+// `manual_dismiss[:note]` and the PR poller records a human closing the
+// PR unmerged as `astro_pr_closed_unmerged` — both are standing "no" for
+// the TARGET, unlike gate failures / router refusals / protected-page
+// bounces, which are query-specific and freeze only their own key
+// (cloud P1 on #3378, correcting the round-7 assumption that no human
+// writer of `skipped` existed).
+function isHumanTerminalSkip(status, skipReason) {
+  if (status !== 'skipped') return false;
+  const r = String(skipReason || '');
+  return r === 'astro_pr_closed_unmerged' || r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
+}
+
 // The CANONICAL identity of a city-service target, shared by the
 // arbitration and the in-flight fence. Buckets disagree on service
 // spelling — local_gap emits canonical 'tree-shrub'/'pest' while
@@ -1754,12 +1768,18 @@ class GscOpportunityMiner {
         const frozenRows = await db('opportunity_queue')
           .where({ action_type: 'create_or_refresh_city_service_page' })
           .whereIn('status', ['done', 'skipped'])
-          .select('dedupe_key', 'service', 'city', 'status', 'updated_at');
+          .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'updated_at');
         cityServiceFrozenKeys = new Set(frozenRows.map((r) => r.dedupe_key));
         const lagCutoff = Date.now() - GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS * 86400_000;
         cityServiceFrozenTargets = new Set(frozenRows
-          .filter((r) => r.status === 'done' && r.service && r.city
-            && r.updated_at && new Date(r.updated_at).getTime() >= lagCutoff)
+          .filter((r) => r.service && r.city && (
+            // Recent done: the GSC-lag window (time-bounded).
+            (r.status === 'done'
+              && r.updated_at && new Date(r.updated_at).getTime() >= lagCutoff)
+            // Human-terminal skip: a standing "no" for the target,
+            // UNBOUNDED — a person said don't build this page, and time
+            // passing does not reverse them. Runner skips stay key-only.
+            || isHumanTerminalSkip(r.status, r.skip_reason)))
           .map((r) => cityServiceTargetKey(r.service, r.city)));
       }
     } catch (err) {
@@ -2498,37 +2518,49 @@ class GscOpportunityMiner {
     // entire life. Cross-bucket target collisions are arbitrated at mine
     // time (arbitrateCityServiceTargets) and in-flight twins deferred
     // under the persist lock (_revalidateCityServiceBatch).
+    // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
+    // be validated against each query's own text before its impressions
+    // count toward a pair (cloud P1 — the sync's SERVICE_PATTERNS are
+    // unbounded substring tests, so "mortgage rates north port" arrives
+    // labelled 'rodent' via 'rat' inside 'rates'; aggregate-first trusted
+    // that and could queue an unrelated city-service draft), and the top
+    // validated query doubles as the pair's representative keyword for the
+    // brief (cloud P1: a query-less AND page-less row cannot be SERP-
+    // profiled, persists a null target_keyword, and hard-fails the quality
+    // gate's no_serp_signal on every draft attempt).
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
       .whereNotNull('city_target')
       .whereNot('city_target', 'local_intent')
       .whereNotNull('service_category')
-      .select('city_target', 'service_category')
+      .select('query', 'city_target', 'service_category')
       .sum('impressions as impressions')
-      .groupBy('city_target', 'service_category');
-    // NO per-raw-group HAVING here: the impressions floor applies to the
-    // MERGED canonical pair below. A raw-group floor would discard alias
-    // demand before the merge could sum it — 30 'specialty' + 30 'pest'
+      .groupBy('query', 'city_target', 'service_category');
+    // NO per-group HAVING: the impressions floor applies to the MERGED
+    // canonical pair below. A raw-group floor would discard alias demand
+    // before the merge could sum it — 30 'specialty' + 30 'pest'
     // impressions in one city is an eligible 60-impression pest target,
     // and a per-group floor drops both halves (pre-push P1).
 
-    // CANONICALIZE, then MERGE by canonical pair, BEFORE scoring. The sync
-    // stores snake_case ('tree_shrub') and a 'specialty' bucket that
-    // canonicalizes to 'pest' — persisting the raw value parks the row as
-    // facts_unmappable downstream, and a noncanonical service also mints a
-    // different ownPageKey, which would slip past the cross-bucket target
-    // arbitration and allow two drafts of one page (pre-push P1). There is
-    // no per-query classifier validation here, unlike no_content_yet: the
-    // bucket aggregates before it mines, so the query evidence is gone —
-    // an uncanonicalizable category is simply skipped (fail closed).
-    // 'specialty' + 'pest' rows for one city merge into ONE pest pair,
-    // impressions summed — same demand, one target.
+    // VALIDATE, CANONICALIZE, then MERGE by canonical pair, BEFORE
+    // scoring. Same validator chain as no_content_yet: a stored label
+    // counts only with boundary-safe query evidence, otherwise fall
+    // through to contextual inference; a query supporting neither is
+    // skipped (fail closed). 'specialty' + 'pest' rows for one city merge
+    // into ONE pest pair, impressions summed — same demand, one target.
+    // The pair's REPRESENTATIVE query — its highest-impression validated
+    // query — rides signal_metadata so the brief has a real, observed
+    // keyword while the row's own `query` stays null and the dedupe key
+    // stays target-stable (see KEY SEMANTICS above).
     const byPair = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target);
-      const service = canonicalizeServiceCategory(q.service_category);
-      if (!city || !service) continue;
+      if (!city) continue;
+      const canon = canonicalizeServiceCategory(q.service_category);
+      const service = (canon && classifierQuerySupported(q.service_category, canon, q.query) ? canon : null)
+        || inferServiceFromQuery(q.query);
+      if (!service) continue;
 
       // Use the normalized own-page map. Earlier iteration queried
       // gsc_pages with raw classifier values, missing pages where the
@@ -2539,9 +2571,16 @@ class GscOpportunityMiner {
       // any page classified to the pair genuinely answers it.
       if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
       const key = ownPageKey(service, city);
+      const imp = parseInt(q.impressions, 10) || 0;
       const prev = byPair.get(key);
-      if (prev) prev.impressions += parseInt(q.impressions, 10) || 0;
-      else byPair.set(key, { service, city, impressions: parseInt(q.impressions, 10) || 0 });
+      if (prev) {
+        prev.impressions += imp;
+        if (imp > prev.repImpressions) { prev.representative = q.query; prev.repImpressions = imp; }
+      } else {
+        byPair.set(key, {
+          service, city, impressions: imp, representative: q.query, repImpressions: imp,
+        });
+      }
     }
 
     const out = [];
@@ -2556,6 +2595,12 @@ class GscOpportunityMiner {
         city: pair.city,
         signal_metadata: {
           impressions: pair.impressions,
+          // The brief's keyword. content-brief-builder falls back to this
+          // when `query` is null, so SERP profiling runs and the quality
+          // gate's no_serp_signal check has evidence to judge — without it
+          // every draft of this lane hard-fails (cloud P1). Kept OUT of
+          // `query` itself so the dedupe key stays target-stable.
+          representative_query: pair.representative || null,
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {
@@ -3635,11 +3680,20 @@ class GscOpportunityMiner {
         .whereIn('status', ['pending', 'claimed', 'pending_review'])
         .orWhere((qq) => qq
           .where({ status: 'done' })
-          .where('updated_at', '>=', trx.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`))))
+          .where('updated_at', '>=', trx.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`)))
+        // Human-terminal skips (manual dismiss / PR closed unmerged) are
+        // standing target vetoes, unbounded — see isHumanTerminalSkip.
+        // Runner skips are deliberately NOT selected: key-only.
+        .orWhere((qq) => qq
+          .where({ status: 'skipped' })
+          .where((r) => r
+            .where('skip_reason', 'astro_pr_closed_unmerged')
+            .orWhere('skip_reason', 'manual_dismiss')
+            .orWhere('skip_reason', 'like', 'manual_dismiss:%'))))
       .forUpdate()
-      .select('dedupe_key', 'service', 'city', 'status', 'bucket', 'query');
+      .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'bucket', 'query');
     if (!inflight.length) return opportunities;
-    const FROZEN = new Set(['done']);
+    const isFrozenRow = (r) => r.status === 'done' || isHumanTerminalSkip(r.status, r.skip_reason);
     const occupied = new Map();
     for (const r of inflight) {
       if (!r.service || !r.city) continue;
@@ -3652,7 +3706,7 @@ class GscOpportunityMiner {
     const out = opportunities.filter((o) => {
       if (o.action_type !== CS || !o.service || !o.city) return true;
       const allRows = occupied.get(cityServiceTargetKey(o.service, o.city)) || [];
-      if (allRows.some((r) => FROZEN.has(r.status))) { deferred += 1; return false; }
+      if (allRows.some(isFrozenRow)) { deferred += 1; return false; }
       const rows = allRows.filter((r) => r.dedupe_key !== o.dedupe_key);
       // The candidate's OWN (non-frozen) row does not occupy its target —
       // that is the ordinary upsert-refresh path.
@@ -4397,6 +4451,7 @@ module.exports.GscOpportunityMiner = GscOpportunityMiner;
 module.exports._internals = {
   arbitrateCityServiceTargets,
   cityServiceTargetKey,
+  isHumanTerminalSkip,
   persistFloorFor,
   isPersistable,
   normalizeCity,
