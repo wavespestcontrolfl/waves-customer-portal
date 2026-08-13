@@ -1117,6 +1117,42 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(out).not.toContain('$420');
   });
 
+  // ⭐ MOSQUITO SPEAKS PER APPLICATION. The engine's mosquito shape exposes
+  // its application price as `perVisit` (not `perApp`) — reading perApp alone
+  // dropped every mosquito quote into the banned "$X per month" branch. The
+  // canonical perApplicationForLine (imported from routes/public-quote.js)
+  // reads perApp OR perVisit and derives exact cents from the discounted
+  // annual — the same truth the public quote widget speaks.
+  test('mosquito pricing honors the requested tier and speaks per APPLICATION from perVisit', async () => {
+    generateEstimate.mockReturnValue({
+      lineItems: [{
+        service: 'mosquito', tier: 'seasonal9', perVisit: 77, visits: 9,
+        monthly: 57.75, annual: 693, monthlyAfterDiscount: 57.75, annualAfterDiscount: 693,
+        requiresManualReview: false,
+      }],
+      summary: {},
+    });
+    const out = await executeTool('get_pricing', {
+      service: 'mosquito', home_sqft: 2000, lot_sqft: 8000, mosquito_tier: 'seasonal9',
+    }, { customerId: null });
+    expect(generateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      services: expect.objectContaining({ mosquito: { tier: 'seasonal9' } }),
+    }));
+    expect(out).toContain('$77 per application');
+    expect(out).toContain('9 applications per year');
+    expect(out).not.toMatch(/per month/i);
+  });
+
+  test('an unrecognized mosquito tier falls back to monthly12 — never rides raw into the engine', async () => {
+    generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
+    await executeTool('get_pricing', {
+      service: 'mosquito', home_sqft: 2000, lot_sqft: 8000, mosquito_tier: 'platinum',
+    }, { customerId: null });
+    expect(generateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      services: expect.objectContaining({ mosquito: { tier: 'monthly12' } }),
+    }));
+  });
+
   test('a genuinely monthly-billed line (no per-application signal) states the monthly ALONE, never an annual roll-up', async () => {
     // No `perApp`/`perVisit` on the line: routes/public-quote.js's
     // perApplicationForLine treats that absence as the design signal for a

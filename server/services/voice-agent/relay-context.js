@@ -1368,7 +1368,12 @@ async function pricingText(input = {}) {
       tier: String(input.lawn_tier || 'standard'),
     };
   } else if (service === 'mosquito') {
-    engineInput.services.mosquito = { tier: String(input.mosquito_tier || 'monthly12') };
+    // Validated like pest frequency: the schema enum is advice to the model,
+    // not enforcement — an unrecognized tier falls to the default rather than
+    // riding raw into the engine.
+    const mosquitoTier = ['seasonal9', 'monthly12'].includes(String(input.mosquito_tier || '').toLowerCase())
+      ? String(input.mosquito_tier).toLowerCase() : 'monthly12';
+    engineInput.services.mosquito = { tier: mosquitoTier };
   } else if (service === 'tree_shrub') {
     engineInput.services.treeShrub = { access: 'easy' };
   } else if (service === 'termite_bait') {
@@ -1385,6 +1390,21 @@ async function pricingText(input = {}) {
   }
 
   const monthly = fmtMoney(line.monthlyAfterDiscount ?? line.monthly);
+  // ⭐ THE CANONICAL PER-APPLICATION RESOLUTION, IMPORTED NOT COPIED.
+  // Mosquito (and palm) lines expose their application price as `perVisit`,
+  // not `perApp` — reading `line.perApp` alone made every mosquito quote fall
+  // through to the "$X per month" branch, the exact unit the owner rule bans.
+  // perApplicationForLine (routes/public-quote.js) reads perApp OR perVisit,
+  // derives exact cents from the discounted annual, and returns null for the
+  // genuinely monthly-billed keys — the same truth the public quote widget
+  // speaks from this same engine output.
+  // `perApp` stays the line's EXPLICIT figure — the pest and termite branches
+  // below document it as the engine's own signal (termite's annual bundles
+  // more than monitoring, so dividing it would overstate the per-app). The
+  // canonical resolution is applied in the generic branch, where the
+  // perVisit-shaped lines live.
+  const { perApplicationForLine } = require('../../routes/public-quote')._internals;
+  const perAppInfo = perApplicationForLine(line);
   const perApp = fmtMoney(line.perApp);
   const visitsPerYear = line.visitsPerYear || line.visits || null;
   const bits = [];
@@ -1429,9 +1449,13 @@ async function pricingText(input = {}) {
     } else if (monthly) {
       bits.push(`then ${monthly} per month monitoring`);
     }
-  } else if (perApp) {
-    bits.push(`${perApp} per application`);
-    if (visitsPerYear) bits.push(`${visitsPerYear} applications per year`);
+  } else if (perAppInfo) {
+    // The canonical per-application resolution (perApp OR the perVisit that
+    // mosquito shapes use, exact cents from the discounted annual) — reading
+    // `line.perApp` alone dropped every mosquito quote into the "$X per
+    // month" branch below, the exact unit the owner rule bans.
+    bits.push(`${fmtMoney(perAppInfo.amount)} per application`);
+    if (perAppInfo.visitsPerYear) bits.push(`${perAppInfo.visitsPerYear} applications per year`);
   } else if (monthly) {
     // No per-application signal on the line ⇒ a genuinely monthly-billed
     // program (tree & shrub publishes `unit: 'per month'` in public-ranges.js);
