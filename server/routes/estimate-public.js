@@ -12211,9 +12211,22 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
     // showed").
     const basisFor = (row) => {
       if (!row) return null;
-      const estResult = resolvePricingEstResult(parseEstimateDataSafe(row));
-      const basis = measuredBasisForSection('lawn_care', estResult)
-        || measuredBasisForSection('commercial_lawn', estResult);
+      // What the customer SAW takes precedence (codex #3376 P1): engine-
+      // input estimates display the anchor-derived basis stamped onto the
+      // pricing bundle (measuredBasisAnchor, cache-carried) — recording the
+      // stored-data figure would re-open the shown-vs-recorded divergence
+      // the anchor exists to prevent. Cache miss falls back to the stored
+      // derivation, which is also what the view falls back to.
+      const cachedBundle = getEstimatePricingCache(row);
+      const anchor = cachedBundle?.measuredBasisAnchor
+        ? (cachedBundle.measuredBasisAnchor.lawn_care || cachedBundle.measuredBasisAnchor.commercial_lawn)
+        : null;
+      const basis = anchor
+        || (() => {
+          const estResult = resolvePricingEstResult(parseEstimateDataSafe(row));
+          return measuredBasisForSection('lawn_care', estResult)
+            || measuredBasisForSection('commercial_lawn', estResult);
+        })();
       if (!basis) return null;
       return {
         sqft: Number(String(basis.value).replace(/[^0-9]/g, '')) || null,
