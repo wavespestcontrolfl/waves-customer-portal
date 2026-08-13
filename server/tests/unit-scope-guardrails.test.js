@@ -1731,3 +1731,26 @@ describe('r62 — only measured-grade folio evidence carries the suite scope', (
     });
   });
 });
+
+describe('r63 — a reordered unit address is the same property', () => {
+  const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+
+  test('unit-first and street-first forms compare equal', () => {
+    expect(sameStreetAddress(
+      'Unit 7, 123 Main St, Bradenton, FL 34201',
+      '123 Main St Unit 7, Bradenton, FL 34201',
+    )).toBe(true);
+    // …so the cross-property fence never fires on the reorder and the
+    // caller's tenancy/stated area survive the re-gather.
+  });
+
+  test('two explicit different units stay separate properties', () => {
+    expect(sameStreetAddress('Unit 7, 123 Main St', '123 Main St Unit 9')).toBe(false);
+  });
+
+  test('a leading token that is not a designator never reorders', () => {
+    // "Building A" is not in the dwelling vocabulary; a genuinely
+    // different street stays different.
+    expect(sameStreetAddress('Building A, 123 Main St', '123 Main St')).toBe(false);
+  });
+});

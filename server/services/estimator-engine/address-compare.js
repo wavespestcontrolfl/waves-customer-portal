@@ -65,7 +65,30 @@ function canonicalizeRouteTokens(tokens) {
   return out;
 }
 
-function sameStreetAddress(a, b, { requireExactUnit = false, requireNamedUnit = false } = {}) {
+// A unit-FIRST address ("Unit 7, 123 Main St, …") is the same street as
+// its street-first form ("123 Main St Unit 7") — comparing the raw
+// segments made the reorder read as a DIFFERENT property, and the
+// cross-property fence then discarded the call's tenancy and stated unit
+// area (codex r63 P1). Mirrors the r41/r57 leading-designator rules: only
+// a recognized designator segment followed by a digit-leading street may
+// reorder (no FL city starts with a digit).
+const LEADING_UNIT_SEGMENT_RE = /^(?:(?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)$/i;
+
+function canonicalizeLeadingUnit(s) {
+  const str = String(s || '');
+  const parts = str.split(',');
+  if (parts.length < 2) return str;
+  const first = parts[0].trim();
+  const second = (parts[1] || '').trim();
+  if (LEADING_UNIT_SEGMENT_RE.test(first) && /^\d/.test(second)) {
+    return [`${second} ${first}`, ...parts.slice(2)].join(', ');
+  }
+  return str;
+}
+
+function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedUnit = false } = {}) {
+  const a = canonicalizeLeadingUnit(rawA);
+  const b = canonicalizeLeadingUnit(rawB);
   const normSegment = (s) => canonicalizeRouteTokens(String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
