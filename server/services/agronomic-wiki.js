@@ -378,7 +378,7 @@ async function logUpdate(action, entrySlug, description, opts = {}) {
 // conditions since the link runs on treatment day. Enrichment only — never
 // blocks or fails the link; a transient failure logs and leaves the weather
 // columns null for the early-return retry path to pick up (codex P2 r4).
-async function backfillOutcomeWeather(outcome, post, treatmentDate) {
+async function backfillOutcomeWeather(outcome, post, treatmentDate, applicationMoment) {
   try {
     const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
     // The post-assessment's snapshot only represents application-day
@@ -390,10 +390,19 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
     // moment (observation_time when present, else fetch timestamp)
     // must ALSO land on the treatment day; missing or unparseable
     // snapshot metadata fails closed.
-    // Shared freshness bound (≤6h): both the persisted snapshot and the
-    // getCurrent() fallback can carry fawn-weather's age-unlimited
-    // cached _lastSnapshot, and even a same-ET-day snapshot from just
-    // after midnight can be 20+ hours from the application.
+    // Shared freshness bound (±6h around the APPLICATION moment, not
+    // processing time): both the persisted snapshot and the getCurrent()
+    // fallback can carry fawn-weather's age-unlimited cached _lastSnapshot,
+    // and even a same-ET-day snapshot from just after midnight can be 20+
+    // hours from the application. Anchoring to Date.now() had it both ways
+    // wrong: the hourly sweep could stamp an 11 PM observation onto a
+    // morning application (same-day check passes, observation is "fresh"
+    // relative to the sweep tick), and a link processed 6+ hours after
+    // completion rejected a snapshot recorded AT application time. The
+    // anchor is service_records.created_at — the record is created when
+    // the visit is completed in the field. No parseable anchor fails
+    // closed (the row ages out rather than guessing at conditions); the
+    // absolute window also bounds clock-skewed future observation_times.
     const FRESH_MS = 6 * 60 * 60 * 1000;
     const parseMoment = (value) => {
       if (value == null) return null;
@@ -401,13 +410,15 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
       const ms = parsed?.getTime?.();
       return Number.isFinite(ms) ? parsed : null;
     };
-    // Age must be NON-NEGATIVE as well as under the window — a future
-    // observation_time (clock-skewed or malformed station data) would
-    // otherwise pass every "recent" check forever.
-    const withinFreshWindow = (parsed) => {
-      const age = Date.now() - parsed.getTime();
-      return age >= 0 && age < FRESH_MS;
-    };
+    const anchorMs = (() => {
+      if (applicationMoment instanceof Date && Number.isFinite(applicationMoment.getTime())) {
+        return applicationMoment.getTime();
+      }
+      const parsed = parseMoment(applicationMoment);
+      return parsed ? parsed.getTime() : null;
+    })();
+    if (anchorMs === null) return false;
+    const withinFreshWindow = (parsed) => Math.abs(parsed.getTime() - anchorMs) < FRESH_MS;
     const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
     let snapshotUsable = false;
     if (postIsTreatmentDay && post.fawn_snapshot) {
@@ -514,7 +525,14 @@ const AgronomicWiki = {
               const existingPost = existing.post_assessment_id
                 ? await db('lawn_assessments').where({ id: existing.post_assessment_id }).first()
                 : null;
-              if (existingPost) await backfillOutcomeWeather(existing, existingPost, existing.treatment_date);
+              // Anchor = the service record's completion moment; a missing
+              // record fails the backfill closed via the null anchor.
+              const existingSr = existingPost
+                ? await db('service_records').where({ id: serviceRecordId }).first()
+                : null;
+              if (existingPost) {
+                await backfillOutcomeWeather(existing, existingPost, existing.treatment_date, existingSr?.created_at);
+              }
             } catch (err) {
               logger.warn(`[agronomic-wiki] outcome ${existing.id} weather retry failed: ${err.message}`);
             }
@@ -675,7 +693,7 @@ const AgronomicWiki = {
         // Weather enrichment (see backfillOutcomeWeather) — never blocks the
         // link; a transient failure leaves the columns null and the
         // early-return path above retries on the next link attempt.
-        await backfillOutcomeWeather(outcome, post, treatmentDate);
+        await backfillOutcomeWeather(outcome, post, treatmentDate, sr.created_at);
         try {
           // Update product pages
           for (const p of productsApplied) {
@@ -745,7 +763,13 @@ const AgronomicWiki = {
         stats.checked++;
         const post = await db('lawn_assessments').where({ id: row.post_assessment_id }).first();
         if (!post) continue;
-        const outcome = await backfillOutcomeWeather(row, post, row.treatment_date);
+        // Anchor freshness to the visit's completion moment — without it
+        // the late-evening sweep tick would stamp current conditions onto
+        // a morning application (the same-day gate alone can't tell).
+        const sr = row.service_record_id
+          ? await db('service_records').where({ id: row.service_record_id }).first()
+          : null;
+        const outcome = await backfillOutcomeWeather(row, post, row.treatment_date, sr?.created_at);
         if (outcome === true) stats.enriched++;
         else if (outcome === 'error') rowErrors++;
       }
@@ -2003,6 +2027,7 @@ module.exports.__private = {
   resolveCanonicalProduct,
   classifyReviewTier,
   sameFlagSets,
+  backfillOutcomeWeather,
   countVisionScored,
   aggregateOutcomes,
   PRE_ASSESSMENT_MAX_AGE_DAYS,

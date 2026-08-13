@@ -10,6 +10,7 @@
 
 jest.mock('../models/db', () => {
   const fn = (table) => global.__wikiDbMock(table);
+  fn.raw = (...args) => global.__wikiDbMock.raw(...args);
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -110,6 +111,9 @@ function makeDb(responses = {}) {
     return b;
   };
   dbFn.state = state;
+  // COALESCE-style patches pass through as opaque tokens — the harness
+  // records the patch object, it never executes SQL.
+  dbFn.raw = (sql, bindings) => ({ sql, bindings });
   return dbFn;
 }
 
@@ -916,6 +920,51 @@ describe('linkTreatmentOutcome weather-enrichment retry', () => {
 
     expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
     expect(state.calls.lawn_assessments).toBeUndefined();
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+});
+
+// ── backfillOutcomeWeather anchor semantics ────────────────────────────────
+
+describe('backfillOutcomeWeather application-moment anchor', () => {
+  const { backfillOutcomeWeather } = wiki.__private;
+  const outcome = { id: 'to-1' };
+  const snapshotPost = (observationTime) => ({
+    id: 'post-1', service_date: '2026-07-01',
+    fawn_snapshot: JSON.stringify({ observation_time: observationTime }),
+    fawn_temp_f: 88.2, fawn_humidity_pct: 71, fawn_rainfall_7d: 0.4,
+  });
+
+  test('accepts an application-time snapshot even when processing happens much later', async () => {
+    // Snapshot recorded 15 minutes after the 9 AM application; the test
+    // itself runs long after 2026-07-01 — the old Date.now() freshness
+    // check would reject this valid snapshot outright.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 09:15'), '2026-07-01', '2026-07-01 09:00',
+    );
+    expect(wrote).toBe(true);
+    expect(state.updates.treatment_outcomes).toHaveLength(1);
+  });
+
+  test('rejects a same-day observation hours away from the application moment', async () => {
+    // 11 PM station reading vs a 9 AM application: the same-day gates all
+    // pass, but the observation says nothing about application conditions —
+    // this is the late-evening sweep-tick misattribution the anchor closes.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 23:00'), '2026-07-01', '2026-07-01 09:00',
+    );
+    expect(wrote).toBe(false);
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('fails closed when no application moment is available', async () => {
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 09:15'), '2026-07-01', null,
+    );
+    expect(wrote).toBe(false);
     expect(state.updates.treatment_outcomes).toBeUndefined();
   });
 });
