@@ -42,10 +42,15 @@ const VOIDED_ROW = {
 };
 
 // Conn stub shaped like a knex TRANSACTION (isTransaction) so the helper
-// restores inside the caller's trx: a candidate-id select, a row-locked
-// re-read, and the restore-marker probe.
-function conn({ rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = undefined } = {}) {
-  const fn = jest.fn(() => {
+// restores inside the caller's trx. Table-aware: invoices serve the
+// candidate select / row lock / marker probe / live-AR probe / by-id prepay
+// lookup; scheduled_services serve the assert-date derivation (visit date,
+// then the accept series' dates).
+function conn({
+  rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = undefined,
+  byId = {}, visitDate = undefined, seriesDates = [],
+} = {}) {
+  const fn = jest.fn((table) => {
     const q = {};
     let notesLike = false;
     let whereId = null;
@@ -61,13 +66,18 @@ function conn({ rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = unde
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
-    q.select = jest.fn(async () => rows.map((r) => ({ id: r.id })));
-    q.first = jest.fn(async () => {
-      if (notesLike) return replacement;
-      if (byVisit) return liveOnVisit;
-      if (whereId != null) return rows.find((r) => String(r.id) === String(whereId));
-      return undefined;
-    });
+    if (table === 'scheduled_services') {
+      q.first = jest.fn(async () => (visitDate ? { scheduled_date: visitDate } : undefined));
+      q.select = jest.fn(async () => seriesDates.map((d) => ({ scheduled_date: d })));
+    } else {
+      q.select = jest.fn(async () => rows);
+      q.first = jest.fn(async () => {
+        if (notesLike) return replacement;
+        if (byVisit) return liveOnVisit;
+        if (whereId != null) return rows.find((r) => String(r.id) === String(whereId)) || byId[String(whereId)];
+        return undefined;
+      });
+    }
     return q;
   });
   fn.isTransaction = true;
@@ -149,8 +159,64 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(createSpy).not.toHaveBeenCalled();
   });
 
+  test('the overlap assert runs against the RESTORED VISIT date, not today', async () => {
+    const c = conn({ visitDate: '2027-02-10' });
+    await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2027-02-10', false, expect.any(String));
+  });
+
+  test('an UNATTACHED setup-only row derives the date from the accept series (Codex P0 r13)', async () => {
+    const c = conn({
+      rows: [{ ...VOIDED_ROW, scheduled_service_id: null }],
+      seriesDates: ['2020-01-01', '2099-05-12'],
+    });
+    await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    // First UPCOMING visit of the accept's own series — today would wrongly
+    // block a future-start renewal restore while the current year runs.
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2099-05-12', false, expect.any(String));
+  });
+
   test('a null prepayInvoiceId is a no-op', async () => {
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay(null, conn());
+    expect(restored).toEqual([]);
+  });
+});
+
+describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
+  let restoreSpy;
+  beforeEach(() => {
+    restoreSpy = jest.spyOn(InvoiceService, 'restoreSwitchSupersededInvoicesForPrepay')
+      .mockResolvedValue([{ replacedInvoiceId: 'inv-old', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0402' }]);
+  });
+  afterEach(() => restoreSpy.mockRestore());
+
+  test('re-runs the restore for every marker whose superseding prepay is DEAD', async () => {
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'void' } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(restoreSpy).toHaveBeenCalledWith('inv-prepay', c);
+    expect(restored).toHaveLength(1);
+  });
+
+  test('a LIVE superseding prepay is left alone — nothing to repair yet', async () => {
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'paid' } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(restored).toEqual([]);
+  });
+
+  test('a restore that fails is retried next sweep, never thrown to the cron', async () => {
+    restoreSpy.mockRejectedValue(new Error('transient'));
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'void' } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
     expect(restored).toEqual([]);
   });
 });

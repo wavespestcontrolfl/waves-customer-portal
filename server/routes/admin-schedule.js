@@ -9811,6 +9811,20 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           err.switchConflict = true;
           throw err;
         }
+        // Provenance pin (Codex P0 r13): the supersede/mint context below
+        // rides `target`, resolved before the transaction. Re-resolve under
+        // the locks and refuse on ANY drift — a reparented series or a
+        // swapped source estimate would otherwise price from the new series
+        // while superseding the old one's invoice (or nothing at all).
+        const liveTarget = await resolveAcceptedSwitchTarget(req.params.id, trx);
+        if (!liveTarget.ok
+          || String(liveTarget.estimateId || '') !== String(target.estimateId || '')
+          || String(liveTarget.customerId || '') !== String(target.customerId || '')
+          || JSON.stringify([...liveTarget.visitIds].sort()) !== JSON.stringify([...target.visitIds].sort())) {
+          const err = new Error('This visit’s series changed while switching — refresh and try again');
+          err.switchConflict = true;
+          throw err;
+        }
         await trx('customers').where({ id: liveVisit.customer_id }).forUpdate().first('id');
         // In-transaction payer re-check (crib of the /secure mint): a payer
         // attached since the preview must abort — the homeowner must not be
@@ -10127,18 +10141,10 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           // P0 r11): an aborted FUTURE-start renewal switch must restore
           // even while the current year still runs — the double-bill risk is
           // coverage spanning the visit being re-billed.
-          let assertDate = etDateString();
-          if (row.scheduled_service_id) {
-            const visitRow = await trx('scheduled_services')
-              .where({ id: row.scheduled_service_id })
-              .first('scheduled_date');
-            const m = visitRow && visitRow.scheduled_date
-              ? /^\d{4}-\d{2}-\d{2}/.exec(visitRow.scheduled_date instanceof Date
-                ? visitRow.scheduled_date.toISOString()
-                : String(visitRow.scheduled_date))
-              : null;
-            if (m) assertDate = m[0];
-          }
+          // Shared with the term-cancel restore (invoice.js) so the two can
+          // never disagree; falls back to the accept series' first upcoming
+          // visit for an UNATTACHED setup-only row (Codex P0 r13).
+          const assertDate = await InvoiceService.prepaySwitchRestoreAssertDate(trx, row);
           await lockAndAssertNoAnnualPrepayOverlap(
             trx, undoCustomerId, assertDate, false,
             'This customer has a live annual prepay through',

@@ -158,6 +158,40 @@ function stripPrepaySwitchSupersededMarkers(notes) {
   return String(notes || "").replace(/\n?\[prepay-switch-superseded-by:[^\]]+\]/g, "");
 }
 
+// The date the restore's overlap assert runs against: the RESTORED VISIT's
+// date, falling back for an UNATTACHED setup-only row (Codex P0 r13) to the
+// first upcoming visit of the accept's own series (the provenance stamp
+// carries the estimate id) — today only as the last resort. Shared by the
+// term-cancel restore and the undo endpoint so the two can never disagree.
+async function prepaySwitchRestoreAssertDate(trx, row) {
+  const dateOf = (v) => {
+    const m = /^\d{4}-\d{2}-\d{2}/.exec(v instanceof Date ? v.toISOString() : String(v || ""));
+    return m ? m[0] : null;
+  };
+  if (row.scheduled_service_id) {
+    const visitRow = await trx("scheduled_services")
+      .where({ id: row.scheduled_service_id })
+      .first("scheduled_date");
+    const d = visitRow && dateOf(visitRow.scheduled_date);
+    if (d) return d;
+  }
+  const est = /Auto-generated from accepted estimate #([^\s.]+)/i.exec(String(row.notes || ""));
+  if (est) {
+    try {
+      const seriesRows = await trx("scheduled_services")
+        .where({ source_estimate_id: est[1] })
+        .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+        .select("scheduled_date");
+      const today = etDateString();
+      const dates = seriesRows.map((r) => dateOf(r.scheduled_date)).filter(Boolean).sort();
+      const upcoming = dates.find((d) => d >= today);
+      if (upcoming) return upcoming;
+      if (dates.length) return dates[dates.length - 1];
+    } catch { /* fall through to today */ }
+  }
+  return etDateString();
+}
+
 function invoiceHasDepositCreditLine(invoice) {
   return parseInvoiceLineItems(invoice.line_items).some(
     (li) => String(li.category || "") === "deposit_credit",
@@ -4186,18 +4220,7 @@ const InvoiceService = {
       // The double-bill question is whether coverage spans the RESTORED
       // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
       // switch must still restore even while the current year runs.
-      let assertDate = etDateString();
-      if (row.scheduled_service_id) {
-        const visitRow = await trx("scheduled_services")
-          .where({ id: row.scheduled_service_id })
-          .first("scheduled_date");
-        const m = visitRow && visitRow.scheduled_date
-          ? /^\d{4}-\d{2}-\d{2}/.exec(visitRow.scheduled_date instanceof Date
-            ? visitRow.scheduled_date.toISOString()
-            : String(visitRow.scheduled_date))
-          : null;
-        if (m) assertDate = m[0];
-      }
+      const assertDate = await prepaySwitchRestoreAssertDate(trx, row);
       try {
         const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
         await lockAndAssertNoAnnualPrepayOverlap(
@@ -4263,6 +4286,42 @@ const InvoiceService = {
         ? await restoreOne(conn, candidate.id)
         : await conn.transaction((trx) => restoreOne(trx, candidate.id));
       if (out) restored.push(out);
+    }
+    return restored;
+  },
+
+  /**
+   * Durable repair sweep for the on-site prepay switch (Codex P0 r13): a
+   * restore that failed transiently inside a term-cancel sync must not lose
+   * the AR forever — the superseded-by markers persist on the void rows, so
+   * this sweep finds every void invoice still carrying one whose superseding
+   * prepay is terminal and re-runs the (idempotent, lock-guarded) restore.
+   * Wired into the daily billing cron; safe to run any number of times.
+   */
+  async sweepOrphanedPrepaySwitchRestores(conn = db) {
+    const rows = await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", "%[prepay-switch-superseded-by:%")
+      .select("id", "notes");
+    const prepayIds = new Set();
+    for (const row of rows) {
+      const m = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(row.notes || ""));
+      if (m) prepayIds.add(m[1]);
+    }
+    const restored = [];
+    for (const prepayId of prepayIds) {
+      const prepay = await conn("invoices").where({ id: prepayId }).first("id", "status");
+      const dead = !!prepay
+        && ["void", "cancelled", "canceled", "refunded"].includes(String(prepay.status || "").toLowerCase());
+      if (!dead) continue;
+      try {
+        restored.push(...await this.restoreSwitchSupersededInvoicesForPrepay(prepayId, conn));
+      } catch (err) {
+        logger.warn(`[invoice] switch-restore sweep failed for prepay ${prepayId}: ${err.message} — next sweep retries`);
+      }
+    }
+    if (restored.length) {
+      logger.info(`[invoice] switch-restore sweep re-minted ${restored.length} invoice(s): ${restored.map((r) => r.invoiceNumber || r.invoiceId).join(", ")}`);
     }
     return restored;
   },
@@ -4637,6 +4696,7 @@ module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
+module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;

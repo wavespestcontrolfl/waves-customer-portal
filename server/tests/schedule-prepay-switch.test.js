@@ -42,10 +42,15 @@ jest.mock('../services/invoice', () => ({
   prepaySwitchRestoreMarker: (id) => '[prepay-switch-restore:' + id + ']',
   prepaySwitchSupersededByMarker: (id) => '[prepay-switch-superseded-by:' + id + ']',
   stripPrepaySwitchSupersededMarkers: (notes) => String(notes || '').replace(/\n?\[prepay-switch-superseded-by:[^\]]+\]/g, ''),
+  // The undo asserts overlap on the date this returns; the real derivation
+  // (visit date → accept-series fallback) is unit-tested in
+  // invoice-prepay-switch-restore.test.js.
+  prepaySwitchRestoreAssertDate: (...args) => mockRestoreAssertDate(...args),
 }));
 // The atomic switch borrows the Customer 360 advisory-lock + overlap assert;
 // the real admin-customers module is far too heavy for this harness.
 const mockLockOverlap = jest.fn(async () => {});
+const mockRestoreAssertDate = jest.fn();
 jest.mock('../routes/admin-customers', () => ({
   _private: { lockAndAssertNoAnnualPrepayOverlap: (...args) => mockLockOverlap(...args) },
 }));
@@ -67,6 +72,7 @@ const router = require('../routes/admin-schedule');
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const FUTURE_DATE = etDateString(addETDays(new Date(), 90));
+mockRestoreAssertDate.mockResolvedValue(FUTURE_DATE);
 
 // The shape the estimate converter leaves behind for a per-application
 // accept: a quarterly series at $128/visit, all rows carrying the estimate.
