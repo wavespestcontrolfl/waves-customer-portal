@@ -1234,8 +1234,16 @@ function arbitrateCityServiceTargets(opportunities = []) {
   }
   for (const group of byTarget.values()) {
     if (group.length === 1) { out.push(group[0]); continue; }
-    const queryBearing = group.filter((o) => o.query);
-    const pool = queryBearing.length ? queryBearing : group;
+    // PERSISTABLE candidates first — the standing yield rule: a candidate
+    // that will not clear its own floor must never displace one that will,
+    // or persistAll drops the winner after the eligible twin was already
+    // removed and the target ends the mine with NOTHING (pre-push P1).
+    // When none clear, keep the full group so calibration still sees the
+    // best candidate (persistAll drops it either way).
+    const persistable = group.filter((o) => isPersistable(o));
+    const eligible = persistable.length ? persistable : group;
+    const queryBearing = eligible.filter((o) => o.query);
+    const pool = queryBearing.length ? queryBearing : eligible;
     const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
     const localTwin = group.find((o) => o !== winner && o.bucket === 'local_gap');
     if (localTwin) {

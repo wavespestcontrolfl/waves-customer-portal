@@ -2217,14 +2217,28 @@ describe('arbitrateCityServiceTargets — one row per (service, city) across buc
     expect(out[0].signal_metadata.segment_impressions).toBe(500);
   });
 
-  test('among query-bearing candidates the highest score wins', () => {
-    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 62 });
+  test('among PERSISTABLE query-bearing candidates the highest score wins', () => {
+    // striking_distance city-service rows keep the GLOBAL 75 floor (the
+    // blog-floor exception covers only no_content_yet and local_gap), so
+    // it must clear 75 to enter the persistable pool at all.
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 80 });
     const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
     const out = arbitrateCityServiceTargets([sd, ncy]);
     expect(out).toHaveLength(1);
     expect(out[0].bucket).toBe('striking_distance');
     // No local_gap twin in the group — no segment_impressions invented.
     expect(out[0].signal_metadata.segment_impressions).toBeUndefined();
+  });
+
+  test('a query-bearing candidate BELOW its own floor loses to a persistable one', () => {
+    // The same pair at sd=62: striking_distance faces 75 and would be
+    // dropped by persistAll — the no_content_yet row (blog floor 45) is
+    // the one that actually lands.
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 62 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([sd, ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
   });
 
   test('different targets never collapse; non-city-service rows pass through', () => {
@@ -2368,5 +2382,44 @@ describe('local_gap canonical merge details (round-2 P1s)', () => {
     expect(loader).toMatch(/const canon = canonicalizeServiceCategory\(service\);/);
     expect(loader).toMatch(/if \(canon && canon !== service\)/);
     expect(loader).toMatch(/if \(!map\.has\(key\)\) map\.set\(key, r\.page_url\)/);
+  });
+});
+
+describe('arbitration yields only to FLOOR-CLEARING candidates (round-3 P1)', () => {
+  const row = (bucket, { query = null, score = 60 } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('a below-floor query-bearing candidate must NOT displace a persistable local_gap row', () => {
+    // Both ride the blog floor (45). The striking_distance twin at 40
+    // would be dropped by persistAll — letting it win would leave the
+    // target with NOTHING this mine.
+    const lg = row('local_gap', { score: 56 });
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 40 });
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('local_gap');
+  });
+
+  test('a persistable query-bearing candidate still beats persistable local_gap at any score', () => {
+    const lg = row('local_gap', { score: 68 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([lg, ncy]);
+    expect(out[0].bucket).toBe('no_content_yet');
+  });
+
+  test('when NOTHING clears the floor, the best candidate survives for calibration', () => {
+    const lg = row('local_gap', { score: 30 });
+    const sd = row('striking_distance', { query: 'q', score: 40 });
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('striking_distance');
   });
 });
