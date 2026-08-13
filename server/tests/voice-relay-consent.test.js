@@ -257,6 +257,22 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     existingLead = null;
   });
 
+  // …but a second capture_lead on the SAME call reuses the lead this call
+  // just created (twilio_call_sid is INSERT-only, so a matching sid can only
+  // be this session's own earlier capture) — isolation across callers, not
+  // duplicates within one call.
+  test('an UNVERIFIED session\'s second capture on the SAME call reuses its own lead', async () => {
+    existingLead = { id: 'lead-own-call', phone: ANI, customer_id: null, first_name: null, twilio_call_sid: 'CA-unverified-3' };
+    primeDb();
+    await createLeadFromExtraction(
+      { call_summary: 'Second capture on the same unverified call.' },
+      { phone: ANI, aniPhone: ANI, aniVerified: false, callSid: 'CA-unverified-3' },
+    );
+    expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeFalsy(); // no duplicate
+    expect(leadUpdate()).toBeTruthy(); // its own lead, updated in place
+    existingLead = null;
+  });
+
   test('a VERIFIED relay session still resolves its own ANI to the account', async () => {
     primeDb();
     tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);

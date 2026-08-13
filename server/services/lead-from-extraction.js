@@ -418,8 +418,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // lead every time; a duplicate row for a legitimate caller whose
   // verification blipped is the cheap side of that trade.
   // (A handed-in identityCustomerId only exists on a verified full-tier match
-  // — those sessions keep the nuanced reuse rules below.)
-  if (existingLead && opts.aniPhone && !opts.identityCustomerId && opts.aniVerified !== true) {
+  // — those sessions keep the nuanced reuse rules below. And a lead THIS CALL
+  // created is this call's own record — leads.twilio_call_sid is INSERT-only,
+  // so a matching sid can only mean this session's earlier capture_lead:
+  // reusing it is idempotency, not cross-caller leakage.)
+  if (existingLead && opts.aniPhone && !opts.identityCustomerId && opts.aniVerified !== true
+      && !(opts.callSid && existingLead.twilio_call_sid === opts.callSid)) {
     logger.info(`[voice-agent-lead] unverified relay session ${maskPhone(opts.aniPhone)} — never reusing the existing lead on ${maskPhone(phone)}`);
     existingLead = null;
   }
