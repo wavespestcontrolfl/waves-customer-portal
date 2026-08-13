@@ -149,6 +149,16 @@ const gates = {
   // permanent record and its S3 cache key does not vary on this gate).
   reportCrossSell: process.env.GATE_REPORT_CROSS_SELL === 'true',
 
+  // Warm the property-evidence cache at visit completion so the cross-sell
+  // card can price at render (the composer reads cache-only — a customer
+  // must never wait on county APIs). Runs the composer itself with a
+  // persisting lookup, post-commit and fire-and-forget, so every render
+  // suppression also suppresses the spend. External-API + vision spend per
+  // completed report on a cold cache — ships dark, owner flips. Inert
+  // unless GATE_REPORT_CROSS_SELL is also on. Gate off: completions behave
+  // exactly as today and the card keeps falling back to the quote CTA.
+  reportCrossSellPrewarm: process.env.GATE_REPORT_CROSS_SELL_PREWARM === 'true',
+
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
   // ready … Invoice for today's visit: {pay_url}") has been unreachable since
