@@ -378,6 +378,22 @@ describe('RelayConversation — explicit end after capture', () => {
     );
   });
 
+  // ⭐ THE LATEST OFFER'S CONTEXT WINS. The slot ref is stable per
+  // (date, start), but a re-offer from a narrower search must refresh the
+  // stored context — request_booking re-validates with it, and a stale broad
+  // 'any' search can crowd the chosen afternoon slot past the per-day cap and
+  // report a still-open time as gone.
+  test('re-offering the same slot refreshes the stored search context under the SAME ref', () => {
+    const convo = new RelayConversation({ callSid: 'CA-slot', from: '+19415551234', send: jest.fn() });
+    const ctx = convo._buildToolCtx();
+    const slot = { date: '2026-08-20', start_time: '14:00' };
+    const ref1 = ctx.rememberSlot(slot, { lat: 27.4, lng: -82.5, timeOfDay: 'any', expandOpenDays: true });
+    expect(ctx.resolveSlotRef(ref1)).toMatchObject({ timeOfDay: 'any', expandOpenDays: true });
+    const ref2 = ctx.rememberSlot(slot, { lat: 27.4, lng: -82.5, timeOfDay: 'afternoon', expandOpenDays: false });
+    expect(ref2).toBe(ref1); // stable ref, no registry growth
+    expect(ctx.resolveSlotRef(ref1)).toMatchObject({ timeOfDay: 'afternoon', expandOpenDays: false });
+  });
+
   // Contact-slot recognition must never reach the ctx as 'full'.
   test('customerTier on the tool ctx mirrors the ANI match column, failing closed', () => {
     const convo = new RelayConversation({ callSid: 'CA7', from: '+19415551234', send: jest.fn() });

@@ -878,6 +878,27 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }
   });
 
+  // ⭐ A PLAIN "and" CAN INTRODUCE THE REPLACEMENT. Without punctuation the
+  // clause boundary must still end before "and text me" — the caller CHOSE
+  // texts.
+  test('"stop emailing me and text me instead" keeps texts running', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Email opt-out, prefers text.',
+      contact_preference: 'stop emailing me and text me instead',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
+  test('…while "stop texting and calling me" is still one stop clause that suppresses SMS', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting and calling.',
+      contact_preference: 'stop texting and calling me',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   // ⭐ WHOSE TEXTS? The suppression is keyed to the CALLER's ANI — a stop
   // about somebody else must never silence the caller's own reminders.
   test('a third-party stop ("stop texting my tenant") records but never suppresses the caller', async () => {

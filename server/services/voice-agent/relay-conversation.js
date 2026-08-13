@@ -671,10 +671,14 @@ class RelayConversation {
         const startMinutes = slotStartMinutes(slot);
         if (!slot || !slot.date || !Number.isFinite(startMinutes)) return null;
         const key = `${slot.date}@${startMinutes}`;
-        const existing = this._slotRefsByKey.get(key);
-        if (existing) return existing;
-        const ref = `S${this._slotRefs.size + 1}`;
-        this._slotRefs.set(ref, {
+        // ⭐ THE LATEST OFFER'S CONTEXT WINS. The ref is stable per
+        // (date, start), but the stored search context must follow the offer
+        // that most recently surfaced the slot: a 2 PM slot first seen in a
+        // broad 'any' search and later re-offered by an afternoon-specific one
+        // would otherwise re-validate under the stale broad search, where
+        // morning candidates can crowd it past the per-day cap and a still-open
+        // time reports slot_gone.
+        const context = {
           date: slot.date,
           startMinutes,
           lat: offerContext && offerContext.lat,
@@ -682,7 +686,14 @@ class RelayConversation {
           duration: (offerContext && offerContext.duration) || null,
           timeOfDay: (offerContext && offerContext.timeOfDay) || 'any',
           expandOpenDays: Boolean(offerContext && offerContext.expandOpenDays),
-        });
+        };
+        const existing = this._slotRefsByKey.get(key);
+        if (existing) {
+          this._slotRefs.set(existing, context);
+          return existing;
+        }
+        const ref = `S${this._slotRefs.size + 1}`;
+        this._slotRefs.set(ref, context);
         this._slotRefsByKey.set(key, ref);
         return ref;
       },

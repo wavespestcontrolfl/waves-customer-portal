@@ -894,7 +894,15 @@ async function executeTool(name, input = {}, ctx = {}) {
         let m = re.exec(preferenceText);
         while (m) {
           const rest = preferenceText.slice(m.index);
-          const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b/i);
+          // ⭐ A PLAIN "and" CAN INTRODUCE THE REPLACEMENT CHANNEL. "stop
+          // emailing me and text me instead" has no punctuation, so only the
+          // trailing "instead" cut — leaving "text me" inside the stopped half
+          // and suppressing the channel the caller just chose. An "and"
+          // followed by a BASE-form channel verb + me/us is a new imperative
+          // (the replacement) and ends the stop clause; a gerund continuation
+          // ("stop texting and calling me") shares the stop verb and stays one
+          // clause.
+          const cut = rest.search(/[,;.!?—–]|\s+\b(?:but|instead|and then|rather)\b|\s+\band\s+(?:please\s+)?(?:text|message|call|phone|email|e-?mail|reach|contact)\s+(?:me|us)\b/i);
           let stopped = cut === -1 ? rest : rest.slice(0, cut);
           // A carve-out survives the clause boundary — "don't contact me, except
           // by text" puts it after the comma — so the text just past the cut is
