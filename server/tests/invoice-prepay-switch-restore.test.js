@@ -87,7 +87,12 @@ function conn({
       q.first = jest.fn(async () => (visitDate ? { scheduled_date: visitDate } : undefined));
       q.select = jest.fn(async () => seriesDates.map((d) => ({ scheduled_date: d })));
     } else {
-      q.select = jest.fn(async () => rows);
+      q.select = jest.fn(async () => {
+        // The live-AR probe is a SELECT scoped by scheduled_service_id and
+        // classifies each row's line_items (Codex P0 r19).
+        if (byVisit) return liveOnVisit ? [liveOnVisit] : [];
+        return rows;
+      });
       q.first = jest.fn(async () => {
         if (notesLike) return replacement;
         if (byVisit) return liveOnVisit;
@@ -98,6 +103,8 @@ function conn({
     return q;
   });
   fn.isTransaction = true;
+  // The canonical scheduled-invoice mint lock rides trx.raw.
+  fn.raw = jest.fn(async () => {});
   return fn;
 }
 
@@ -156,7 +163,10 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   });
 
   test('live AR on the visit ⇒ restore the SETUP FEE ONLY, never the application again', async () => {
-    const c = conn({ liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    const c = conn({ liveOnVisit: {
+      id: 'inv-completion', invoice_number: 'WPC-2026-0410',
+      line_items: JSON.stringify([{ client_id: 'svc-1_primary', description: 'Quarterly Pest Control', amount: 128 }]),
+    } });
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toHaveLength(1);
     expect(createSpy.mock.calls[0][0].lineItems).toEqual([
@@ -167,7 +177,10 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   test('an application-only row beside live AR skips benignly — nothing left to restore', async () => {
     const c = conn({
       rows: [{ ...VOIDED_ROW, line_items: JSON.stringify([{ description: 'First service application', amount: 128 }]) }],
-      liveOnVisit: { id: 'inv-completion' },
+      liveOnVisit: {
+        id: 'inv-completion',
+        line_items: JSON.stringify([{ client_id: 'svc-1_primary', description: 'Quarterly Pest Control', amount: 128 }]),
+      },
     });
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toEqual([]);
@@ -184,6 +197,24 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     mockLockOverlap.mockRejectedValue(overlapErr);
     createSpy.mockClear();
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', conn());
+    expect(restored).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  test('a live invoice billing something UNRELATED keeps the FULL restore (Codex P0 r19)', async () => {
+    const c = conn({ liveOnVisit: {
+      id: 'inv-manual', invoice_number: 'WPC-2026-0420',
+      line_items: JSON.stringify([{ description: 'Wasp nest removal', amount: 150 }]),
+    } });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(restored).toHaveLength(1);
+    // Nothing bills the application, so BOTH lines come back.
+    expect(createSpy.mock.calls[0][0].lineItems).toHaveLength(2);
+  });
+
+  test('an UNREADABLE live invoice defers to manual review — no guess in either direction', async () => {
+    const c = conn({ liveOnVisit: { id: 'inv-mystery', line_items: 'not-json' } });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();
   });

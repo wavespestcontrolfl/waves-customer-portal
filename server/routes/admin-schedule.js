@@ -10209,23 +10209,37 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
             }))
             .filter((li) => li.description && Number.isFinite(li.unit_price));
           if (row.scheduled_service_id) {
+            // Canonical mint lock + line-level classification, byte-matched
+            // with the term-cancel restore in services/invoice (Codex P0
+            // r19): serialize against every completion/checkout writer, then
+            // demote to fee-only ONLY when a live invoice provably bills the
+            // base application; unrelated live invoices keep the full
+            // restore, unreadable ones go to manual review.
+            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            await acquireScheduledInvoiceMintLock(trx, row.scheduled_service_id);
             const liveOnVisit = await trx('invoices')
               .where({ scheduled_service_id: row.scheduled_service_id })
               .whereNot({ id: row.id })
               .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
-              .first('id', 'invoice_number');
-            if (liveOnVisit) {
-              // The visit completed while the prepay sat unpaid — completion
-              // billed the APPLICATION, but the setup fee lived only on the
-              // superseded invoice. Restore JUST the fee lines beside the
-              // completion invoice (Codex P0 r17); an application-only row
-              // has nothing left to restore and skips benignly.
-              lines = lines.filter((li) => /setup fee/i.test(li.description));
-              if (lines.length === 0) {
-                logger.info(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: visit invoice ${liveOnVisit.invoice_number || liveOnVisit.id} already bills the application and no setup fee rode the superseded row`);
-                return { skipped: true };
+              .select('id', 'invoice_number', 'line_items');
+            if (liveOnVisit.length > 0) {
+              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some((li) => (
+                /_primary$/.test(String(li?.client_id || ''))
+                || /^First service application$/i.test(String(li?.description || '').trim())
+              ));
+              const unreadable = liveOnVisit.some((inv) => invoiceLineItems(inv.line_items).length === 0);
+              if (unreadable) {
+                return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'a live invoice on this visit has unreadable lines — reconcile from Invoices' } };
               }
-              logger.info(`[schedule:prepay-switch] undo restoring SETUP FEE ONLY for ${row.invoice_number || id}: application covered by live invoice ${liveOnVisit.invoice_number || liveOnVisit.id}`);
+              if (liveOnVisit.some(billsApplication)) {
+                lines = lines.filter((li) => /setup fee/i.test(li.description));
+                if (lines.length === 0) {
+                  logger.info(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: the application is already billed and no setup fee rode the superseded row`);
+                  return { skipped: true };
+                }
+                logger.info(`[schedule:prepay-switch] undo restoring SETUP FEE ONLY for ${row.invoice_number || id}: application billed by a live visit invoice`);
+              }
+              // else: live invoices bill something unrelated — full restore.
             }
           }
           if (lines.length === 0) return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'no readable line items' } };

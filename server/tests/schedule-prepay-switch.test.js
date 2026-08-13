@@ -182,6 +182,9 @@ function stubTables({
     q.select = jest.fn(async () => {
       if (table === 'invoices') {
         if (invoices === 'throw') throw new Error('invoice read failed');
+        // The undo's live-AR probe selects by scheduled_service_id and
+        // classifies line_items (Codex P0 r19).
+        if (byVisit) return liveOnVisit ? [liveOnVisit] : [];
         const rows = Array.isArray(invoices) ? invoices : [];
         return voidOnly ? rows.filter((r) => String(r.status || '').toLowerCase() === 'void') : rows;
       }
@@ -688,7 +691,10 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
   });
 
   test('a live completion invoice on the visit ⇒ restore the SETUP FEE ONLY (Codex P0 r17)', async () => {
-    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY, liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY, liveOnVisit: {
+      id: 'inv-completion', invoice_number: 'WPC-2026-0410',
+      line_items: [{ client_id: 'svc-1_primary', description: 'Quarterly Pest Control', amount: 128 }],
+    } });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toHaveLength(1);
     const created = mockCreateInvoice.mock.calls[0][0];
@@ -703,7 +709,10 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     stubTables({
       invoices: [{ ...VOIDED_ROW, line_items: [{ description: 'First service application', amount: 128 }] }],
       invoicesById: DEAD_PREPAY,
-      liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' },
+      liveOnVisit: {
+        id: 'inv-completion', invoice_number: 'WPC-2026-0410',
+        line_items: [{ client_id: 'svc-1_primary', description: 'Quarterly Pest Control', amount: 128 }],
+      },
     });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);

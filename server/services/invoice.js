@@ -4246,24 +4246,43 @@ const InvoiceService = {
           unit_price: Number(li?.unit_price ?? li?.amount),
         }))
         .filter((li) => li.description && Number.isFinite(li.unit_price));
-      // Live AR on the same visit means completion already billed the
-      // APPLICATION while the prepay sat unpaid (Codex P0 r9). The setup fee
-      // lived only on the superseded invoice, so restore JUST the fee lines
-      // beside the completion invoice (Codex P0 r17); an application-only
-      // row has nothing left to restore and skips benignly.
+      // Live AR on the same visit (Codex P0 r9/r17/r19): serialize on the
+      // CANONICAL scheduled-invoice mint lock — the same one every
+      // completion/checkout writer takes — so a concurrent completion mint
+      // cannot land between this check and the create. Then classify what
+      // the live invoices actually bill: only an invoice that provably
+      // bills the BASE APPLICATION (a *_primary line or the accept's own
+      // first-application line) demotes the restore to setup-fee-only; live
+      // invoices that clearly bill something ELSE (a manual add-on) leave
+      // the full restore intact, and anything unreadable defers to manual
+      // review rather than guessing in either direction.
       if (row.scheduled_service_id) {
+        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+        await acquireScheduledInvoiceMintLock(trx, row.scheduled_service_id);
         const liveOnVisit = await trx("invoices")
           .where({ scheduled_service_id: row.scheduled_service_id })
           .whereNot({ id: row.id })
           .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
-          .first("id", "invoice_number");
-        if (liveOnVisit) {
-          lines = lines.filter((li) => /setup fee/i.test(li.description));
-          if (lines.length === 0) {
-            logger.info(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: visit invoice ${liveOnVisit.invoice_number || liveOnVisit.id} already bills the application and no setup fee rode the superseded row`);
+          .select("id", "invoice_number", "line_items");
+        if (liveOnVisit.length > 0) {
+          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => (
+            /_primary$/.test(String(li?.client_id || ""))
+            || /^First service application$/i.test(String(li?.description || "").trim())
+          ));
+          const unreadable = liveOnVisit.some((inv) => parseInvoiceLineItems(inv.line_items).length === 0);
+          if (unreadable) {
+            logger.warn(`[invoice] switch-supersede restore deferred for ${row.invoice_number || row.id}: live invoice on the visit has unreadable lines — manual review`);
             return null;
           }
-          logger.info(`[invoice] switch-supersede restoring SETUP FEE ONLY for ${row.invoice_number || row.id}: application covered by ${liveOnVisit.invoice_number || liveOnVisit.id}`);
+          if (liveOnVisit.some(billsApplication)) {
+            lines = lines.filter((li) => /setup fee/i.test(li.description));
+            if (lines.length === 0) {
+              logger.info(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: the application is already billed and no setup fee rode the superseded row`);
+              return null;
+            }
+            logger.info(`[invoice] switch-supersede restoring SETUP FEE ONLY for ${row.invoice_number || row.id}: application billed by a live visit invoice`);
+          }
+          // else: live invoices bill something unrelated — full restore.
         }
       }
       if (lines.length === 0) {
