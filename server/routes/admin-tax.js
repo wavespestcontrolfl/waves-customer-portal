@@ -1666,16 +1666,6 @@ router.post('/bank-import/upload', async (req, res, next) => {
         || typeof forceToken !== 'string' || forceToken.length < 8 || forceToken.length > 64)) {
       return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes + forceToken from the original upload response' });
     }
-    // One account_type per canonical label: row_hash excludes account_type,
-    // so re-using a label under the other type would silently dedupe against
-    // the existing rows (and book expenses with the wrong payment_method).
-    const existingType = await db('bank_transactions')
-      .whereRaw('upper(trim(account_label)) = upper(?)', [accountLabel.trim()])
-      .first('account_type');
-    if (existingType && existingType.account_type !== accountType) {
-      const asWhat = existingType.account_type === 'bank' ? 'a bank account' : 'a credit card';
-      return res.status(400).json({ error: `"${accountLabel.trim()}" is already imported as ${asWhat} — keep that type, or use a different label if this is a different account` });
-    }
     const { rows, skipped } = bankImport.parseStatementCsv(csv);
     if (rows.length === 0) {
       return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
@@ -1701,6 +1691,22 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // idempotent via the confirmation token.)
     const inserted = [];
     await db.transaction(async (trx) => {
+      // Advisory xact-lock serializes uploads per canonical label, making
+      // the label→type invariant race-free: two concurrent FIRST uploads
+      // of the same label with different types can't both pass the check.
+      await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${accountLabel.trim().toUpperCase()}`]);
+      // One account_type per canonical label: row_hash excludes account_type,
+      // so re-using a label under the other type would silently dedupe against
+      // the existing rows (and book expenses with the wrong payment_method).
+      const existingType = await trx('bank_transactions')
+        .whereRaw('upper(trim(account_label)) = upper(?)', [accountLabel.trim()])
+        .first('account_type');
+      if (existingType && existingType.account_type !== accountType) {
+        const asWhat = existingType.account_type === 'bank' ? 'a bank account' : 'a credit card';
+        const e = new Error(`"${accountLabel.trim()}" is already imported as ${asWhat} — keep that type, or use a different label if this is a different account`);
+        e.status = 400;
+        throw e; // rolls back before any insert
+      }
       for (let i = 0; i < toInsert.length; i += 500) {
         const batch = await trx('bank_transactions')
           .insert(toInsert.slice(i, i + 500))

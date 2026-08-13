@@ -1107,6 +1107,21 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
           skipped = true;
           return;
         }
+        // onlyIfUnreconciled is an AUTOMATION confirm: "unreconciled" does
+        // not distinguish never-reconciled from a HUMAN's explicit rejection
+        // ('rejected' clears the payout flag). A human ruling stands —
+        // check the latest reconciliation row under the same lock and skip.
+        if (opts.onlyIfUnreconciled) {
+          const latest = await trx('bank_reconciliation')
+            .where('payout_id', payoutId)
+            .orderBy('reconciled_at', 'desc')
+            .orderBy('created_at', 'desc')
+            .first('status', 'reconciled_by');
+          if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+            skipped = true;
+            return;
+          }
+        }
       }
       if (opts.precondition && !(await opts.precondition(trx))) {
         skipped = true;
