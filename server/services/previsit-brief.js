@@ -181,11 +181,23 @@ function shapeHistoryProduct(row) {
 async function loadRecentServiceRecords(dbh, customerId, serviceType) {
   try {
     const { loadRecentLineServices } = require('../utils/last-line-service');
-    const { last, lineRecords } = await loadRecentLineServices(dbh, customerId, serviceType, { limit: 5 });
-    return { available: true, last, lineRecords };
+    const { last, lineRecords, visitLine } = await loadRecentLineServices(dbh, customerId, serviceType, { limit: 5 });
+    return { available: true, last, lineRecords, visitLine };
   } catch (err) {
     logger.warn(`[previsit-brief] service history unreadable for customer ${customerId}: ${err.message}`);
-    return { available: false, last: null, lineRecords: [] };
+    return { available: false, last: null, lineRecords: [], visitLine: null };
+  }
+}
+
+// The visit's service-line verdict — the SAME classifier the line-scoped
+// history walk uses. null when the classifier is unavailable, and callers
+// fail closed (drop the section) rather than leak cross-line rows.
+function visitLineOf(serviceType) {
+  try {
+    const { detectServiceLine } = require('./service-report/service-line-configs');
+    return detectServiceLine(serviceType) || null;
+  } catch {
+    return null;
   }
 }
 
@@ -449,6 +461,7 @@ async function assembleGrounding(svc, dbh = db) {
     .catch(() => null);
 
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
+  const visitLine = history.visitLine ?? visitLineOf(svc.service_type);
   // Same-line ONLY — no any-line fallback: a cross-line "last visit" would
   // drag another line's products and notes into this visit's brief.
   const lastVisitRecord = history.lineRecords[0] || null;
@@ -530,11 +543,17 @@ async function assembleGrounding(svc, dbh = db) {
         actionLine: sinceLastVisit.actionLine || null,
       } : null,
     } : null,
-    serviceHistory: (context?.serviceHistory || []).map((s) => ({
-      type: cleanText(s.type, 120),
-      date: calendarDay(s.date),
-      notes: cleanText(s.notes, 500),
-    })),
+    // Same-line ONLY, same verdict as loadRecentLineServices — the
+    // aggregator's history is cross-line, and a pest brief must not
+    // summarize lawn/termite/tree work. Classifier unavailable ⇒ the
+    // section is dropped (fail closed), never passed unfiltered.
+    serviceHistory: visitLine == null ? [] : (context?.serviceHistory || [])
+      .filter((s) => visitLineOf(s.type) === visitLine)
+      .map((s) => ({
+        type: cleanText(s.type, 120),
+        date: calendarDay(s.date),
+        notes: cleanText(s.notes, 500),
+      })),
     propertyProfile: context?.propertyProfile || null,
     flags: (context?.flags || []).map((f) => ({
       type: f.type,
@@ -681,49 +700,80 @@ function findUngroundedClaim(body, grounding) {
   return null;
 }
 
+// Full domain validation of one LLM JSON response. Returns
+// { reason } on rejection or { body } (the sanitized brief body) on
+// success. Runs INSIDE dispatchWithFallback's validate option so a bad
+// primary response fails over to the secondary provider before the
+// deterministic template — and again on the accepted response as defense
+// in depth (test/mocked dispatch paths included).
+//
+// Shape rules close the {}-response trap: a truthy-but-empty object used
+// to sanitize into all-empty fields, store generated_via:'llm', and the
+// grounding hash then blocked regeneration until inputs changed.
+function validateBriefJson(json, grounding) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return { reason: 'not_an_object' };
+  if (!Array.isArray(json.priorities)) return { reason: 'priorities_not_array' };
+  if (!Array.isArray(json.watch_items)) return { reason: 'watch_items_not_array' };
+  for (const field of ['last_visit_summary', 'open_scope', 'customer_context']) {
+    if (json[field] != null && typeof json[field] !== 'string') return { reason: `${field}_not_string` };
+  }
+  // Banned genera anywhere in the RAW response (lists included) reject the
+  // whole leg — never silently dropped item-by-item.
+  const rawText = [...json.priorities, ...json.watch_items, json.last_visit_summary, json.open_scope, json.customer_context]
+    .filter((v) => typeof v === 'string')
+    .join(' ');
+  if (FORBIDDEN_TARGET_RE.test(rawText)) return { reason: 'forbidden_genus' };
+  const body = {
+    priorities: sanitizeList(json.priorities, 3),
+    watch_items: sanitizeList(json.watch_items, 6),
+    last_visit_summary: cleanText(json.last_visit_summary, 500),
+    open_scope: cleanText(json.open_scope, 400),
+    customer_context: cleanText(json.customer_context, 500),
+  };
+  const ungrounded = findUngroundedClaim(body, grounding);
+  if (ungrounded) {
+    return { reason: `ungrounded_${ungrounded.kind === 'names' ? 'product' : 'target'}:${ungrounded.term}` };
+  }
+  return { body };
+}
+
 async function generateBriefBody(grounding, deps = {}) {
   const fallback = () => ({ via: 'template', body: templateBriefBody(grounding) });
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback();
+  // An unreadable catalog means NO response can be validated — fail closed
+  // to the template without spending an LLM call at all.
+  if (!grounding.catalogVocabulary) {
+    logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
+    return fallback();
+  }
+  const validate = (result) => {
+    if (!result?.json) return 'no_json';
+    return validateBriefJson(result.json, grounding).reason || null;
+  };
   const callModel = deps.callModel
-    || ((payload) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
+    || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
       jsonMode: true,
       maxTokens: 1000,
       ...payload,
-    }));
+    }, opts));
   try {
     const resp = await callModel({
       system: SYSTEM_PROMPT,
       text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}\n\nReturn only the JSON object.`,
-    });
-    if (!resp || !resp.ok || !resp.json || typeof resp.json !== 'object') {
+    }, { validate });
+    if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
       return fallback();
     }
-    const body = {
-      priorities: sanitizeList(resp.json.priorities, 3),
-      watch_items: sanitizeList(resp.json.watch_items, 6),
-      last_visit_summary: cleanText(resp.json.last_visit_summary, 500),
-      open_scope: cleanText(resp.json.open_scope, 400),
-      customer_context: cleanText(resp.json.customer_context, 500),
-    };
-    // Defensive: forbidden genera must never appear anywhere in the prose.
-    if (FORBIDDEN_TARGET_RE.test([body.last_visit_summary, body.open_scope, body.customer_context].join(' '))) {
-      logger.warn('[previsit-brief] LLM output named a forbidden target; using deterministic template');
+    // Defense in depth: the dispatcher already ran this validator per leg,
+    // but injected/mocked call paths may not — never trust an unvalidated
+    // response into the stored brief.
+    const verdict = validateBriefJson(resp.json, grounding);
+    if (verdict.reason) {
+      logger.warn(`[previsit-brief] LLM output rejected (${verdict.reason}); using deterministic template`);
       return fallback();
     }
-    // Grounded-allowlist validation. An unreadable catalog means the output
-    // CANNOT be validated — treated like a failed LLM pass (fail closed to
-    // the deterministic template), consistent with the fallback posture.
-    if (!grounding.catalogVocabulary) {
-      logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
-      return fallback();
-    }
-    const ungrounded = findUngroundedClaim(body, grounding);
-    if (ungrounded) {
-      logger.warn(`[previsit-brief] LLM output made an ungrounded ${ungrounded.kind === 'names' ? 'product' : 'target'} claim ("${ungrounded.term}"); using deterministic template`);
-      return fallback();
-    }
-    return { via: 'llm', body };
+    return { via: 'llm', body: verdict.body };
   } catch (err) {
     logger.warn(`[previsit-brief] LLM pass failed: ${err.message}; using deterministic template`);
     return fallback();
@@ -868,6 +918,7 @@ module.exports = {
   _test: {
     assembleGrounding,
     findUngroundedClaim,
+    validateBriefJson,
     redactDeep,
     loadCatalogVocabulary,
     templateBriefBody,

@@ -52,6 +52,7 @@ jest.mock('../services/service-report/service-line-configs', () => ({
   detectServiceLine: (serviceType) => {
     const s = String(serviceType || '');
     if (/tree|shrub|palm/i.test(s)) return 'tree_shrub';
+    if (/termite|wdo/i.test(s)) return 'termite';
     return /lawn|turf/i.test(s) ? 'lawn' : 'pest';
   },
 }));
@@ -378,6 +379,81 @@ describe('grounded allowlist validation of LLM output', () => {
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.generated).toBe(true);
     expect(out.via).toBe('template');
+  });
+});
+
+describe('aggregator serviceHistory is line-scoped', () => {
+  test('a pest brief never summarizes lawn/termite work from context history', async () => {
+    mockGetContext.mockResolvedValueOnce({
+      serviceHistory: [
+        { type: 'Lawn Care Service', date: '2026-08-05', notes: 'Applied pre-emergent to turf.' },
+        { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' },
+        { type: 'Termite Monitoring', date: '2026-06-01', notes: 'Checked bait stations.' },
+      ],
+      propertyProfile: null,
+      flags: [],
+      recentCalls: [],
+      recentInteractions: [],
+      pendingEstimate: null,
+    });
+    useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.serviceHistory).toEqual([
+      { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' },
+    ]);
+    expect(text).not.toContain('pre-emergent');
+    expect(text).not.toContain('bait stations');
+  });
+});
+
+describe('typed response validation (validateBriefJson + dispatcher validate)', () => {
+  const GROUNDING = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const { validateBriefJson } = PrevisitBrief._test;
+
+  test('shape rejections carry typed reasons', () => {
+    expect(validateBriefJson(null, GROUNDING).reason).toBe('not_an_object');
+    expect(validateBriefJson([], GROUNDING).reason).toBe('not_an_object');
+    expect(validateBriefJson({}, GROUNDING).reason).toBe('priorities_not_array');
+    expect(validateBriefJson({ priorities: 'do things' }, GROUNDING).reason).toBe('priorities_not_array');
+    expect(validateBriefJson({ priorities: [] }, GROUNDING).reason).toBe('watch_items_not_array');
+    expect(validateBriefJson({ priorities: [], watch_items: [], open_scope: 42 }, GROUNDING).reason).toBe('open_scope_not_string');
+  });
+
+  test('banned genera ANYWHERE in the raw response reject the leg', () => {
+    expect(validateBriefJson({ priorities: ['Check for Ganoderma conks'], watch_items: [] }, GROUNDING).reason).toBe('forbidden_genus');
+    expect(validateBriefJson({ priorities: [], watch_items: [], customer_context: 'thielaviopsis risk' }, GROUNDING).reason).toBe('forbidden_genus');
+  });
+
+  test('ungrounded catalog claims reject with the offending term', () => {
+    const grounding = { catalogVocabulary: { names: ['termidor sc'], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson({ priorities: ['Apply Termidor SC'], watch_items: [] }, grounding).reason).toBe('ungrounded_product:termidor sc');
+  });
+
+  test('a clean response yields the sanitized body', () => {
+    const verdict = validateBriefJson({ ...CLEAN_LLM_JSON }, GROUNDING);
+    expect(verdict.reason).toBeUndefined();
+    expect(verdict.body.priorities).toEqual(CLEAN_LLM_JSON.priorities);
+  });
+
+  test('the validator is handed to dispatchWithFallback so a bad primary fails over pre-template', async () => {
+    useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const opts = global.__dispatch.mock.calls[0][2];
+    expect(typeof opts.validate).toBe('function');
+    expect(opts.validate({ json: {} })).toBe('priorities_not_array');
+    expect(opts.validate({ json: null })).toBe('no_json');
+    expect(opts.validate({ json: { ...CLEAN_LLM_JSON } })).toBeNull();
+  });
+
+  test('an empty-object response is never stored as an LLM brief', async () => {
+    global.__dispatch = jest.fn(async () => ({ ok: true, json: {} }));
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(storedBrief(state).brief.generated_via).toBe('template');
   });
 });
 
