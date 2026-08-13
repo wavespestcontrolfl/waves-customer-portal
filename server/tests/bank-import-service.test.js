@@ -24,7 +24,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['where', 'andWhere', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -395,18 +395,65 @@ describe('runDeterministicMatching', () => {
     expect(cleared.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
   });
 
-  test("an operator's unlink ruling excludes that exact target from automatic rematching", async () => {
+  test("operator unlink rulings exclude ALL previously rejected targets, not just the latest", async () => {
     state.bankRows = [
-      { id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: { lastUnlink: { was: 'matched_payout', payoutId: 'po-1' } } },
-      { id: 'bt-2', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { lastUnlink: { was: 'matched_expense', expenseId: 'exp-1' } } },
+      { id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: { rejectedPayoutIds: ['po-0'], lastUnlink: { was: 'matched_payout', payoutId: 'po-1' } } },
+      { id: 'bt-2', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { rejectedExpenseIds: ['exp-0'], lastUnlink: { was: 'matched_expense', expenseId: 'exp-1' } } },
     ];
     state.payouts = [];
     state.expenses = [];
     await runDeterministicMatching();
     const payoutBuilder = state.builders.find(x => x.table === 'stripe_payouts');
-    expect(payoutBuilder.b.whereNot).toHaveBeenCalledWith('id', 'po-1');
+    expect(payoutBuilder.b.whereNotIn).toHaveBeenCalledWith('id', expect.arrayContaining(['po-0', 'po-1']));
     const expenseBuilder = state.builders.find(x => x.table === 'expenses');
-    expect(expenseBuilder.b.whereNot).toHaveBeenCalledWith('id', 'exp-1');
+    expect(expenseBuilder.b.whereNotIn).toHaveBeenCalledWith('id', expect.arrayContaining(['exp-0', 'exp-1']));
+  });
+
+  test('a card debit never auto-links to an expense the books say was paid by ACH/check/cash', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1); // parks for the operator instead
+    // an unknown payment method stays eligible
+    state.updates = [];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: null }];
+    const second = await runDeterministicMatching();
+    expect(second.expensesLinked).toBe(1);
+  });
+
+  test('ambiguous payout credits PARK their candidates for the manual link path', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null },
+    ];
+    state.payouts = [
+      { id: 'po-1', amount: '2418.66', arrival_date: '2026-08-10', reconciled: false },
+      { id: 'po-2', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    const parked = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.payoutCandidates);
+    expect(parked.patch.suggestion.payoutCandidates).toHaveLength(2);
+    expect(parked.patch.suggestion.payoutCandidatesTotal).toBe(2);
+    expect(parked.patch.suggestion.payoutCandidates[0]).toEqual({ id: 'po-1', amount: 2418.66, arrival_date: '2026-08-10' });
+  });
+
+  test('a bounded pass reports moreRemaining instead of scanning everything', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-09', description: 'A', amount: 1, direction: 'debit', suggestion: null },
+      { id: 'bt-2', txn_date: '2026-08-10', description: 'B', amount: 2, direction: 'debit', suggestion: null },
+      { id: 'bt-3', txn_date: '2026-08-11', description: 'C', amount: 3, direction: 'debit', suggestion: null },
+    ];
+    state.expenses = [];
+    const summary = await runDeterministicMatching({ limit: 2 });
+    expect(summary.scanned).toBe(2);
+    expect(summary.moreRemaining).toBe(true);
+    const unbounded = await runDeterministicMatching();
+    expect(unbounded.scanned).toBe(3);
+    expect(unbounded.moreRemaining).toBe(false);
   });
 
   test('the transfer flag MERGES into suggestion — durable identity records survive', async () => {

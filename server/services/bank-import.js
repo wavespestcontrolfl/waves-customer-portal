@@ -295,20 +295,73 @@ async function resetDanglingLinks() {
  * Serial and idempotent: re-running never relinks or double-claims (CAS on
  * status + DB-level partial unique indexes on the matched FKs).
  */
-async function runDeterministicMatching() {
+// The ledger echo for a payout link, shared by the automatic matcher and
+// the manual link-payout route: reconcile through the EXISTING stripe-banking
+// mechanism under the unreconciled guard + still-linked precondition, then
+// clear the row's pending flag scoped to this exact link. Throws on failure —
+// callers leave the persisted reconcilePending flag in place so the sweep
+// retries.
+async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
+  const { reconcilePayout } = require('./stripe-banking');
+  await reconcilePayout(payoutId, Number(amount), note, `bank-import:${rowId}`, 'confirmed', {
+    onlyIfUnreconciled: true,
+    precondition: (trx) => trx('bank_transactions')
+      .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+      .forUpdate().first('id').then(Boolean),
+  });
+  // jsonb key-subtraction removes ONLY the flag, and the CAS scopes it to
+  // THIS link — if an unlink + re-match to a different payout landed since,
+  // the newer link keeps its own pending flag and the sweep still retries it
+  await db('bank_transactions')
+    .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+    .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
+}
+
+// Rejected-target ruling for a row: every id the operator has ever unlinked
+// from it (cumulative arrays; the single lastUnlink id folds in for rows
+// written before the arrays existed).
+function rejectedTargets(suggestion) {
+  const last = suggestion?.lastUnlink || {};
+  const expenseIds = new Set(suggestion?.rejectedExpenseIds || []);
+  const payoutIds = new Set(suggestion?.rejectedPayoutIds || []);
+  if (last.expenseId) expenseIds.add(last.expenseId);
+  if (last.payoutId) payoutIds.add(last.payoutId);
+  return { expenseIds: [...expenseIds], payoutIds: [...payoutIds] };
+}
+
+// A card-statement debit cannot be an expense the books already know was
+// paid by ACH, check, or cash — such an "exact" match is a coincidence and
+// auto-linking it would hide the real card purchase from review. Unknown
+// methods stay eligible (they park for the operator when not unique).
+// Bank-side debits are NOT restricted: checking outflow legitimately books
+// as ach, check, or card (debit-card-on-checking).
+function methodIncompatible(accountType, paymentMethod) {
+  return accountType === 'card' && ['ach', 'check', 'cash'].includes(String(paymentMethod || '').toLowerCase());
+}
+
+async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
-  const unmatched = await db('bank_transactions')
+  const bounded = Number.isFinite(limit) && limit > 0;
+  // limit+1 sentinel answers "is there more?" without a count query. A huge
+  // backfill would otherwise run thousands of serial per-row queries inside
+  // one request — callers pass a bound and surface moreRemaining instead.
+  let unmatchedQuery = db('bank_transactions')
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
-  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
+  if (bounded) unmatchedQuery = unmatchedQuery.limit(limit + 1);
+  const fetched = await unmatchedQuery;
+  const moreRemaining = bounded && fetched.length > limit;
+  const unmatched = bounded ? fetched.slice(0, limit) : fetched;
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
     // An operator's explicit unlink is a ruling: the automatic pass never
-    // re-proposes that exact target. (Manual link/re-link stays possible.)
-    const unlinked = row.suggestion?.lastUnlink || {};
+    // re-proposes ANY previously rejected target — including earlier
+    // rejections, not just the latest. (Manual re-link stays possible.)
+    const rejected = rejectedTargets(row.suggestion);
     const transfer = transferSuggestion(row.description);
     if (transfer) {
       if (!row.suggestion || !row.suggestion.ignore) {
@@ -337,9 +390,12 @@ async function runDeterministicMatching() {
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
-        .select('id', 'amount', 'reconciled')
-        .limit(2);
-      if (unlinked.payoutId) payoutQuery = payoutQuery.whereNot('id', unlinked.payoutId);
+        .select('id', 'amount', 'arrival_date', 'reconciled')
+        // 8 is a parking cap, not a uniqueness cap: auto-link still demands
+        // candidates.length === 1, so a cap-hidden extra can only PREVENT a
+        // link, never fake "exactly one".
+        .limit(8);
+      if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
       const candidates = await payoutQuery;
       const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
@@ -370,28 +426,10 @@ async function runDeterministicMatching() {
             // real, reconciliation is the ledger echo, and the flag retries.
             if (needsEcho) {
               try {
-                const { reconcilePayout } = require('./stripe-banking');
-                // onlyIfUnreconciled (row-locked): a human who reconciled
-                // this payout since our candidate read is never overwritten.
-                // Author is row-specific so a later reversal can only undo
-                // ITS OWN reconciliation, never a newer claim's. The
-                // precondition locks OUR bank row inside the reconcile
-                // transaction and verifies the link still stands — an admin
-                // unlink during this await makes the echo skip instead of
-                // reconciling a payout its row no longer claims.
-                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, `bank-import:${row.id}`, 'confirmed', {
-                  onlyIfUnreconciled: true,
-                  precondition: (trx) => trx('bank_transactions')
-                    .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
-                    .forUpdate().first('id').then(Boolean),
-                });
-                // jsonb key-subtraction removes ONLY the flag, and the CAS
-                // scopes it to THIS link — if an unlink + re-match to a
-                // different payout landed since, the newer link keeps its
-                // own pending flag and the sweep still retries it
-                await db('bank_transactions')
-                  .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
-                  .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
+                // guarded + preconditioned inside the helper: a human who
+                // reconciled since the candidate read, or an admin unlink
+                // during this await, makes the echo skip — never clobber.
+                await echoPayoutReconciliation(row.id, exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`);
               } catch (reconErr) {
                 // flag already persisted with the claim — the sweep retries
                 logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
@@ -401,8 +439,19 @@ async function runDeterministicMatching() {
         } catch (err) {
           if (!isUniqueViolation(err)) throw err; // lost the claim race — skip
         }
-      } else if (candidates.length > 1) {
+      } else if (candidates.length > 0) {
+        // Ambiguous (or near-miss-only) payout credits park their candidates
+        // so the operator has a manual link path — without this the credit
+        // is permanently unmatched even when the right payout is obvious.
         summary.ambiguous++;
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          suggestion: {
+            ...(row.suggestion || {}),
+            payoutCandidates: candidates.map(c => ({ id: c.id, amount: Number(c.amount), arrival_date: toDateStr(c.arrival_date) })),
+            payoutCandidatesTotal: candidates.length,
+          },
+          updated_at: new Date(),
+        });
       }
       continue;
     }
@@ -417,11 +466,13 @@ async function runDeterministicMatching() {
       // candidate set — a cap could hide a second strong candidate and fake
       // "exactly one". The ±5-day amount-filtered window keeps this small;
       // only the operator-facing suggestion list below is bounded.
-      .select('id', 'amount', 'description', 'vendor_name', 'expense_date');
-    if (unlinked.expenseId) expenseQuery = expenseQuery.whereNot('id', unlinked.expenseId);
+      .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+    if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
     const candidates = await expenseQuery;
-    // Auto-link needs exact cents + vendor evidence + a single such candidate.
-    const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c));
+    // Auto-link needs exact cents + vendor evidence + a compatible payment
+    // method + a single such candidate. Incompatible-method expenses still
+    // PARK below — the operator may know the books are mislabeled.
+    const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
     if (strong.length === 1) {
       try {
         const changed = await db('bank_transactions')
@@ -479,6 +530,7 @@ module.exports = {
   hashRow,
   transferSuggestion,
   runDeterministicMatching,
+  echoPayoutReconciliation,
   ledgerCoverage,
   // exported for tests
   parseAmount,

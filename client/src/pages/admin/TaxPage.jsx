@@ -4097,7 +4097,7 @@ function BankImportTab() {
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +
             (r.matching
-              ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses`
+              ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses${r.matching.moreRemaining ? " (more rows pending — click Run matching)" : ""}`
               : ` · ${r.matchingError || "matching not run"}`) +
             (r.duplicates > 0 && r.duplicateSamples?.length
               ? ` — skipped as re-uploads: ${r.duplicateSamples
@@ -4198,7 +4198,7 @@ function BankImportTab() {
             act("match", "/admin/tax/bank-import/match").then((r) => {
               if (r)
                 setNotice({
-                  text: `Matching pass: ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses linked, ${r.matching.ambiguous} ambiguous`,
+                  text: `Matching pass: ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses linked, ${r.matching.ambiguous} ambiguous${r.matching.moreRemaining ? " — more rows pending, run again" : ""}`,
                 });
             })
           }
@@ -4209,13 +4209,23 @@ function BankImportTab() {
           type="button"
           style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
           disabled={!!busy}
-          onClick={() =>
-            act("suggest", "/admin/tax/bank-import/suggest", { limit: 20 }).then(
+          onClick={() => {
+            // scoped to the rows on screen — a global oldest-first pass can
+            // report "processed" while changing nothing the operator can see
+            const visibleIds = rows
+              .filter((r) => r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.categoryId && !r.suggestion?.ignore)
+              .map((r) => r.id)
+              .slice(0, 50);
+            if (!visibleIds.length) {
+              setNotice({ text: "No uncategorized unmatched debits on screen — load or filter to the rows you want suggestions for" });
+              return;
+            }
+            act("suggest", "/admin/tax/bank-import/suggest", { limit: 20, ids: visibleIds }).then(
               (r) => {
                 if (r) setNotice({ text: `AI suggested categories for ${r.processed} rows` });
               },
-            )
-          }
+            );
+          }}
           title="AI proposes an expense category for unmatched debits — nothing is created until you click Create"
         >
           {busy === "suggest" ? "Suggesting…" : "Suggest categories (AI)"}
@@ -4360,6 +4370,22 @@ function BankImportTab() {
                         </option>
                       )}
                     </select>
+                  ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.payoutCandidates?.length ? (
+                    <select
+                      style={{ ...inputStyle, maxWidth: 240 }}
+                      value={linkPick[r.id] || ""}
+                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      title="Stripe payouts with a matching amount near this date — pick the one this deposit is"
+                    >
+                      <option value="">
+                        {r.suggestion.payoutCandidates.length} possible payout{r.suggestion.payoutCandidates.length > 1 ? "s" : ""}…
+                      </option>
+                      {r.suggestion.payoutCandidates.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
+                        </option>
+                      ))}
+                    </select>
                   ) : (
                     r.suggestion?.categoryName || ""
                   )}
@@ -4382,6 +4408,25 @@ function BankImportTab() {
                       }
                     >
                       Link
+                    </button>
+                  )}
+                  {r.status === "unmatched" && r.direction === "credit" && linkPick[r.id] && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      onClick={() =>
+                        act("link-payout", `/admin/tax/bank-import/${r.id}/link-payout`, { payoutId: linkPick[r.id] }).then((res) => {
+                          if (res)
+                            setLinkPick((p) => {
+                              const next = { ...p };
+                              delete next[r.id];
+                              return next;
+                            });
+                        })
+                      }
+                    >
+                      Link payout
                     </button>
                   )}
                   {/* transfer-flagged rows keep Create too — the flag is only a

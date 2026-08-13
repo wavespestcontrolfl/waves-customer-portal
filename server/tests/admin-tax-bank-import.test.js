@@ -19,6 +19,7 @@ const state = {
   expenseRow: null,
   payoutRow: null,
   accountTypeRow: null,
+  listRows: null,
   bankUpdateError: null,
   bankUpdateResult: 1,
   insertedBank: [],
@@ -68,6 +69,8 @@ function bankBuilder() {
     orderBy: jest.fn(() => b),
     limit: jest.fn(() => b),
   };
+  // awaiting a bare select chain (the suggest scope query) resolves listRows
+  b.then = (resolve, reject) => Promise.resolve(state.listRows || []).then(resolve, reject);
   return b;
 }
 
@@ -168,6 +171,7 @@ beforeEach(() => {
   state.category = null;
   state.payoutRow = null;
   state.accountTypeRow = null;
+  state.listRows = null;
   state.insertReturningQueue = null;
   reconcilePayout.mockReset();
   reconcilePayout.mockImplementation(async () => ({}));
@@ -472,6 +476,85 @@ describe('force-duplicates upload (gate on)', () => {
   });
 });
 
+describe('link-payout (gate on)', () => {
+  beforeEach(() => {
+    process.env.GATE_BANK_IMPORT = 'true';
+    state.bankRow = { id: 'bt-1', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: { payoutCandidates: [{ id: 'po-9' }] } };
+    state.payoutRow = { id: 'po-9', reconciled: false };
+  });
+
+  test('claims via CAS with match_method=manual and echoes reconciliation (pending flag in the claim)', async () => {
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.reconciliation).toBe('confirmed');
+    const claim = state.bankUpdates[0];
+    expect(claim.wheres).toContainEqual({ id: 'bt-1', status: 'unmatched' });
+    expect(claim.patch).toMatchObject({ status: 'matched_payout', matched_payout_id: 'po-9', match_method: 'manual' });
+    expect(claim.patch.suggestion.reconcilePending).toBe(true);
+    expect(reconcilePayout).toHaveBeenCalledWith('po-9', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'confirmed',
+      expect.objectContaining({ onlyIfUnreconciled: true, precondition: expect.any(Function) }));
+    // the flag clears (jsonb key-subtraction, scoped to this link)
+    expect(state.bankUpdates[1].wheres).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-9' });
+    expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcilePending'");
+  });
+
+  test('an already-reconciled payout links without an echo or pending flag', async () => {
+    state.payoutRow = { id: 'po-9', reconciled: true };
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    const body = await res.json();
+    expect(body.reconciliation).toBe('already_reconciled');
+    expect(reconcilePayout).not.toHaveBeenCalled();
+    expect(state.bankUpdates[0].patch.suggestion).toBeUndefined();
+  });
+
+  test('an echo failure answers pending — the claim stands and the sweep retries', async () => {
+    reconcilePayout.mockRejectedValueOnce(new Error('db down'));
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.reconciliation).toBe('pending');
+    expect(state.bankUpdates).toHaveLength(1); // no clearing update
+    expect(state.bankUpdates[0].patch.suggestion.reconcilePending).toBe(true);
+  });
+
+  test('validates inputs: missing payoutId, debit row, card credit, non-unmatched, unknown payout', async () => {
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', {})).status).toBe(400);
+    state.bankRow.direction = 'debit';
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(400);
+    state.bankRow.direction = 'credit';
+    state.bankRow.account_type = 'card';
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(400);
+    state.bankRow.account_type = 'bank';
+    state.bankRow.status = 'ignored';
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(409);
+    state.bankRow.status = 'unmatched';
+    state.payoutRow = null;
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(404);
+  });
+
+  test('a unique-index violation (payout already linked elsewhere) answers 409', async () => {
+    const dup = Object.assign(new Error('duplicate key'), { code: '23505' });
+    state.bankUpdateError = dup;
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(409);
+  });
+});
+
+describe('suggest scoped to visible rows (gate on)', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
+
+  test('processes the passed ids and writes only suggestion jsonb', async () => {
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-1', categoryName: 'Supplies', reasoning: 'r' });
+    state.listRows = [{ id: 'bt-7', description: 'HD SUPPLY', amount: '204.87', suggestion: null }];
+    const res = await post('/admin/tax/bank-import/suggest', { limit: 20, ids: ['bt-7'] });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.processed).toBe(1);
+    expect(state.bankUpdates[0].patch.suggestion).toMatchObject({ categoryId: 'cat-1', categoryName: 'Supplies' });
+  });
+});
+
 describe('unlink (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
@@ -513,6 +596,8 @@ describe('unlink (gate on)', () => {
     expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(upd.patch).toMatchObject({ status: 'unmatched', matched_payout_id: null });
     expect(upd.patch.suggestion.lastUnlink.payoutId).toBe('po-1');
+    // rejections accumulate — a later unlink of a different target keeps this one excluded
+    expect(upd.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
   });
 
   test("someone else's reconciliation is kept — unlink proceeds, banking side untouched", async () => {

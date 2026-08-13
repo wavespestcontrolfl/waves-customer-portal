@@ -1392,8 +1392,10 @@ const gates = {
   // Bank Import (2026-08-13): statement-CSV staging + expense reconciliation
   // under /admin/tax. Staff-only and read-mostly, but OFF in every
   // environment until Adam flips it — routes read GATE_BANK_IMPORT through
-  // gateEnvValue() at call time so a flip needs no redeploy.
-  bankImport: process.env.GATE_BANK_IMPORT === 'true',
+  // gateEnvValue() at call time so a flip needs no redeploy. The registry
+  // entry uses the SAME parser so the startup gate report can never
+  // disagree with request-time enforcement ('1'/'on' variants included).
+  bankImport: gateEnvValue('GATE_BANK_IMPORT'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

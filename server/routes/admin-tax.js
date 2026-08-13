@@ -1788,7 +1788,10 @@ router.post('/bank-import/upload', async (req, res, next) => {
     let matching = null;
     let matchingError = null;
     try {
-      matching = await bankImport.runDeterministicMatching();
+      // bounded: a multi-thousand-row backfill must not run thousands of
+      // serial per-row queries inside this request — the response reports
+      // moreRemaining and "Run matching" continues the pass
+      matching = await bankImport.runDeterministicMatching({ limit: 500 });
     } catch (err) {
       logger.warn(`[bank-import] upload imported rows but the matching pass failed: ${err.message}`);
       matchingError = 'rows imported, but the matching pass failed — use "Run matching" to retry';
@@ -1836,24 +1839,32 @@ router.get('/bank-import/transactions', async (req, res, next) => {
 
 router.post('/bank-import/match', async (req, res, next) => {
   try {
-    res.json({ success: true, matching: await bankImport.runDeterministicMatching() });
+    res.json({ success: true, matching: await bankImport.runDeterministicMatching({ limit: 2000 }) });
   } catch (err) { next(err); }
 });
 
 // AI category suggestions for unmatched debits — operator-triggered and
 // bounded like /expenses/auto-categorize; writes only the suggestion jsonb,
-// never an expense row.
+// never an expense row. `ids` scopes the pass to the rows the operator is
+// LOOKING AT (same principle as /expenses/auto-categorize's scoped ids —
+// a global oldest-first pass can report "20 processed" while changing
+// nothing on screen); without ids it falls back to oldest-first.
 router.post('/bank-import/suggest', async (req, res, next) => {
   try {
     const rawLimit = parseInt(req.body?.limit, 10);
     const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
-    const rows = await db('bank_transactions')
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter(x => typeof x === 'string').slice(0, 50)
+      : null;
+    let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
       .whereRaw("(suggestion is null or (suggestion->>'categoryId') is null)")
       .whereRaw("coalesce(suggestion->>'ignore','') <> 'true'")
       .orderBy('txn_date', 'asc')
       .limit(limit)
       .select('id', 'description', 'amount', 'suggestion');
+    if (ids && ids.length) q = q.whereIn('id', ids);
+    const rows = await q;
     const results = [];
     for (const row of rows) {
       try {
@@ -1960,6 +1971,57 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Manually link a staged BANK credit to an existing Stripe payout (the
+// ambiguous-payout path — the automatic matcher parks candidates when more
+// than one paid payout fits). Atomic claim via CAS + the partial unique
+// index on matched_payout_id; the reconciliation echo reuses the exact
+// mechanism the automatic path uses (pending flag persisted with the claim,
+// guarded echo, sweep retry on failure).
+router.post('/bank-import/:id/link-payout', async (req, res, next) => {
+  try {
+    const { payoutId } = req.body || {};
+    if (!payoutId) return res.status(400).json({ error: 'payoutId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit' || row.account_type !== 'bank') {
+      return res.status(400).json({ error: 'only bank-account credits link to payouts' });
+    }
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'reconciled');
+    if (!payout) return res.status(404).json({ error: 'payout not found' });
+    const needsEcho = !payout.reconciled;
+    let claimed;
+    try {
+      claimed = await db('bank_transactions')
+        .where({ id: row.id, status: 'unmatched' })
+        .update({
+          status: 'matched_payout',
+          matched_payout_id: payoutId,
+          match_method: 'manual',
+          matched_at: new Date(),
+          updated_at: new Date(),
+          ...(needsEcho ? { suggestion: { ...(row.suggestion || {}), reconcilePending: true } } : {}),
+        });
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'that payout is already linked to another bank row' });
+      throw err;
+    }
+    if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    let reconciliation = 'already_reconciled';
+    if (needsEcho) {
+      try {
+        await bankImport.echoPayoutReconciliation(row.id, payoutId, Number(row.amount), `Manually linked to bank import row ${row.id}`);
+        reconciliation = 'confirmed';
+      } catch (err) {
+        // pending flag persisted with the claim — the matching sweep retries
+        logger.warn(`[bank-import] manual payout link ${row.id}→${payoutId} succeeded but reconciliation write failed (sweep will retry): ${err.message}`);
+        reconciliation = 'pending';
+      }
+    }
+    res.json({ success: true, reconciliation });
+  } catch (err) { next(err); }
+});
+
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
     const changed = await db('bank_transactions')
@@ -2003,8 +2065,20 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
     }
     // a stale confirm-pending flag makes no sense on an unlinked row
     const { reconcilePending: _stalePending, ...baseSuggestion } = row.suggestion || {};
+    // rejections are CUMULATIVE: unlinking B after A must not let the
+    // matcher re-propose A — every rejected id stays excluded forever
+    const rejectedExpenseIds = [...new Set([
+      ...(baseSuggestion.rejectedExpenseIds || []),
+      ...(row.matched_expense_id ? [row.matched_expense_id] : []),
+    ])];
+    const rejectedPayoutIds = [...new Set([
+      ...(baseSuggestion.rejectedPayoutIds || []),
+      ...(row.matched_payout_id ? [row.matched_payout_id] : []),
+    ])];
     const suggestion = {
       ...baseSuggestion,
+      ...(rejectedExpenseIds.length ? { rejectedExpenseIds } : {}),
+      ...(rejectedPayoutIds.length ? { rejectedPayoutIds } : {}),
       lastUnlink: {
         at: new Date().toISOString(),
         was: row.status,
