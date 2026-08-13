@@ -52,8 +52,18 @@ router.get('/', async (req, res, next) => {
     const result = await buildPropertyRecommendations(req.customerId);
     // Server-computed one-tap availability (bet 3): the client shows the
     // priced offer's purchase CTA only when this is true. Additive — the
-    // existing fields are untouched.
-    return res.json({ available: true, oneTap: gateEnvValue('GATE_ONE_TAP_PURCHASE'), ...result });
+    // existing fields are untouched. Monthly-membership accounts are fenced
+    // out (their converter path would fold the add-on into monthly_rate,
+    // contradicting the per-application terms); the write side re-checks.
+    let oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE');
+    if (oneTap) {
+      const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
+      const customer = await db('customers')
+        .where({ id: req.customerId })
+        .first('pipeline_stage', 'monthly_rate', 'billing_mode');
+      oneTap = !!customer && !customerPreservesMonthlyMembership(customer);
+    }
+    return res.json({ available: true, oneTap, ...result });
   } catch (err) {
     next(err);
   }

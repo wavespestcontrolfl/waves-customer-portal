@@ -35,6 +35,8 @@ const { getAvailableSlots } = require('./estimate-slot-availability');
 const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup } = require('./service-report/cross-sell');
 const { acquireOccupancyLock } = require('./scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { customerPreservesMonthlyMembership } = require('./billing-cadence');
+const { arrivalWindowRange } = require('../utils/sms-time-format');
 
 // Single source of the terms the customer agrees to. The exact snapshot is
 // stored on the purchase row at init and rendered verbatim by the client —
@@ -77,6 +79,16 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : '';
 }
 
+// Customer-facing arrival end = window_start + the standard 2-hour arrival
+// window (AGENTS.md: never expose the scheduling window_end — it is the
+// duration/overlap block, not the promise made to the customer). Shared
+// helper so the picker, the confirm summary, and the notification copy can
+// never disagree.
+function arrivalEndFor(windowStart) {
+  const range = arrivalWindowRange(hhmm(windowStart));
+  return range ? range.split('-')[1] : '';
+}
+
 // Same STRICT drift rules as routes/property-recommendations.js's request
 // path: fingerprint, service key, option id, and the priced amount must all
 // match what the server would render RIGHT NOW; Number() coercion traps
@@ -106,7 +118,9 @@ function serializeSlot(slot) {
     slotId: slot.slotId,
     date: slot.date,
     windowStart: slot.windowStart,
-    windowEnd: slot.windowEnd,
+    // The customer-facing ARRIVAL window (start + 2h), never the scheduling
+    // window_end — that is the duration/overlap block (P1, AGENTS.md rule).
+    windowEnd: arrivalEndFor(slot.windowStart) || slot.windowEnd,
     techFirstName: slot.techFirstName || null,
     routeOptimal: !!slot.routeOptimal,
   };
@@ -144,6 +158,15 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
   if (!basis) throw httpError(409, OFFER_CHANGED);
   const offer = basis.payload;
   assertNoDrift(offer, clicked);
+
+  // P0 fence: a monthly-membership customer's converter path PRESERVES the
+  // membership and folds the add-on into customers.monthly_rate — billed as
+  // a monthly spread, not per application. That contradicts the accepted
+  // terms ("billed per application"), so one-tap refuses these accounts
+  // entirely (the GET flag hides the button; this is the write-side fence).
+  if (customerPreservesMonthlyMembership(basis.customer)) {
+    throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
+  }
 
   const pricingAi = require('./customer-pricing-ai');
   const pricingEngine = require('./pricing-engine');
@@ -254,13 +277,18 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
     },
   };
 
-  // Supersede any prior open one-tap attempt: release its live hold, void
-  // its ledger row, archive its draft (never bulk beyond this customer's
-  // own open one-tap drafts).
-  const priorOpen = await db('one_tap_purchases')
+  // Supersede any prior open one-tap attempt. CAS on the still-open states
+  // (P0): a purchase that COMPLETES between a read and a blind id-keyed
+  // update must never be flipped to voided — the status filter inside the
+  // single UPDATE closes that window, and holds are released only for rows
+  // the update actually transitioned (releaseReservation itself only
+  // deletes live customer-less holds, so a committed visit is untouchable).
+  const superseded = await db('one_tap_purchases')
     .where({ customer_id: customerId })
-    .whereIn('status', ['initiated', 'reserved']);
-  for (const prior of priorOpen) {
+    .whereIn('status', ['initiated', 'reserved'])
+    .update({ status: 'voided', updated_at: db.fn.now() })
+    .returning(['id', 'estimate_id', 'scheduled_service_id']);
+  for (const prior of superseded) {
     if (prior.scheduled_service_id) {
       try {
         await slotReservation.releaseReservation({
@@ -272,11 +300,6 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
         logger.warn(`[one-tap-purchase] prior hold release failed (code=${err?.code || 'none'})`);
       }
     }
-  }
-  if (priorOpen.length) {
-    await db('one_tap_purchases')
-      .whereIn('id', priorOpen.map((p) => p.id))
-      .update({ status: 'voided', updated_at: db.fn.now() });
   }
   await db('estimates')
     .where({ customer_id: customerId, source: 'one_tap_purchase', status: 'draft' })
@@ -416,6 +439,42 @@ async function slots({ customerId, purchaseId }) {
   }
 }
 
+// Ownership + billing-lane fence, shared by the advisory pre-check and the
+// authoritative in-transaction re-check. `database` is db or the confirm trx.
+// Fail closed everywhere: an unprovable premises or a thrown ownership read
+// means we cannot prove the family is un-owned, so nothing may be sold.
+async function assertTargetStillPurchasable(database, customer, serviceKey) {
+  if (!customer || customer.active === false || customer.deleted_at) throw httpError(409, OFFER_CHANGED);
+  if (customerPreservesMonthlyMembership(customer)) {
+    throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
+  }
+  const linkage = require('./estimate-property-linkage');
+  const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
+  let ownedKeys;
+  try {
+    const primaryStreet = linkage.normalizedStampedStreet(
+      customer.address_line1, customer.address_line2, customer.city, customer.zip
+    );
+    if (!primaryStreet || linkage.scopeKeyLacksLocality(primaryStreet)) {
+      throw new Error('unprovable primary premises');
+    }
+    ownedKeys = await loadOwnedRecurringServiceKeys(database, customer.id, {
+      streetScope: {
+        estimateStreet: primaryStreet,
+        customerPrimaryStreet: primaryStreet,
+        requireSharedLocality: true,
+      },
+    });
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] ownership re-check failed, refusing (code=${err?.code || 'none'})`);
+    throw httpError(409, OFFER_CHANGED);
+  }
+  const ownedVocab = new Set(ownedKeys.map((k) => OWNED_KEY_TO_OFFER_KEY[k] || k));
+  if (ownedVocab.has(serviceKey)) {
+    throw httpError(409, 'This service is already on your account — nothing was purchased.', { code: 'OWNED_MEANWHILE' });
+  }
+}
+
 async function voidPurchase(purchase) {
   if (purchase.scheduled_service_id) {
     try {
@@ -470,35 +529,16 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer || customer.active === false || customer.deleted_at) throw httpError(409, OFFER_CHANGED);
 
-  // Owned-in-the-meantime re-check (fail closed → release + void): the same
-  // street-scoped ownership authority the offer used. An unknowable picture
-  // voids too — we may not sell a family we cannot prove is un-owned.
-  const linkage = require('./estimate-property-linkage');
-  const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
-  let ownedKeys = null;
+  // Fast-fail ownership pre-check (fail closed → release + void). This runs
+  // UNLOCKED and is advisory only — the authoritative re-check runs again
+  // INSIDE the confirm transaction after the comms lock (P0: two concurrent
+  // confirms for the same family both passed a pre-lock check, serialized on
+  // the lock, and both converted).
   try {
-    const primaryStreet = linkage.normalizedStampedStreet(
-      customer.address_line1, customer.address_line2, customer.city, customer.zip
-    );
-    if (!primaryStreet || linkage.scopeKeyLacksLocality(primaryStreet)) {
-      throw new Error('unprovable primary premises');
-    }
-    ownedKeys = await loadOwnedRecurringServiceKeys(db, customerId, {
-      streetScope: {
-        estimateStreet: primaryStreet,
-        customerPrimaryStreet: primaryStreet,
-        requireSharedLocality: true,
-      },
-    });
+    await assertTargetStillPurchasable(db, customer, purchase.service_key);
   } catch (err) {
-    logger.warn(`[one-tap-purchase] confirm ownership re-check failed, voiding (code=${err?.code || 'none'})`);
     await voidPurchase(purchase);
-    throw httpError(409, OFFER_CHANGED);
-  }
-  const ownedVocab = new Set(ownedKeys.map((k) => OWNED_KEY_TO_OFFER_KEY[k] || k));
-  if (ownedVocab.has(purchase.service_key)) {
-    await voidPurchase(purchase);
-    throw httpError(409, 'This service is already on your account — nothing was purchased.');
+    throw err.status ? err : httpError(409, OFFER_CHANGED);
   }
 
   // Consented chargeable card — REQUIRED, no fallback, never proceed
@@ -535,6 +575,20 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // Rung 6 — comms lock before this txn's first row lock (the converter
       // inserts scheduled_services rows on this trx).
       await lockCustomerComms(trx, customerId);
+
+      // AUTHORITATIVE re-checks, now serialized behind the comms lock (P0:
+      // concurrent confirms both passed the unlocked pre-check). The
+      // purchase row lock + status check also closes the double-confirm and
+      // confirm-vs-reinit races; the fresh customer read re-runs the
+      // ownership and monthly-membership fences against committed state —
+      // a first confirm's converted rows are visible here.
+      const purchaseRow = await trx('one_tap_purchases')
+        .where({ id: purchase.id })
+        .forUpdate()
+        .first();
+      if (!purchaseRow || purchaseRow.status !== 'reserved') throw httpError(409, OFFER_CHANGED);
+      const freshCustomer = await trx('customers').where({ id: customerId }).first();
+      await assertTargetStillPurchasable(trx, freshCustomer, purchase.service_key);
 
       const est = await trx('estimates')
         .where({ id: purchase.estimate_id })
@@ -593,17 +647,29 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         deferCommercialScheduleNotification: true,
       });
 
-      await trx('one_tap_purchases').where({ id: purchase.id }).update({
-        status: 'completed',
-        accepted_at: trx.fn.now(),
-        consent_ip: ip || null,
-        consent_user_agent: userAgent || null,
-        updated_at: trx.fn.now(),
-      });
+      // CAS on the reserved state (belt to the forUpdate braces above): a
+      // zero-row update means someone else transitioned this purchase — the
+      // whole conversion must roll back rather than complete a voided row.
+      const completedCount = await trx('one_tap_purchases')
+        .where({ id: purchase.id, status: 'reserved' })
+        .update({
+          status: 'completed',
+          accepted_at: trx.fn.now(),
+          consent_ip: ip || null,
+          consent_user_agent: userAgent || null,
+          updated_at: trx.fn.now(),
+        });
+      if (!completedCount) throw httpError(409, OFFER_CHANGED);
 
       return { conversion, committed };
     });
   } catch (err) {
+    // Owned-in-the-meantime discovered under the lock: the conversion rolled
+    // back; void the purchase (releases the hold) so it cannot be retried.
+    if (err && err.code === 'OWNED_MEANWHILE') {
+      await voidPurchase(purchase);
+      throw err;
+    }
     // Re-pick recovery: the hold died mid-confirm — everything rolled back;
     // put the purchase back in pick-a-time state (best-effort).
     if (err && (err.code === 'RESERVATION_EXPIRED' || err.code === 'SLOT_UNAVAILABLE')) {
@@ -622,7 +688,9 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   const firstVisit = committed ? {
     date: dateOnly(committed.scheduled_date),
     windowStart: hhmm(committed.window_start),
-    windowEnd: hhmm(committed.window_end),
+    // Customer-facing arrival window (start + 2h), never the scheduling
+    // window_end (duration/overlap block — AGENTS.md arrival-copy rule).
+    windowEnd: arrivalEndFor(committed.window_start) || hhmm(committed.window_end),
   } : null;
 
   // Standard accept-path emails, nothing else: the booked-onboarding email

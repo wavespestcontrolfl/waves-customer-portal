@@ -34,10 +34,19 @@ jest.mock('../models/db', () => {
       forUpdate() { return q; },
       _rows() { return (state.tables[table] || []).filter((r) => filters.every((f) => f(r))); },
       async first() { const r = q._rows()[0]; return r ? clone(r) : undefined; },
-      async update(patch) {
-        const rows = q._rows();
-        rows.forEach((r) => Object.assign(r, patch));
-        return rows.length;
+      update(patch) {
+        const apply = () => {
+          const rows = q._rows();
+          rows.forEach((r) => Object.assign(r, patch));
+          return rows;
+        };
+        // Thenable (resolves to affected count, knex-style) that also
+        // supports .returning(cols) resolving to the updated rows.
+        return {
+          returning: async () => apply().map(clone),
+          then(resolve, reject) { return Promise.resolve(apply().length).then(resolve, reject); },
+          catch(reject) { return this.then(undefined, reject); },
+        };
       },
       insert(row) {
         return {
@@ -360,6 +369,32 @@ describe('initPurchase', () => {
     const oldEstimate = db.__state.tables.estimates.find((e) => e.id === 'est-old');
     expect(oldEstimate.archived_at).toBeTruthy();
   });
+
+  test('re-init can NEVER void a completed purchase (P0 CAS: status filter inside the update)', async () => {
+    db.__state.tables.one_tap_purchases.push({
+      id: 'p-done', customer_id: 'cust-1', estimate_id: 'est-done',
+      status: 'completed', scheduled_service_id: 'ss-done', service_key: 'lawn_care',
+    });
+
+    await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    const done = db.__state.tables.one_tap_purchases.find((p) => p.id === 'p-done');
+    expect(done.status).toBe('completed');
+    // Its committed visit's hold is never touched either.
+    expect(slotReservation.releaseReservation).not.toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledServiceId: 'ss-done' }),
+    );
+  });
+
+  test('customer-facing slot windowEnd is the ARRIVAL window (start + 2h), never the scheduling window_end', async () => {
+    getAvailableSlots.mockResolvedValueOnce({
+      primary: [{ slotId: 's1', date: '2026-08-20', windowStart: '09:00', windowEnd: '09:30', routeOptimal: true }],
+      expander: [],
+      nearby: true,
+    });
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    expect(out.slots.primary[0].windowEnd).toBe('11:00');
+  });
 });
 
 // ── reserve / release ────────────────────────────────────────────────────
@@ -666,7 +701,13 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     server = app.listen(0, () => resolve(`http://127.0.0.1:${server.address().port}`));
   });
 
-  function recsApp({ recsGate, oneTapGate }) {
+  // Default: a per-application account — one-tap eligible. The monthly-
+  // membership fence case overrides billing_mode (null = legacy monthly).
+  const ELIGIBLE_CUSTOMER = {
+    id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 89, billing_mode: 'per_application',
+  };
+
+  function recsApp({ recsGate, oneTapGate, customerRow = ELIGIBLE_CUSTOMER }) {
     jest.resetModules();
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
@@ -678,6 +719,11 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     let router;
     jest.isolateModules(() => {
       router = require('../routes/property-recommendations');
+      // Seed the customer row the oneTap fence reads — into the SAME mock-db
+      // instance this isolated router resolved (resetModules re-ran the
+      // factory, so the file-level db handle is a different instance).
+      const isolatedDb = require('../models/db');
+      isolatedDb.__state.tables.customers = customerRow ? [{ ...customerRow }] : [];
     });
     const app = express();
     app.use(express.json());
@@ -707,5 +753,23 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     const off = await listen(recsApp({ recsGate: true, oneTapGate: false }));
     const gotOff = await (await fetch(`${off}/api/property-recommendations/`)).json();
     expect(gotOff).toMatchObject({ available: true, oneTap: false });
+  });
+
+  test('monthly-membership accounts are fenced out of oneTap even with the gate on (P0)', async () => {
+    // billing_mode null + monthly_rate > 0 + active = the converter's
+    // membership-preserving lane, which would bill the add-on monthly.
+    const url = await listen(recsApp({
+      recsGate: true,
+      oneTapGate: true,
+      customerRow: { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 89, billing_mode: null },
+    }));
+    const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
+    expect(got).toMatchObject({ available: true, oneTap: false });
+  });
+
+  test('a missing customer row fails closed to oneTap:false', async () => {
+    const url = await listen(recsApp({ recsGate: true, oneTapGate: true, customerRow: null }));
+    const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
+    expect(got).toMatchObject({ available: true, oneTap: false });
   });
 });
