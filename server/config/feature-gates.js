@@ -1157,8 +1157,11 @@ const gates = {
   // scorer rank slots with. Opt-in everywhere so the shift in slot ordering is
   // a deliberate flip. Off → the legacy constants apply unchanged.
   // NOTE: consumers read this through gateEnvValue() at CALL time rather than
-  // this baked value, so a flip takes effect without a redeploy.
-  driveTimeCalibration: process.env.GATE_DRIVE_TIME_CALIBRATION === 'true',
+  // this baked value, so a flip takes effect without a redeploy. Parsed with
+  // the SAME helper here so the registry and the startup log can never disagree
+  // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
+  // would calibrate the estimator while logGateStatus reported it disabled.
+  driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).

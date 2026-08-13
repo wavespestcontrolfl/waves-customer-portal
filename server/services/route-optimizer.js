@@ -92,10 +92,14 @@ const AVG_MPH = 30;
 const CALIBRATED_FIXED_MINUTES = 4.25;
 const CALIBRATED_MINUTES_PER_MILE = 2.35;
 
-// Below this, two points are the same place (~260 ft) and the leg is not a
-// drive, so no overhead is charged. Guards the HQ bookends in candidate-slots,
-// where an anchor can coincide with the stop being scored.
-const SAME_PLACE_MILES = 0.05;
+// Only genuinely identical coordinates skip the per-leg overhead — this is a
+// float-comparison epsilon (~6 cm), NOT a "close enough" radius. It exists for
+// the candidate-slots case where an anchor is literally the stop being scored
+// (same customer row, same lat/lng). A neighbourhood-scale threshold would be
+// wrong twice over: adjacent properties are routinely within a few hundred
+// feet, and pricing that hop at zero would let the scorer stack back-to-back
+// slots with no parking time at all.
+const SAME_PLACE_MILES = 1e-6;
 
 /**
  * Convert straight-line miles to estimated drive minutes.
@@ -142,17 +146,6 @@ function fallbackLegMetrics(straightMiles) {
     return { meters, minutes: milesToDriveMinutes(straightMiles) };
   }
   return { meters, minutes: Math.round((meters / 1609.34 / 30) * 60) };
-}
-
-/**
- * Drive minutes between two {lat,lng} points.
- */
-function driveMin(a, b) {
-  if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return 0;
-  return milesToDriveMinutes(haversine(
-    parseFloat(a.lat), parseFloat(a.lng),
-    parseFloat(b.lat), parseFloat(b.lng),
-  ));
 }
 
 /**
@@ -483,6 +476,10 @@ module.exports = {
   haversine,
   HQ,
   milesToDriveMinutes,
-  driveMin,
+  // Exported for the legacy-rounding contract tests. Unlike a coord wrapper
+  // this has real production callers (both fallback legs below); the export
+  // exists so the metre-first arithmetic can be pinned directly rather than
+  // reached through geometry that would have to be reverse-engineered to sit
+  // on the rounding boundary.
   fallbackLegMetrics,
 };

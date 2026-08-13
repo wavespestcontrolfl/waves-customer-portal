@@ -100,6 +100,24 @@ describe('drive-time estimator', () => {
       expect(milesToDriveMinutes(0)).toBe(0);
     });
 
+    /**
+     * The zero-cost case is for IDENTICAL coordinates only. Neighbouring
+     * properties routinely sit a couple of hundred feet apart, and treating
+     * that hop as free would let the scorer stack back-to-back slots with no
+     * parking time — the overhead is exactly what those legs cost.
+     */
+    test('a nearby but distinct address still costs the per-leg overhead', () => {
+      process.env[GATE] = 'true';
+      // ~200 ft north: two houses on the same street, not the same house.
+      const neighbour = { lat: VENICE.lat + 0.000549, lng: VENICE.lng };
+      const miles = require('../services/route-optimizer').haversine(
+        VENICE.lat, VENICE.lng, neighbour.lat, neighbour.lng,
+      );
+      expect(miles).toBeGreaterThan(0.03);
+      expect(miles).toBeLessThan(0.05);
+      expect(driveMin(VENICE, neighbour)).toBeGreaterThanOrEqual(4);
+    });
+
     test.each([['off', undefined], ['on', 'true']])('missing or bad coords return 0 (gate %s)', (_label, val) => {
       if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
       expect(driveMin(null, SARASOTA)).toBe(0);
@@ -149,11 +167,18 @@ describe('drive-time estimator', () => {
       expect(src).toMatch(/milesToDriveMinutes.*require\('\.\.\/route-optimizer'\)|require\('\.\.\/route-optimizer'\)/);
     });
 
+    // Both consumers wrap the SAME model function (asserted by identity above),
+    // so the production wrapper must agree with the model applied directly to
+    // the same straight-line distance. Exercised through auto-dispatch's real
+    // wrapper rather than a test-only one on the optimizer.
     test.each([['off', undefined], ['on', 'true']])(
-      'both surfaces produce identical minutes for the same leg (gate %s)', (_label, val) => {
+      'the production wrapper applies exactly the shared model (gate %s)', (_label, val) => {
         if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
-        expect(routeOptimizer.driveMin(VENICE, SARASOTA))
-          .toBe(autoDispatchGeo.driveMin(VENICE, SARASOTA));
+        const miles = routeOptimizer.haversine(
+          VENICE.lat, VENICE.lng, SARASOTA.lat, SARASOTA.lng,
+        );
+        expect(autoDispatchGeo.driveMin(VENICE, SARASOTA))
+          .toBe(routeOptimizer.milesToDriveMinutes(miles));
       },
     );
   });
