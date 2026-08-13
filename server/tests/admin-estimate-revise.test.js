@@ -397,6 +397,38 @@ describe('reviseAdminEstimate', () => {
     expect(data.reportCtaMint.fingerprintInvalidatedAt).toBeTruthy();
   });
 
+  test('a click-mint revise preserves the delivery witness — a DELIVERED mint must not become "unsent" (audit on 573ee332e P1)', async () => {
+    // The witness (firstDeliveredAt / lastDeliveredAt) is what the
+    // source-performance report and both watcher predicates key on; a
+    // revise replaces estimate_data wholesale and never authors delivery
+    // state, so the prior row's is authoritative (prior-wins).
+    const deliveredMint = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        noEngagementAutomation: true,
+        reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-card-1' },
+        deliveryState: {
+          firstDeliveredAt: '2026-08-13T01:00:00.000Z',
+          lastDeliveredAt: '2026-08-13T02:00:00.000Z',
+          sentChannels: ['email'],
+          channels: { email: { ok: true, provider: 'email' } },
+        },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: deliveredMint });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.deliveryState.firstDeliveredAt).toBe('2026-08-13T01:00:00.000Z');
+    expect(data.deliveryState.lastDeliveredAt).toBe('2026-08-13T02:00:00.000Z');
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

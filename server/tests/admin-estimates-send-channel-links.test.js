@@ -168,6 +168,41 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(patches[0].deliveryState.firstDeliveredAt).toBe(first);
   });
 
+  test('a real delivery advances lastDeliveredAt; a suppressed-SMS-only attempt carries BOTH witnesses forward unchanged (audit on 573ee332e)', async () => {
+    // The watchers compare lastDeliveredAt against their call/task
+    // boundary — a suppressed attempt advances sent_at but must never
+    // advance the witness, or a pre-promise delivery plus a suppressed
+    // later attempt would falsely keep the promise.
+    const first = '2026-07-02T09:00:00.000Z';
+    const last = '2026-07-03T09:00:00.000Z';
+    const row = estimateRow({
+      customer_email: null, // sms-only attempt
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: first, lastDeliveredAt: last } }),
+    });
+    db.mockImplementation(() => makeBuilder(row));
+    // {sent:true} with no providerMessageId = a suppression path, not a
+    // real provider send (isRealProviderSend contract).
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    await router.sendEstimateNow(row, 'sms');
+    const patches = deliveryPatches();
+    expect(patches.length).toBeGreaterThan(0);
+    expect(patches[0].deliveryState.firstDeliveredAt).toBe(first);
+    expect(patches[0].deliveryState.lastDeliveredAt).toBe(last);
+  });
+
+  test('a REAL provider send advances lastDeliveredAt past the prior stamp', async () => {
+    const last = '2026-07-03T09:00:00.000Z';
+    const row = estimateRow({
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: last, lastDeliveredAt: last } }),
+    });
+    db.mockImplementation(() => makeBuilder(row));
+    await router.sendEstimateNow(row, 'email');
+    const patches = deliveryPatches();
+    expect(patches[0].deliveryState.firstDeliveredAt).toBe(last);
+    expect(patches[0].deliveryState.lastDeliveredAt).not.toBe(last);
+    expect(new Date(patches[0].deliveryState.lastDeliveredAt).getTime()).toBeGreaterThan(new Date(last).getTime());
+  });
+
   test('losing the sending claim to a concurrent accept still persists the delivery witness (estimate_data-only merge)', async () => {
     const updatePayloads = [];
     db.mockImplementation(() => {

@@ -47,13 +47,15 @@ describe('composeUnworkedCommsDigest', () => {
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
     );
-    const block = src.split('fe.sent_at > t.created_at')[1].slice(0, 800);
+    const block = src.split('fe.customer_id = t.customer_id')[1].slice(0, 900);
     expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
     // …but a mint an operator LATER actually delivered fulfills the task
     // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
     // — stamped only for REAL deliveries, durable across resends, merged
     // even when a concurrent accept wins the send claim.
-    expect(block).toMatch(/fe\.estimate_data #>> '\{deliveryState,firstDeliveredAt\}'/);
+    // lastDeliveredAt compared against the task boundary itself (audit on
+    // 573ee332e) — never mere existence paired with mutable sent_at.
+    expect(block).toMatch(/\(fe\.estimate_data #>> '\{deliveryState,lastDeliveredAt\}'\)::timestamptz > t\.created_at/);
     expect(block).not.toMatch(/sentChannels/);
     expect(block).not.toMatch(/channels,email,ok/);
   });

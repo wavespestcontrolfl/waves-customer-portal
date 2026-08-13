@@ -233,15 +233,19 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     -- click-to-estimate mints stamp sent_at without any delivery — they
     -- must not fulfill a send obligation (in-hook audit r7b P1 on #3391).
     -- Unless an operator LATER actually sent the mint (GitHub round P2):
-    -- the truth is deliveryState.firstDeliveredAt — stamped only for REAL
-    -- deliveries (stampChannels' suppression-sentinel line), durable
-    -- across resends, and merged even when a concurrent accept wins the
-    -- send claim (GitHub round P1).
+    -- the witness is deliveryState.lastDeliveredAt — advanced only on
+    -- REAL handoffs, carried forward by suppressed attempts, merged even
+    -- when a concurrent accept wins the send claim. Compared against the
+    -- task boundary itself (uncapped audit on 573ee332e): a pre-task
+    -- delivery plus a later suppressed attempt (which advances sent_at
+    -- but not this stamp) must not fulfill the task.
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
-        WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
-          AND (COALESCE(fe.source, '') <> 'service_report_cta'
-               OR COALESCE(fe.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')
+        WHERE fe.customer_id = t.customer_id
+          AND ((COALESCE(fe.source, '') <> 'service_report_cta' AND fe.sent_at > t.created_at)
+               OR (COALESCE(fe.source, '') = 'service_report_cta'
+                   AND COALESCE(fe.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
+                   AND (fe.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > t.created_at))
       ))
       -- Unlinked send_sms tasks fulfill through the source call's SID and
       -- recipient phone (codex r34): a human-typed/approved text to the

@@ -1387,16 +1387,25 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // Stamped only when stampChannels is non-empty — the same real-vs-
   // suppression-sentinel line drawn above — and consumed by the
   // click-mint delivery predicates (source-performance + watchers).
-  const priorFirstDeliveredAt = (() => {
+  const priorDeliveryState = (() => {
     try {
       const data = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
-      return data?.deliveryState?.firstDeliveredAt || null;
+      return data?.deliveryState || null;
     } catch { return null; }
   })();
-  const firstDeliveredAt = priorFirstDeliveredAt
+  const firstDeliveredAt = priorDeliveryState?.firstDeliveredAt
     || (stampChannels.length ? now().toISOString() : null);
+  // lastDeliveredAt advances on every REAL handoff and is carried forward
+  // (never dropped) by suppressed later attempts — the watcher predicates
+  // compare it against their call/task boundary, because pairing mutable
+  // sent_at with the mere existence of firstDeliveredAt let a pre-promise
+  // delivery plus a later suppressed attempt falsely keep the promise
+  // (uncapped audit on 573ee332e).
+  const lastDeliveredAt = stampChannels.length
+    ? now().toISOString()
+    : (priorDeliveryState?.lastDeliveredAt || null);
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -1404,6 +1413,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       failedChannels,
       channels,
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
+      ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
     },
   };
   // Delivery outcomes must survive even if snapshot construction fails;

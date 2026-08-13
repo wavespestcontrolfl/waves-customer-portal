@@ -2141,6 +2141,19 @@ function preserveClickMintMarkersAcrossRevise(nextData, priorData) {
     };
     changed = true;
   }
+  // The delivery witness survives a revise, prior-wins (uncapped audit on
+  // 573ee332e P1): a revise replaces estimate_data wholesale, and dropping
+  // deliveryState turned a genuinely DELIVERED click-mint back into
+  // "unsent" for source-performance and both watcher predicates. A revise
+  // never authors delivery state, so the prior row's is authoritative.
+  // Scoped to click-mint rows (this function's contract) — other sources'
+  // revise behavior is unchanged.
+  if (mark && typeof mark === 'object'
+    && priorData.deliveryState && typeof priorData.deliveryState === 'object'
+    && nextData.deliveryState === undefined) {
+    nextData.deliveryState = priorData.deliveryState;
+    changed = true;
+  }
   return changed;
 }
 // Nested estimatorEngine keys preserved across a revise — the call
