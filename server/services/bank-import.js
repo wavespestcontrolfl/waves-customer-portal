@@ -218,6 +218,39 @@ function isUniqueViolation(err) {
   return err && err.code === '23505';
 }
 
+// The reconciliation echo can fail AFTER the row is linked (the link is
+// real; the echo is the ledger mirror). Those rows carry
+// suggestion.reconcilePending and are retried at the top of every matching
+// pass — scoped to the flag so a reconciliation a HUMAN later rejected is
+// never re-confirmed by the sweep.
+async function retryPendingReconciliations() {
+  const pending = await db('bank_transactions')
+    .where({ status: 'matched_payout' })
+    .whereNotNull('matched_payout_id')
+    .whereRaw("suggestion->>'reconcilePending' = 'true'")
+    .select('id', 'amount', 'matched_payout_id', 'suggestion');
+  let retried = 0;
+  for (const row of pending) {
+    const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled');
+    let done = !!(payout && payout.reconciled); // someone else reconciled meanwhile
+    if (payout && !payout.reconciled) {
+      try {
+        const { reconcilePayout } = require('./stripe-banking');
+        await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, 'bank-import', 'confirmed');
+        done = true;
+        retried++;
+      } catch (err) {
+        logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
+      }
+    }
+    if (done || !payout) {
+      const { reconcilePending, ...rest } = row.suggestion || {};
+      await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+    }
+  }
+  return { pending: pending.length, retried };
+}
+
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
 // without this, ledgerCoverage (and the UI) would keep counting a row whose
 // ledger side no longer exists. Deterministic self-heal at the top of every
@@ -246,14 +279,18 @@ async function resetDanglingLinks() {
  */
 async function runDeterministicMatching() {
   const healed = await resetDanglingLinks();
+  const reconciliation = await retryPendingReconciliations();
   const unmatched = await db('bank_transactions')
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
-  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed };
+  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
+    // An operator's explicit unlink is a ruling: the automatic pass never
+    // re-proposes that exact target. (Manual link/re-link stays possible.)
+    const unlinked = row.suggestion?.lastUnlink || {};
     const transfer = transferSuggestion(row.description);
     if (transfer) {
       if (!row.suggestion || !row.suggestion.ignore) {
@@ -268,7 +305,7 @@ async function runDeterministicMatching() {
       // statement is a merchant refund or payment credit, never a payout,
       // and auto-linking one would hide it from review.
       if (row.account_type !== 'bank') continue;
-      const candidates = await db('stripe_payouts')
+      let payoutQuery = db('stripe_payouts')
         // Only money that actually REACHED the bank can explain a bank
         // credit — pending/in-transit/canceled/failed payouts are excluded.
         .where('status', 'paid')
@@ -282,6 +319,8 @@ async function runDeterministicMatching() {
         })
         .select('id', 'amount', 'reconciled')
         .limit(2);
+      if (unlinked.payoutId) payoutQuery = payoutQuery.whereNot('id', unlinked.payoutId);
+      const candidates = await payoutQuery;
       const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
         try {
@@ -300,7 +339,14 @@ async function runDeterministicMatching() {
                 const { reconcilePayout } = require('./stripe-banking');
                 await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, 'bank-import', 'confirmed');
               } catch (reconErr) {
+                // The link is real; the echo failed. Flag the row so
+                // retryPendingReconciliations picks it up on every later
+                // pass instead of the inconsistency being logged and lost.
                 logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed: ${reconErr.message}`);
+                await db('bank_transactions').where({ id: row.id }).update({
+                  suggestion: { ...(row.suggestion || {}), reconcilePending: true },
+                  updated_at: new Date(),
+                });
               }
             }
           }
@@ -313,7 +359,7 @@ async function runDeterministicMatching() {
       continue;
     }
 
-    const candidates = await db('expenses')
+    let expenseQuery = db('expenses')
       .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
       .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
       .whereNotExists(function claimed() {
@@ -324,6 +370,8 @@ async function runDeterministicMatching() {
       // "exactly one". The ±5-day amount-filtered window keeps this small;
       // only the operator-facing suggestion list below is bounded.
       .select('id', 'amount', 'description', 'vendor_name', 'expense_date');
+    if (unlinked.expenseId) expenseQuery = expenseQuery.whereNot('id', unlinked.expenseId);
+    const candidates = await expenseQuery;
     // Auto-link needs exact cents + vendor evidence + a single such candidate.
     const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c));
     if (strong.length === 1) {

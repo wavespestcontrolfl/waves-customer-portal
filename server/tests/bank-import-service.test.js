@@ -18,12 +18,13 @@ const state = {
   expenses: [],
   updates: [],
   queried: [],
+  builders: [],
 };
 
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['where', 'andWhere', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotExists',
+  ['where', 'andWhere', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -36,11 +37,23 @@ function makeBuilder(table) {
   });
   b.then = (resolve, reject) => {
     state.queried.push(table);
-    const rows = table === 'bank_transactions' ? state.bankRows
+    let rows = table === 'bank_transactions' ? state.bankRows
       : table === 'stripe_payouts' ? state.payouts
         : table === 'expenses' ? state.expenses : [];
+    // mirror the status + pending-flag filters so the unmatched loop and the
+    // reconciliation sweep each see only their own rows (a row with no
+    // status set counts as 'unmatched')
+    if (table === 'bank_transactions') {
+      const statusWhere = b.where.mock.calls.map(c => c[0]).find(a => a && typeof a === 'object' && 'status' in a);
+      if (statusWhere) rows = rows.filter(r => (r.status || 'unmatched') === statusWhere.status);
+      if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
+        rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
+      }
+    }
     return Promise.resolve(rows).then(resolve, reject);
   };
+  b.first = jest.fn(() => b.then(rows => rows[0]));
+  state.builders.push({ table, b });
   return b;
 }
 
@@ -64,6 +77,7 @@ beforeEach(() => {
   state.expenses = [];
   state.updates = [];
   state.queried = [];
+  state.builders = [];
   reconcilePayout.mockClear();
 });
 
@@ -345,6 +359,40 @@ describe('runDeterministicMatching', () => {
     expect(summary.expensesLinked).toBe(0);
     expect(state.queried.filter(t => t === 'expenses')).toHaveLength(0);
     expect(state.updates[0].patch.suggestion.ignore).toBe(true);
+  });
+
+  test('a failed reconciliation echo flags the row and the next pass retries it', async () => {
+    // Pass 1: link succeeds, echo fails → row gains suggestion.reconcilePending
+    reconcilePayout.mockRejectedValueOnce(new Error('bank_reconciliation insert failed'));
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    let summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+    const flagged = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.reconcilePending === true);
+    expect(flagged).toBeDefined();
+
+    // Pass 2: the row is matched_payout + flagged → sweep retries and clears
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(1);
+    expect(reconcilePayout).toHaveBeenLastCalledWith('po-1', 2418.66, expect.stringContaining('retry'), 'bank-import', 'confirmed');
+    const cleared = state.updates.find(u => u.patch.suggestion && !('reconcilePending' in u.patch.suggestion));
+    expect(cleared).toBeDefined();
+  });
+
+  test("an operator's unlink ruling excludes that exact target from automatic rematching", async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: { lastUnlink: { was: 'matched_payout', payoutId: 'po-1' } } },
+      { id: 'bt-2', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { lastUnlink: { was: 'matched_expense', expenseId: 'exp-1' } } },
+    ];
+    state.payouts = [];
+    state.expenses = [];
+    await runDeterministicMatching();
+    const payoutBuilder = state.builders.find(x => x.table === 'stripe_payouts');
+    expect(payoutBuilder.b.whereNot).toHaveBeenCalledWith('id', 'po-1');
+    const expenseBuilder = state.builders.find(x => x.table === 'expenses');
+    expect(expenseBuilder.b.whereNot).toHaveBeenCalledWith('id', 'exp-1');
   });
 
   test('an already-flagged transfer row is not re-flagged (idempotent)', async () => {
