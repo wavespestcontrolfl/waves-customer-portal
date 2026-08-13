@@ -3724,26 +3724,20 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // closed) keeps the method saved with consent recorded, skips
       // enrollment, and parks a billing office exception — no rethrow,
       // matching this branch's existing webhook-retry doctrine.
-      let payerBlocked = false;
-      let payerCheckFailed = false;
-      try {
-        const resolvedPayer = await require('../services/payer')
-          .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
-        payerBlocked = !!resolvedPayer?.payerId;
-      } catch (payerErr) {
-        payerBlocked = true;
-        payerCheckFailed = true;
-        logger.warn(`[stripe-webhook] payer check failed before portal-add-method enrollment — skipping (fail closed): ${payerErr.message}`);
-      }
-      if (payerBlocked) {
+      // A TRANSIENT lookup failure must RETHROW, not skip: returning here
+      // marks the event processed, Stripe never retries, and — for hosted
+      // redirects / micro-deposit verification, where this webhook is the
+      // ONLY completion path — a self-pay customer's method stays
+      // permanently unenrolled. Every step above is idempotent, so the
+      // retry re-enters safely. Only a CONFIRMED payer-billed result
+      // returns successfully (that skip is correct and permanent).
+      const resolvedPayer = await require('../services/payer')
+        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
+      if (resolvedPayer?.payerId) {
         await require('../services/notification-service').notifyAdmin(
           'billing',
-          payerCheckFailed
-            ? 'Card saved without Auto Pay (payer check failed)'
-            : 'Card saved without Auto Pay (payer-billed)',
-          payerCheckFailed
-            ? 'A portal card save (webhook completion) skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — review the account and enroll manually if it is self-pay.'
-            : 'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+          'Card saved without Auto Pay (payer-billed)',
+          'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
           { link: `/admin/customers/${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
         ).catch(() => {});
         return;

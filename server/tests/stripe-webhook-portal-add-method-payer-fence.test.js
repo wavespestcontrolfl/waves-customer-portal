@@ -114,12 +114,13 @@ describe('portal-add-method webhook payer fence', () => {
     );
   });
 
-  test('an unknowable payer picture fails CLOSED: no enrollment, office exception, no throw', async () => {
+  test('a transient payer-lookup failure RETHROWS so Stripe retries — never a permanent silent skip', async () => {
+    // Returning success would mark the event processed; for micro-deposit
+    // verification this webhook is the ONLY completion path, so a transient
+    // DB failure would permanently strand a self-pay enrollment. All steps
+    // are idempotent — the retry re-enters safely.
     PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
-    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).resolves.toBeUndefined();
+    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).rejects.toThrow('payer lookup down');
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
-      'billing', expect.stringMatching(/payer check failed/), expect.any(String), expect.any(Object),
-    );
   });
 });
