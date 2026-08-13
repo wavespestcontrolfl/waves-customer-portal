@@ -25,17 +25,13 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
-const { stripThinkingBlocks } = require('./llm/deep');
+const { dispatchWithFallback } = require('./llm/call');
 const PhotoService = require('./photos');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MAX_ATTEMPTS = 3;
 const MIN_CONFIDENCE_FOR_SCORE = 0.4;
 
-const PROMPT = `You are comparing two photos of the same lawn: the first is labeled BEFORE (pre-treatment), the second AFTER (post-treatment). Describe ONLY the visible differences between the two photos.
+const PROMPT = `You are comparing two photos of the same lawn: the FIRST image is BEFORE (pre-treatment), the SECOND image is AFTER (post-treatment). Describe ONLY the visible differences between the two photos.
 
 Rules:
 - Describe only what is visible. NEVER speculate about causes, products, treatments, pests, or diseases.
@@ -84,36 +80,49 @@ function validateVerdict(verdict) {
   return verdict;
 }
 
+function parseVerdictText(text) {
+  if (!text || !String(text).trim()) throw new Error('empty vision response');
+  return JSON.parse(String(text).replace(/```json|```/g, '').trim());
+}
+
+// Cross-provider by policy, not a direct Anthropic call: an Anthropic outage
+// must fail over to the OpenAI leg instead of burning all three attempts and
+// terminally abandoning a valid photo pair. TEXT_POLICIES.visionAnalysis is
+// the repo's vision route (Anthropic VISION → OpenAI balanced); every adapter
+// in llm/call.js accepts the { text, images } payload (the completed-service
+// photo-analysis endpoint is the precedent), and the adapters own provider
+// quirks (thinking-block handling, sampling-control strips). The validator
+// runs INSIDE the dispatch so a malformed primary verdict fails over to the
+// secondary before this function ever throws.
 async function callVisionModel(prePhoto, postPhoto) {
-  if (!Anthropic) throw new Error('anthropic sdk unavailable');
-  const client = new Anthropic();
-  const response = await anthropicCreateWithSamplingRetry(client, {
-    model: MODELS.VISION,
-    max_tokens: 600,
-    temperature: 0.2, // pin output for repeatable verdicts on the same pair
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: 'BEFORE (pre-treatment) photo:' },
-        { type: 'image', source: { type: 'base64', media_type: prePhoto.mimeType, data: prePhoto.data } },
-        { type: 'text', text: 'AFTER (post-treatment) photo:' },
-        { type: 'image', source: { type: 'base64', media_type: postPhoto.mimeType, data: postPhoto.data } },
-        { type: 'text', text: PROMPT },
+  const result = await dispatchWithFallback(
+    MODELS.TEXT_POLICIES.visionAnalysis,
+    {
+      text: PROMPT,
+      images: [
+        { data: prePhoto.data, mimeType: prePhoto.mimeType },
+        { data: postPhoto.data, mimeType: postPhoto.mimeType },
       ],
-    }],
-  });
-  // Reasoning-capable VISION models can emit thinking / redacted_thinking
-  // blocks ahead of the text block — a blind content[0].text read would turn
-  // every valid response into a "failure" and terminally abandon the row.
-  // Strip them, then take the FIRST text block wherever it lands.
-  const stripped = stripThinkingBlocks(response);
-  // First text-bearing block (typeless blocks pass stripThinkingBlocks —
-  // tolerate them like deep.js does; tool_use blocks have no .text).
-  const textBlock = (stripped?.content || []).find((b) => b && typeof b.text === 'string' && b.text);
-  const text = textBlock?.text;
-  if (!text) throw new Error('empty vision response');
-  const verdict = JSON.parse(String(text).replace(/```json|```/g, '').trim());
-  return validateVerdict(verdict);
+      jsonMode: false,
+      maxTokens: 600,
+      temperature: 0.2, // pin output for repeatable verdicts on the same pair
+    },
+    {
+      validate: (candidate) => {
+        try {
+          validateVerdict(parseVerdictText(candidate.text));
+          return null;
+        } catch (err) {
+          return `invalid_vision_verdict: ${err.message}`;
+        }
+      },
+    },
+  );
+  if (!result?.ok) {
+    const detail = (result?.failures || []).map((f) => `${f.provider}:${f.reason}`).join(', ');
+    throw new Error(`vision dispatch failed: ${result?.reason || 'unknown'}${detail ? ` (${detail})` : ''}`);
+  }
+  return validateVerdict(parseVerdictText(result.text));
 }
 
 const VisionDelta = {

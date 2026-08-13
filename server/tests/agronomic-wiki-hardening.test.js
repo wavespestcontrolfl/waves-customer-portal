@@ -61,7 +61,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
         rec.ops.push([m, args]);
         if (typeof args[0] === 'function') args[0].call(b);
@@ -326,6 +326,39 @@ describe('generatePage', () => {
     expect([...whereIn[1][1]].sort()).toEqual(['product/talstar-p', 'seasonal/august', 'track/a']);
     // only pages not already stale get touched
     expect(rec.ops).toContainEqual(['where', [{ stale_flag: false }]]);
+  });
+
+  test('markOutcomePagesStale includes condition pages matched via the customer assessment observations', async () => {
+    const state = useDb({
+      knowledge_entries: (rec) => {
+        const isConditionSelect = rec.ops.some(([m, args]) => m === 'where' && args[0]?.category === 'condition');
+        return isConditionSelect
+          ? [{ slug: 'condition/chinch-bugs', title: 'Condition: Chinch Bugs' },
+             { slug: 'condition/brown-patch', title: 'Condition: Brown Patch' }]
+          : [];
+      },
+      products_catalog: [],
+      product_aliases: [],
+      lawn_assessments: [{ observations: 'Heavy chinch bugs along the driveway strip' }],
+    });
+
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-3',
+      customer_id: 'cust-1',
+      products_applied: JSON.stringify([{ name: 'Talstar P' }]),
+      grass_track: 'A',
+      treatment_date: '2026-08-05T12:00:00Z',
+    });
+
+    expect(flagged).toBe(1);
+    // The updating call is the one carrying whereIn — condition page whose
+    // name appears in this customer's observations is included; the
+    // non-matching condition page is not.
+    const updateRec = state.calls.knowledge_entries.find((r) => r.ops.some(([m]) => m === 'whereIn'));
+    const whereIn = updateRec.ops.find(([m]) => m === 'whereIn');
+    expect([...whereIn[1][1]].sort()).toEqual([
+      'condition/chinch-bugs', 'product/talstar-p', 'seasonal/august', 'track/a',
+    ]);
   });
 
   test('markOutcomePagesStale tolerates junk input and never throws', async () => {

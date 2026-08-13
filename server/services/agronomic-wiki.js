@@ -1178,6 +1178,29 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         if (monthNames[month - 1]) slugs.add(`seasonal/${monthNames[month - 1]}`);
       }
 
+      // Condition pages aggregate outcomes by CUSTOMER set
+      // (updateConditionPage: assessments whose observations mention the
+      // condition → those customers' outcomes) — so any condition page whose
+      // name appears in this customer's assessment observations consumes
+      // this outcome and must re-gen too. Same substring semantics as the
+      // ilike %name% query, inverted in JS over the (small) page set.
+      if (outcome.customer_id) {
+        const conditionPages = await db('knowledge_entries')
+          .where({ category: 'condition' })
+          .select('slug', 'title');
+        if (conditionPages.length) {
+          const observationRows = await db('lawn_assessments')
+            .where({ customer_id: outcome.customer_id })
+            .whereNotNull('observations')
+            .select('observations');
+          const haystack = observationRows.map((r) => String(r.observations).toLowerCase());
+          for (const page of conditionPages) {
+            const name = String(page.title || '').replace(/^Condition:\s*/i, '').toLowerCase();
+            if (name && haystack.some((obs) => obs.includes(name))) slugs.add(page.slug);
+          }
+        }
+      }
+
       if (!slugs.size) return 0;
       const flagged = await db('knowledge_entries')
         .whereIn('slug', [...slugs])

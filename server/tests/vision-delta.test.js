@@ -16,6 +16,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/models', () => ({
   VISION: 'test-model',
   PROVIDER: { ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' },
+  TEXT_POLICIES: {
+    visionAnalysis: {
+      name: 'visionAnalysis',
+      primary: { provider: 'anthropic', model: 'test-model' },
+      fallback: { provider: 'openai', model: 'test-openai' },
+    },
+  },
 }));
 jest.mock('../services/photos', () => ({
   getPhotoBase64: jest.fn(),
@@ -23,14 +30,21 @@ jest.mock('../services/photos', () => ({
 jest.mock('../services/agronomic-wiki', () => ({
   markOutcomePagesStale: jest.fn(async () => 1),
 }));
-jest.mock('@anthropic-ai/sdk', () => {
-  return class MockAnthropic {
-    constructor() {
-      this.messages = { create: (...args) => global.__anthropicCreate(...args) };
+jest.mock('../services/llm/call', () => ({
+  dispatchWithFallback: jest.fn(async (policy, payload, { validate } = {}) => {
+    const result = await global.__visionDispatch(policy, payload);
+    if (!result?.ok) return { failures: [], ...result };
+    if (validate) {
+      const rejection = validate(result, policy?.primary);
+      if (rejection) {
+        return { ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', model: 'test-model', reason: String(rejection) }] };
+      }
     }
-  };
-});
+    return { provider: 'anthropic', model: result.model || 'test-model', failures: [], ...result };
+  }),
+}));
 
+const MODELS = require('../config/models');
 const VisionDelta = require('../services/vision-delta');
 const PhotoService = require('../services/photos');
 const AgronomicWiki = require('../services/agronomic-wiki');
@@ -87,7 +101,7 @@ const OUTCOME = {
 };
 
 function verdictResponse(verdict) {
-  return { content: [{ text: JSON.stringify(verdict) }], model: 'test-model' };
+  return { ok: true, text: JSON.stringify(verdict), model: 'test-model' };
 }
 
 const GOOD_VERDICT = {
@@ -107,7 +121,7 @@ beforeEach(() => {
   PhotoService.getPhotoBase64.mockReset();
   PhotoService.getPhotoBase64.mockResolvedValue({ data: 'aGk=', mimeType: 'image/jpeg' });
   AgronomicWiki.markOutcomePagesStale.mockClear();
-  global.__anthropicCreate = jest.fn(async () => verdictResponse(GOOD_VERDICT));
+  global.__visionDispatch = jest.fn(async () => verdictResponse(GOOD_VERDICT));
 });
 
 afterAll(() => {
@@ -123,7 +137,7 @@ describe('sweepUnscoredOutcomes gating', () => {
     const res = await VisionDelta.sweepUnscoredOutcomes();
     expect(res).toEqual({ skipped: 'gated' });
     expect(state.calls.treatment_outcomes).toBeUndefined();
-    expect(global.__anthropicCreate).not.toHaveBeenCalled();
+    expect(global.__visionDispatch).not.toHaveBeenCalled();
   });
 
   test('gate must be exactly "true" — "1" stays gated', async () => {
@@ -153,11 +167,11 @@ describe('scoreOutcome', () => {
     // Both photos fetched, one vision call with both images labeled
     expect(PhotoService.getPhotoBase64).toHaveBeenCalledWith('lawn/pre.jpg');
     expect(PhotoService.getPhotoBase64).toHaveBeenCalledWith('lawn/post.jpg');
-    expect(global.__anthropicCreate).toHaveBeenCalledTimes(1);
-    const request = global.__anthropicCreate.mock.calls[0][0];
-    expect(request.model).toBe('test-model');
-    const content = request.messages[0].content;
-    expect(content.filter((c) => c.type === 'image')).toHaveLength(2);
+    expect(global.__visionDispatch).toHaveBeenCalledTimes(1);
+    const [policy, payload] = global.__visionDispatch.mock.calls[0];
+    expect(policy).toBe(MODELS.TEXT_POLICIES.visionAnalysis);
+    expect(payload.images).toHaveLength(2);
+    expect(payload.text).toContain('FIRST image is BEFORE');
 
     // A persisted score marks the outcome's wiki pages regenerate-eligible
     expect(AgronomicWiki.markOutcomePagesStale).toHaveBeenCalledTimes(1);
@@ -168,7 +182,7 @@ describe('scoreOutcome', () => {
 
   test('a genuine out-of-range number is clamped, not rejected', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, overall_change: 250 }));
+    global.__visionDispatch = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, overall_change: 250 }));
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(true);
     expect(res.score).toBe(100);
@@ -178,7 +192,7 @@ describe('scoreOutcome', () => {
   test('non-comparable verdict stores jsonb with NULL score and still stamps scored_at', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
     const verdict = { ...GOOD_VERDICT, comparable: false, notes: 'Different angles.' };
-    global.__anthropicCreate = jest.fn(async () => verdictResponse(verdict));
+    global.__visionDispatch = jest.fn(async () => verdictResponse(verdict));
 
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(true);
@@ -192,7 +206,7 @@ describe('scoreOutcome', () => {
 
   test('low confidence (<0.4) also leaves score NULL but stamps scored_at', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, confidence: 0.2 }));
+    global.__visionDispatch = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, confidence: 0.2 }));
 
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(true);
@@ -204,7 +218,7 @@ describe('scoreOutcome', () => {
 
   test('LLM failure increments attempts WITHOUT stamping scored_at', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => { throw new Error('overloaded'); });
+    global.__visionDispatch = jest.fn(async () => { throw new Error('overloaded'); });
 
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(false);
@@ -234,7 +248,7 @@ describe('scoreOutcome', () => {
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res).toEqual({ ok: false, reason: 'already_scored' });
     expect(state.updates.treatment_outcomes).toBeUndefined();
-    expect(global.__anthropicCreate).not.toHaveBeenCalled();
+    expect(global.__visionDispatch).not.toHaveBeenCalled();
   });
 
   test('missing photo key rows are refused without burning an attempt', async () => {
@@ -244,15 +258,13 @@ describe('scoreOutcome', () => {
     expect(state.updates.treatment_outcomes).toBeUndefined();
   });
 
-  test('thinking blocks ahead of the text block do not break extraction', async () => {
+  test('a fallback-leg success (Anthropic outage → OpenAI) persists normally', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => ({
-      content: [
-        { type: 'thinking', thinking: 'comparing turf density...' },
-        { type: 'redacted_thinking', data: 'xxx' },
-        { type: 'text', text: JSON.stringify(GOOD_VERDICT) },
-      ],
-      model: 'test-model',
+    global.__visionDispatch = jest.fn(async () => ({
+      ok: true,
+      text: JSON.stringify(GOOD_VERDICT),
+      model: 'test-openai',
+      fallbackUsed: true,
     }));
 
     const res = await VisionDelta.scoreOutcome('o1');
@@ -265,7 +277,7 @@ describe('scoreOutcome', () => {
 
   test('unparseable model output counts as a failed attempt', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => ({ content: [{ text: 'not json' }] }));
+    global.__visionDispatch = jest.fn(async () => ({ ok: true, text: 'not json' }));
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(false);
     expect(state.updates.treatment_outcomes).toEqual([{ vision_score_attempts: 1 }]);
@@ -283,7 +295,7 @@ describe('scoreOutcome', () => {
     ['notes is a number', { ...GOOD_VERDICT, notes: 42 }],
   ])('invalid verdict (%s) is a failed attempt — no stamp, no trusted zero, no stale-flagging', async (_label, verdict) => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => verdictResponse(verdict));
+    global.__visionDispatch = jest.fn(async () => verdictResponse(verdict));
 
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(false);
@@ -293,12 +305,12 @@ describe('scoreOutcome', () => {
 
   test('null-score verdicts and failures never stale-flag wiki pages', async () => {
     useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, comparable: false }));
+    global.__visionDispatch = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, comparable: false }));
     await VisionDelta.scoreOutcome('o1');
     expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
 
     useDb({ treatment_outcomes: [OUTCOME] });
-    global.__anthropicCreate = jest.fn(async () => { throw new Error('overloaded'); });
+    global.__visionDispatch = jest.fn(async () => { throw new Error('overloaded'); });
     await VisionDelta.scoreOutcome('o1');
     expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
   });
@@ -336,7 +348,7 @@ describe('sweepUnscoredOutcomes selection', () => {
 
     // Both rows got a persisted verdict
     expect(state.updates.treatment_outcomes).toHaveLength(2);
-    expect(global.__anthropicCreate).toHaveBeenCalledTimes(2);
+    expect(global.__visionDispatch).toHaveBeenCalledTimes(2);
   });
 
   test('default limit is 25', async () => {
