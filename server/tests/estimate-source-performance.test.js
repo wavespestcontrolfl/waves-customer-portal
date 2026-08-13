@@ -121,13 +121,14 @@ describe('sourcePerformance', () => {
       [
         // Zero-delivery mint: sent + sent_at stamped at mint, nothing
         // delivered — drafted, NOT sent.
-        { id: 'm1', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: created, cta_real_delivery: false },
+        { id: 'm1', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: created, cta_first_delivered_at: null },
         // Viewed via the tap's own redirect seconds later — still not
         // delivery evidence for this source.
-        { id: 'm2', source: 'service_report_cta', status: 'viewed', created_at: created, sent_at: created, viewed_at: hoursAfter(created, 0.01), cta_real_delivery: null },
-        // Operator later REALLY sent it: sent_at refreshed to the handoff;
-        // latency runs to the handoff, not the earlier self-serve view.
-        { id: 'm3', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: hoursAfter(created, 30), viewed_at: hoursAfter(created, 0.01), cta_real_delivery: true },
+        { id: 'm2', source: 'service_report_cta', status: 'viewed', created_at: created, sent_at: created, viewed_at: hoursAfter(created, 0.01), cta_first_delivered_at: null },
+        // Operator REALLY sent it at +30h, then RESENT at +80h (sent_at
+        // overwritten): latency runs to the durable FIRST handoff, not
+        // the resend, and never the earlier self-serve view.
+        { id: 'm3', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: hoursAfter(created, 80), viewed_at: hoursAfter(created, 0.01), cta_first_delivered_at: hoursAfter(created, 30) },
       ],
       [], // resolved query
     ];

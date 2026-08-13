@@ -491,6 +491,19 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     expect(block).toMatch(/status: 'resolved'/);
   });
 
+  test('DECLINE terminalizes the linked CTA request too — a rejected offer must not page staff forever (GitHub round P1, source contract)', () => {
+    // Mirrors the acceptance pin: same source scoping, same linkage match,
+    // resolved in the SAME decline transaction.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const declineIdx = src.indexOf("status: 'declined', declined_at");
+    expect(declineIdx).toBeGreaterThan(0);
+    const block = src.slice(declineIdx, declineIdx + 1400);
+    expect(block).toMatch(/declinedCount && estimate\.source === 'service_report_cta'/);
+    expect(block).toMatch(/whereNotIn\('status', OPEN_REQUEST_TERMINAL_STATUSES\)/);
+    expect(block).toMatch(/pricing_revision->'mintedEstimate'->>'id' = \?/);
+    expect(block).toMatch(/status: 'resolved'/);
+  });
+
   test('a non-drift mint failure is a retryable 503 — the card may only confirm durable state', async () => {
     mintReportClickEstimate.mockRejectedValue(new Error('snapshot did not freeze'));
     const { q } = clickDb();

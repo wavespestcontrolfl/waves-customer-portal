@@ -736,6 +736,55 @@ describe('mintReportClickEstimate', () => {
     expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
   });
 
+  test('a SCHEDULED delivery refuses a superseding mint as DRIFT — archiving would silently cancel the planned send (GitHub round P0)', async () => {
+    // The scheduler skips archived rows, so archival kills the token the
+    // customer may already hold; and unlike 'sending', the job can be days
+    // out — drift (card refresh), not a "retry shortly".
+    const scheduled = priorMint({
+      id: 'est-scheduled', status: 'scheduled',
+      estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-DIFFERENT' } },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [scheduled] });
+    await expect(mintReportClickEstimate(trx, baseArgs({ deduped: false })))
+      .rejects.toThrow(ClickEstimateDriftError);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a scheduled row with the UNCHANGED fingerprint reuses — the tap hands back the token staff planned to deliver', async () => {
+    const scheduled = priorMint({ id: 'est-scheduled', status: 'scheduled' });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [scheduled] });
+    const out = await mintReportClickEstimate(trx, baseArgs({
+      deduped: true,
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-scheduled', token: 'tok-old' } }) },
+    }));
+    expect(out.reused).toBe(true);
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('an accepted mint whose service was since CANCELED is terminal history — the tap mints a fresh offer instead of the dead end (GitHub round P1)', async () => {
+    // Default ownership mock: lawn held, pest_control NOT — the post-cancel
+    // state. The accepted row must neither satisfy the tap (auto-resolved
+    // request, nothing acceptable) nor block the fresh mint.
+    const { trx, ops } = fakeTrx({
+      priorEstimateRows: [priorMint({ status: 'accepted' })],
+    });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    expect(out.reused).toBe(false);
+    expect(out.acceptedReuse).toBeUndefined();
+    expect(ops.inserts).toHaveLength(1);
+    // The accepted row itself is never archived.
+    const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at);
+    expect(archive).toBeUndefined();
+  });
+
+  test('the turf-profile revalidation read takes the row lock — the admin turf PUT writes without the customer lock (GitHub round P1)', async () => {
+    const { trx } = fakeTrx();
+    const args = baseArgs();
+    await mintReportClickEstimate(trx, args);
+    expect(args.deps.pricingAi.loadTurfProfile).toHaveBeenCalledWith(trx, 'cust-9', { forUpdate: true });
+  });
+
   test('a CRASHED send (sending, window lapsed) supersedes like any dead lineage row', async () => {
     const crashed = priorMint({
       id: 'est-crashed', status: 'sending', expires_at: new Date('2026-08-01T00:00:00Z'),
@@ -771,5 +820,9 @@ describe('priorMintStillLive', () => {
   test('an in-flight operator send (sending, window not lapsed) is LIVE; a stale claim (lapsed) is a crashed send and dead (GitHub round P0)', () => {
     expect(priorMintStillLive({ status: 'sending', expires_at: '2026-08-20' }, now)).toBe(true);
     expect(priorMintStillLive({ status: 'sending', expires_at: '2026-08-01' }, now)).toBe(false);
+  });
+  test('a SCHEDULED delivery is live even past its old expiry — the send finalization writes the real one (GitHub round P0)', () => {
+    expect(priorMintStillLive({ status: 'scheduled', expires_at: '2026-08-20' }, now)).toBe(true);
+    expect(priorMintStillLive({ status: 'scheduled', expires_at: '2026-08-01' }, now)).toBe(true);
   });
 });

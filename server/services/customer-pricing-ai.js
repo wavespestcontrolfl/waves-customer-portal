@@ -309,13 +309,23 @@ async function loadCurrentServiceKeys(db, customer) {
   }
 }
 
-async function loadTurfProfile(db, customerId) {
-  const rows = await safeSelect(db, 'customer_turf_profiles', q => q
-    .where({ customer_id: customerId })
-    .where(function activeScope() {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .first());
+async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
+  // forUpdate (GitHub #3391 round): the click-to-estimate mint re-reads the
+  // turf row under its transaction to compare against the composition's
+  // pricing-source stamp, but the admin turf-profile PUT updates the row
+  // without the customer lock — an unlocked read here could pass the
+  // comparison against values that are already being replaced, publishing a
+  // stale lawn price. Locking the active row serializes the mint against
+  // that writer (the PUT touches only this table, so no lock cycle).
+  const rows = await safeSelect(db, 'customer_turf_profiles', q => {
+    let query = q
+      .where({ customer_id: customerId })
+      .where(function activeScope() {
+        this.where({ active: true }).orWhereNull('active');
+      });
+    if (forUpdate) query = query.forUpdate();
+    return query.first();
+  });
   return rows || null;
 }
 

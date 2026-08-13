@@ -44,6 +44,13 @@ class ClickEstimateDriftError extends Error {
 function priorMintStillLive(row, now) {
   if (!row || row.archived_at) return false;
   if (row.status === 'accepted') return true;
+  // 'scheduled' is a staff-PLANNED delivery (GitHub #3391 round P0): the
+  // scheduler skips archived rows, so archiving one silently cancels the
+  // planned send and kills the token the customer may already hold. Live
+  // regardless of expires_at — the send finalization writes the real
+  // expiry, so a lapsed value here just means the send hasn't run yet
+  // (unlike 'sending', where a lapsed window is a crashed claim).
+  if (String(row.status || '') === 'scheduled') return true;
   // 'sending' is an operator send IN FLIGHT (GitHub #3391 round P0): the
   // admin workflow commits the claim BEFORE the provider calls, and
   // finalization does not reject an archived row — so a mid-send row is a
@@ -172,6 +179,10 @@ async function mintReportClickEstimate(trx, {
   const supersedableMints = (priorMintRows || []).filter((row) => (
     !row.archived_at && row.status !== 'accepted' && !row.price_locked_at
     && !staffRevisedAndLive(row)
+    // Scheduled = staff-planned delivery; the scheduler skips archived
+    // rows, so archival silently cancels the send (GitHub round P0). The
+    // drift blocker below refuses the tap; this is the belt.
+    && String(row.status || '') !== 'scheduled'
   ));
 
   const context = crossSell?.engineContext;
@@ -227,7 +238,11 @@ async function mintReportClickEstimate(trx, {
   // from; re-read both rows under the lock and treat any change as offer
   // drift — the recompute replays captured facts, so it would only confirm
   // stale inputs.
-  const freshTurf = await loadTurfProfile(trx, customer.id);
+  // forUpdate (GitHub round P1): the admin turf-profile PUT writes without
+  // the customer lock, so an unlocked read could pass this comparison
+  // against values already being replaced — lock the active turf row so
+  // the stamp compare and the insert see one consistent profile.
+  const freshTurf = await loadTurfProfile(trx, customer.id, { forUpdate: true });
   const stamp = context.pricingSourceStamp;
   const numOrNull = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
   const strOrNull = (v) => (v === null || v === undefined ? null : String(v));
@@ -265,10 +280,26 @@ async function mintReportClickEstimate(trx, {
   // tap arrive deduped=false with the offer unchanged, and archiving the
   // live estimate the customer already holds would kill their token
   // mid-consideration.
-  const fingerprintMatch = liveMints.find((row) => {
+  let fingerprintMatch = liveMints.find((row) => {
     const mark = reportCtaMintOf(row);
     return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
   });
+
+  // Ownership revalidation INSIDE the transaction, BEFORE any reuse
+  // (in-hook audits r7+r8 P0; hoisted above the accepted fast path in the
+  // GitHub round): context.currentServiceKeys was loaded at composition,
+  // before this customer lock. Same loader + street-scope resolution the
+  // composition used; premises equality above guarantees the same scope.
+  const freshServices = await loadCurrentServiceKeys(trx, freshCustomer);
+  if (freshServices.ownershipLookupFailed) {
+    // FAIL CLOSED, retryable — unknown ownership must not publish a price
+    // (same posture as the membership snapshot below).
+    throw new Error('ownership revalidation failed before click-to-estimate mint');
+  }
+  const mapOwnKey = (key) => (key === 'termite_bait' ? 'termite' : key);
+  const nowHeldKeys = new Set([
+    ...freshServices.currentServiceKeys, ...freshServices.ownedServiceKeys,
+  ].map(mapOwnKey));
   const relinkRequestRow = async (match) => {
     // Relink the CURRENT request row when its snapshot lost (or never
     // had) the mint pointer — the durable lineage lives on the estimate,
@@ -310,6 +341,18 @@ async function mintReportClickEstimate(trx, {
   // Their tap gets the accepted estimate back — and the fresh request row
   // resolves immediately (mirrors the accept path's own resolution): the
   // work is booked, staff must not be paged to follow up on it.
+  // ONLY while the target service is still HELD (GitHub round P1): an
+  // accepted row is live forever, so a customer who accepted, later
+  // CANCELED the service, and is legitimately offered it again would
+  // otherwise get the terminal accepted estimate back — with the request
+  // row auto-resolved, a dead end nobody can restart the service through.
+  // A canceled acceptance is terminal HISTORY: it neither satisfies the
+  // tap nor blocks the fresh mint (supersession already never touches
+  // accepted rows).
+  if (fingerprintMatch && fingerprintMatch.status === 'accepted'
+    && !nowHeldKeys.has(mapOwnKey(crossSell.serviceKey))) {
+    fingerprintMatch = null;
+  }
   if (fingerprintMatch && fingerprintMatch.status === 'accepted') {
     const relinkPatch = await relinkRequestRow(fingerprintMatch);
     await trx('service_requests').where({ id: requestRow.id }).update({
@@ -330,24 +373,11 @@ async function mintReportClickEstimate(trx, {
     };
   }
 
-  // Ownership revalidation INSIDE the transaction, BEFORE any unaccepted
-  // reuse (in-hook audits r7+r8 P0): context.currentServiceKeys was loaded
-  // at composition, before this customer lock — an acceptance or staff add
-  // landing in between must neither mint NOR hand back a still-acceptable
-  // estimate for a service the customer now owns (duplicate billing on
-  // accept). The lineage lock only sees prior CTA mints. Same loader +
-  // street-scope resolution the composition used; premises equality above
-  // guarantees the same scope.
-  const freshServices = await loadCurrentServiceKeys(trx, freshCustomer);
-  if (freshServices.ownershipLookupFailed) {
-    // FAIL CLOSED, retryable — unknown ownership must not publish a price
-    // (same posture as the membership snapshot below).
-    throw new Error('ownership revalidation failed before click-to-estimate mint');
-  }
-  const mapOwnKey = (key) => (key === 'termite_bait' ? 'termite' : key);
-  const nowHeldKeys = new Set([
-    ...freshServices.currentServiceKeys, ...freshServices.ownedServiceKeys,
-  ].map(mapOwnKey));
+  // An acceptance or staff add landing between composition and this lock
+  // must neither mint NOR hand back a still-acceptable estimate for a
+  // service the customer now owns — duplicate billing on accept (audits
+  // r7+r8 P0). Runs AFTER the accepted fast path: post-acceptance
+  // ownership is exactly what that path expects.
   if (nowHeldKeys.has(mapOwnKey(crossSell.serviceKey))) {
     throw new ClickEstimateDriftError('target service is now owned — offer is stale');
   }
@@ -396,6 +426,18 @@ async function mintReportClickEstimate(trx, {
   ));
   if (midSendMint) {
     throw new Error('a click-mint estimate send is in flight — retry after delivery completes');
+  }
+  // A SCHEDULED delivery likewise blocks (GitHub round P0) — but as DRIFT,
+  // not a retryable: the scheduler may be hours or days out, so "try again
+  // shortly" is wrong. Archiving would silently cancel the planned send
+  // (the scheduler skips archived rows) and kill the token the customer
+  // may already hold; minting beside it puts two live prices in play.
+  // Staff planned this delivery — the card is stale until it runs.
+  const scheduledMint = (priorMintRows || []).find((row) => (
+    !row.archived_at && String(row.status || '') === 'scheduled'
+  ));
+  if (scheduledMint) {
+    throw new ClickEstimateDriftError('a scheduled delivery holds this offer — the card is stale');
   }
 
   // ── Mint ────────────────────────────────────────────────────────────────

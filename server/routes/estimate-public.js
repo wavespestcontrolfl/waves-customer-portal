@@ -12498,6 +12498,22 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({ status: 'declined', declined_at: trx.fn.now(), updated_at: trx.fn.now() });
+      // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
+      // acceptance path): the customer just REJECTED the very thing the
+      // CTA request row asked staff to follow up on — leaving it open
+      // pages staff indefinitely after 24h (unworked-comms-watcher).
+      // Resolve the linked request in the SAME transaction; the row
+      // survives as the audit trail. Scoped to this source so no other
+      // decline path changes behavior.
+      if (declinedCount && estimate.source === 'service_report_cta' && estimate.customer_id) {
+        const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
+        await trx('service_requests')
+          .where({ customer_id: estimate.customer_id })
+          .whereIn('source', ['service_report', 'portal_home'])
+          .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+          .whereRaw("pricing_revision->'mintedEstimate'->>'id' = ?", [String(estimate.id)])
+          .update({ status: 'resolved', updated_at: trx.fn.now() });
+      }
       return { staleLinkage: false, declinedCount };
     });
     if (declineTxn.staleLinkage) {

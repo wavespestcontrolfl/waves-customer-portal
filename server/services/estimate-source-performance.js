@@ -123,10 +123,14 @@ async function sourcePerformance({ days = 90 } = {}) {
       'id', 'source', 'status', 'created_at', 'sent_at', 'viewed_at', 'accepted_at',
       // Real-delivery witness for click-mints, computed in SQL so the
       // cohort scan never hydrates estimate_data blobs. Same truth line the
-      // promised-estimate / unworked-comms watchers draw (channels.email.ok
-      // / channels.sms.real — sentChannels also carries SMS suppression
-      // sentinels).
-      db.raw("(estimate_data #>> '{deliveryState,channels,email,ok}' = 'true' OR estimate_data #>> '{deliveryState,channels,sms,real}' = 'true') AS cta_real_delivery"),
+      // promised-estimate / unworked-comms watchers draw:
+      // deliveryState.firstDeliveredAt is stamped by sendEstimateNow only
+      // for REAL deliveries (stampChannels' suppression-sentinel line),
+      // survives resends and suppressed later attempts, and is merged even
+      // when a concurrent accept wins the send claim — so it is also the
+      // FIRST handoff timestamp, immune to the sent_at resend inflation
+      // the generic branch guards against (GitHub round P2).
+      db.raw("(estimate_data #>> '{deliveryState,firstDeliveredAt}') AS cta_first_delivered_at"),
     );
   for (const row of cohort) {
     const bucket = buckets.get(sourceKey(row.source));
@@ -139,10 +143,10 @@ async function sourcePerformance({ days = 90 } = {}) {
     // handoff (sendEstimateNow refreshes sent_at at delivery), never to
     // the self-serve view the tap's redirect produces seconds after mint.
     if (String(row.source || '') === 'service_report_cta') {
-      if (row.cta_real_delivery === true) {
+      if (row.cta_first_delivered_at) {
         bucket.sent += 1;
         const created = new Date(row.created_at).getTime();
-        const handoff = row.sent_at ? new Date(row.sent_at).getTime() : NaN;
+        const handoff = new Date(row.cta_first_delivered_at).getTime();
         if (Number.isFinite(created) && Number.isFinite(handoff) && handoff >= created) {
           latencies.get(sourceKey(row.source)).push((handoff - created) / 3600000);
         }

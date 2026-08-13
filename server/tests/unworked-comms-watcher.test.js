@@ -50,11 +50,12 @@ describe('composeUnworkedCommsDigest', () => {
     const block = src.split('fe.sent_at > t.created_at')[1].slice(0, 800);
     expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
     // …but a mint an operator LATER actually delivered fulfills the task
-    // (GitHub #3391 round P2). REAL delivery only — sentChannels also
-    // carries SMS suppression sentinels (uncapped audit on 528b1aad7 P1).
-    expect(block).toMatch(/fe\.estimate_data #>> '\{deliveryState,channels,email,ok\}' = 'true'/);
-    expect(block).toMatch(/fe\.estimate_data #>> '\{deliveryState,channels,sms,real\}' = 'true'/);
+    // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
+    // — stamped only for REAL deliveries, durable across resends, merged
+    // even when a concurrent accept wins the send claim.
+    expect(block).toMatch(/fe\.estimate_data #>> '\{deliveryState,firstDeliveredAt\}'/);
     expect(block).not.toMatch(/sentChannels/);
+    expect(block).not.toMatch(/channels,email,ok/);
   });
 
   test('fully-worked day composes nothing', () => {

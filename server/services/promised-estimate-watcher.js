@@ -92,14 +92,13 @@ async function loadUnkeptPromises() {
           -- a report tap after a promised-quote call must not erase the
           -- obligation (in-hook audit r7b P1 on #3391). A mint an operator
           -- LATER actually sent is a real handoff, though (GitHub round
-          -- P2): sendEstimateNow stamps deliveryState. REAL delivery only —
-          -- sentChannels also carries SMS suppression sentinels (uncapped
-          -- audit on 528b1aad7 P1), so the truth is channels.email.ok
-          -- (email ok = real handoff) or channels.sms.real (provider send,
-          -- not a sentinel), the same line stampChannels draws.
+          -- P2): the truth is deliveryState.firstDeliveredAt — stamped by
+          -- sendEstimateNow only for REAL deliveries (stampChannels' own
+          -- suppression-sentinel line), carried forward across resends and
+          -- suppressed later attempts, and merged onto the row even when a
+          -- concurrent accept wins the send claim (GitHub round P1).
           AND (COALESCE(e.source, '') <> 'service_report_cta'
-               OR e.estimate_data #>> '{deliveryState,channels,email,ok}' = 'true'
-               OR e.estimate_data #>> '{deliveryState,channels,sms,real}' = 'true')
+               OR COALESCE(e.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')
           -- End-of-call boundary (codex r23): bridged rows end at
           -- bridge-start + duration; late-created rows (recording/status
           -- callback) already carry post-call created_at — adding

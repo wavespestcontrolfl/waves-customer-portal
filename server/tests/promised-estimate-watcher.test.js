@@ -97,13 +97,14 @@ describe('runPromisedEstimateWatcher', () => {
     const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 1200);
     expect(block).toMatch(/COALESCE\(e\.source, ''\) <> 'service_report_cta'/);
     // …but a mint an operator LATER actually delivered keeps the promise
-    // (GitHub #3391 round P2). REAL delivery only — sentChannels also
-    // carries SMS suppression sentinels (uncapped audit on 528b1aad7 P1),
-    // so the predicate keys on channels.email.ok / channels.sms.real, the
-    // same line stampChannels draws, never on sentChannels length.
-    expect(block).toMatch(/e\.estimate_data #>> '\{deliveryState,channels,email,ok\}' = 'true'/);
-    expect(block).toMatch(/e\.estimate_data #>> '\{deliveryState,channels,sms,real\}' = 'true'/);
+    // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
+    // — stamped only for REAL deliveries (never suppression sentinels),
+    // durable across resends, merged even when a concurrent accept wins
+    // the send claim. Never sentChannels (sentinel-polluted) or the
+    // per-attempt channels shape (replaced wholesale per send).
+    expect(block).toMatch(/e\.estimate_data #>> '\{deliveryState,firstDeliveredAt\}'/);
     expect(block).not.toMatch(/sentChannels\}'\) = 'array'/);
+    expect(block).not.toMatch(/channels,email,ok/);
   });
 
   test('quiet day skips without sending or stamping', async () => {
