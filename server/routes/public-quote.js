@@ -289,10 +289,16 @@ function recurringLineDisplayLabel(line) {
 //
 // `source` maps the engine's turfBasis ladder onto the widget's label set.
 // Deliberately conservative: only a tech measurement or an uncapped vision
-// figure gets a definite label. Every estimated/capped/fallback basis maps to
-// the "verified on your first visit" family, because claiming satellite
+// figure gets a definite label. Every estimated/capped/fallback basis maps
+// to the ESTIMATE family ('lot_estimate' et al), because claiming satellite
 // precision for a lot-ratio guess is the same over-claim the estimate page
 // avoids by labelling a county seed "County records (estimated)".
+//
+// Copy contract (owner ruling 2026-08-12: NO verify-on-first-visit wording —
+// it writes a work order for the field tech): astro PR #464 renders these
+// keys as "Estimated from property records". Until #464 deploys, the live
+// widget still shows the older verify wording for these keys — merge #464
+// with (or before) this PR.
 const TURF_BASIS_TO_PUBLIC_SOURCE = {
   measuredTurfSf: 'measured',
   lawnSqFt: 'confirmed',

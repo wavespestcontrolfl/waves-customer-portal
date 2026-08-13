@@ -135,15 +135,25 @@ async function createEstimateMeasurementReview({
     : (fn) => fn(database, estimate);
 
   const serialized = typeof database.transaction === 'function';
-  return runSerialized(async (dbx, lockedEstimate) => createReviewRow({
-    database: dbx,
-    estimate: lockedEstimate,
-    reasonKeys,
-    cleanNote,
-    shownSqFt,
-    shownSource,
-    serialized,
-  }));
+  return runSerialized(async (dbx, lockedEstimate) => {
+    // Re-validate on the LOCKED row (local audit P1): a concurrent accept,
+    // decline, archive, expiry, or linkage invalidation can commit while
+    // this request waited on the lock — the pre-lock checks are then stale.
+    if (!viewabilityCheck(lockedEstimate) || !isMeasurementReviewEligible(lockedEstimate)) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+    return createReviewRow({
+      database: dbx,
+      estimate: lockedEstimate,
+      reasonKeys,
+      cleanNote,
+      shownSqFt,
+      shownSource,
+      serialized,
+    });
+  });
 }
 
 async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {
@@ -220,8 +230,12 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
 
   logger.info(`[estimate-measurement-review] request ${request.id} for estimate ${estimate.id} (${reasonKeys.join(',') || 'note-only'})`);
 
-  // Office-only notification — never the customer.
-  await NotificationService.notifyAdmin(
+  // Office-only notification — never the customer. notifyAdmin swallows
+  // persistence errors and resolves null/suppressed rather than rejecting
+  // (local audit P1: a .catch here is dead code), and it is the flow's ONLY
+  // handoff — retry once, then log LOUDLY; the request row stands either way
+  // (same pattern as the extension route's auto-grant notification).
+  const notifyOffice = () => NotificationService.notifyAdmin(
     'estimate_measurement_review',
     subject,
     description,
@@ -233,8 +247,13 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
       metadata: { estimateId: estimate.id, requestId: request.id, customerId: customer.id },
     }
   ).catch((err) => {
-    logger.error(`[estimate-measurement-review] admin notification failed for request ${request.id}: ${err.message} — request row stands`);
+    logger.error(`[estimate-measurement-review] admin notification threw for request ${request.id}: ${err.message}`);
+    return null;
   });
+  const delivered = (await notifyOffice())?.id || (await notifyOffice())?.id;
+  if (!delivered) {
+    logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${request.id} — request row stands, office unnotified; surface via the requests panel sweep`);
+  }
 
   return { success: true, deduped: false };
 }

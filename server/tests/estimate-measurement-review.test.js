@@ -169,6 +169,51 @@ describe('createEstimateMeasurementReview', () => {
     expect(lockCalls).toContain('forUpdate');
   });
 
+  test('re-validates eligibility on the LOCKED row (local-audit P1: concurrent accept during lock wait)', async () => {
+    const database = mockDb();
+    // The row re-read under the lock comes back ACCEPTED — a concurrent
+    // accept committed while this request waited. Must 404 with no writes.
+    database.transaction = async (fn) => {
+      const trx = (table) => {
+        if (table === 'estimates') {
+          return {
+            where: () => ({
+              forUpdate: () => ({ first: async () => ({ ...ESTIMATE_ROW, status: 'accepted' }) }),
+              first: async () => ({ ...ESTIMATE_ROW, status: 'accepted' }),
+            }),
+          };
+        }
+        return database(table);
+      };
+      trx.raw = database.raw;
+      return fn(trx);
+    };
+    await expect(createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+    })).rejects.toMatchObject({ status: 404 });
+    expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('retries a suppressed/failed admin notification once, then logs loudly (notifyAdmin never rejects)', async () => {
+    // notifyAdmin resolves a suppressed sentinel (no id) rather than
+    // rejecting — first call suppressed, retry succeeds.
+    NotificationService.notifyAdmin
+      .mockResolvedValueOnce({ id: null, suppressed: true })
+      .mockResolvedValueOnce({ id: 'notif-2' });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database: mockDb(),
+      viewabilityCheck: viewable,
+    });
+    expect(result).toEqual({ success: true, deduped: false });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
+  });
+
   test('404s a non-viewable estimate BEFORE any write (codex r2: leaked/archived/expired tokens)', async () => {
     const database = mockDb();
     await expect(createEstimateMeasurementReview({
