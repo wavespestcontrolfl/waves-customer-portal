@@ -73,18 +73,44 @@ test('a record missing its ids is a no-op, never a throw', async () => {
   expect(buildReportCrossSell).not.toHaveBeenCalled();
 });
 
-describe('dispatch wiring (source contract — the completion handler is too heavy to stand up)', () => {
-  const src = require('fs').readFileSync(
-    require('path').join(__dirname, '../routes/admin-dispatch.js'),
-    'utf8',
-  );
+describe('bounded wait (pre-push r1 P1: the SMS races the warm)', () => {
+  const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
 
-  test('exactly one call site: post-commit, setImmediate, guarded on v1 + complete + non-backfill', () => {
-    const calls = src.match(/prewarmReportCrossSellEvidence/g) || [];
-    // require + invocation
-    expect(calls.length).toBe(2);
-    expect(src).toMatch(/useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record\?\.id/);
-    // Fire-and-forget: inside setImmediate, result discarded with void.
-    expect(src).toMatch(/setImmediate\(\(\) => \{\s*\n\s*const \{ prewarmReportCrossSellEvidence \} = require\('\.\.\/services\/service-report\/evidence-prewarm'\);\s*\n\s*void prewarmReportCrossSellEvidence\(record, db\);/);
+  test('a fast warm resolves through with its result before the deadline', async () => {
+    buildReportCrossSell.mockResolvedValue({ mode: 'priced' });
+    await expect(prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 500 })).resolves.toBe('priced');
+  });
+
+  test('a slow warm yields "timeout" at the deadline and keeps running in the background', async () => {
+    let finish;
+    buildReportCrossSell.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const bounded = prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 30 });
+    await expect(bounded).resolves.toBe('timeout');
+    // The underlying warm was not cancelled — completing it later is what
+    // lets the customer's NEXT view find the cache warm.
+    finish({ mode: 'priced' });
+    expect(buildReportCrossSell).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('completion wiring (source contracts — both handlers are too heavy to stand up)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
+
+  test('dispatch: one BOUNDED-await call site, guarded on v1 + complete + non-backfill', () => {
+    const calls = dispatchSrc.match(/prewarmReportCrossSellEvidenceBounded/g) || [];
+    expect(calls.length).toBe(2); // require + invocation
+    expect(dispatchSrc).toMatch(/useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record\?\.id/);
+    expect(dispatchSrc).toMatch(/await prewarmReportCrossSellEvidenceBounded\(record, db, \{ maxWaitMs: 10000 \}\)/);
+  });
+
+  test('pest-recap: the slim completion path warms BEFORE its SMS send (r1 P1)', () => {
+    const calls = recapSrc.match(/prewarmReportCrossSellEvidenceBounded/g) || [];
+    expect(calls.length).toBe(2); // require + invocation
+    // Ordering: the warm call must appear before the recap SMS dispatch.
+    expect(recapSrc.indexOf('prewarmReportCrossSellEvidenceBounded'))
+      .toBeLessThan(recapSrc.indexOf('body: smsRecap(recapText)'));
   });
 });

@@ -51,4 +51,20 @@ async function prewarmReportCrossSellEvidence(serviceRecord, database) {
   }
 }
 
-module.exports = { prewarmReportCrossSellEvidence };
+// Bounded-wait wrapper for completion handlers (pre-push r1 P1): the report
+// SMS goes out moments after completion on both completion paths, so a pure
+// background pre-warm loses the race for customers who open the link
+// immediately — they'd get the CTA fallback on first view. The T&S
+// auto-scorer beside the dispatch call site set the pattern: give the warm
+// a bounded window BEFORE the customer artifacts go out, and on timeout let
+// it finish in the background (the very next view self-heals to a priced
+// card — a cold first view is exactly today's behavior, never wrong data).
+function prewarmReportCrossSellEvidenceBounded(serviceRecord, database, { maxWaitMs = 10000 } = {}) {
+  const warm = prewarmReportCrossSellEvidence(serviceRecord, database);
+  return Promise.race([
+    warm,
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), maxWaitMs)),
+  ]);
+}
+
+module.exports = { prewarmReportCrossSellEvidence, prewarmReportCrossSellEvidenceBounded };

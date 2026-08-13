@@ -572,6 +572,26 @@ async function submitRecap({
     }
   }
 
+  // 4c. Warm the cross-sell card's property-evidence cache before the recap
+  // SMS goes out (pre-push r1 P1: this slim path completes visits and texts
+  // the report link without ever passing through /complete, so its reports
+  // — a major one-time-pest lane — would otherwise always render the CTA
+  // fallback). Same bounded-wait posture as the dispatch handler: on
+  // timeout the warm finishes in the background and the next view
+  // self-heals; the module is double-gated and never rejects, so it can't
+  // block or fail the recap.
+  if (recordId) {
+    try {
+      const freshRecord = await db('service_records').where({ id: recordId }).first();
+      if (freshRecord) {
+        const { prewarmReportCrossSellEvidenceBounded } = require('./service-report/evidence-prewarm');
+        await prewarmReportCrossSellEvidenceBounded(freshRecord, db, { maxWaitMs: 10000 });
+      }
+    } catch (prewarmErr) {
+      logger.warn(`[pest-recap] evidence pre-warm skipped (code=${prewarmErr?.code || 'none'}) for record ${recordId}`);
+    }
+  }
+
   // 5. Optional customer recap SMS. Only the submit that won the
   //    recap_sms_sent_at claim under the lock reaches the send — a
   //    concurrent/retried submit has willSendSms=false and is skipped.

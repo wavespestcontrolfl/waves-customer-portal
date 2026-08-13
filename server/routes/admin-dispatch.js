@@ -8111,20 +8111,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     // Warm the cross-sell card's property-evidence cache (owner lane
-    // 2026-08-13). Post-commit + fire-and-forget, same posture as the T&S
-    // auto-score above: it never blocks completion latency or success, and
-    // the module is double-gated (dark by default) and never rejects. The
-    // report SMS goes out well after this, so a cold-cache county/vision
-    // lookup has hours of headroom — by the time the customer opens the
-    // report, the composer's cache-only read finds the evidence and the
-    // card prices instead of falling back to the quote CTA. Backfills are
-    // excluded: their customers already received (or never had) the report
-    // moment this exists to serve. Replays are cache-first no-ops.
+    // 2026-08-13). Post-commit with a BOUNDED wait, the same posture as the
+    // T&S auto-score's 12s race above (pre-push r1 P1: the completion SMS
+    // goes out from this very handler moments later, so a pure background
+    // warm loses the race for customers who open the link immediately).
+    // On timeout the warm finishes in the background and the next view
+    // self-heals to a priced card; a cold first view is exactly today's
+    // CTA behavior, never wrong data. The module is double-gated (dark by
+    // default) and never rejects, so a slow or failing lookup can't affect
+    // any completion. Backfills are excluded: their customers already
+    // received (or never had) the report moment this exists to serve.
+    // Replays are cache-first no-ops.
     if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id) {
-      setImmediate(() => {
-        const { prewarmReportCrossSellEvidence } = require('../services/service-report/evidence-prewarm');
-        void prewarmReportCrossSellEvidence(record, db);
-      });
+      const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
+      await prewarmReportCrossSellEvidenceBounded(record, db, { maxWaitMs: 10000 });
     }
 
     // Live-override completions correct the linked technician timer too
