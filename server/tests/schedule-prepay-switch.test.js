@@ -80,6 +80,7 @@ const ACCEPT_INVOICE = {
   stripe_payment_intent_id: null,
   payer_id: null,
   annual_prepay_term_id: null,
+  notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — $99.00 setup fee plus first application.',
   line_items: [
     { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
     { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
@@ -268,6 +269,57 @@ describe('on-site prepay switch — invoices that must not be superseded', () =>
     const { body } = await preview();
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/already gone out to the customer/i);
+  });
+
+  test('an unrelated draft on the same visit refuses — it is not the accept invoice', async () => {
+    stubTables({
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        id: 'inv-manual',
+        invoice_number: 'WPC-2026-0399',
+        notes: 'Manual draft for an extra bait station',
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/does not replace/i);
+  });
+
+  test('a second manual draft alongside the accept invoice refuses the whole switch', async () => {
+    stubTables({
+      invoices: [
+        ACCEPT_INVOICE,
+        { ...ACCEPT_INVOICE, id: 'inv-manual', invoice_number: 'WPC-2026-0399', notes: 'Manual draft' },
+      ],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/does not replace/i);
+  });
+
+  test('an accept invoice from a DIFFERENT estimate is not superseded', async () => {
+    stubTables({
+      invoices: [{ ...ACCEPT_INVOICE, notes: 'Auto-generated from accepted estimate #est-OTHER. Customer selected pay per application.' }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/does not replace/i);
+  });
+
+  test('a ledger-backed estimate deposit credit refuses — it would strand paid money', async () => {
+    stubTables({
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          { description: 'First service application', amount: 128 },
+          { description: 'Estimate deposit', category: 'deposit_credit', amount: -49 },
+        ],
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/estimate deposit credit/i);
   });
 
   test('a payer-billed invoice refuses', async () => {

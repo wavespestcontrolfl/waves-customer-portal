@@ -9163,6 +9163,10 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // setup + first-application invoice to the FIRST scheduled service, which
     // is the parent for every later child).
     let supersedeVisitIds = [];
+    // The accepted estimate this series came from — the provenance the
+    // supersede match is bound to, so only ITS accept-minted invoice can be
+    // replaced.
+    let anchorEstimateId = null;
     if (scheduledServiceId) {
       const visit = await db('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -9210,6 +9214,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
           return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
         }
         isAcceptedSwitch = true;
+        anchorEstimateId = String(anchor.source_estimate_id);
         supersedeVisitIds = [...new Set([visit.id, anchor.id].filter(Boolean).map(String))];
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
@@ -9480,7 +9485,8 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         attachedInvoices = await db('invoices')
           .whereIn('scheduled_service_id', supersedeVisitIds)
           .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
-            'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id');
+            'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+            'notes');
       } catch (invErr) {
         logger.warn(`[schedule:prepay-preview] attached-invoice lookup failed for series ${supersedeVisitIds.join(',')}: ${invErr.message} — refusing`);
         return blocked('couldn’t confirm what this visit is already invoiced for — refresh and try again');
@@ -9488,6 +9494,22 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       for (const inv of attachedInvoices) {
         const status = String(inv.status || '').toLowerCase();
         if (SUPERSEDE_DEAD_STATUSES.has(status)) continue;
+        // PROVENANCE, not position (Codex P0 r2). "Every live draft on this
+        // visit" is the wrong set: a manually built draft, or a duplicate,
+        // would be swept into the void and the customer's AR would quietly
+        // disappear. Only the invoice the ACCEPT minted for THIS estimate is
+        // the thing the prepaid year replaces, and the converter stamps that
+        // provenance into notes ("Auto-generated from accepted estimate
+        // #<id>. Customer selected pay per application …"). Anything else
+        // live on the row refuses the switch — the operator resolves it in
+        // Invoices, where they can see what it is.
+        const fromThisAccept = new RegExp(
+          `Auto-generated from accepted estimate #${String(anchorEstimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+          'i',
+        ).test(String(inv.notes || ''));
+        if (!fromThisAccept) {
+          return blocked(`can’t be switched here — this visit also carries ${inv.invoice_number || 'another invoice'} (${status}), which the prepaid year does not replace. Resolve it from Invoices first`);
+        }
         // Another term's prepay invoice: the overlap guard above owns that
         // case, and voiding it here would cancel live coverage.
         if (inv.annual_prepay_term_id) {
@@ -9516,6 +9538,23 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         }
         if (Number(inv.credit_applied || 0) > 0) {
           return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360`);
+        }
+        // A ledger-backed ESTIMATE DEPOSIT rides as a `deposit_credit` LINE,
+        // not as credit_applied (Codex P0 r2). Voiding restores it to the
+        // deposit ledger — but the prepay mint here carries no deposit
+        // credit, and a covered year cuts no later invoice for it to land
+        // on, so the customer's already-paid deposit would sit stranded.
+        // Refuse: applying it belongs to the Customer 360 mint, where the
+        // operator sees the credited total before sending.
+        const hasDepositCreditLine = (() => {
+          const raw = inv.line_items;
+          const parsed = Array.isArray(raw)
+            ? raw
+            : (() => { try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; } })();
+          return parsed.some((li) => String(li?.category || '') === 'deposit_credit');
+        })();
+        if (hasDepositCreditLine) {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it`);
         }
         if (inv.payer_id) {
           return blocked('isn’t available — this visit’s invoice bills to a third-party payer');
