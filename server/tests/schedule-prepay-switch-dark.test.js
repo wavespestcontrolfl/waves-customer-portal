@@ -45,27 +45,37 @@ async function get(path) {
   }
 }
 
+async function post(path) {
+  const app = express();
+  app.use(express.json());
+  app.use('/admin/schedule', router);
+  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  const server = app.listen(0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    return res.status;
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 describe('on-site prepay switch — both gates dark', () => {
   test('the committed preview 404s instead of answering', async () => {
     const { status } = await get('/admin/schedule/annual-prepay-preview?scheduledServiceId=svc-1');
     expect(status).toBe(404);
   });
 
-  test('the atomic switch and undo endpoints are unobservable too', async () => {
-    const post = async (path) => {
-      const app = express();
-      app.use(express.json());
-      app.use('/admin/schedule', router);
-      const server = app.listen(0);
-      try {
-        const res = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        return res.status;
-      } finally {
-        await new Promise((resolve) => server.close(resolve));
-      }
-    };
+  test('the atomic switch endpoint is unobservable too', async () => {
     expect(await post('/admin/schedule/svc-1/prepay-switch')).toBe(404);
-    expect(await post('/admin/schedule/svc-1/prepay-switch/undo')).toBe(404);
+  });
+
+  test('the undo COMPENSATION endpoint stays reachable while dark', async () => {
+    // A switch started just before the kill switch flipped still needs its
+    // restore leg — a gate-off 404 here would strand that visit with no
+    // invoice at all. (The bare db mock makes it error past the gate check;
+    // what matters is that the gate no longer answers 404.)
+    const status = await post('/admin/schedule/svc-1/prepay-switch/undo');
+    expect(status).not.toBe(404);
   });
 
   test('availability answers false on both lanes', async () => {

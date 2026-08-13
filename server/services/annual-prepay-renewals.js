@@ -2587,6 +2587,18 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
         await resetBillingModeAfterTermCancel(updated, conn);
+        // An ON-SITE SWITCH retired the accept-minted per-application
+        // invoice when this prepay was created; with the prepay dead that
+        // AR (setup fee included) must come back, or it is silently gone
+        // forever — nothing else ever re-mints it. Marker-keyed and
+        // idempotent; best-effort (never blocks the void/refund sync).
+        if (updated.prepay_invoice_id) {
+          try {
+            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, conn);
+          } catch (err) {
+            logger.warn(`[annual-prepay] switch-superseded restore skipped for term ${updated.id}: ${err.message}`);
+          }
+        }
       }
     }
 

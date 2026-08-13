@@ -139,6 +139,18 @@ function invoiceHasNonBaseCharges(invoice) {
 // Ledger-backed estimate deposit credit rides as a `deposit_credit` line; voidInvoice
 // restores it (restoreDepositCreditForVoidedInvoice). Settling 'prepaid' would strand
 // it, so these defer to the caller's void.
+// On-site prepay-switch markers (see admin-schedule prepay-switch): the
+// superseded-by marker rides a voided per-application invoice's notes keyed
+// by the prepay invoice that replaced it; the restore marker rides the
+// replacement's notes keyed by the voided row. Together they make every
+// restore idempotent and every superseded row findable when its prepay dies.
+function prepaySwitchSupersededByMarker(prepayInvoiceId) {
+  return `[prepay-switch-superseded-by:${prepayInvoiceId}]`;
+}
+function prepaySwitchRestoreMarker(voidedInvoiceId) {
+  return `[prepay-switch-restore:${voidedInvoiceId}]`;
+}
+
 function invoiceHasDepositCreditLine(invoice) {
   return parseInvoiceLineItems(invoice.line_items).some(
     (li) => String(li.category || "") === "deposit_credit",
@@ -4124,6 +4136,58 @@ const InvoiceService = {
    * reopen to their pre-settlement collectible status so the work is owed again.
    * NEVER reopens a cash-paid invoice. Best-effort per invoice.
    */
+  /**
+   * Restore invoices the ON-SITE PREPAY SWITCH retired, keyed by the prepay
+   * invoice that superseded them (the switch stamps each voided row with
+   * prepaySwitchSupersededByMarker(prepayInvoiceId)). Called from the
+   * annual-prepay true-void/refund sync so that cancelling an UNPAID switch
+   * prepay through the ordinary Invoices flow puts the per-application
+   * invoice (setup fee included) back on the books — without this, the
+   * accept-minted AR is silently gone the moment the sheet closes (Codex
+   * on-site-switch P0 r7). Idempotent via prepaySwitchRestoreMarker: a row
+   * whose replacement already exists is skipped, never double-minted.
+   * Best-effort per row; returns the restored descriptors.
+   */
+  async restoreSwitchSupersededInvoicesForPrepay(prepayInvoiceId, conn = db) {
+    if (!prepayInvoiceId) return [];
+    const marker = prepaySwitchSupersededByMarker(prepayInvoiceId);
+    const rows = await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", `%${marker}%`)
+      .select("id", "invoice_number", "line_items", "notes", "title",
+        "scheduled_service_id", "customer_id");
+    const restored = [];
+    for (const row of rows) {
+      const restoreMarker = prepaySwitchRestoreMarker(row.id);
+      const existing = await conn("invoices")
+        .where("notes", "like", `%${restoreMarker}%`)
+        .first("id");
+      if (existing) continue;
+      const lines = parseInvoiceLineItems(row.line_items)
+        .map((li) => ({
+          description: String(li?.description || ""),
+          quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+          unit_price: Number(li?.unit_price ?? li?.amount),
+        }))
+        .filter((li) => li.description && Number.isFinite(li.unit_price));
+      if (lines.length === 0) {
+        logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: no readable line items`);
+        continue;
+      }
+      const recreated = await this.create({
+        ...(conn === db ? {} : { database: conn }),
+        customerId: row.customer_id,
+        scheduledServiceId: row.scheduled_service_id,
+        title: row.title || "Service invoice",
+        lineItems: lines,
+        notes: `${row.notes || ""}\n${restoreMarker} Re-created after the annual prepay that superseded it was cancelled; replaces voided ${row.invoice_number || row.id}.`.trim(),
+        dueDate: new Date().toISOString().slice(0, 10),
+      });
+      restored.push({ replacedInvoiceId: row.id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null });
+    }
+    return restored;
+  },
+
   async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
     if (!termId) return 0;
     let reopened = 0;
@@ -4491,6 +4555,8 @@ InvoiceService._internals = {
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 
 module.exports = InvoiceService;
+module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
+module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;

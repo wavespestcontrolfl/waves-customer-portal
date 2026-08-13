@@ -21,6 +21,7 @@ jest.mock('../models/db', () => {
   const dbFn = jest.fn();
   dbFn.transaction = jest.fn();
   dbFn.fn = { now: () => 'NOW' };
+  dbFn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return dbFn;
 });
 jest.mock('../services/logger', () => ({
@@ -38,6 +39,8 @@ jest.mock('../services/invoice', () => ({
   voidInvoice: (...args) => mockVoidInvoice(...args),
   create: (...args) => mockCreateInvoice(...args),
   sendViaSMSAndEmail: (...args) => mockSendInvoice(...args),
+  prepaySwitchRestoreMarker: (id) => '[prepay-switch-restore:' + id + ']',
+  prepaySwitchSupersededByMarker: (id) => '[prepay-switch-superseded-by:' + id + ']',
 }));
 // The atomic switch borrows the Customer 360 advisory-lock + overlap assert;
 // the real admin-customers module is far too heavy for this harness.
@@ -150,7 +153,12 @@ function stubTables({
     q.forUpdate = jest.fn(() => q);
     q.update = jest.fn(async (patch) => {
       stubTables.updates.push({ table, patch });
-      if (table === 'invoices') { stubTables.casCalls.push(true); return casResult; }
+      // Only the CAS void counts as a retirement; the superseded-by marker
+      // stamp also updates invoices but must not read as a second void.
+      if (table === 'invoices' && patch && patch.status === 'void') {
+        stubTables.casCalls.push(true);
+        return casResult;
+      }
       return 1;
     });
     q.insert = jest.fn(async () => [{}]);
@@ -510,6 +518,10 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     // Collect path: no delivery attempted.
     expect(mockSendInvoice).not.toHaveBeenCalled();
     expect(body.delivery).toBeNull();
+    // Durable pointer from the retired row to its replacing prepay, so the
+    // term-cancel sync can restore it long after this sheet is gone.
+    const stamp = stubTables.updates.find((u) => u.table === 'invoices' && u.patch.notes);
+    expect(String(stamp.patch.notes.bindings[1])).toContain('[prepay-switch-superseded-by:inv-prepay]');
   });
 
   test('a CAS conflict (invoice changed under the lock) aborts before anything is minted', async () => {

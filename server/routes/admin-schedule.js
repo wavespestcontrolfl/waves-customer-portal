@@ -9109,12 +9109,14 @@ function acceptProvenanceRe(estimateId) {
 }
 
 // Marker written into a restored invoice's notes, keyed by the VOIDED row it
-// replaces. This is the undo's idempotency anchor: a marker match means the
-// restore already happened, so a retried/duplicated undo can never mint a
-// second replacement (Codex P0 r3).
-function restoreMarker(voidedInvoiceId) {
-  return `[prepay-switch-restore:${voidedInvoiceId}]`;
-}
+// replaces — the undo's idempotency anchor (a marker match means the restore
+// already happened, so a retried/duplicated undo can never mint a second
+// replacement; Codex P0 r3). Shared with services/invoice.js, whose
+// term-cancel compensation uses the same markers.
+const {
+  prepaySwitchRestoreMarker: restoreMarker,
+  prepaySwitchSupersededByMarker: supersededByMarker,
+} = require('../services/invoice');
 
 async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0 || !estimateId) {
@@ -9869,6 +9871,21 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           throw err;
         }
 
+        // Durable pointer FROM each retired row TO the prepay that replaced
+        // it (Codex P0 r7): if this prepay is later voided/refunded through
+        // the ordinary flows — long after this sheet is gone — the term-
+        // cancel sync follows the marker and re-mints the per-application
+        // invoice. Without it, the accept-minted AR dies silently with the
+        // prepay.
+        for (const inv of voided) {
+          await trx('invoices')
+            .where({ id: inv.id })
+            .update({
+              notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+              updated_at: new Date(),
+            });
+        }
+
         const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: liveVisit.customer_id,
           // Estimate-origin switches carry their provenance so a later
@@ -9970,9 +9987,15 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
 // never trust client-sent amounts) — the client supplies only ids, and each is
 // verified to be a void invoice belonging to this visit's series. Idempotent:
 // a row already replaced is skipped rather than duplicated.
+// DELIBERATELY NOT GATED (Codex P1 r7): this is the compensation leg. A
+// client that started a switch just before the kill switch flipped can still
+// void its uncollected prepay through the ordinary invoice route — refusing
+// the restore here would strand the visit with no invoice at all. The
+// endpoint is admin-only, provenance-bound, marker-idempotent, and refuses
+// under any live prepay term, so keeping it reachable while the lane is dark
+// exposes nothing new; only NEW switches (preview + mint) are gated.
 router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
   try {
-    if (!isEnabled('onsitePrepaySwitch')) return res.status(404).json({ error: 'Not found' });
     const target = await resolveAcceptedSwitchTarget(req.params.id);
     if (!target.ok) return res.status(target.status || 409).json({ error: target.blockReason });
 
