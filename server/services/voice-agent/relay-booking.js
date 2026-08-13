@@ -329,6 +329,12 @@ async function commitVoiceBooking({
       // above — a clash here is somebody ELSE's committed visit or live hold.
       const clash = await findConflictingVisits({
         db: trx, date: dateStr, windowStart, windowEnd: endTime,
+        // ⭐ INACTIVE ROWS ARE NOT OCCUPANCY. The helper's default excludes only
+        // 'cancelled', but a REJECTED voice booking lands on 'skipped' and a
+        // superseded one on 'rescheduled' — every other rail in this lane
+        // treats all three as inactive, and counting them here made the very
+        // slot the office just freed report slot_taken to its replacement.
+        excludeStatuses: ['cancelled', 'skipped', 'rescheduled'],
       });
       if (clash.length) return { status: 'slot_taken' };
 

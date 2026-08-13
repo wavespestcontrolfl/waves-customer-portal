@@ -420,6 +420,12 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.window_display).toBe('9:00 AM');
     expect(row.window_display).not.toMatch(/[-–]/);
 
+    // ⭐ INACTIVE ROWS ARE NOT OCCUPANCY: the commit-time clash probe excludes
+    // the same statuses every other rail treats as inactive — a slot freed by
+    // a rejection (skipped) or a move (rescheduled) must be re-bookable.
+    const clashCall = occupancy.findConflictingVisits.mock.calls[0][0];
+    expect(clashCall.excludeStatuses).toEqual(['cancelled', 'skipped', 'rescheduled']);
+
     // The pending request surfaces in the EXISTING admin confirm queue.
     const triageInsert = trxBuilders.triage_items.insert;
     expect(triageInsert).toHaveBeenCalledTimes(1);
