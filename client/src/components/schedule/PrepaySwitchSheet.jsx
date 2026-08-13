@@ -271,9 +271,27 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       onSaved?.();
       onClose?.();
     };
-    const collected = () => {
+    // The tender sheet fires onChargeSuccess for PROCESSING tenders too
+    // (manual card accepts that status; saved ACH 200s while processing) —
+    // Codex P0 r15. Success is only claimed on a SERVER-confirmed settled
+    // status; anything else parks with instructions, because the term is
+    // still payment_pending and the charge can yet fail.
+    const collected = async () => {
+      setBusy('confirm');
+      const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
+      setBusy('');
       setCollecting(null);
-      finish(invoice);
+      const status = String(fresh?.status || '').toLowerCase();
+      if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
+        finish(invoice);
+        return;
+      }
+      setRecovery({
+        title: 'Payment still processing',
+        message: `The ${money(Number(invoice.total) || 0)} charge went in but hasn\u2019t settled yet \u2014 do not charge again. If it settles, the prepaid year activates on its own. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
+        detail: fresh ? `Invoice status: ${status}` : 'Could not confirm the invoice status \u2014 check Invoices.',
+        voided,
+      });
     };
     return (
       <MobilePaymentSheet

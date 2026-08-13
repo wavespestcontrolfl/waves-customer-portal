@@ -17,7 +17,8 @@ jest.mock('../services/invoice-followups', () => ({
   resumeSequence: jest.fn(async () => undefined),
   scheduleForInvoice: jest.fn(async () => undefined),
 }));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
+const mockTermSync = jest.fn(async () => undefined);
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: (...args) => mockTermSync(...args) }));
 // The restore serializes on the SAME per-customer advisory lock every prepay
 // mint takes (lazily required to dodge the admin-customers ⇄ invoice cycle).
 const mockLockOverlap = jest.fn(async () => {});
@@ -48,7 +49,7 @@ const VOIDED_ROW = {
 // then the accept series' dates).
 function conn({
   rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = undefined,
-  byId = {}, visitDate = undefined, seriesDates = [],
+  byId = {}, visitDate = undefined, seriesDates = [], paymentRow = undefined,
 } = {}) {
   const fn = jest.fn((table) => {
     const q = {};
@@ -66,7 +67,10 @@ function conn({
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
-    if (table === 'scheduled_services') {
+    if (table === 'payments') {
+      q.first = jest.fn(async () => paymentRow);
+      q.select = jest.fn(async () => (paymentRow ? [paymentRow] : []));
+    } else if (table === 'scheduled_services') {
       q.first = jest.fn(async () => (visitDate ? { scheduled_date: visitDate } : undefined));
       q.select = jest.fn(async () => seriesDates.map((d) => ({ scheduled_date: d })));
     } else {
@@ -185,19 +189,58 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
 describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
   let restoreSpy;
   beforeEach(() => {
+    mockTermSync.mockClear();
+    mockTermSync.mockResolvedValue(undefined);
     restoreSpy = jest.spyOn(InvoiceService, 'restoreSwitchSupersededInvoicesForPrepay')
       .mockResolvedValue([{ replacedInvoiceId: 'inv-old', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0402' }]);
   });
   afterEach(() => restoreSpy.mockRestore());
 
-  test('re-runs the restore for every marker whose superseding prepay is DEAD', async () => {
+  test('re-runs the TERM SYNC then the restore for every marker whose superseding prepay is DEAD', async () => {
     const c = conn({
       rows: [VOIDED_ROW],
       byId: { 'inv-prepay': { id: 'inv-prepay', status: 'void' } },
     });
     const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    // A term the void-time sync failed to cancel is repaired here — without
+    // it the overlap assert would skip the restore forever (Codex P0 r15).
+    expect(mockTermSync).toHaveBeenCalledWith('inv-prepay', c);
     expect(restoreSpy).toHaveBeenCalledWith('inv-prepay', c);
     expect(restored).toHaveLength(1);
+  });
+
+  test('a failed term sync defers the restore to the next sweep', async () => {
+    mockTermSync.mockRejectedValueOnce(new Error('db blip'));
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'void' } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(restored).toEqual([]);
+  });
+
+  test('a PI-bearing old draft expires only when the payments ledger shows nothing live', async () => {
+    const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockResolvedValue({ status: 'void' });
+    const oldDraft = {
+      id: 'inv-prepay', status: 'draft', sent_at: null, paid_at: null,
+      stripe_payment_intent_id: 'pi_abandoned',
+      created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+    };
+    // No live payment row → the failed tender's draft is expirable.
+    await InvoiceService.sweepOrphanedPrepaySwitchRestores(conn({ rows: [VOIDED_ROW], byId: { 'inv-prepay': oldDraft } }));
+    expect(voidSpy).toHaveBeenCalledWith('inv-prepay');
+    voidSpy.mockClear();
+    restoreSpy.mockClear();
+    // A live (non-terminal) payment row → hands off, fail closed.
+    await InvoiceService.sweepOrphanedPrepaySwitchRestores(conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': oldDraft },
+      paymentRow: { id: 'pay-1', status: 'processing' },
+    }));
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(restoreSpy).not.toHaveBeenCalled();
+    voidSpy.mockRestore();
   });
 
   test('a LIVE superseding prepay is left alone — nothing to repair yet', async () => {

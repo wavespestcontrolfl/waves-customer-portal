@@ -58,7 +58,7 @@ let calls;
 // switch committed?", "was the old invoice restored?") instead of indexes.
 function stubFetch({
   preview = PREVIEW, switchFails = false, switchNetworkFails = false,
-  undoFails = false, freshStatus = 'draft',
+  undoFails = false, freshStatus = 'paid',
 } = {}) {
   calls = [];
   global.fetch = vi.fn(async (url, options = {}) => {
@@ -125,10 +125,25 @@ describe('PrepaySwitchSheet', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
     expect(await screen.findByText('Annual prepay collected')).toBeInTheDocument();
+    // Success only after the SERVER confirms a settled status (Codex P0 r15)
+    // — the tender sheet fires onChargeSuccess for processing tenders too.
+    expect(calls.some((c) => c.path === '/api/admin/invoices/inv-prepay' && c.method === 'GET')).toBe(true);
     // The next step is spelled out — completion cuts no invoice now.
     expect(screen.getByText(/Complete the visit next/)).toBeInTheDocument();
     expect(onSaved).toHaveBeenCalled();
     expect(didUndo()).toBe(false);
+  });
+
+  it('a tender that reports success while PROCESSING parks — never a success claim', async () => {
+    stubFetch({ freshStatus: 'processing' });
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await screen.findByText('tender 512');
+    fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
+    expect(await screen.findByText('Payment still processing')).toBeInTheDocument();
+    expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
+    expect(didUndo()).toBe(false);
+    expect(voidedPrepay()).toBe(false);
   });
 
   it('offers NO send option — Customer 360 is the pointer for pay-by-link', async () => {
@@ -150,6 +165,7 @@ describe('PrepaySwitchSheet', () => {
   });
 
   it('backing out voids the PREPAY invoice and puts the per-application one back, in that order', async () => {
+    stubFetch({ freshStatus: 'draft' });
     const onClose = vi.fn();
     render(<PrepaySwitchSheet service={SERVICE} onClose={onClose} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
@@ -166,7 +182,7 @@ describe('PrepaySwitchSheet', () => {
   });
 
   it('a failed restore is loud — the visit would complete with nothing to bill', async () => {
-    stubFetch({ undoFails: true });
+    stubFetch({ undoFails: true, freshStatus: 'draft' });
     const onClose = vi.fn();
     render(<PrepaySwitchSheet service={SERVICE} onClose={onClose} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));

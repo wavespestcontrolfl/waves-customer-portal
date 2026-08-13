@@ -4325,19 +4325,48 @@ const InvoiceService = {
         && ["void", "cancelled", "canceled", "refunded"].includes(String(prepay.status || "").toLowerCase());
       if (!dead && prepay
         && String(prepay.status || "").toLowerCase() === "draft"
-        && !prepay.sent_at && !prepay.paid_at && !prepay.stripe_payment_intent_id
+        && !prepay.sent_at && !prepay.paid_at
         && prepay.created_at
         && Date.now() - new Date(prepay.created_at).getTime() > ABANDONED_SWITCH_PREPAY_MAX_AGE_MS) {
-        try {
-          await this.voidInvoice(prepay.id);
-          dead = true;
-          logger.info(`[invoice] switch-restore sweep expired abandoned prepay ${prepay.id} — term cancelled, restoring superseded AR`);
-        } catch (err) {
-          logger.warn(`[invoice] switch-restore sweep could not expire abandoned prepay ${prepay.id}: ${err.message} — next sweep retries`);
-          continue;
+        // A PI on the draft usually means a tender FAILED mid-collection
+        // (a settling one flips the invoice off draft) — but verify against
+        // the payments ledger and fail CLOSED: any non-terminal payment row,
+        // or an unreadable ledger, leaves the draft alone (Codex P0 r15).
+        let expirable = true;
+        if (prepay.stripe_payment_intent_id) {
+          try {
+            const livePayment = await conn("payments")
+              .where({ invoice_id: prepay.id })
+              .whereNotIn("status", ["failed", "canceled", "cancelled"])
+              .first("id");
+            expirable = !livePayment;
+          } catch {
+            expirable = false;
+          }
+        }
+        if (expirable) {
+          try {
+            await this.voidInvoice(prepay.id);
+            dead = true;
+            logger.info(`[invoice] switch-restore sweep expired abandoned prepay ${prepay.id} — term cancelled, restoring superseded AR`);
+          } catch (err) {
+            logger.warn(`[invoice] switch-restore sweep could not expire abandoned prepay ${prepay.id}: ${err.message} — next sweep retries`);
+            continue;
+          }
         }
       }
       if (!dead) continue;
+      // voidInvoice's term sync is best-effort and can have failed at void
+      // time, leaving the term payment_pending — the overlap assert would
+      // then skip the restore forever (Codex P0 r15). Re-run the idempotent
+      // sync for every terminal prepay before restoring: a still-pending
+      // term is cancelled now, an already-cancelled one is a no-op.
+      try {
+        await require("./annual-prepay-renewals").syncTermForInvoicePayment(prepayId, conn);
+      } catch (err) {
+        logger.warn(`[invoice] switch-restore sweep term-sync failed for prepay ${prepayId}: ${err.message} — next sweep retries`);
+        continue;
+      }
       try {
         restored.push(...await this.restoreSwitchSupersededInvoicesForPrepay(prepayId, conn));
       } catch (err) {
