@@ -912,9 +912,12 @@ function findUngroundedClaim(body, grounding) {
   const fixedNames = (grounding.llmFacts?.productGuidance?.productNames || [])
     .map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim())
     .filter(Boolean);
+  // EXACT normalized name only — either-side substring would let
+  // "Apply Bifen" ride on fixed "Bifen IT", a renaming the prompt
+  // forbids and the product authority rule rejects.
   const onFixedList = (term) => {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
-    return !phrase || fixedNames.some((n) => n === phrase || n.includes(phrase) || phrase.includes(n));
+    return !phrase || fixedNames.includes(phrase);
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1164,20 +1167,29 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     access: grounding.access,
   };
 
-  // The WDO guard rides the UPDATE too (not just the read above) so a
-  // concurrently-written WDO brief can never be clobbered in the race
-  // window between our read and this write.
+  // Compare-and-swap: generation can spend minutes in the LLM fallback
+  // chain, and a concurrent regeneration (fresher grounding, fresher
+  // access codes) may have written meanwhile — this run's stale brief
+  // must never overwrite it. The row must still carry the exact
+  // generated_at stamp read at load (or none), and the WDO guard rides
+  // the same UPDATE so a concurrently-written WDO brief can never be
+  // clobbered either. 0 rows = a newer writer won; nothing stored.
+  const priorGeneratedAt = svc.pre_service_brief_generated_at || null;
   const updated = await dbh('scheduled_services')
     .where({ id: scheduledServiceId })
     .where(function notWdo() {
       this.whereNull('pre_service_brief_type').orWhereNot('pre_service_brief_type', WDO_BRIEF_TYPE);
+    })
+    .where(function sameGeneration() {
+      if (priorGeneratedAt) this.where('pre_service_brief_generated_at', priorGeneratedAt);
+      else this.whereNull('pre_service_brief_generated_at');
     })
     .update({
       pre_service_brief: JSON.stringify(brief),
       pre_service_brief_type: VISIT_BRIEF_TYPE,
       pre_service_brief_generated_at: new Date(),
     });
-  if (!updated) return { skipped: true, reason: 'wdo_brief_present' };
+  if (!updated) return { skipped: true, reason: 'superseded' };
 
   return { generated: true, via, brief };
 }
