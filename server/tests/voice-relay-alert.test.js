@@ -259,6 +259,32 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(callBuilder.select).toHaveBeenCalledWith('twilio_call_sid', 'metadata', 'from_phone', 'call_summary');
   });
 
+  // ⭐ RECOVERY OUTLIVES THE GATE. Obligations minted while the lane was live
+  // must deliver even if the gate was since rolled back — otherwise a day-long
+  // outage silently discarded owed pages.
+  test('the sweep delivers persisted obligations even with the context gate OFF', async () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED; // rollback / outage
+    const callRows = [{
+      twilio_call_sid: 'CA-gateoff-1',
+      metadata: { relay_hot_alert_needed: 'true' },
+      from_phone: CALLER, call_summary: 'Swarm call captured before the rollback.',
+    }];
+    const callBuilder = {};
+    for (const m of ['where', 'whereRaw', 'orderBy', 'limit']) callBuilder[m] = jest.fn(() => callBuilder);
+    callBuilder.select = jest.fn(async () => callRows);
+    callBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
+    callBuilder.first = jest.fn(async () => null);
+    const notifBuilder = {};
+    for (const m of ['where', 'whereRaw']) notifBuilder[m] = jest.fn(() => notifBuilder);
+    notifBuilder.first = jest.fn(async () => null);
+    db.mockImplementation((table) => (table === 'notifications' ? notifBuilder : callBuilder));
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+
+    const paged = await relayAlert.sweepAbandonedHotAlerts();
+    expect(paged).toBe(1);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
   test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });

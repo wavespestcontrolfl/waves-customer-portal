@@ -715,7 +715,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       .where({ id: serviceId, customer_confirmed: false })
       // A rejection that committed during the hook window wins: never
       // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
     return stamped > 0;
   } catch (e) {
@@ -777,7 +777,7 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
       .where({ id: svc.id, customer_confirmed: false })
       // A rejection that committed during the hook window wins: never stamp a
       // cancelled/skipped row confirmed (same guard as the lazy helper).
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
     return stamped > 0;
   } catch (e) {

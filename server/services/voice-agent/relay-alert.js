@@ -227,8 +227,14 @@ async function hotAlertAlreadyDelivered(callSid) {
 
 async function alertOwnerHotLead(lead = {}, ctx = {}) {
   try {
+    // ⭐ THE CREATION GATE DOES NOT GOVERN RECOVERY. A persisted
+    // relay_hot_alert_needed obligation was minted while the lane was live;
+    // gating its DELIVERY on the same switch meant a rollback or gate outage
+    // silently discarded owed pages. The sweep passes recovery:true and
+    // delivers regardless — new obligations still cannot be created gate-off
+    // (capture_lead itself is gate-checked upstream).
     const { isContextEnabled } = require('./relay-context');
-    if (!isContextEnabled()) return false;
+    if (!isContextEnabled() && ctx.recovery !== true) return false;
     if (String(lead.lead_quality || '').toLowerCase() !== 'hot') return false;
     // One per CALL, never per turn. The session exposes a LIVE reader
     // (isOwnerAlerted) because the tool ctx is rebuilt each turn while two
@@ -437,8 +443,10 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
     rows = await db('call_log')
       .whereRaw("(metadata->>'relay_hot_alert_needed') IS NOT NULL")
       .whereRaw(`(metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
-      // Recent only: this recovers crashed pages, it does not re-litigate history.
-      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      // No age cutoff: an obligation is retained until its receipt lands or it
+      // is explicitly cleared — a gate outage longer than any window must not
+      // silently discard an owed page. The population is bounded by the
+      // markers themselves (cleared on delivery or on a dead linkage).
       .orderBy('created_at', 'asc')
       .limit(limit)
       // from_phone + call_summary feed the lead-LESS branch below (a hot
@@ -487,7 +495,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
         call_summary: lead.transcript_summary,
         urgency_reason: 'recovered by the hot-alert sweep',
       },
-      { callSid: row.twilio_call_sid },
+      { callSid: row.twilio_call_sid, recovery: true },
     ).catch(() => false);
     if (ok) paged += 1;
   }
