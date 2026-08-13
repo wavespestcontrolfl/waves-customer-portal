@@ -1917,6 +1917,23 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
     if (!['matched_expense', 'matched_payout'].includes(row.status)) {
       return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
     }
+    // For payout rows, the reversal-pending flag rides in the SAME update
+    // that unlinks the row — if the reversal below fails (or the process
+    // dies), the matching pass's sweep retries it instead of /admin/banking
+    // staying reconciled against an unlinked row forever.
+    const suggestion = {
+      ...(row.suggestion || {}),
+      lastUnlink: {
+        at: new Date().toISOString(),
+        was: row.status,
+        method: row.match_method,
+        ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
+        ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
+      },
+      ...(row.status === 'matched_payout' && row.matched_payout_id
+        ? { reconcileReversalPending: row.matched_payout_id }
+        : {}),
+    };
     const changed = await db('bank_transactions')
       .where({ id: row.id, status: row.status })
       .update({
@@ -1925,35 +1942,24 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         matched_payout_id: null,
         match_method: null,
         matched_at: null,
-        suggestion: {
-          ...(row.suggestion || {}),
-          lastUnlink: {
-            at: new Date().toISOString(),
-            was: row.status,
-            method: row.match_method,
-            ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
-            ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
-          },
-        },
+        suggestion,
         updated_at: new Date(),
       });
     if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
     let reconciliation = null;
-    if (row.status === 'matched_payout' && row.matched_payout_id) {
-      const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled', 'reconciled_by');
-      if (payout && payout.reconciled) {
-        if (payout.reconciled_by === 'bank-import') {
-          try {
-            const { reconcilePayout } = require('../services/stripe-banking');
-            await reconcilePayout(payout.id, Number(row.amount), `Unlinked from bank import row ${row.id}`, 'bank-import', 'rejected');
-            reconciliation = 'reversed';
-          } catch (err) {
-            logger.warn(`[bank-import] row ${row.id} unlinked but reconciliation reversal failed: ${err.message}`);
-            reconciliation = 'reversal_failed';
-          }
-        } else {
-          reconciliation = 'kept_manual';
-        }
+    if (suggestion.reconcileReversalPending) {
+      try {
+        const { reconcilePayout } = require('../services/stripe-banking');
+        // The onlyIfReconciledBy guard is checked under a row lock INSIDE
+        // reconcilePayout — a human's reconciliation (or none at all) is
+        // skipped atomically, never clobbered by this automated reversal.
+        const result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+        reconciliation = result && result.skipped ? 'kept' : 'reversed';
+        const { reconcileReversalPending, ...rest } = suggestion;
+        await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[bank-import] row ${row.id} unlinked; reconciliation reversal pending retry: ${err.message}`);
+        reconciliation = 'reversal_pending';
       }
     }
     res.json({ success: true, reconciliation });

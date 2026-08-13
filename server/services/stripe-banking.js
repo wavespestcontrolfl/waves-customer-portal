@@ -1057,8 +1057,14 @@ async function getCashFlow(startDate, endDate) {
  * @param {number} actualAmount — amount that hit the bank
  * @param {string} notes — reconciliation notes
  * @param {string} reconciledBy — who reconciled
+ * @param {string} status — draft | confirmed | rejected
+ * @param {object} opts — { onlyIfReconciledBy }: when set, the write only
+ *   proceeds if the payout is CURRENTLY reconciled by that exact author,
+ *   checked under a row lock inside the transaction (atomic — a concurrent
+ *   human reconciliation can never be clobbered by an automated reversal).
+ *   A guard miss returns { skipped: true } instead of writing.
  */
-async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed') {
+async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed', opts = {}) {
   try {
     const payout = await db('stripe_payouts').where('id', payoutId).first();
     if (!payout) throw new Error('Payout not found');
@@ -1077,7 +1083,15 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     const matched = Math.abs(discrepancy) < 0.01;
     const now = new Date().toISOString();
 
+    let skipped = false;
     await db.transaction(async (trx) => {
+      if (opts.onlyIfReconciledBy !== undefined) {
+        const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
+        if (!cur || !cur.reconciled || cur.reconciled_by !== opts.onlyIfReconciledBy) {
+          skipped = true;
+          return;
+        }
+      }
       const reconRow = {
         payout_id: payoutId,
         expected_amount: expectedAmount,
@@ -1098,6 +1112,11 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         reconciled_by: status === 'confirmed' ? reconciledBy : null,
       });
     });
+
+    if (skipped) {
+      logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status} SKIPPED — guard onlyIfReconciledBy=${opts.onlyIfReconciledBy} did not match current state`);
+      return { payout_id: payoutId, skipped: true };
+    }
 
     logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${normalizedActual}, matched=${matched}`);
 

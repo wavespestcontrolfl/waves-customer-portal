@@ -6,6 +6,8 @@ describe('stripe banking service', () => {
   let payoutAttempts;
   let syncStateRow;
   let syncStatePatch;
+  let payoutRow;
+  let reconInserts;
   let service;
 
   function makePayoutAttemptQuery() {
@@ -49,6 +51,8 @@ describe('stripe banking service', () => {
     payoutAttempts = [];
     syncStateRow = null;
     syncStatePatch = null;
+    payoutRow = { id: 'local-payout-1', stripe_payout_id: 'po_123', amount: '120.00' };
+    reconInserts = [];
 
     stripeClient = {
       balance: { retrieve: jest.fn() },
@@ -60,7 +64,8 @@ describe('stripe banking service', () => {
       if (table === 'stripe_payouts') {
         return {
           where: jest.fn().mockReturnThis(),
-          first: jest.fn().mockResolvedValue({ id: 'local-payout-1', stripe_payout_id: 'po_123', amount: '120.00' }),
+          forUpdate: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => payoutRow),
           update: jest.fn((patch) => { payoutUpdate = patch; return Promise.resolve(1); }),
           insert: jest.fn(() => ({
             onConflict: jest.fn(() => ({
@@ -95,6 +100,9 @@ describe('stripe banking service', () => {
         };
       }
       if (table === 'stripe_payout_idempotency_attempts') return makePayoutAttemptQuery();
+      if (table === 'bank_reconciliation') {
+        return { insert: jest.fn((row) => { reconInserts.push(row); return Promise.resolve([1]); }) };
+      }
       throw new Error(`Unexpected table ${table}`);
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -506,5 +514,41 @@ describe('stripe banking service', () => {
 
     await expect(service.createInstantPayout(50, { idempotencyKey: 'ipo_propagate_status' }))
       .rejects.toMatchObject({ message: 'Insufficient instant available balance', status: 400 });
+  });
+
+  describe('reconcilePayout onlyIfReconciledBy guard', () => {
+    test('writes normally when the guard matches the current author (checked under the row lock)', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'bank-import' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+      expect(reconInserts[0]).toMatchObject({ status: 'rejected', reconciled_by: 'bank-import' });
+      // 'rejected' un-reconciles the payout
+      expect(payoutUpdate).toMatchObject({ reconciled: false, reconciled_at: null, reconciled_by: null });
+    });
+
+    test('skips atomically when someone else owns the reconciliation — nothing is written', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('skips when the payout was never reconciled', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+      expect(result.skipped).toBe(true);
+      expect(reconInserts).toHaveLength(0);
+    });
+
+    test('no guard passed = unchanged legacy behavior (unconditional write)', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 118.5, 'bank shows less', 'admin', 'confirmed');
+      expect(result.skipped).toBeUndefined();
+      expect(result.discrepancy).toBe(-1.5);
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: true });
+    });
   });
 });

@@ -248,7 +248,35 @@ async function retryPendingReconciliations() {
       await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
     }
   }
-  return { pending: pending.length, retried };
+
+  // Reversal side: an unlink whose reconciliation reversal failed left
+  // suggestion.reconcileReversalPending = <payoutId>. Retry under the same
+  // onlyIfReconciledBy guard (atomic inside reconcilePayout) — a guard miss
+  // means a human owns the state now, which also resolves the flag.
+  const reversals = await db('bank_transactions')
+    .whereRaw("suggestion->>'reconcileReversalPending' is not null")
+    .select('id', 'amount', 'suggestion');
+  let reversed = 0;
+  for (const row of reversals) {
+    const payoutId = row.suggestion && row.suggestion.reconcileReversalPending;
+    if (!payoutId) continue;
+    try {
+      const { reconcilePayout } = require('./stripe-banking');
+      const result = await reconcilePayout(payoutId, Number(row.amount), `Unlinked from bank import row ${row.id} (retry)`, 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+      if (!(result && result.skipped)) reversed++;
+      const { reconcileReversalPending, ...rest } = row.suggestion || {};
+      await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+    } catch (err) {
+      // a deleted payout can never be reversed — resolve the flag
+      if (/payout not found/i.test(err.message)) {
+        const { reconcileReversalPending, ...rest } = row.suggestion || {};
+        await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+      } else {
+        logger.warn(`[bank-import] reconciliation reversal retry for payout ${payoutId} failed again: ${err.message}`);
+      }
+    }
+  }
+  return { pending: pending.length, retried, reversalsPending: reversals.length, reversed };
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -284,7 +312,7 @@ async function runDeterministicMatching() {
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
-  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
+  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, reconcileReversed: reconciliation.reversed };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);

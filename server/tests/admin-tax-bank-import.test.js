@@ -369,21 +369,37 @@ describe('unlink (gate on)', () => {
     expect(reconcilePayout).not.toHaveBeenCalled();
   });
 
-  test('unlinking a payout row reverses a bank-import-authored reconciliation', async () => {
-    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'bank-import' };
+  test('unlinking a payout row reverses the reconciliation under the reconciled-by guard', async () => {
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.reconciliation).toBe('reversed');
-    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'rejected');
+    // the guard rides INTO reconcilePayout, where it's checked under a row lock
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+    // the unlink update itself carries the reversal-pending flag (crash-safe),
+    // and a follow-up update clears it once the reversal lands
+    expect(state.bankUpdates[0].patch.suggestion.reconcileReversalPending).toBe('po-1');
+    expect(state.bankUpdates[1].patch.suggestion).not.toHaveProperty('reconcileReversalPending');
+    expect(state.bankUpdates[1].patch.suggestion.lastUnlink.payoutId).toBe('po-1');
   });
 
-  test('a HUMAN-authored reconciliation is never overridden from here', async () => {
-    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'adam' };
+  test('a guard miss (human owns the reconciliation, or none exists) resolves as kept', async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true });
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     const body = await res.json();
-    expect(body.reconciliation).toBe('kept_manual');
-    expect(reconcilePayout).not.toHaveBeenCalled();
+    expect(body.reconciliation).toBe('kept');
+    // flag still clears — nothing left to reverse
+    expect(state.bankUpdates[1].patch.suggestion).not.toHaveProperty('reconcileReversalPending');
+  });
+
+  test('a reversal failure answers reversal_pending and LEAVES the flag for the sweep', async () => {
+    reconcilePayout.mockRejectedValueOnce(new Error('db down'));
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.reconciliation).toBe('reversal_pending');
+    expect(state.bankUpdates).toHaveLength(1); // no clearing update
+    expect(state.bankUpdates[0].patch.suggestion.reconcileReversalPending).toBe('po-1');
   });
 
   test('only matched rows can be unlinked — unmatched and created_expense answer 409', async () => {
