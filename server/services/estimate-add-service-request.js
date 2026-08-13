@@ -300,7 +300,12 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
   }
 }
 
-async function resolveEstimateCustomer(database, estimate = {}) {
+// opts.sourceDetail: attribution stamp for a newly-created customer profile.
+// Defaults to this module's add-service label; other flows that share this
+// resolver (estimate-measurement-review) pass their own so lead attribution
+// reflects the actual entry point (codex #3376).
+async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
+  const sourceDetail = opts.sourceDetail || 'estimate_add_service_request';
   if (estimate.customer_id) {
     const customer = await database('customers')
       .where({ id: estimate.customer_id })
@@ -352,12 +357,12 @@ async function resolveEstimateCustomer(database, estimate = {}) {
     member_since: null,
     stage: 'new_lead',
     lead_source: SOURCE_PUBLIC_ESTIMATE,
-    lead_source_detail: 'estimate_add_service_request',
+    lead_source_detail: sourceDetail,
     lead_source_channel: 'public_estimate',
     pipeline_stage: 'new_lead',
     pipeline_stage_changed_at: new Date(),
     last_contact_date: new Date(),
-    last_contact_type: 'estimate_add_service_request',
+    last_contact_type: sourceDetail,
   })).onConflict().ignore().returning('*');
 
   if (!created) {

@@ -2715,7 +2715,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
                       border: `1.5px solid ${on ? COLORS.glassNavy : ESTIMATE_BORDER}`,
                       background: on ? COLORS.glassNavy : COLORS.white,
                       color: on ? COLORS.white : COLORS.glassNavy,
-                      fontSize: 13.5,
+                      fontSize: 14,
                       cursor: 'pointer',
                     }}
                   >
@@ -2753,7 +2753,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
                 Cancel
               </button>
             </div>
-            <div style={{ fontSize: 12.5, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 12, textAlign: 'center' }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 12, textAlign: 'center' }}>
               Your current estimate stays valid while we re-check — nothing changes until you see the updated number.
             </div>
           </>

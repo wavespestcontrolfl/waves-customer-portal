@@ -126,6 +126,49 @@ describe('createEstimateMeasurementReview', () => {
     })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
   });
 
+  test('404s an estimate with NO priced lawn basis (codex r3: pest-only estimates take no lawn challenge)', async () => {
+    const database = mockDb();
+    await expect(createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      lawnBasisPresent: false,
+    })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
+    expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('serializes per-estimate when the database supports transactions (codex r3 P1: duplicate customer race)', async () => {
+    const database = mockDb();
+    const lockCalls = [];
+    // knex-shaped transaction: hand the callback a trx that records the
+    // estimate row lock, then behaves like the base mock.
+    database.transaction = async (fn) => {
+      const trx = (table) => {
+        if (table === 'estimates') {
+          return {
+            where: () => ({
+              forUpdate: () => ({ first: async () => { lockCalls.push('forUpdate'); return ESTIMATE_ROW; } }),
+              first: async () => ESTIMATE_ROW,
+            }),
+          };
+        }
+        return database(table);
+      };
+      trx.raw = database.raw;
+      return fn(trx);
+    };
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+    });
+    expect(result.success).toBe(true);
+    expect(lockCalls).toContain('forUpdate');
+  });
+
   test('404s a non-viewable estimate BEFORE any write (codex r2: leaked/archived/expired tokens)', async () => {
     const database = mockDb();
     await expect(createEstimateMeasurementReview({

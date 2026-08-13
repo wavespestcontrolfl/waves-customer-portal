@@ -83,6 +83,12 @@ async function createEstimateMeasurementReview({
   shownSource,
   database = db,
   viewabilityCheck = defaultViewabilityCheck,
+  // Whether the estimate actually carries a priced lawn basis — computed by
+  // the route from the SAME helpers that render the area line (codex #3376:
+  // a pest-only estimate must not accept a lawn challenge; 404 keeps it
+  // indistinguishable from an unknown token). Defaults true only for direct
+  // service callers/tests; the route always passes the real verdict.
+  lawnBasisPresent = true,
 } = {}) {
   const token = String(estimateToken || '').trim();
   if (!token) {
@@ -102,17 +108,48 @@ async function createEstimateMeasurementReview({
   }
 
   const estimate = await database('estimates').where({ token }).first();
-  // Both gates, both 404 (indistinguishable): the full customer-viewability
-  // contract, AND this flow's own accepted/declined exclusion (a customer
-  // who accepted the price challenges through the office, not the sheet —
-  // viewability alone still renders accepted estimates).
-  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate)) {
+  // All three gates, all 404 (indistinguishable): the full customer-
+  // viewability contract; this flow's own accepted/declined exclusion (a
+  // customer who accepted the price challenges through the office, not the
+  // sheet — viewability alone still renders accepted estimates); and the
+  // lawn-basis requirement (no lawn line, no lawn challenge).
+  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !lawnBasisPresent) {
     const err = new Error('Estimate not found');
     err.status = 404;
     throw err;
   }
 
-  const customer = await resolveEstimateCustomer(database, estimate);
+  // Serialize per-estimate (codex #3376 P1): two concurrent first-time POSTs
+  // for an estimate with no linked customer would BOTH reach the attach-or-
+  // create resolver and mint duplicate customer profiles before either
+  // insert hits the dedupe index. A row lock on the estimate makes the
+  // second request wait, see the first's customer_id backfill, and dedupe
+  // normally. Falls back to unserialized on databases without transaction
+  // support (unit-test mocks) — the route always passes real knex.
+  const runSerialized = typeof database.transaction === 'function'
+    ? (fn) => database.transaction(async (trx) => {
+      await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      const locked = await trx('estimates').where({ id: estimate.id }).first();
+      return fn(trx, locked || estimate);
+    })
+    : (fn) => fn(database, estimate);
+
+  return runSerialized(async (dbx, lockedEstimate) => createReviewRow({
+    database: dbx,
+    estimate: lockedEstimate,
+    reasonKeys,
+    cleanNote,
+    shownSqFt,
+    shownSource,
+  }));
+}
+
+async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource }) {
+  const customer = await resolveEstimateCustomer(database, estimate, {
+    // Attribution reflects the actual entry point, not the add-service flow
+    // this resolver was born in (codex #3376).
+    sourceDetail: 'estimate_measurement_review',
+  });
 
   const estimateNumber = estimate.estimate_number || estimate.id;
   const reasonLabels = reasonKeys.map((k) => MEASUREMENT_REVIEW_REASONS[k]);
@@ -171,7 +208,13 @@ async function createEstimateMeasurementReview({
     'estimate_measurement_review',
     subject,
     description,
-    { metadata: { estimateId: estimate.id, requestId: request.id, customerId: customer.id } }
+    {
+      // Deep-link to the Customer 360 PANEL (codex #3376: the standalone
+      // requests page is gone — requests are worked from the notification
+      // deep-link; note the ?customerId=<id> panel form, NOT /customers/<id>).
+      link: `/admin/customers?customerId=${customer.id}`,
+      metadata: { estimateId: estimate.id, requestId: request.id, customerId: customer.id },
+    }
   ).catch((err) => {
     logger.error(`[estimate-measurement-review] admin notification failed for request ${request.id}: ${err.message} — request row stands`);
   });

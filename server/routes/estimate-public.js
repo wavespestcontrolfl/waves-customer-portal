@@ -12203,12 +12203,19 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const { createEstimateMeasurementReview } = require('../services/estimate-measurement-review');
+    // Lawn-basis verdict from the SAME helpers that render the area line —
+    // a pest-only estimate 404s identically to an unknown token (codex
+    // #3376: no lawn line, no lawn challenge).
+    const reviewEstResult = estimateRow ? resolvePricingEstResult(parseEstimateDataSafe(estimateRow)) : {};
+    const lawnBasisPresent = !!(measuredBasisForSection('lawn_care', reviewEstResult)
+      || measuredBasisForSection('commercial_lawn', reviewEstResult));
     const result = await createEstimateMeasurementReview({
       estimateToken: req.params.token,
       reasons: req.body?.reasons,
       note: req.body?.note,
       shownSqFt: req.body?.shownSqFt,
       shownSource: req.body?.shownSource,
+      lawnBasisPresent,
     });
     res.status(result.deduped ? 200 : 201).json(result);
   } catch (err) {

@@ -502,7 +502,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
           Server-supplied and already rounded; absent when the section has no
           area basis, so a service priced some other way shows nothing. */}
       {measuredBasis?.label && measuredBasis?.value ? (
-        <div style={{ fontSize: 13.5, color: CUSTOMER_SURFACE.muted, marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 6, lineHeight: 1.5 }}>
           {measuredBasis.label}: <strong style={{ color: CUSTOMER_SURFACE.text }}>{measuredBasis.value}</strong>
           {/* Source must WRAP on narrow phones (~230px content width) — a
               nowrap span overflows the card (codex #3376 r1). */}
@@ -522,7 +522,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   border: 'none',
                   padding: 0,
                   font: 'inherit',
-                  fontSize: 13,
+                  fontSize: 14,
                   color: CUSTOMER_SURFACE.muted,
                   textDecoration: 'underline',
                   cursor: 'pointer',
