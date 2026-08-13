@@ -744,14 +744,20 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', evidence = {} }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {} }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
-  return db.transaction(async (trx) => {
+  // Locked winner snapshot + lock-held timestamp, hoisted for the
+  // post-commit contact audit event.
+  let winnerBeforeMerge = null;
+  let mergeLockedAt = null;
+  const result = await db.transaction(async (trx) => {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
+    winnerBeforeMerge = winner;
+    mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
     // The surviving row must be live: retiring an active customer into an
@@ -1494,6 +1500,21 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // link-as-property route preserves the loser's address on the winner).
     return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
   });
+  // 360 timeline events for loser contacts appended onto the winner —
+  // post-commit, best-effort, awaited (the recorder never throws; a failed
+  // event only warns and never fails the merge). No-op when the backfills
+  // touched no contact slot.
+  if (winnerBeforeMerge) {
+    await require('./service-contact-events').recordServiceContactChanges({
+      customerId: winnerId,
+      before: winnerBeforeMerge,
+      after: { ...winnerBeforeMerge, ...result.backfills },
+      source: 'dedupe',
+      adminUserId: performedById,
+      occurredAt: mergeLockedAt,
+    });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2082,6 +2103,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     err.statusCode = 409;
     throw err;
   };
+  // Locked winner snapshot + applied patch, hoisted for the post-commit
+  // contact audit event (backfilled loser contacts leaving the winner).
+  let winnerBeforeUndo = null;
+  let winnerPatchApplied = null;
+  let undoLockedAt = null;
   const result = await db.transaction(async (trx) => {
     const journal = await trx('customer_merge_journal').where({ id: journalId }).forUpdate().first();
     if (!journal) refuse('Merge journal entry not found');
@@ -3547,6 +3573,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     if (Object.keys(winnerPatch).length) {
       await trx('customers').where({ id: winnerId }).update({ ...winnerPatch, updated_at: trx.fn.now() });
+      winnerBeforeUndo = winner;
+      winnerPatchApplied = winnerPatch;
+      undoLockedAt = new Date();
     }
     if (!ledgerMovedBack && creditsMovedBack) {
       await trx('customers').where({ id: winnerId }).decrement('account_credits', creditsMovedBack);
@@ -3720,6 +3749,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       winnerName: [winner.first_name, winner.last_name].filter(Boolean).join(' ') || 'Unknown',
     };
   });
+
+  // Post-commit on purpose: a failed event must never roll back the revert
+  // (the recorder never throws — awaited so the row lands before the undo
+  // reports done). No-op when the reverted patch touched no contact slot.
+  if (winnerBeforeUndo && winnerPatchApplied) {
+    await require('./service-contact-events').recordServiceContactChanges({
+      customerId: result.winnerId,
+      before: winnerBeforeUndo,
+      after: { ...winnerBeforeUndo, ...winnerPatchApplied },
+      source: 'dedupe_undo',
+      adminUserId: performedById || null,
+      occurredAt: undoLockedAt,
+    });
+  }
 
   // Post-commit on purpose: a failed bell must never roll back the revert.
   try {

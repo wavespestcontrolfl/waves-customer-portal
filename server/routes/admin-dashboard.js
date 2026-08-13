@@ -414,7 +414,12 @@ router.get('/', dashboardCache, async (req, res, next) => {
       })),
       recentActivity: recentActivity.map(a => ({
         id: a.id, action: a.action, description: a.description,
-        metadata: safeParseJSON(a.metadata),
+        // service_contact_* metadata carries full contact name/phone/email
+        // for the customer-scoped People panel — the global feed gets the
+        // already-masked description only.
+        metadata: String(a.action || '').startsWith('service_contact_')
+          ? null
+          : safeParseJSON(a.metadata),
         createdAt: a.created_at,
       })),
       revenueByTier: tierRevenue.map(t => ({
