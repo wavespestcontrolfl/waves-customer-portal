@@ -536,6 +536,43 @@ async function post(path, body = {}) {
 
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 
+describe('on-site prepay switch — the NON-ESTIMATE lane (prepay-on-book twin)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 });
+  });
+
+  test('a live attached invoice REFUSES the switch — nothing is safely voidable here', async () => {
+    // Codex PR #3381 r1 P1: estimateId null used to skip the invoice query
+    // entirely, minting the year while a checkout pre-mint stayed payable.
+    const termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, source_estimate_id: null },
+      invoices: [{ id: 'inv-premint', invoice_number: 'WPC-2026-0430', status: 'draft', notes: 'Checkout pre-mint' }],
+    });
+    const { status, body } = await post('/svc-1/prepay-switch');
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/already carries WPC-2026-0430/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+    termSpy.mockRestore();
+  });
+
+  test('with NO attached invoices the non-estimate switch mints with supersedes: []', async () => {
+    const termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, source_estimate_id: null },
+      invoices: [],
+    });
+    const { status, body } = await post('/svc-1/prepay-switch');
+    expect(status).toBe(201);
+    expect(body.voided).toEqual([]);
+    expect(body.invoice.id).toBe('inv-prepay');
+    termSpy.mockRestore();
+  });
+});
+
 describe('on-site prepay switch — the atomic switch endpoint', () => {
   let termSpy;
   beforeEach(() => {

@@ -9120,7 +9120,30 @@ const {
 } = require('../services/invoice');
 
 async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
-  if (!Array.isArray(visitIds) || visitIds.length === 0 || !estimateId || !customerId) {
+  if (!Array.isArray(visitIds) || visitIds.length === 0) {
+    return { ok: true, supersedes: [] };
+  }
+  // NON-ESTIMATE lane (the prepay-on-book twin): nothing was accept-minted,
+  // so nothing is safely voidable — but a LIVE invoice already attached to
+  // the series (an uncollected checkout pre-mint, a manual draft) must not
+  // sit payable beside a freshly collected year (Codex PR #3381 r1 P1:
+  // returning supersedes:[] here skipped the invoice query entirely and the
+  // switch double-billed). Fail closed: any live attached invoice refuses
+  // the switch; the operator resolves it from Invoices first.
+  if (!estimateId || !customerId) {
+    let liveAttached;
+    try {
+      liveAttached = await conn('invoices')
+        .whereIn('scheduled_service_id', visitIds)
+        .whereNotIn('status', [...SUPERSEDE_DEAD_STATUSES])
+        .first('id', 'invoice_number', 'status');
+    } catch (err) {
+      logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
+      return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
+    }
+    if (liveAttached) {
+      return { ok: false, blockReason: `can’t be switched here — this visit already carries ${liveAttached.invoice_number || 'an invoice'} (${String(liveAttached.status || '').toLowerCase()}), which the prepaid year does not replace. Resolve it from Invoices first` };
+    }
     return { ok: true, supersedes: [] };
   }
   let rows;
