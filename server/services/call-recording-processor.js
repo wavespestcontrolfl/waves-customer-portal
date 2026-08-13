@@ -1682,15 +1682,13 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
       .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
     if (wrote) {
-      // 360 timeline event — post-write, best-effort (never fails the call
-      // pipeline; the recorder catches its own failures).
-      require('./service-contact-events').recordServiceContactChanges({
+      // 360 timeline event — post-write, best-effort, awaited (the recorder
+      // never throws; a failure only warns and never fails the pipeline).
+      await require('./service-contact-events').recordServiceContactChanges({
         customerId,
         before: customer,
         after: { ...customer, [matched.roleCol]: roleToRecord.slice(0, 30) },
         source: 'call',
-      }).catch((err) => {
-        logger.warn(`[call-processor] service-contact event recording failed for customer ${customerId}: ${err.message}`);
       });
     }
     return !!wrote;
@@ -1807,16 +1805,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   };
   const updated = await write.update(slotWrite);
   if (!updated) return 'skipped_slot_race';
-  // 360 timeline event — post-write, best-effort. The conditional WHERE
-  // proved the slot was still empty at write time, so merging slotWrite over
-  // the read snapshot diffs to exactly this one addition.
-  require('./service-contact-events').recordServiceContactChanges({
+  // 360 timeline event — post-write, best-effort, awaited (the recorder
+  // never throws). The conditional WHERE proved the slot was still empty at
+  // write time, so merging slotWrite over the read snapshot diffs to exactly
+  // this one addition.
+  await require('./service-contact-events').recordServiceContactChanges({
     customerId,
     before: customer,
     after: { ...customer, ...slotWrite },
     source: 'call',
-  }).catch((err) => {
-    logger.warn(`[call-processor] service-contact event recording failed for customer ${customerId}: ${err.message}`);
   });
   return 'written';
 }

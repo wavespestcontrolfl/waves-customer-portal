@@ -123,6 +123,27 @@ describe('diffServiceContacts', () => {
     ]);
   });
 
+  test('renaming a name-only contact is an update, not remove+add', () => {
+    const before = { service_contact_name: 'Grandma Ruth' };
+    const after = { service_contact_name: 'Ruth Wilson' };
+    expect(diffServiceContacts(before, after)).toEqual([
+      expect.objectContaining({ action: 'service_contact_updated', changed: ['name'] }),
+    ]);
+  });
+
+  test('replacing a contact who HAS a phone with a different person is remove+add, not an update', () => {
+    const after = {
+      service_contact_name: 'Bob Neighbor',
+      service_contact_phone: '+15557775555',
+    };
+    const events = diffServiceContacts(jane, after);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'service_contact_added', person: expect.objectContaining({ name: 'Bob Neighbor' }) }),
+      expect.objectContaining({ action: 'service_contact_removed', person: expect.objectContaining({ name: 'Jane Smith' }) }),
+    ]));
+    expect(events).toHaveLength(2);
+  });
+
   test('a role-only change is an update flagged on role', () => {
     const events = diffServiceContacts(jane, {
       ...jane,

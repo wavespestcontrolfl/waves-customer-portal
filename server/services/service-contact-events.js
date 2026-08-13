@@ -104,11 +104,12 @@ function diffServiceContacts(beforeRow = {}, afterRow = {}) {
   const afterPeople = slotPeople(afterRow);
   const events = [];
   const matched = new Set();
+  const unmatchedAfter = [];
 
   for (const person of afterPeople) {
     const prior = matchPerson(person, beforePeople.filter((p) => !matched.has(p)));
     if (!prior) {
-      events.push({ action: 'service_contact_added', person, changed: [] });
+      unmatchedAfter.push(person);
       continue;
     }
     matched.add(prior);
@@ -116,6 +117,23 @@ function diffServiceContacts(beforeRow = {}, afterRow = {}) {
     if (changed.length) {
       events.push({ action: 'service_contact_updated', person, changed });
     }
+  }
+
+  // Same-slot fallback: a name-only contact (no phone, no email) that is
+  // renamed can't match on any stable identifier and would read as
+  // remove+add. When BOTH the unmatched after-person and the unmatched
+  // before-person in the same slot lack stable identifiers, the slot is the
+  // only identity evidence — treat it as an update. A person with a phone or
+  // email that stopped matching really is a different person: no fallback.
+  const hasStableId = (p) => !!(phoneKey(p.phone) || norm(p.email));
+  for (const person of unmatchedAfter) {
+    const samePriorSlot = beforePeople.find((p) => !matched.has(p) && p.slot === person.slot);
+    if (samePriorSlot && !hasStableId(person) && !hasStableId(samePriorSlot)) {
+      matched.add(samePriorSlot);
+      events.push({ action: 'service_contact_updated', person, changed: changedFields(samePriorSlot, person) });
+      continue;
+    }
+    events.push({ action: 'service_contact_added', person, changed: [] });
   }
 
   for (const prior of beforePeople) {

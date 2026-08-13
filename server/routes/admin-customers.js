@@ -3461,14 +3461,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // read and this save's lock.
     if (SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => field in updates)) {
       const { recordServiceContactChanges } = require('../services/service-contact-events');
-      recordServiceContactChanges({
+      // Awaited: the recorder never throws (a failure only warns), so this
+      // cannot fail the save — it just guarantees the event row is committed
+      // before the save reports done.
+      await recordServiceContactChanges({
         customerId: req.params.id,
         before: contactAuditBefore,
         after: { ...contactAuditBefore, ...updates },
         source: 'admin',
         adminUserId: req.technicianId || null,
-      }).catch((err) => {
-        logger.warn(`[admin-customers] service-contact event recording failed for customer ${req.params.id}: ${err.message}`);
       });
     }
 

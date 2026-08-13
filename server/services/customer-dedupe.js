@@ -1498,16 +1498,15 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
   });
   // 360 timeline events for loser contacts appended onto the winner —
-  // post-commit, best-effort (a failed event must never fail the merge).
-  // No-op when the backfills touched no contact slot.
+  // post-commit, best-effort, awaited (the recorder never throws; a failed
+  // event only warns and never fails the merge). No-op when the backfills
+  // touched no contact slot.
   if (winnerBeforeMerge) {
-    require('./service-contact-events').recordServiceContactChanges({
+    await require('./service-contact-events').recordServiceContactChanges({
       customerId: winnerId,
       before: winnerBeforeMerge,
       after: { ...winnerBeforeMerge, ...result.backfills },
       source: 'dedupe',
-    }).catch((err) => {
-      logger.warn(`[customer-dedupe] service-contact event recording failed for customer ${winnerId}: ${err.message}`);
     });
   }
   return result;
@@ -3744,16 +3743,15 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     };
   });
 
-  // Post-commit on purpose: a failed event must never roll back the revert.
-  // No-op when the reverted patch touched no contact slot.
+  // Post-commit on purpose: a failed event must never roll back the revert
+  // (the recorder never throws — awaited so the row lands before the undo
+  // reports done). No-op when the reverted patch touched no contact slot.
   if (winnerBeforeUndo && winnerPatchApplied) {
-    require('./service-contact-events').recordServiceContactChanges({
+    await require('./service-contact-events').recordServiceContactChanges({
       customerId: result.winnerId,
       before: winnerBeforeUndo,
       after: { ...winnerBeforeUndo, ...winnerPatchApplied },
       source: 'dedupe_undo',
-    }).catch((err) => {
-      logger.warn(`[customer-dedupe] service-contact event recording failed for customer ${result.winnerId}: ${err.message}`);
     });
   }
 
