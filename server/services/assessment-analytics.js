@@ -934,6 +934,24 @@ async function detectContradictions() {
       }
     }
 
+    // Self-heal stranded gates: a crash between re-pointing a
+    // contradiction row and recomputing its FORMER page — or any
+    // historical gate-write failure — leaves a page carrying
+    // 'open_contradiction' flags with no open row owning it, and nothing
+    // else ever revisits it (later runs select open rows only). Recompute
+    // clears it (getOpenContradictionIdsFor returns []); a failure here
+    // propagates into this leg's error so the run records unhealthy.
+    const flagged = await db('knowledge_entries')
+      .whereRaw("risk_flags::text LIKE ?", ['%open_contradiction%'])
+      .select('id');
+    for (const row of flagged) {
+      const open = await db('knowledge_contradictions')
+        .where({ wiki_entry_id: row.id })
+        .whereNotIn('status', ['resolved', 'dismissed'])
+        .first('id');
+      if (!open) await recomputeEntryReviewGate(row.id);
+    }
+
     logger.info(`[assessment-analytics] Contradiction detection: ${found.length} new contradictions found`);
     return { contradictions: found.length, details: found };
   } catch (err) {
