@@ -430,7 +430,13 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
     // etCalendarDayOf, not etDateString: service_date is a pg DATE
     // materialized at UTC midnight — the ET wall clock would shift it
     // to the previous day and the same-day check would never pass.
-    if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
+    // Runs for a PARTIAL snapshot too — a fresh snapshot carrying only
+    // one sensor would otherwise satisfy the truthy check, skip this
+    // merge, and COALESCE the same nulls every hour until ET midnight
+    // closes the window and the gaps go permanent.
+    const weatherIncomplete = !weather
+      || weather.temp_f == null || weather.humidity_pct == null || weather.rainfall_in == null;
+    if (weatherIncomplete && etCalendarDayOf(treatmentDate) === etDateString()) {
       const fawn = await require('./fawn-weather').getCurrent();
       // Same ≤6h bound as the persisted-snapshot path above. The
       // STATION's observation_time is authoritative when present
@@ -444,7 +450,15 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
       };
       const obsFresh = freshMoment(fawn?.observation_time);
       const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
-      if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
+      if (fawn && fawn.station !== 'unavailable' && fresh) {
+        // Merge into the snapshot's gaps only — the persisted snapshot
+        // stays authoritative for fields it actually carried.
+        weather = {
+          temp_f: weather?.temp_f ?? fawn.temp_f,
+          humidity_pct: weather?.humidity_pct ?? fawn.humidity_pct,
+          rainfall_in: weather?.rainfall_in ?? fawn.rainfall_in,
+        };
+      }
     }
     if (weather) {
       // COALESCE: a partial snapshot must never null out a field a prior

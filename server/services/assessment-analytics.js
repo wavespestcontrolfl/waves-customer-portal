@@ -668,7 +668,39 @@ async function getCustomerBenchmark(customerId) {
 // the wiki entry, attribute the existing row and gate the page now. On gate
 // failure the attribution is reverted so the next weekly run retries.
 async function backfillContradictionAttribution(existing, wikiEntryId) {
-  if (!existing || existing.wiki_entry_id || !wikiEntryId) return false;
+  if (!existing || !wikiEntryId) return false;
+  if (existing.wiki_entry_id === wikiEntryId) return false;
+  // MISMATCHED legacy attribution (the former unordered fuzzy .first()
+  // could pick an arbitrary variant page): move the row to the exact
+  // resolution — gate the correct page first, conditionally re-point the
+  // row, then recompute the wrongly-gated former page so it clears.
+  if (existing.wiki_entry_id) {
+    await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
+    const moved = await db('knowledge_contradictions')
+      .where({ id: existing.id, status: 'open', wiki_entry_id: existing.wiki_entry_id })
+      .update({ wiki_entry_id: wikiEntryId });
+    const recomputeOrThrow = async (entryId, label) => {
+      try {
+        await recomputeEntryReviewGate(entryId);
+      } catch (err) {
+        try {
+          await recomputeEntryReviewGate(entryId);
+          logger.warn(`[assessment-analytics] ${label} recompute for ${entryId} succeeded on retry`);
+        } catch (retryErr) {
+          logger.error(`[assessment-analytics] ${label} recompute failed for ${entryId}: ${retryErr.message}`);
+          throw retryErr;
+        }
+      }
+    };
+    if (!moved) {
+      // Admin resolved/re-pointed the row between read and write — clear
+      // the gate this call just forced on the exact page.
+      await recomputeOrThrow(wikiEntryId, 'corrective gate');
+      return false;
+    }
+    await recomputeOrThrow(existing.wiki_entry_id, 'former-page gate');
+    return true;
+  }
   // Gate FIRST, persist second: attribution written before a successful gate
   // would make this function's null-check skip the row on every later run
   // while the page stayed trusted (a crash between the two writes used to
