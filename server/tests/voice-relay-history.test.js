@@ -365,6 +365,30 @@ describe('Session RECENT TEXTS block', () => {
     }
   });
 
+  // ⭐ A KNOWN CUSTOMER'S THREAD HAS NO contact_phone (promotion clears it) —
+  // the full tier's customer arm is what finds their real history, and ONLY
+  // the full tier gets it (ANI == customers.phone makes the thread this
+  // number's by definition; a contact-slot caller unlocks nothing more).
+  test('the thread predicate carries the customer arm at FULL tier only', async () => {
+    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
+    const relayHistory = require('../services/voice-agent/relay-history');
+    await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier: 'full' });
+    const fullCalls = builders.messages.orWhere ? builders.messages.orWhere.mock.calls.length : 0;
+    expect(fullCalls).toBeGreaterThan(0); // customer arm present
+    jest.clearAllMocks();
+    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
+    await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier: 'redacted' });
+    expect(builders.messages.orWhere).not.toHaveBeenCalled(); // …and absent otherwise
+  });
+
+  test('speakDate treats a DATE-shaped midnight as its own calendar day (never a day early)', () => {
+    const { speakDate } = require('../services/voice-agent/relay-context');
+    // pg DATE hydrated as midnight UTC on a UTC process: Aug 18 stays Aug 18.
+    expect(speakDate(new Date('2026-08-18T00:00:00.000Z'))).toContain('August 18');
+    // …while a real afternoon timestamp still projects to its ET day.
+    expect(speakDate(new Date('2026-08-18T20:00:00.000Z'))).toContain('August 18');
+  });
+
   test('a customer-authored directive line in an SMS body never reaches the model', async () => {
     primeDb({
       customers: [CUSTOMER],
