@@ -105,30 +105,47 @@ function stubTables({
   estimate = { id: 'est-1', status: 'accepted', accepted_at: '2026-08-10T14:40:05.527Z' },
   visit = ACCEPTED_SERIES_VISIT,
   invoices = [ACCEPT_INVOICE],
+  replacementRow = undefined,
   term = undefined,
   addonCount = 0,
   seriesCount = 4,
 } = {}) {
+  db.transaction = jest.fn(async (cb) => cb(db));
   db.mockImplementation((table) => {
     const q = {};
     let isCount = false;
-    q.where = jest.fn(() => q);
+    // The invoices table serves four distinct reads; the stub tells them
+    // apart by their WHERE shapes: the restore-marker lookup filters on
+    // notes LIKE, the idempotent-retry sweep filters status='void'.
+    let notesLike = false;
+    let voidOnly = false;
+    q.where = jest.fn((...args) => {
+      if (args[0] === 'notes') notesLike = true;
+      if (args[0] && typeof args[0] === 'object' && args[0].status === 'void') voidOnly = true;
+      return q;
+    });
     q.whereNull = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.whereIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
+    q.forUpdate = jest.fn(() => q);
     q.count = jest.fn(() => { isCount = true; return q; });
     q.select = jest.fn(async () => {
       if (table === 'invoices') {
         if (invoices === 'throw') throw new Error('invoice read failed');
-        return invoices;
+        const rows = Array.isArray(invoices) ? invoices : [];
+        return voidOnly ? rows.filter((r) => String(r.status || '').toLowerCase() === 'void') : rows;
       }
       return [];
     });
     q.first = jest.fn(async () => {
       // The undo endpoint reads ONE invoice row by id; the preview/supersede
-      // path reads the set via .select() above.
-      if (table === 'invoices') return Array.isArray(invoices) ? invoices[0] : undefined;
+      // path reads the set via .select() above; the marker lookup answers
+      // with the stubbed replacement row.
+      if (table === 'invoices') {
+        if (notesLike) return replacementRow;
+        return Array.isArray(invoices) ? invoices[0] : undefined;
+      }
       if (table === 'customers') return customer;
       if (table === 'estimates') {
         if (estimate === 'throw') throw new Error('estimate read failed');
@@ -353,6 +370,15 @@ describe('on-site prepay switch — invoices that must not be superseded', () =>
     expect(body.setupFee).toBeNull();
   });
 
+  test('TWO live accept-provenance invoices refuse — single-row supersede is the atomicity', async () => {
+    stubTables({
+      invoices: [ACCEPT_INVOICE, { ...ACCEPT_INVOICE, id: 'inv-dup', invoice_number: 'WPC-2026-0346' }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/more than one live invoice/i);
+  });
+
   test('an unreadable invoice read refuses rather than switching blind', async () => {
     stubTables({ invoices: 'throw' });
     const { body } = await preview();
@@ -463,6 +489,26 @@ describe('on-site prepay switch — supersede (retire before the tender)', () =>
     expect(body.error).toMatch(/Nothing was charged/i);
     expect(body.voided).toEqual([]);
   });
+
+  test('a RETRY after a lost response re-reports the already-voided invoice without re-voiding', async () => {
+    // The first call voided it; the response never arrived. The retry finds
+    // the void, accept-provenance, not-yet-restored row and hands it back so
+    // the client still has something to restore on abort.
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, status: 'void' }] });
+    const { status, body } = await post('/svc-1/prepay-switch/supersede');
+    expect(status).toBe(200);
+    expect(body.voided).toEqual([{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }]);
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a retry does NOT re-report a void the undo already replaced', async () => {
+    stubTables({
+      invoices: [{ ...ACCEPT_INVOICE, status: 'void' }],
+      replacementRow: { id: 'inv-new', invoice_number: 'WPC-2026-0401' },
+    });
+    const { body } = await post('/svc-1/prepay-switch/supersede');
+    expect(body.voided).toEqual([]);
+  });
 });
 
 describe('on-site prepay switch — undo (put the invoice back)', () => {
@@ -495,6 +541,19 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
       { description: 'First service application', quantity: 1, unit_price: 128 },
     ]);
     expect(created.scheduledServiceId).toBe('svc-1');
+    // The idempotency anchor: a marker keyed by the voided row rides the
+    // replacement's notes so a duplicated undo can never mint a second bill.
+    expect(created.notes).toContain('[prepay-switch-restore:inv-1]');
+  });
+
+  test('a duplicated undo reports the EXISTING replacement instead of minting a second bill', async () => {
+    stubTables({
+      invoices: [VOIDED_ROW],
+      replacementRow: { id: 'inv-new', invoice_number: 'WPC-2026-0401' },
+    });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([{ replacedInvoiceId: 'inv-1', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0401' }]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
   test('skips a row that is not void — no duplicate bill on a repeated undo', async () => {

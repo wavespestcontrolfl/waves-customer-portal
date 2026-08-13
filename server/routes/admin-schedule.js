@@ -9097,6 +9097,25 @@ function invoiceLineItems(raw) {
   return [];
 }
 
+// The estimate converter's provenance stamp for an accept-minted invoice.
+// One definition — the resolver's supersede match and the supersede
+// endpoint's idempotent re-report must agree on what "this accept's
+// invoice" means.
+function acceptProvenanceRe(estimateId) {
+  return new RegExp(
+    `Auto-generated from accepted estimate #${String(estimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+    'i',
+  );
+}
+
+// Marker written into a restored invoice's notes, keyed by the VOIDED row it
+// replaces. This is the undo's idempotency anchor: a marker match means the
+// restore already happened, so a retried/duplicated undo can never mint a
+// second replacement (Codex P0 r3).
+function restoreMarker(voidedInvoiceId) {
+  return `[prepay-switch-restore:${voidedInvoiceId}]`;
+}
+
 async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0 || !estimateId) {
     return { ok: true, supersedes: [] };
@@ -9118,10 +9137,7 @@ async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
   // the void and real AR would quietly disappear. Only the invoice the ACCEPT
   // minted for THIS estimate is what the prepaid year replaces, and the
   // converter stamps that into notes.
-  const acceptStamp = new RegExp(
-    `Auto-generated from accepted estimate #${String(estimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
-    'i',
-  );
+  const acceptStamp = acceptProvenanceRe(estimateId);
   const supersedes = [];
   for (const inv of rows) {
     const status = String(inv.status || '').toLowerCase();
@@ -9169,6 +9185,13 @@ async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
         .map((li) => ({ description: String(li?.description || ''), amount: Number(li?.amount ?? li?.unit_price) }))
         .filter((li) => li.description && Number.isFinite(li.amount)),
     });
+  }
+  // ONE invoice, by construction: the accept mints exactly one. More than
+  // one live accept-provenance invoice is an abnormal state this one-tap
+  // action must not try to untangle — and single-row supersede is what makes
+  // the retire step atomic (no partial-void state can exist; Codex P0 r3).
+  if (supersedes.length > 1) {
+    return { ok: false, blockReason: 'can\u2019t be switched here \u2014 this visit carries more than one live invoice. Resolve them from Invoices, then mint the prepay from Customer 360' };
   }
   return { ok: true, supersedes };
 }
@@ -9691,13 +9714,37 @@ router.post('/:id/prepay-switch/supersede', requireAdmin, async (req, res, next)
     if (!resolved.ok) return res.status(409).json({ error: resolved.blockReason });
 
     const InvoiceService = require('../services/invoice');
+    // Idempotency (Codex P0 r3): a retried call — e.g. the first response was
+    // lost on a dead connection — must return the SAME voided list instead of
+    // an empty one, or the client would have nothing to restore on abort.
+    // Re-report accept-provenance rows a prior call already voided, as long
+    // as no restore marker says the undo already put them back.
+    const stamp = acceptProvenanceRe(target.estimateId);
+    const priorVoidRows = (await db('invoices')
+      .whereIn('scheduled_service_id', target.visitIds)
+      .where({ status: 'void' })
+      .select('id', 'invoice_number', 'total', 'notes'))
+      .filter((row) => stamp.test(String(row.notes || '')));
     const voided = [];
+    for (const row of priorVoidRows) {
+      const replaced = await db('invoices')
+        .where('notes', 'like', `%${restoreMarker(row.id)}%`)
+        .first('id');
+      if (!replaced) {
+        voided.push({
+          id: row.id,
+          invoiceNumber: row.invoice_number || null,
+          total: Math.round(Number(row.total || 0) * 100) / 100,
+        });
+      }
+    }
     for (const inv of resolved.supersedes) {
       try {
         await InvoiceService.voidInvoice(inv.id);
       } catch (err) {
-        // Partial failure: report what DID retire so the caller can stop
-        // rather than mint a prepay beside a live per-application invoice.
+        // The resolver capped the set at ONE live invoice, so a failure here
+        // means NOTHING new was voided this call — the visit still bills
+        // exactly as it did.
         logger.warn(`[schedule:prepay-switch] void failed for ${inv.invoiceNumber || inv.id}: ${err.message}`);
         return res.status(409).json({
           error: `Couldn’t retire ${inv.invoiceNumber || 'the per-application invoice'}: ${err.message}. Nothing was charged — resolve it from Invoices and try again.`,
@@ -9735,43 +9782,59 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
     const restored = [];
     const failed = [];
     for (const id of ids) {
-      const row = await db('invoices')
-        .where({ id })
-        .whereIn('scheduled_service_id', target.visitIds)
-        .first('id', 'invoice_number', 'status', 'line_items', 'notes', 'title',
-          'scheduled_service_id', 'customer_id', 'due_date');
-      // Only a row this lane could have retired: void, on this series. A
-      // non-void row means the undo already ran (or never applied) — skip it
-      // rather than mint a duplicate bill.
-      if (!row || String(row.status || '').toLowerCase() !== 'void') continue;
-      const lines = invoiceLineItems(row.line_items)
-        .map((li) => ({
-          description: String(li?.description || ''),
-          quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
-          unit_price: Number(li?.unit_price ?? li?.amount),
-        }))
-        .filter((li) => li.description && Number.isFinite(li.unit_price));
-      if (lines.length === 0) {
-        failed.push({ id, invoiceNumber: row.invoice_number || null, error: 'no readable line items' });
-        continue;
-      }
+      // IDEMPOTENT + TRANSACTIONAL (Codex P0 r3): the voided row is locked,
+      // the restore-marker check and the re-mint commit together, and the
+      // marker makes a retried/duplicated undo a no-op instead of a second
+      // bill. A lost response is safe to retry.
       try {
-        const recreated = await InvoiceService.create({
-          customerId: row.customer_id,
-          scheduledServiceId: row.scheduled_service_id,
-          title: row.title || 'Service invoice',
-          lineItems: lines,
-          notes: `${row.notes || ''}\n(Re-created after an annual-prepay switch was cancelled; replaces voided ${row.invoice_number || id}.)`.trim(),
-          dueDate: etDateString(),
+        const outcome = await db.transaction(async (trx) => {
+          const row = await trx('invoices')
+            .where({ id })
+            .whereIn('scheduled_service_id', target.visitIds)
+            .forUpdate()
+            .first('id', 'invoice_number', 'status', 'line_items', 'notes', 'title',
+              'scheduled_service_id', 'customer_id');
+          // Only a row this lane could have retired: void, on this series.
+          if (!row || String(row.status || '').toLowerCase() !== 'void') return { skipped: true };
+          // Already restored (this call raced a duplicate, or an earlier
+          // response was lost) — report the existing replacement, mint nothing.
+          const existing = await trx('invoices')
+            .where('notes', 'like', `%${restoreMarker(row.id)}%`)
+            .first('id', 'invoice_number');
+          if (existing) {
+            return { restored: { replacedInvoiceId: id, invoiceId: existing.id, invoiceNumber: existing.invoice_number || null } };
+          }
+          const lines = invoiceLineItems(row.line_items)
+            .map((li) => ({
+              description: String(li?.description || ''),
+              quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+              unit_price: Number(li?.unit_price ?? li?.amount),
+            }))
+            .filter((li) => li.description && Number.isFinite(li.unit_price));
+          if (lines.length === 0) return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'no readable line items' } };
+          let recreated;
+          try {
+            recreated = await InvoiceService.create({
+              database: trx,
+              customerId: row.customer_id,
+              scheduledServiceId: row.scheduled_service_id,
+              title: row.title || 'Service invoice',
+              lineItems: lines,
+              notes: `${row.notes || ''}\n${restoreMarker(row.id)} Re-created after an annual-prepay switch was cancelled; replaces voided ${row.invoice_number || id}.`.trim(),
+              dueDate: etDateString(),
+            });
+          } catch (createErr) {
+            // Caught INSIDE the transaction so the failure report keeps the
+            // row's identity; nothing was written, so committing is a no-op.
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: createErr.message } };
+          }
+          return { restored: { replacedInvoiceId: id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null } };
         });
-        restored.push({
-          replacedInvoiceId: id,
-          invoiceId: recreated?.id || null,
-          invoiceNumber: recreated?.invoice_number || null,
-        });
+        if (outcome.restored) restored.push(outcome.restored);
+        else if (outcome.failed) failed.push(outcome.failed);
       } catch (err) {
-        logger.error(`[schedule:prepay-switch] undo re-mint FAILED for voided ${row.invoice_number || id}: ${err.message}`);
-        failed.push({ id, invoiceNumber: row.invoice_number || null, error: err.message });
+        logger.error(`[schedule:prepay-switch] undo re-mint FAILED for voided ${id}: ${err.message}`);
+        failed.push({ id, invoiceNumber: null, error: err.message });
       }
     }
     logger.info(`[schedule:prepay-switch] undo for visit ${req.params.id}: restored ${restored.length}, failed ${failed.length}`);
