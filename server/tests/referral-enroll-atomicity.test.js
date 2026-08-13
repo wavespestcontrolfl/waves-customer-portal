@@ -162,8 +162,11 @@ test('a sibling profile sharing the phone reuses the household promoter — no i
   expect(sibling.alreadyEnrolled).toBe(true);
   expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
   expect(state.inserts).toHaveLength(1);
-  // The sibling profile's own customer row aligns to the household code.
-  expect(state.customer.referral_code).toBe(first.promoter.referral_code);
+  // The sibling's own customer row stays CODELESS (pre-push r3 P1):
+  // customers.referral_code is UNIQUE and the winning profile's row
+  // already holds this code — copying it would 23505 forever.
+  expect(state.customer.referral_code).toBeNull();
+  expect(state.updates.filter((u) => u.table === 'customers')).toHaveLength(1); // the winner's write only
 });
 
 test('a sibling losing the insert race retries once and lands on the winner (23505)', async () => {

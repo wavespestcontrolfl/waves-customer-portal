@@ -245,7 +245,13 @@ async function enrollPromoter(customerId) {
         updates.updated_at = new Date();
         await trx('referral_promoters').where({ id: existing.id }).update(updates);
       }
-      if (!customer.referral_code) {
+      // Only the promoter's OWN profile mirrors the code onto customers
+      // (codex #3379 pre-push r3 P1): customers.referral_code is UNIQUE,
+      // and a sibling profile found through the shared-phone fallback must
+      // not copy a code the winning profile's row already holds — the
+      // write would 23505 and the retry would repeat it. The household's
+      // promoter row is the identity; sibling customer rows stay codeless.
+      if (!customer.referral_code && existing.customer_id === customerId) {
         await trx('customers').where({ id: customerId }).update({ referral_code: code });
       }
 
