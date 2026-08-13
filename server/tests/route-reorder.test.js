@@ -297,8 +297,10 @@ test('commit-time reminder-guard OUTAGE fails LOUD: rollback + failure + degrade
 test('ledger pairs with that night\'s CRON auto-dispatch run, never a later manual run', async () => {
   stopsByDate['2026-08-18'] = backtrackDay();
   // The .first() row is whatever the filtered query returns; the assertion
-  // that matters is the FILTERS: triggered_by='cron' and a completed status —
-  // so a manual/dry_run started after 4:10 can never be selected.
+  // that matters is the FILTERS: triggered_by='cron' with NO status filter —
+  // a manual/dry_run started after 4:10 can never be selected, and a FAILED
+  // cron run stays visible in the ledger instead of vanishing (run:null) or
+  // being shadowed by an earlier successful run.
   adRunRow = {
     id: 'AD-CRON-1', status: 'completed', mode: 'apply', total_evaluated: 10, total_skipped: 2,
     total_recommended: 1, total_changed: 3, total_failed: 0, created_at: '2026-08-13T08:12:00Z',
@@ -306,9 +308,20 @@ test('ledger pairs with that night\'s CRON auto-dispatch run, never a later manu
   await runRouteReorder({ now: NOW });
   const runFilters = dbCalls.filter((c) => c.table === 'auto_dispatch_runs');
   expect(runFilters).toContainEqual(expect.objectContaining({ method: 'where', args: ['triggered_by', 'cron'] }));
-  expect(runFilters).toContainEqual(expect.objectContaining({ method: 'whereIn', args: ['status', ['completed', 'completed_with_errors']] }));
+  expect(runFilters).not.toContainEqual(expect.objectContaining({ method: 'whereIn', args: ['status', expect.anything()] }));
   const ledger = JSON.parse(ledgerInserts[0].result);
   expect(ledger.auto_dispatch.run).toMatchObject({ id: 'AD-CRON-1', mode: 'apply', changed: 3 });
+});
+
+test('a FAILED cron run is paired and its failure preserved in the ledger', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  adRunRow = {
+    id: 'AD-CRON-FAIL', status: 'failed', mode: 'apply', total_evaluated: 4, total_skipped: 0,
+    total_recommended: 1, total_changed: 0, total_failed: 4, created_at: '2026-08-13T08:12:00Z',
+  };
+  await runRouteReorder({ now: NOW });
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.auto_dispatch.run).toMatchObject({ id: 'AD-CRON-FAIL', status: 'failed', failed: 4 });
 });
 
 test('a cron run from a PREVIOUS day is not paired (date guard)', async () => {

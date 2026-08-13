@@ -430,9 +430,12 @@ async function loadAutoDispatchSummary(today) {
     // started after 4:10 must not shadow it, or the ledger reports the wrong
     // (often zero) day-moves. triggered_by='cron' is stamped by audit.startRun
     // from the scheduler's runAutoDispatch({ triggeredBy: 'cron' }).
+    // Latest cron run of ANY status — filtering to successful statuses let a
+    // failed 4:10 run vanish from the ledger (run:null) or be shadowed by an
+    // earlier successful run from the same day; a failed night must be
+    // VISIBLE in the ledger, status preserved.
     const run = await db('auto_dispatch_runs')
       .where('triggered_by', 'cron')
-      .whereIn('status', ['completed', 'completed_with_errors'])
       .orderBy('created_at', 'desc')
       .first('id', 'status', 'mode', 'total_evaluated', 'total_skipped', 'total_recommended', 'total_changed', 'total_failed', 'created_at');
     if (!run || toDateStr(run.created_at) !== today) return { run: null, moves: [] };

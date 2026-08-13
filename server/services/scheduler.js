@@ -944,7 +944,13 @@ function initScheduledJobs() {
           // Ledger it as skipped so job health / the dispatch card never show
           // a lock-starved night as a successful run with no output.
           logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
-          await recordSkippedTick(inner.reason);
+          const tickId = await recordSkippedTick(inner.reason);
+          // recordSkippedTick swallows insert errors and returns null — a
+          // lost skip ledger must fail job health like any lost ledger, or
+          // the night is invisible everywhere.
+          if (tickId == null) {
+            throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
+          }
           return;
         }
         const result = inner || {};

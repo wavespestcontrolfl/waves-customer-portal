@@ -219,6 +219,15 @@ describe('track token expiry on reschedule paths', () => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       throw new Error(`Unexpected db table ${table}`);
     });
+    // The mover wraps each per-stop CAS in a short trx solely to hold the
+    // tech-day advisory fence (tech-day-lock.js) — model that real surface:
+    // the CAS update runs on the trx, the fence probes go through trx.raw.
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueries.shift();
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    db.transaction = jest.fn(async (callback) => callback(trx));
 
     await expect(executeScheduleTool('move_stops_to_day', {
       service_ids: ['svc-1'],
@@ -240,5 +249,16 @@ describe('track token expiry on reschedule paths', () => {
       bindings: ['2027-06-03', '11:00:00'],
     });
     expect(payload.track_token_expires_at.sql).toContain("AT TIME ZONE 'America/New_York'");
+    // Fence coverage: both the leaving and joining tech-day keys, in the
+    // canonical '<techId|unassigned>:<YYYY-MM-DD>' form the other slot-reserve
+    // holders use — a differently-built key silently fails to collide.
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'unassigned:2026-05-20'],
+    );
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'unassigned:2027-06-03'],
+    );
   });
 });

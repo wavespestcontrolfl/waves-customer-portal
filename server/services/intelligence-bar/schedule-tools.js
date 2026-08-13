@@ -346,6 +346,11 @@ async function assignTechnician(input) {
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
+      'scheduled_services.technician_id as current_tech_id',
+      // Canonical YYYY-MM-DD for the tech-day fence key — a JS Date
+      // stringified any other way builds a key that never collides with the
+      // other lock holders' keys (see tech-day-lock.js).
+      db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"),
       'cur_tech.name as current_tech_name',
     );
 
@@ -369,9 +374,21 @@ async function assignTechnician(input) {
     };
   }
 
-  const count = await db('scheduled_services')
-    .whereIn('id', serviceIds)
-    .update({ technician_id: tech.id, updated_at: new Date() });
+  // Reassignment edits tech-day MEMBERSHIP on both sides (the day the stop
+  // leaves and the day it joins), so it must hold the same tech-day fence the
+  // nightly reorder and the booking/reschedule writers hold — an unfenced
+  // reassign landing mid-reorder leaves the committed route_order not
+  // covering the day.
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  const count = await db.transaction(async trx => {
+    await lockTechDays(trx, services.flatMap(s => [
+      { techId: s.current_tech_id, date: s.scheduled_date_str },
+      { techId: tech.id, date: s.scheduled_date_str },
+    ]));
+    return trx('scheduled_services')
+      .whereIn('id', serviceIds)
+      .update({ technician_id: tech.id, updated_at: new Date() });
+  });
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
 
@@ -519,9 +536,13 @@ async function moveStopsToDay(input) {
     // movability + logs the window pair off the same read) — a concurrent
     // end-resize would otherwise still match and get a token expiry computed
     // from the stale end. Field-level CAS is the repo's established
-    // pattern for exactly this (rebooker options.expect); deliberately NOT
-    // SELECT..FOR UPDATE, which would put row locks + a transaction around a
-    // quick per-stop mover for no added safety. updated_at stays out of the
+    // pattern for exactly this (rebooker options.expect); still deliberately
+    // NOT SELECT..FOR UPDATE. The short transaction below exists solely to
+    // hold the tech-day advisory fence (a date-move edits tech-day MEMBERSHIP
+    // on both the leaving and joining day, and the nightly reorder's
+    // membership read is only fenced against writers holding the same lock —
+    // see tech-day-lock.js); the CAS predicate remains the conflict
+    // detector. updated_at stays out of the
     // predicate: knex never auto-touches it and not every mover stamps it
     // (the bulk route's UPDATE doesn't), so it isn't a reliable change
     // marker. Zero rows matched = the stop changed under us; skip it and
@@ -529,31 +550,38 @@ async function moveStopsToDay(input) {
     const observedDate = s.scheduled_date instanceof Date
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const updatedRows = await applyTrackLifecycleCas(
-      db('scheduled_services')
-        .where('id', s.id)
-        .where('status', String(s.status))
-        .where({
-          scheduled_date: observedDate,
-          window_start: s.window_start ?? null,
-          window_end: s.window_end ?? null,
-        }),
-      // Full observed tracker/lifecycle snapshot in the CAS — any
-      // concurrent lifecycle or SMS-guard write must make this miss.
-      // See reschedule_appointment in tools.js.
-      s,
-    )
-      .update({
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    const updatedRows = await db.transaction(async trx => {
+      await lockTechDays(trx, [
+        { techId: s.technician_id, date: observedDate },
+        { techId: s.technician_id, date: dateStr },
+      ]);
+      return applyTrackLifecycleCas(
+        trx('scheduled_services')
+          .where('id', s.id)
+          .where('status', String(s.status))
+          .where({
+            scheduled_date: observedDate,
+            window_start: s.window_start ?? null,
+            window_end: s.window_end ?? null,
+          }),
+        // Full observed tracker/lifecycle snapshot in the CAS — any
+        // concurrent lifecycle or SMS-guard write must make this miss.
+        // See reschedule_appointment in tools.js.
+        s,
+      )
+        .update({
         scheduled_date: dateStr,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
         track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
         // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
         // moved en_route/on_site stop back on 'confirmed' so it isn't left live
         // on a future date, matching the rebooker's own path.
-        ...(wasLive ? { status: 'confirmed' } : {}),
-        ...liveReset,
-        updated_at: new Date(),
-      });
+          ...(wasLive ? { status: 'confirmed' } : {}),
+          ...liveReset,
+          updated_at: new Date(),
+        });
+    });
     if (updatedRows === 0) {
       // Best-effort re-read so the operator sees the status that blocked the
       // move (falls back to the stale one if the row vanished).
@@ -750,6 +778,15 @@ async function swapTechAssignments(input) {
   const aIds = aServices.map(s => s.id);
   const bIds = bServices.map(s => s.id);
   await db.transaction(async trx => {
+    // Tech-day fence before any membership write — both real tech-days plus
+    // the transient 'unassigned' day the A-set parks on (see
+    // tech-day-lock.js; keys must match the other holders').
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    await lockTechDays(trx, [
+      { techId: techA.id, date },
+      { techId: techB.id, date },
+      { techId: null, date },
+    ]);
     if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
     if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, updated_at: new Date() });
     if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, updated_at: new Date() });
