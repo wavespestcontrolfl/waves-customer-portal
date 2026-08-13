@@ -1676,13 +1676,21 @@ router.post('/bank-import/upload', async (req, res, next) => {
       })))
       .onConflict('row_hash')
       .ignore()
-      .returning('id');
+      .returning(['id', 'row_hash']);
+    // Duplicates are SURFACED, not silently swallowed: identical rows carry
+    // no bank-side ID in a CSV, so a skipped row is *probably* a re-upload
+    // but could be a genuinely distinct identical purchase from a partial
+    // earlier export. The operator sees exactly which rows were skipped and
+    // can add the real one by hand if it wasn't a re-upload.
+    const insertedHashes = new Set(inserted.map(r => r.row_hash));
+    const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
     const matching = await bankImport.runDeterministicMatching();
     res.json({
       success: true,
       parsed: rows.length,
       imported: inserted.length,
-      duplicates: rows.length - inserted.length,
+      duplicates: duplicateRows.length,
+      duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,
     });

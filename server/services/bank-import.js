@@ -41,18 +41,32 @@ function parseAmount(raw) {
   return Math.round(n * 100) / 100;
 }
 
+// numeric(12,2) ceiling — a row beyond it would blow up the BULK insert and
+// roll back every valid row, so it must be rejected at parse time.
+const MAX_AMOUNT = 9999999999.99;
+
+function isRealCalendarDate(y, m, d) {
+  if (m < 1 || m > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, m, 0)).getUTCDate(); // day 0 of next month = last day of m
+}
+
 // Accepts MM/DD/YYYY, MM/DD/YY, YYYY-MM-DD → 'YYYY-MM-DD' (calendar day,
-// no timezone math — statements carry dates, not instants).
+// no timezone math — statements carry dates, not instants). Shape alone is
+// not enough: 02/31/2026 or 2026-99-01 would pass regex and then abort the
+// whole bulk insert at the DB, so the calendar is checked too.
 function parseDateCell(raw) {
   const s = String(raw || '').trim();
+  let y; let mo; let d;
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
-  if (m) {
-    const year = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${year}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  if (m) { [, y, mo, d] = m; } else {
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+    if (!m) return null;
+    y = m[3].length === 2 ? `20${m[3]}` : m[3];
+    mo = m[1];
+    d = m[2];
   }
-  return null;
+  if (!isRealCalendarDate(Number(y), Number(mo), Number(d))) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
 function pick(row, names) {
@@ -111,6 +125,7 @@ function parseStatementCsv(csvText) {
       }
     }
     if (amount === 0) { skipped.push({ line, reason: 'zero amount' }); return; }
+    if (amount > MAX_AMOUNT) { skipped.push({ line, reason: 'amount exceeds storable range' }); return; }
     rows.push({ txn_date: date, description, amount, direction });
   });
   return { rows, skipped };
@@ -220,6 +235,9 @@ async function runDeterministicMatching() {
 
     if (row.direction === 'credit') {
       const candidates = await db('stripe_payouts')
+        // Only money that actually REACHED the bank can explain a bank
+        // credit — pending/in-transit/canceled/failed payouts are excluded.
+        .where('status', 'paid')
         .whereBetween('arrival_date', [
           new Date(`${addDays(row.txn_date, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`),
           new Date(`${addDays(row.txn_date, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`),

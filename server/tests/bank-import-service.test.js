@@ -184,6 +184,21 @@ describe('date helpers', () => {
     expect(parseDateCell('garbage')).toBeNull();
   });
 
+  test('shape-valid but impossible calendar dates are rejected (would abort the bulk insert)', () => {
+    expect(parseDateCell('02/31/2026')).toBeNull();
+    expect(parseDateCell('2026-99-01')).toBeNull();
+    expect(parseDateCell('13/01/2026')).toBeNull();
+    expect(parseDateCell('02/29/2028')).toBe('2028-02-29'); // real leap day survives
+    expect(parseDateCell('02/29/2027')).toBeNull();
+  });
+
+  test('amounts beyond numeric(12,2) are skipped with a reason, not sent to the DB', () => {
+    const csv = 'Date,Description,Amount\n08/10/2026,HUGE,-99999999999.00\n08/10/2026,FINE,-10.00';
+    const { rows, skipped } = parseStatementCsv(csv);
+    expect(rows).toHaveLength(1);
+    expect(skipped[0].reason).toBe('amount exceeds storable range');
+  });
+
   test('addDays crosses month boundaries as calendar math', () => {
     expect(addDays('2026-08-30', 5)).toBe('2026-09-04');
     expect(addDays('2026-08-02', -5)).toBe('2026-07-28');

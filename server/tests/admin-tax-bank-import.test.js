@@ -43,7 +43,7 @@ function bankBuilder() {
     }),
     onConflict: jest.fn(() => b),
     ignore: jest.fn(() => b),
-    returning: jest.fn(() => Promise.resolve(state.insertedBank.slice(0, state.insertedBank.length - 1).map((_, i) => ({ id: `bt-${i}` })).concat([{ id: 'bt-last' }]))),
+    returning: jest.fn(() => Promise.resolve(state.insertedBank.map((r, i) => ({ id: `bt-${i}`, row_hash: r.row_hash })))),
     select: jest.fn(() => b),
     count: jest.fn(() => b),
     groupBy: jest.fn(() => Promise.resolve([])),
@@ -184,6 +184,8 @@ describe('upload (gate on)', () => {
       account_label: 'capone-checking', account_type: 'bank', direction: 'debit', amount: 204.87, source: 'csv', source_file: 'aug.csv',
     });
     expect(state.insertedBank[0].row_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.duplicates).toBe(0);
+    expect(body.duplicateSamples).toEqual([]);
   });
 });
 

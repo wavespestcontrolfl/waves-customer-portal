@@ -4067,7 +4067,14 @@ function BankImportTab() {
       }).then((r) => {
         if (r)
           setNotice({
-            text: `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses`,
+            text:
+              `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses` +
+              (r.duplicates > 0 && r.duplicateSamples?.length
+                ? ` — skipped as re-uploads: ${r.duplicateSamples
+                    .slice(0, 3)
+                    .map((d) => `${d.txn_date} ${d.description.slice(0, 24)} $${d.amount}`)
+                    .join("; ")}${r.duplicates > 3 ? "…" : ""}. If one of these was a genuinely separate identical purchase, add it via + Add Expense.`
+                : ""),
           });
       });
     reader.readAsText(file);
