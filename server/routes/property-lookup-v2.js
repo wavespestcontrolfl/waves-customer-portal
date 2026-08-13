@@ -252,6 +252,33 @@ async function performPropertyLookupCore(address, options = {}) {
           if (persist) await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
+      // A cached EMPTY permit marker predates whatever the weekly permit
+      // sync has learned since — without this, a closed permit synced after
+      // the marker was cached stays invisible for the rest of the cache
+      // TTL. The synced-table read is a cheap local query (no GIS call, so
+      // it is allowed on cache hits), Manatee-only, fail-open, and only
+      // UPGRADES an empty marker — it never overwrites live GIS evidence.
+      if (
+        !cacheOnly
+        && cached.property_record?._poolPermits
+        && !cached.property_record._poolPermits.poolPermit
+        && cached.property_record._parcel?.county === 'Manatee'
+      ) {
+        try {
+          const { findSyncedPoolPermit, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+          const synced = await findSyncedPoolPermit({
+            parcelPin: cached.property_record._parcel.paoParcelId,
+            looseKey: looseKeyFromFreeform(address),
+          });
+          if (synced) {
+            cached.property_record._poolPermits = {
+              ...cached.property_record._poolPermits,
+              poolPermit: synced,
+            };
+            if (persist) await attachPoolPermitsToCachedLookup(address, cached.property_record._poolPermits);
+          }
+        } catch { /* fail-open: table missing or DB blip = no signal */ }
+      }
       // House-number-audit backfill, same pattern: record-bearing rows cached
       // before the audit shipped have no _addressAudit key, so the panel's
       // typo hint would stay dark until the 180-day TTL. Audit once on hit

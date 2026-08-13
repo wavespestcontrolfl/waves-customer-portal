@@ -41,7 +41,7 @@ exports.up = async function up(knex) {
     // Exact shared-normalization key (customer-properties addressKey) plus a
     // loose house-number+first-street-word+zip key. The loose key exists
     // because the report abbreviates suffixes the shared canon doesn't map
-    // ("COTELLA CV" vs "Cotella Cove") — parcel PIN is the primary join,
+    // ("SAMPLE CV" vs "Sample Cove") — parcel PIN is the primary join,
     // loose key the fallback, exact key the bonus.
     table.string('address_key', 160);
     table.string('address_loose_key', 80);

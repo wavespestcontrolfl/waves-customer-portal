@@ -43,25 +43,25 @@ function builder(result) {
 }
 
 const CSV = '﻿"RECORD ID","RECORD STATUS","Applicant Job Value","Permit Issued Date","ADDR FULL BLOCK","NAME FML#","BUSINESS NAME","LICENSE NBR","NAME FULL","PARCEL NBR","RECORD TYPE","Type of Project"\r\n'
-  + '"BLD2603-0892","Permit Issued","99678","3/11/2026","639 COTELLA CV\nBRADENTON, 34212","DUSTIN RAY POINTER","COAST TO COAST POOLS","CPC1457311","REAGAN FAMILY RANCH LLC","5567383090000-3472867879","Pool-Spa","Residential"\r\n'
-  + '"BLD2603-3764","Closed","105758.00","4/7/2026","655 COTELLA CV\nBRADENTON, 34212","","AGNELLI POOLS & CONSTRUCTION LLC","CPC1457571","SMITH EXAMPLE","5567383140000-1111111111","Pool-Spa","Residential"\r\n'
-  + '"BLD2604-9999","Canceled","1000","4/30/2026","100 EXAMPLE WAY\nPARRISH, 34219","","","","","1234567890000-2222222222","Pool-Spa","Residential"\r\n';
+  + '"BLD9901-0001","Permit Issued","99678","3/11/2026","101 SAMPLE CV\nBRADENTON, 34212","PAT SAMPLE","EXAMPLE POOLS LLC","CPC0000001","OWNER EXAMPLE LLC","1234567890000-1111111111","Pool-Spa","Residential"\r\n'
+  + '"BLD9901-0002","Closed","105758.00","4/7/2026","103 SAMPLE CV\nBRADENTON, 34212","","SAMPLE POOLS LLC","CPC0000002","OWNER TWO EXAMPLE","2345678901000-2222222222","Pool-Spa","Residential"\r\n'
+  + '"BLD9901-0003","Canceled","1000","4/30/2026","100 EXAMPLE WAY\nPARRISH, 34219","","","","","3456789012000-3333333333","Pool-Spa","Residential"\r\n';
 
 describe('CSV parse + normalization', () => {
   test('parses BOM, embedded-newline address blocks, city/zip, parcel pin', () => {
     const rows = parsePoolPermitCsv(CSV);
     expect(rows).toHaveLength(3);
     const first = rows[0];
-    expect(first.record_id).toBe('BLD2603-0892');
+    expect(first.record_id).toBe('BLD9901-0001');
     expect(first.record_status).toBe('Permit Issued');
-    expect(first.address_line1).toBe('639 COTELLA CV');
+    expect(first.address_line1).toBe('101 SAMPLE CV');
     expect(first.city).toBe('BRADENTON');
     expect(first.zip).toBe('34212');
     expect(first.job_value).toBe(99678);
     expect(first.issued_date).toBe('2026-03-11');
-    expect(first.parcel_pin).toBe('5567383090');
-    expect(first.address_loose_key).toBe('639cotella34212');
-    expect(first.contractor_name).toBe('COAST TO COAST POOLS');
+    expect(first.parcel_pin).toBe('1234567890');
+    expect(first.address_loose_key).toBe('101sample34212');
+    expect(first.contractor_name).toBe('EXAMPLE POOLS LLC');
   });
 
   test('Canceled rows are parsed and kept (exclusion is the READ side)', () => {
@@ -74,8 +74,8 @@ describe('CSV parse + normalization', () => {
   });
 
   test('parcelPinFromRaw: 13-digit base parcel → 10-digit PIN; others keep digits', () => {
-    expect(parcelPinFromRaw('5567383090000-3472867879')).toBe('5567383090');
-    expect(parcelPinFromRaw('5817149090001-123')).toBe('5817149090001');
+    expect(parcelPinFromRaw('1234567890000-1111111111')).toBe('1234567890');
+    expect(parcelPinFromRaw('9876543210001-123')).toBe('9876543210001');
     expect(parcelPinFromRaw('')).toBeNull();
     expect(parcelPinFromRaw(null)).toBeNull();
   });
@@ -83,16 +83,16 @@ describe('CSV parse + normalization', () => {
 
 describe('loose address keys', () => {
   test('report side: house number + first street word + zip', () => {
-    expect(looseAddressKey('658 COTELLA CV', '34212')).toBe('658cotella34212');
-    expect(looseAddressKey('COTELLA CV', '34212')).toBeNull(); // no house number
-    expect(looseAddressKey('658 COTELLA CV', '')).toBeNull(); // no zip
+    expect(looseAddressKey('658 SAMPLE CV', '34212')).toBe('658sample34212');
+    expect(looseAddressKey('SAMPLE CV', '34212')).toBeNull(); // no house number
+    expect(looseAddressKey('658 SAMPLE CV', '')).toBeNull(); // no zip
   });
 
   test('freeform side matches the report side across suffix spellings', () => {
     // The exact shared addressKey can NEVER match here ("cv" is not in the
     // suffix canon) — the loose key is the join that works.
-    expect(looseKeyFromFreeform('658 Cotella Cove, Bradenton, FL 34212'))
-      .toBe(looseAddressKey('658 COTELLA CV', '34212'));
+    expect(looseKeyFromFreeform('658 Sample Cove, Bradenton, FL 34212'))
+      .toBe(looseAddressKey('658 SAMPLE CV', '34212'));
   });
 
   test('freeform side: last 5-digit group is the zip, not a 5-digit house number', () => {
@@ -196,14 +196,14 @@ describe('findSyncedPoolPermit', () => {
 
   test('row → permit shape with GIS-vocabulary type; Canceled excluded in the query', async () => {
     const b = builder({
-      record_id: 'BLD2603-3764',
+      record_id: 'BLD9901-0002',
       record_status: 'Closed',
       issued_date: '2026-04-07',
     });
     db.mockImplementation(() => b);
-    const permit = await findSyncedPoolPermit({ parcelPin: '5567383140', looseKey: '655cotella34212' });
+    const permit = await findSyncedPoolPermit({ parcelPin: '2345678901', looseKey: '103sample34212' });
     expect(permit).toEqual({
-      permitNo: 'BLD2603-3764',
+      permitNo: 'BLD9901-0002',
       type: 'Pool_Spa',
       issuedAt: '2026-04-07',
       status: 'Closed',
@@ -213,10 +213,10 @@ describe('findSyncedPoolPermit', () => {
 });
 
 const UC_CSV = 'Permits Issued by Date Range\n\n<h1>Manatee County Building and Development Services</h1>\n\n"Permit","CurrentStatus","IssuedDate","Type","TypeofWork","Parcel","Owner","JobAddress","JobValue","Lic Number","LicType","BusContact","BusName","BusAddress","BusPhone"\n'
-  + '"BLD2508-1704","Permit Issued","8/13/2026 ","Residential","New Single Family","6085387090000-3441044235","EXAMPLE PROPCO LLC","10550 GRAIN SILO TRL  PARRISH 34219"," 330000","CBC1268025","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
+  + '"BLD9902-0001","Permit Issued","8/13/2026 ","Residential","New Single Family","4567890123000-4444444444","EXAMPLE PROPCO LLC","200 SAMPLE TRL  PARRISH 34219"," 330000","CBC0000003","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
 
 const CO_CSV = 'Certificates of Occupancy Issued by Date Range\n\n<h3>heading</h3>\n\n"Permit","Status","IssuedDate","CODate","Type","Parcel","Owner","JobAddress","JobValue","Lic Number","LicType","BusContact","BusName","BusAddress","BusPhone"\n'
-  + '"BLD2508-1704","Closed","8/13/2026 ","2/1/2027","Residential","6085387090000-3441044235","EXAMPLE PROPCO LLC","10550 GRAIN SILO TRL  PARRISH 34219","330000 ","CBC1268025","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
+  + '"BLD9902-0001","Closed","8/13/2026 ","2/1/2027","Residential","4567890123000-4444444444","EXAMPLE PROPCO LLC","200 SAMPLE TRL  PARRISH 34219","330000 ","CBC0000003","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
 
 describe('construction report parse', () => {
   const { _private: cp } = require('../services/property-lookup/manatee-permit-sync');
@@ -225,14 +225,14 @@ describe('construction report parse', () => {
     const rows = cp.parseConstructionCsv(UC_CSV, 'under_construction');
     expect(rows).toHaveLength(1);
     const r = rows[0];
-    expect(r.permit_no).toBe('BLD2508-1704');
+    expect(r.permit_no).toBe('BLD9902-0001');
     expect(r.status).toBe('Permit Issued');
     expect(r.type_of_work).toBe('New Single Family');
     expect(r.issued_date).toBe('2026-08-13');
     expect(r.co_date).toBeUndefined(); // absent key — the CO report owns it
     expect(r.zip).toBe('34219');
-    expect(r.parcel_pin).toBe('6085387090');
-    expect(r.address_loose_key).toBe('10550grain34219');
+    expect(r.parcel_pin).toBe('4567890123');
+    expect(r.address_loose_key).toBe('200sample34219');
     expect(r.job_value).toBe(330000);
   });
 
@@ -260,10 +260,10 @@ describe('findConstructionActivity', () => {
   test('issued recently with no CO → underConstruction evidence', async () => {
     const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     db.mockImplementation(() => builder({
-      permit_no: 'BLD2508-1704', status: 'Permit Issued', permit_type: 'Residential',
+      permit_no: 'BLD9902-0001', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
     }));
-    const activity = await findConstructionActivity({ parcelPin: '6085387090' });
+    const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(true);
     expect(activity.newBuild).toBe(false);
   });
@@ -271,20 +271,20 @@ describe('findConstructionActivity', () => {
   test('recent CO → newBuild, not underConstruction', async () => {
     const coIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     db.mockImplementation(() => builder({
-      permit_no: 'BLD2508-1704', status: 'Closed', permit_type: 'Residential',
+      permit_no: 'BLD9902-0001', status: 'Closed', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2026-01-05', co_date: coIso,
     }));
-    const activity = await findConstructionActivity({ looseKey: '10550grain34219' });
+    const activity = await findConstructionActivity({ looseKey: '200sample34219' });
     expect(activity.newBuild).toBe(true);
     expect(activity.underConstruction).toBe(false);
   });
 
   test('stale issued permit with no CO is NOT underConstruction (24-month window)', async () => {
     db.mockImplementation(() => builder({
-      permit_no: 'BLD2201-0001', status: 'Permit Issued', permit_type: 'Residential',
+      permit_no: 'BLD9902-0002', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2022-01-05', co_date: null,
     }));
-    const activity = await findConstructionActivity({ parcelPin: '6085387090' });
+    const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(false);
     expect(activity.newBuild).toBe(false);
   });
@@ -300,7 +300,7 @@ describe('syncPermits', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('a failing section is reported in errors and never sinks the other', async () => {
+  test('a failing section never sinks the other, but the run THROWS so cron health sees it', async () => {
     process.env.GATE_PERMIT_SYNC = 'true';
     db.mockImplementation(() => builder({ n: '42' })); // both tables non-empty → refresh
     db.fn = { now: () => 'NOW()' };
@@ -310,10 +310,12 @@ describe('syncPermits', () => {
       .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
       .mockResolvedValueOnce(acaResponse({ text: CSV, contentType: 'APPLICATION/CSV' }))
       .mockRejectedValue(new Error('ECONNRESET'));
-    const res = await syncPermits();
-    expect(res.pool.fetched).toBe(3);
-    expect(res.construction).toBeUndefined();
-    expect(res.errors).toEqual([expect.stringContaining('construction: ')]);
+    // The pool section completed (fetch was called for all 3 pool steps +
+    // the failing construction step) and its partial success is in the
+    // error message — but the run still rejects so runExclusive/job health
+    // records a failure instead of a silent success.
+    await expect(syncPermits()).rejects.toThrow(/construction: .*ECONNRESET.*pool ok \(3 rows\)/);
+    expect(global.fetch.mock.calls.length).toBeGreaterThanOrEqual(4);
   });
 });
 
@@ -322,18 +324,18 @@ describe('county-permits merge', () => {
     jest.resetModules();
     jest.doMock('../services/property-lookup/manatee-permit-sync', () => ({
       findSyncedPoolPermit: jest.fn(async () => ({
-        permitNo: 'BLD2603-3764', type: 'Pool_Spa', issuedAt: '2026-04-07', status: 'Closed',
+        permitNo: 'BLD9901-0002', type: 'Pool_Spa', issuedAt: '2026-04-07', status: 'Closed',
       })),
-      looseKeyFromFreeform: jest.fn(() => '655cotella34212'),
+      looseKeyFromFreeform: jest.fn(() => '103sample34212'),
     }));
     const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
     global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ features: [] }) }));
     const result = await lookupPoolPermitsByParcel({
       county: 'Manatee',
-      parcelId: '5567383140',
-      address: '655 Cotella Cove, Bradenton, FL 34212',
+      parcelId: '2345678901',
+      address: '103 Sample Cove, Bradenton, FL 34212',
     });
-    expect(result.poolPermit).toMatchObject({ permitNo: 'BLD2603-3764', type: 'Pool_Spa' });
+    expect(result.poolPermit).toMatchObject({ permitNo: 'BLD9901-0002', type: 'Pool_Spa' });
     expect(result.enclosurePermit).toBeNull();
     jest.dontMock('../services/property-lookup/manatee-permit-sync');
   });

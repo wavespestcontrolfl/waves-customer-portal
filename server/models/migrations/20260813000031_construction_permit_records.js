@@ -29,7 +29,7 @@ exports.up = async function up(knex) {
     table.date('issued_date');
     table.date('co_date'); // set when the CO report has seen the permit
     table.decimal('job_value', 14, 2);
-    table.string('address_raw', 200); // one-line "10550 GRAIN SILO TRL  PARRISH 34219"
+    table.string('address_raw', 200); // one-line "200 SAMPLE TRL  PARRISH 34219"
     table.string('zip', 10);
     table.string('parcel_pin', 20);
     table.string('parcel_raw', 40);

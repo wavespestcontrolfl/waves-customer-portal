@@ -177,7 +177,7 @@ function parcelPinFromRaw(parcelRaw) {
 /**
  * Loose join key: house number + first street word + zip. Exists because the
  * report abbreviates suffixes the shared addressKey canon doesn't map
- * ("COTELLA CV" never keys equal to "Cotella Cove"). Null when the address
+ * ("SAMPLE CV" never keys equal to "Sample Cove"). Null when the address
  * doesn't start with a house number — a loose key built from a street
  * without one would collide entire streets.
  */
@@ -189,7 +189,7 @@ function looseAddressKey(line1, zip) {
 }
 
 /**
- * Loose key from a FREEFORM one-line address ("658 Cotella Cove, Bradenton,
+ * Loose key from a FREEFORM one-line address ("658 Sample Cove, Bradenton,
  * FL 34212") — house number + first street word + the LAST 5-digit group
  * (the zip; the house number itself can be 5 digits, so "first" is wrong).
  * Null when either anchor is missing.
@@ -207,7 +207,7 @@ function looseKeyFromFreeform(address) {
 function normalizeRow(row) {
   const recordId = String(row['RECORD ID'] || '').trim();
   if (!recordId) return null;
-  // "658 COTELLA CV\nBRADENTON, 34212" — line 1 street, line 2 "CITY, ZIP".
+  // "658 SAMPLE CV\nBRADENTON, 34212" — line 1 street, line 2 "CITY, ZIP".
   const addrBlock = String(row['ADDR FULL BLOCK'] || '');
   const [line1Raw = '', line2Raw = ''] = addrBlock.split(/\r?\n/);
   const line1 = line1Raw.trim();
@@ -309,14 +309,18 @@ async function syncPoolPermits({ timeoutMs } = {}) {
       return [[mdy(from), mdy(new Date())]];
     })();
 
-  let fetched = 0;
-  let written = 0;
+  // Fetch EVERY window before writing anything: backfill mode is inferred
+  // from table emptiness, so a partial initial load (early window written,
+  // later fetch failed) would flip the next run into refresh mode and
+  // permanently skip the unfetched history. All-or-nothing keeps the
+  // empty-table signal honest.
+  const allRows = [];
   for (const [from, to] of windows) {
     const csv = await fetchPoolPermitCsv(from, to, timeoutMs);
-    const rows = parsePoolPermitCsv(csv);
-    fetched += rows.length;
-    written += await upsertRows(rows);
+    allRows.push(...parsePoolPermitCsv(csv));
   }
+  const fetched = allRows.length;
+  const written = await upsertRows(allRows);
   logger.info('[pool-permit-sync] sync complete', {
     mode: empty ? 'backfill' : 'refresh',
     windows: windows.length,
@@ -334,24 +338,25 @@ async function syncPoolPermits({ timeoutMs } = {}) {
  * key. A Canceled permit is not pool evidence.
  */
 async function findSyncedPoolPermit({ parcelPin, addrKey, looseKey } = {}) {
-  if (!parcelPin && !addrKey && !looseKey) return null;
-  const query = db('pool_permit_records')
-    .whereNot('record_status', 'Canceled')
-    .orderBy('issued_date', 'desc')
-    .first();
-  query.where((b) => {
-    let started = false;
-    const add = (col, val) => {
-      if (!val) return;
-      if (started) b.orWhere(col, val);
-      else b.where(col, val);
-      started = true;
-    };
-    add('parcel_pin', parcelPin ? String(parcelPin) : null);
-    add('address_key', addrKey);
-    add('address_loose_key', looseKey);
-  });
-  const row = await query;
+  // STRICT precedence, not an OR: a parcel match is authoritative, and an
+  // OR'd loose key could let a NEWER permit from a neighboring parcel that
+  // shares the loose key (same house number + street word + zip) outrank
+  // it and fabricate pool evidence. Address keys are consulted only when
+  // the parcel finds nothing.
+  const tiers = [
+    parcelPin ? ['parcel_pin', String(parcelPin)] : null,
+    addrKey ? ['address_key', addrKey] : null,
+    looseKey ? ['address_loose_key', looseKey] : null,
+  ].filter(Boolean);
+  let row = null;
+  for (const [col, val] of tiers) {
+    row = await db('pool_permit_records')
+      .whereNot('record_status', 'Canceled')
+      .where(col, val)
+      .orderBy('issued_date', 'desc')
+      .first();
+    if (row) break;
+  }
   if (!row) return null;
   return {
     permitNo: row.record_id,
@@ -466,16 +471,20 @@ async function syncConstructionPermits({ timeoutMs } = {}) {
       const from = new Date(Date.now() - REFRESH_DAYS * 24 * 60 * 60 * 1000);
       return [[mdy(from), mdy(new Date())]];
     })();
-  let fetched = 0;
-  let written = 0;
+  // All windows fetched before any write — same partial-backfill guard as
+  // the pool sync (a half-written initial load would permanently flip the
+  // next run into refresh mode). The under_construction rows are upserted
+  // before the cos rows so the CO merge lands on rows that carry
+  // type_of_work.
+  const staged = [];
   for (const reportKey of ['under_construction', 'cos']) {
     for (const [from, to] of windows) {
       const csv = await fetchAcaReportCsv(REPORTS[reportKey], from, to, timeoutMs);
-      const rows = parseConstructionCsv(csv, reportKey);
-      fetched += rows.length;
-      written += await upsertConstructionRows(rows);
+      staged.push(...parseConstructionCsv(csv, reportKey));
     }
   }
+  const fetched = staged.length;
+  const written = await upsertConstructionRows(staged);
   logger.info('[permit-sync] construction sync complete', {
     mode: empty ? 'backfill' : 'refresh',
     windows: windows.length,
@@ -487,9 +496,11 @@ async function syncConstructionPermits({ timeoutMs } = {}) {
 }
 
 /**
- * Scheduler entry: both synced sources under one gate. Each section fails
- * independently — a broken construction report must not stop the pool sync
- * (and vice versa); failures surface in the returned errors array.
+ * Scheduler entry: both synced sources under one gate. Each section runs
+ * even when the other fails (a broken construction report must not stop
+ * the pool sync), but ANY section failure re-throws after both have run —
+ * a swallowed failure would record the cron as healthy while a report
+ * stays broken indefinitely.
  */
 async function syncPermits(options = {}) {
   if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
@@ -503,6 +514,13 @@ async function syncPermits(options = {}) {
     out.construction = await syncConstructionPermits(options);
   } catch (err) {
     out.errors.push(`construction: ${err?.message || err}`);
+  }
+  if (out.errors.length) {
+    const parts = [
+      out.pool ? `pool ok (${out.pool.written} rows)` : null,
+      out.construction ? `construction ok (${out.construction.written} rows)` : null,
+    ].filter(Boolean).join('; ');
+    throw new Error(`permit sync failed: ${out.errors.join(' | ')}${parts ? ` — ${parts}` : ''}`);
   }
   return out;
 }
@@ -525,16 +543,21 @@ function monthsAgoIso(months) {
  * Cheap read path, fail-open at the caller. Null when nothing matches.
  */
 async function findConstructionActivity({ parcelPin, looseKey } = {}) {
-  if (!parcelPin && !looseKey) return null;
-  const query = db('construction_permit_records')
-    .orderBy('issued_date', 'desc')
-    .first();
-  query.where((b) => {
-    if (parcelPin) b.where('parcel_pin', String(parcelPin));
-    if (parcelPin && looseKey) b.orWhere('address_loose_key', looseKey);
-    else if (looseKey) b.where('address_loose_key', looseKey);
-  });
-  const row = await query;
+  // Same strict parcel-first precedence as findSyncedPoolPermit — an OR'd
+  // loose key could let a neighbor's newer permit outrank the parcel match.
+  const tiers = [
+    parcelPin ? ['parcel_pin', String(parcelPin)] : null,
+    looseKey ? ['address_loose_key', looseKey] : null,
+  ].filter(Boolean);
+  if (!tiers.length) return null;
+  let row = null;
+  for (const [col, val] of tiers) {
+    row = await db('construction_permit_records')
+      .where(col, val)
+      .orderBy('issued_date', 'desc')
+      .first();
+    if (row) break;
+  }
   if (!row) return null;
   const issuedAt = row.issued_date ? new Date(row.issued_date).toISOString().slice(0, 10) : null;
   const coIssuedAt = row.co_date ? new Date(row.co_date).toISOString().slice(0, 10) : null;
