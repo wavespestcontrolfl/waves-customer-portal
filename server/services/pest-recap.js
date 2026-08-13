@@ -259,6 +259,7 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
+  let completedThisSubmit = false;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -304,7 +305,13 @@ async function submitRecap({
     }
 
     // 1. Status -> completed. Skip only when already completed (idempotent
-    //    re-recap); any other non-terminal status transitions now.
+    //    re-recap); any other non-terminal status transitions now. The
+    //    submit that performs this transition under the lock is the ONE
+    //    completion winner — the prewarm below keys off it (pre-push r5
+    //    P1: concurrent/retried submits each ran the paid county/vision
+    //    pipeline against the same cold cache; the lock makes exactly one
+    //    submit the winner, so exactly one warms).
+    completedThisSubmit = lockedStatus !== COMPLETED_STATUS;
     if (lockedStatus !== COMPLETED_STATUS) {
       await transitionJobStatus({
         jobId: serviceId,
@@ -580,7 +587,7 @@ async function submitRecap({
   // timeout the warm finishes in the background and the next view
   // self-heals; the module is double-gated and never rejects, so it can't
   // block or fail the recap.
-  if (recordId) {
+  if (recordId && completedThisSubmit) {
     try {
       const freshRecord = await db('service_records').where({ id: recordId }).first();
       // v1-template records ONLY (pre-push r3 P1): reports-public composes

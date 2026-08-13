@@ -119,6 +119,11 @@ describe('completion wiring (source contracts — both handlers are too heavy to
       .toBeLessThan(recapSrc.indexOf('body: smsRecap(recapText)'));
   });
 
+  test('pest-recap: only the completion-transition WINNER warms — retries never duplicate the paid pipeline (r5 P1)', () => {
+    expect(recapSrc).toMatch(/completedThisSubmit = lockedStatus !== COMPLETED_STATUS/);
+    expect(recapSrc).toMatch(/if \(recordId && completedThisSubmit\)/);
+  });
+
   test('pest-recap: only v1-template records warm — the card renders for no other template (r3 P1)', () => {
     // Spend guard: a recap record without service_report_v1 renders a
     // report the composer never decorates, so warming it buys nothing.
