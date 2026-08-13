@@ -23,10 +23,15 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['where', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNotExists',
+  ['where', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
-    state.updates.push({ table, where: b.where.mock.calls.map(c => c[0]), patch });
+    // Only row-scoped updates (where({id,...})) are the matcher's claims and
+    // parks; the dangling-link heal sweep uses whereIn/whereNull and is
+    // treated as a no-op here so it doesn't pollute the assertions.
+    const wheres = b.where.mock.calls.map(c => c[0]);
+    if (!wheres.some(w => w && typeof w === 'object' && 'id' in w)) return Promise.resolve(0);
+    state.updates.push({ table, where: wheres, patch });
     return Promise.resolve(1);
   });
   b.then = (resolve, reject) => {
@@ -45,7 +50,7 @@ jest.mock('../models/db', () => mockDb);
 
 const {
   parseStatementCsv, withRowHashes, transferSuggestion,
-  runDeterministicMatching, parseDateCell, addDays,
+  runDeterministicMatching, parseDateCell, addDays, vendorEvidence,
 } = require('../services/bank-import');
 
 beforeEach(() => {
@@ -160,6 +165,17 @@ describe('transferSuggestion', () => {
   });
 });
 
+describe('vendorEvidence', () => {
+  test('shares a significant token between bank description and vendor', () => {
+    expect(vendorEvidence('SITEONE LANDSCAPE SUPPLY 4471', { vendor_name: 'SiteOne', description: 'sod order' })).toBe(true);
+    expect(vendorEvidence('SOME RANDOM STORE', { vendor_name: 'SiteOne', description: 'sod order' })).toBe(false);
+  });
+
+  test('short and stopword tokens are not evidence', () => {
+    expect(vendorEvidence('THE ONLINE CARD PURCHASE LLC', { vendor_name: 'The LLC', description: 'online purchase' })).toBe(false);
+  });
+});
+
 describe('date helpers', () => {
   test('parseDateCell handles all three statement formats', () => {
     expect(parseDateCell('08/09/2026')).toBe('2026-08-09');
@@ -177,7 +193,7 @@ describe('date helpers', () => {
 describe('runDeterministicMatching', () => {
   test('a credit with exactly one payout candidate links through a status CAS', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', suggestion: null }];
-    state.payouts = [{ id: 'po-1' }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66' }];
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(1);
     const link = state.updates.find(u => u.patch.status === 'matched_payout');
@@ -190,21 +206,43 @@ describe('runDeterministicMatching', () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE', amount: 312.4, direction: 'debit', suggestion: null },
     ];
-    state.expenses = [{ id: 'exp-1', description: 'SiteOne', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
     let summary = await runDeterministicMatching();
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense').patch.matched_expense_id).toBe('exp-1');
 
     state.updates = [];
     state.expenses = [
-      { id: 'exp-1', description: 'A', vendor_name: 'A', expense_date: '2026-08-10' },
-      { id: 'exp-2', description: 'B', vendor_name: 'B', expense_date: '2026-08-11' },
+      { id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' },
+      { id: 'exp-2', amount: '312.40', description: 'SiteOne credit', vendor_name: 'SiteOne', expense_date: '2026-08-11' },
     ];
     summary = await runDeterministicMatching();
     expect(summary.expensesLinked).toBe(0);
     expect(summary.ambiguous).toBe(1);
     const parked = state.updates.find(u => u.patch.suggestion);
     expect(parked.patch.suggestion.candidates).toHaveLength(2);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+  });
+
+  test('exact amount WITHOUT vendor evidence parks instead of auto-linking', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SOME RANDOM STORE', amount: 312.4, direction: 'debit', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    expect(state.updates.find(u => u.patch.suggestion).patch.suggestion.candidates).toHaveLength(1);
+  });
+
+  test('near-miss amount (within candidate tolerance) never auto-links', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.41, direction: 'debit', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
   });
 

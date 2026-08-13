@@ -1644,9 +1644,12 @@ router.use('/bank-import', (req, res, next) => {
 
 router.post('/bank-import/upload', async (req, res, next) => {
   try {
-    const { accountLabel, filename, csv } = req.body || {};
+    const { accountLabel, accountType, filename, csv } = req.body || {};
     if (!accountLabel || typeof accountLabel !== 'string' || accountLabel.length > 100) {
       return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
+    }
+    if (!['bank', 'card'].includes(accountType)) {
+      return res.status(400).json({ error: "accountType must be 'bank' or 'card'" });
     }
     if (typeof csv !== 'string' || csv.length === 0) {
       return res.status(400).json({ error: 'csv text is required' });
@@ -1662,6 +1665,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
     const inserted = await db('bank_transactions')
       .insert(hashed.map(r => ({
         account_label: accountLabel.trim(),
+        account_type: accountType,
         txn_date: r.txn_date,
         description: r.description,
         amount: r.amount,
@@ -1744,9 +1748,10 @@ router.post('/bank-import/suggest', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Create a real expense from a staged debit. CAS on status='unmatched' so a
-// double-click (or a match landing mid-flight) can never create two expenses
-// from one bank row.
+// Create a real expense from a staged debit. The insert and the bank-row
+// claim happen in ONE transaction with a CAS on status='unmatched' — a
+// double-click, a match landing mid-flight, or a crash between the two
+// statements can never leave an orphan expense feeding the P&L.
 router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
@@ -1766,26 +1771,35 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     }
     const txnDate = dateCellStr(row.txn_date);
     const quarter = `Q${Math.ceil(Number(txnDate.slice(5, 7)) / 3)}`;
-    const [expense] = await db('expenses').insert({
-      category_id: categoryId,
-      description: row.description.slice(0, 300),
-      amount: row.amount,
-      tax_deductible_amount: deductible,
-      expense_date: txnDate,
-      vendor_name: row.description.slice(0, 200),
-      payment_method: 'card',
-      tax_year: txnDate.slice(0, 4),
-      quarter,
-      notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
-    }).returning('*');
-
-    const claimed = await db('bank_transactions')
-      .where({ id: row.id, status: 'unmatched' })
-      .update({ status: 'created_expense', matched_expense_id: expense.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
-    if (!claimed) {
-      // Lost the race after inserting — roll the orphan expense back.
-      await db('expenses').where({ id: expense.id }).del();
-      return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    let expense;
+    try {
+      expense = await db.transaction(async trx => {
+        const [inserted] = await trx('expenses').insert({
+          category_id: categoryId,
+          description: row.description.slice(0, 300),
+          amount: row.amount,
+          tax_deductible_amount: deductible,
+          expense_date: txnDate,
+          vendor_name: row.description.slice(0, 200),
+          // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
+          payment_method: row.account_type === 'card' ? 'card' : 'ach',
+          tax_year: txnDate.slice(0, 4),
+          quarter,
+          notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+        }).returning('*');
+        const claimed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
+        if (!claimed) {
+          const e = new Error('row was matched by someone else mid-flight');
+          e.code = 'CLAIM_LOST';
+          throw e; // rolls the expense insert back with it
+        }
+        return inserted;
+      });
+    } catch (err) {
+      if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
+      throw err;
     }
     res.json({ success: true, expense });
   } catch (err) { next(err); }

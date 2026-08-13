@@ -70,6 +70,11 @@ const mockDb = jest.fn((table) => {
 });
 mockDb.raw = jest.fn((sql) => sql);
 mockDb.fn = { now: jest.fn(() => new Date()) };
+// Transaction stub: the callback gets the same table router. A thrown error
+// propagates like a rollback would (the mock can't undo recorded inserts —
+// route tests assert the ERROR path, not storage rollback, which is the
+// database's contract).
+mockDb.transaction = jest.fn(async (cb) => cb(mockDb));
 jest.mock('../models/db', () => mockDb);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -148,13 +153,15 @@ describe('gate darkness', () => {
 describe('upload (gate on)', () => {
   beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
 
-  test('rejects a missing account label and an empty CSV', async () => {
-    expect((await post('/admin/tax/bank-import/upload', { csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' })).status).toBe(400);
-    expect((await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', csv: '' })).status).toBe(400);
+  test('rejects a missing account label, bad account type, and an empty CSV', async () => {
+    expect((await post('/admin/tax/bank-import/upload', { accountType: 'bank', csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' })).status).toBe(400);
+    expect((await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' })).status).toBe(400);
+    expect((await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'venmo', csv: 'x' })).status).toBe(400);
+    expect((await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: '' })).status).toBe(400);
   });
 
   test('rejects a CSV with no usable rows, reporting why', async () => {
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', csv: 'Date,Description,Amount\nbad,X,1.00' });
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: 'Date,Description,Amount\nbad,X,1.00' });
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.skipped[0].reason).toBe('unparseable date');
@@ -162,13 +169,13 @@ describe('upload (gate on)', () => {
 
   test('imports rows and reports duplicates from the conflict-ignoring insert', async () => {
     const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/11/2026,REFUND,15.00';
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', filename: 'aug.csv', csv });
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', filename: 'aug.csv', csv });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.parsed).toBe(2);
     expect(state.insertedBank).toHaveLength(2);
     expect(state.insertedBank[0]).toMatchObject({
-      account_label: 'capone-checking', direction: 'debit', amount: 204.87, source: 'csv', source_file: 'aug.csv',
+      account_label: 'capone-checking', account_type: 'bank', direction: 'debit', amount: 204.87, source: 'csv', source_file: 'aug.csv',
     });
     expect(state.insertedBank[0].row_hash).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -178,7 +185,7 @@ describe('create-expense (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
     state.bankRow = {
-      id: 'bt-1', account_label: 'capone-card-1234', txn_date: '2026-08-09',
+      id: 'bt-1', account_label: 'capone-card-1234', account_type: 'card', txn_date: '2026-08-09',
       description: 'WAWA 5211 VENICE FL', amount: '58.12', direction: 'debit',
       status: 'unmatched', suggestion: { categoryId: 'cat-meals', categoryName: 'Meals & Entertainment' },
     };
@@ -195,9 +202,17 @@ describe('create-expense (gate on)', () => {
     expect(exp.tax_year).toBe('2026');
     expect(exp.quarter).toBe('Q3');
     expect(exp.notes).toContain('[AI-categorized — verify]');
-    // the bank row is claimed via a CAS on status='unmatched'
+    expect(exp.payment_method).toBe('card');
+    // the bank row is claimed via a CAS on status='unmatched', inside a transaction
+    expect(mockDb.transaction).toHaveBeenCalled();
     expect(state.bankUpdates[0].wheres).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     expect(state.bankUpdates[0].patch.status).toBe('created_expense');
+  });
+
+  test('a bank-account debit books as ach, not card', async () => {
+    state.bankRow.account_type = 'bank';
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].payment_method).toBe('ach');
   });
 
   test('an operator-picked category skips the AI-verify note', async () => {
@@ -207,11 +222,13 @@ describe('create-expense (gate on)', () => {
     expect(state.insertedExpenses[0].notes).not.toContain('AI-categorized');
   });
 
-  test('losing the CAS race rolls the inserted expense back with a 409', async () => {
+  test('losing the CAS race throws inside the transaction and answers 409', async () => {
     state.bankUpdateResult = 0;
     const res = await post('/admin/tax/bank-import/bt-1/create-expense', {});
     expect(res.status).toBe(409);
-    expect(state.deletedExpenseIds).toEqual(['exp-new']);
+    // the throw happened INSIDE the transaction callback, so the real DB
+    // rolls the expense insert back with it
+    expect(mockDb.transaction).toHaveBeenCalled();
   });
 
   test('non-debit and non-unmatched rows are refused', async () => {

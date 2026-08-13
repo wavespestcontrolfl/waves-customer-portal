@@ -4013,6 +4013,7 @@ function BankImportTab() {
   const [coverage, setCoverage] = useState([]);
   const [filter, setFilter] = useState("");
   const [accountLabel, setAccountLabel] = useState("capone-checking");
+  const [accountType, setAccountType] = useState("bank");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null);
 
@@ -4058,6 +4059,7 @@ function BankImportTab() {
     reader.onload = () =>
       act("upload", "/admin/tax/bank-import/upload", {
         accountLabel: accountLabel.trim(),
+        accountType,
         filename: file.name,
         csv: String(reader.result || ""),
       }).then((r) => {
@@ -4104,6 +4106,15 @@ function BankImportTab() {
           placeholder="Account label (e.g. capone-card-1234)"
           title="Stamped on every imported row so checking and each card stay separate"
         />
+        <select
+          style={inputStyle}
+          value={accountType}
+          onChange={(e) => setAccountType(e.target.value)}
+          title="Card statements book created expenses as 'card'; bank statements as 'ach'"
+        >
+          <option value="bank">Bank account</option>
+          <option value="card">Credit card</option>
+        </select>
         <label
           style={{
             ...inputStyle,
