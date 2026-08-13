@@ -342,7 +342,10 @@ const CONTEXT_TOOLS = [
         lawn_sqft: { type: 'number', description: 'Approximate lawn/turf square footage, if the caller knows it' },
         frequency: { type: 'string', enum: ['quarterly', 'bimonthly', 'monthly'], description: 'Pest control visit frequency (default quarterly)' },
         lawn_track: { type: 'string', enum: ['st_augustine', 'bermuda', 'zoysia', 'bahia'], description: 'Grass type, if known' },
-        lawn_tier: { type: 'string', enum: ['basic', 'standard', 'enhanced', 'premium'], description: 'Lawn program tier (default standard)' },
+        // 'basic' is deliberately absent: the 4x tier is fully retired
+        // (owner 2026-08-04) and the engine silently resolves it to enhanced —
+        // advertising it would quote a program Waves does not sell.
+        lawn_tier: { type: 'string', enum: ['standard', 'enhanced', 'premium'], description: 'Lawn program tier (default standard)' },
         mosquito_tier: { type: 'string', enum: ['seasonal9', 'monthly12'], description: 'Mosquito program (default monthly12)' },
         property_type: {
           type: 'string',

@@ -1119,3 +1119,26 @@ describe('round 27 — clearance is stamped, side effects wait for commits, repa
     expect(hook).toContain('needsWindowlessConversion');
   });
 });
+
+// ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION. The explicit
+// 'confirmed' tap is not the only field path: pending → en_route/on_site/
+// completed day-of skips 'confirmed' entirely, and without the durable stamp
+// the lazy activation ran the office-side card funnel on a visit the tech was
+// standing at. Both status routes must carry the same takeover predicate and
+// stamp it inside the status transaction (source pin — the mechanism the
+// hook's own field_confirmed_at re-read consumes).
+describe('field-confirm semantics cover day-of takeovers on BOTH status routes', () => {
+  const fs = require('fs');
+  const path = require('path');
+  for (const file of ['admin-schedule.js', 'admin-dispatch.js']) {
+    test(`${file}: pending office-review row moved day-of by its technician stamps field_confirmed_at`, () => {
+      const src = fs.readFileSync(path.join(__dirname, '../routes', file), 'utf8');
+      const idx = src.indexOf('const isFieldLifecycleTakeover');
+      expect(idx).toBeGreaterThan(-1);
+      const predicate = src.slice(idx, idx + 700);
+      expect(predicate).toContain('OFFICE_REVIEW_PENDING_SOURCE_ACTIONS');
+      expect(predicate).toContain("fromStatus === 'pending'");
+      expect(src).toMatch(/if \(isFieldLifecycleTakeover\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
+    });
+  }
+});

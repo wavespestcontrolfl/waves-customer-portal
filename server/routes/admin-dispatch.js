@@ -3542,6 +3542,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
     const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
     const isOfficeReviewConfirm = toStatus === 'confirmed'
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
+    // ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION — the same
+    // day-of takeover semantics as the admin-schedule status route: a pending
+    // office-review row moved straight to en_route/on_site/completed by its
+    // technician must carry the durable field stamp, or the lazy activation
+    // runs the office-side card funnel on a visit the tech is standing at.
+    const isFieldLifecycleTakeover = req.techRole === 'technician'
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+      && fromStatus === 'pending'
+      && ['en_route', 'on_site', 'completed'].includes(toStatus);
     try {
       await db.transaction(async (trx) => {
         // Lifecycle timestamps live on the same row as status; flip
@@ -3574,6 +3583,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         }
         if (toStatus === 'completed') {
           Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, lifecycleAt));
+        }
+        if (isFieldLifecycleTakeover) {
+          lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || lifecycleAt;
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);

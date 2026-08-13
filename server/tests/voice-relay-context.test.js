@@ -1117,6 +1117,22 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(out).not.toContain('$420');
   });
 
+  // ⭐ THE RETIRED 'basic' TIER IS NEITHER ADVERTISED NOR FORWARDED. The 4x
+  // lawn tier is fully retired (owner 2026-08-04); the engine silently
+  // resolves it to enhanced, so offering it in the schema quoted a program
+  // Waves does not sell under a name the caller chose.
+  test("the retired 'basic' lawn tier is absent from the schema and falls to standard in the engine input", async () => {
+    const pricing = CONTEXT_TOOLS.find((t) => t.name === 'get_pricing');
+    expect(pricing.input_schema.properties.lawn_tier.enum).toEqual(['standard', 'enhanced', 'premium']);
+    generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
+    await executeTool('get_pricing', {
+      service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000, lawn_tier: 'basic',
+    }, { customerId: null });
+    expect(generateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      services: expect.objectContaining({ lawn: expect.objectContaining({ tier: 'standard' }) }),
+    }));
+  });
+
   // ⭐ MOSQUITO SPEAKS PER APPLICATION. The engine's mosquito shape exposes
   // its application price as `perVisit` (not `perApp`) — reading perApp alone
   // dropped every mosquito quote into the banned "$X per month" branch. The

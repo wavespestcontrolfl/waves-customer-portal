@@ -575,6 +575,29 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(stampWrites()).toHaveLength(0);
   });
 
+  // ⭐ A LOOKUP FAILURE IS NOT A MISSING CUSTOMER. Collapsing a DB error to
+  // null cleared the ONLY durable marker during a transient outage — the
+  // exact window the sweep exists to survive.
+  test('a transient customer-lookup failure keeps the marker — never cleared as unresolvable', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-swept',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true },
+      },
+    }]);
+    tables.customers = makeBuilder('customers', []);
+    tables.customers.first = jest.fn(() => Promise.reject(new Error('pool exhausted')));
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const clears = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+    expect(clears).toHaveLength(0); // a transient failure never clears the debt
+  });
+
   // ⭐ THE MARKER OUTLIVES ANY OUTAGE — no attempt cap ever clears it. A high
   // attempt count keeps retrying; only success or a deliberate suppression
   // (or a deleted customer) clears the obligation.

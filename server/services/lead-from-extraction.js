@@ -567,9 +567,22 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
       metadata: db.raw("metadata - 'relay_contact_instruction_needed' - 'relay_contact_instruction' - 'relay_contact_instruction_attempts'"),
     }).catch((e) => logger.warn(`[voice-agent-lead] contact-instruction marker clear failed call_log=${row.id}: ${e.message}`));
 
-    const customer = payload.customerId
-      ? await db('customers').where({ id: payload.customerId }).whereNull('deleted_at').first().catch(() => null)
-      : null;
+    // ⭐ A LOOKUP FAILURE IS NOT A MISSING CUSTOMER. Collapsing a DB error to
+    // null cleared the ONLY durable marker for a stated instruction (possibly
+    // a do-not-contact) during a transient outage — the exact window the
+    // sweep exists to survive. An error keeps the marker for the next pass;
+    // only a CONFIRMED missing/deleted row clears the debt.
+    let customer = null;
+    let lookupFailed = false;
+    if (payload.customerId) {
+      try {
+        customer = await db('customers').where({ id: payload.customerId }).whereNull('deleted_at').first();
+      } catch (err) {
+        lookupFailed = true;
+        logger.warn(`[voice-agent-lead] contact-instruction sweep customer lookup failed call_log=${row.id} — keeping the marker for retry: ${err.message}`);
+      }
+    }
+    if (lookupFailed) continue;
     if (!customer) {
       // Unresolvable obligation (customer gone / malformed payload): clear it
       // loudly rather than retry a debt nobody can pay.

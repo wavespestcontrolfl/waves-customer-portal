@@ -8344,6 +8344,15 @@ router.put('/:id/status', async (req, res, next) => {
     const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
     const isOfficeReviewConfirm = toStatus === 'confirmed'
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
+    // ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION. The explicit
+    // 'confirmed' tap is not the only field path: pending → en_route/on_site/
+    // completed day-of skips 'confirmed' entirely, and without the durable
+    // stamp the lazy activation ran the office-side card funnel on a visit
+    // the technician was standing at. Same stamp, same trx.
+    const isFieldLifecycleTakeover = isTechnicianRequest(req)
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+      && fromStatus === 'pending'
+      && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
     try {
       await db.transaction(async (trx) => {
@@ -8384,6 +8393,9 @@ router.put('/:id/status', async (req, res, next) => {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, new Date()));
         } else if (toStatus === 'completed') {
           Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, new Date()));
+        }
+        if (isFieldLifecycleTakeover) {
+          lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || new Date();
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
