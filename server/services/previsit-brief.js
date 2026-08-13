@@ -633,6 +633,20 @@ async function assembleGrounding(svc, dbh = db) {
     sinceLastVisit,
     openScope,
     catalogVocabulary,
+    // Per-section population counts, stored in the brief. Some grounding
+    // sources swallow their own DB errors into empty results (the context
+    // aggregator's legs, since-last-visit) — a populated section
+    // collapsing to zero between runs is treated as a suspected outage by
+    // the regression guard in generateVisitBrief, not as truth.
+    coverage: {
+      history: history.lineRecords.length,
+      products: productRows.length,
+      calls: (context?.recentCalls || []).length,
+      flags: (context?.flags || []).length,
+      sinceLastVisit: sinceLastVisit ? 1 : 0,
+      prefs: prefs ? 1 : 0,
+      estimate: openScope?.sourceEstimate ? 1 : 0,
+    },
     // Every free-text slice is run through the shared access-code redactor
     // at this boundary (belt over the context-aggregator's own layer):
     // pet/sensitivity flag details and call summaries arrive as raw
@@ -940,7 +954,7 @@ async function generateBriefBody(grounding, deps = {}) {
  * { skipped: true, reason } otherwise. Never throws for a per-visit data
  * problem; the sweep and the route both surface `reason`.
  */
-async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = {}) {
+async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {}, force = false } = {}) {
   if (!briefGateEnabled()) return { skipped: true, reason: 'gate_off' };
 
   const svc = await dbh('scheduled_services')
@@ -987,12 +1001,33 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
 
+  // Grounding-regression guard (belt over the strict lookups): several
+  // grounding sources swallow their own DB errors into empty results, so
+  // a transient outage can change the hash and read as "data gone". A
+  // section that was populated in the stored brief but is empty now is a
+  // suspected outage — keep the prior brief. The admin regenerate route
+  // passes force to accept a genuine data removal.
+  if (
+    !force
+    && String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
+    && existing?.coverage
+  ) {
+    const regressed = Object.entries(existing.coverage)
+      .filter(([key, prior]) => Number(prior) > 0 && Number(grounding.coverage?.[key] ?? 0) === 0)
+      .map(([key]) => key);
+    if (regressed.length) {
+      logger.warn(`[previsit-brief] grounding regression for ${scheduledServiceId} (${regressed.join(', ')}) — keeping the cached brief`);
+      return { skipped: true, reason: `grounding_regression:${regressed.join(',')}` };
+    }
+  }
+
   const { via, body } = await generateBriefBody(grounding, deps);
 
   const brief = {
     version: VISIT_BRIEF_TYPE,
     grounding_hash: groundingHash,
     generated_via: via,
+    coverage: grounding.coverage,
     priorities: body.priorities,
     watch_items: body.watch_items,
     last_visit: {

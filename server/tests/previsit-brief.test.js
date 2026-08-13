@@ -629,6 +629,48 @@ describe('input-hash cache', () => {
     expect(second.generated).toBe(true);
     expect(storedBrief(state2).brief.access.codes.propertyGate).toBe('1111');
   });
+
+  test('a populated section collapsing to zero is held as a suspected outage', async () => {
+    const state1 = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const stored = storedBrief(state1).patch;
+    expect(JSON.parse(stored.pre_service_brief).coverage.calls).toBeGreaterThan(0);
+
+    // The aggregator swallows a recent-calls outage into [] — the hash
+    // changes, but the regression guard must keep the cached brief.
+    mockGetContext.mockResolvedValue({
+      serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
+      propertyProfile: { accessNotes: 'gate code [redacted]', pets: 'One dog, friendly' },
+      flags: [{ type: 'sensitivity', severity: 'medium', detail: 'Sensitive to pyrethroids' }],
+      recentCalls: [],
+      recentInteractions: [],
+      pendingEstimate: null,
+    });
+    const state2 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.skipped).toBe(true);
+    expect(second.reason).toMatch(/^grounding_regression:.*calls/);
+    expect(state2.updates.scheduled_services).toBeUndefined();
+
+    // The manual regenerate route passes force — a genuine data removal
+    // is accepted then.
+    const state3 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    const forced = await PrevisitBrief.generateVisitBrief('svc-1', { force: true });
+    expect(forced.generated).toBe(true);
+    expect(storedBrief(state3).brief.coverage.calls).toBe(0);
+  });
 });
 
 describe('lawn bounded product section', () => {

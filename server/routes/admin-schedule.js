@@ -10584,7 +10584,10 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     if (!PrevisitBrief.briefGateEnabled()) {
       return res.status(409).json({ error: 'Pre-visit briefs are turned off (GATE_PREVISIT_BRIEF). Nothing was changed.' });
     }
-    const outcome = await PrevisitBrief.generateVisitBrief(req.params.id);
+    // force: the operator explicitly asked — a genuine data removal may
+    // legitimately empty a section the regression guard would otherwise
+    // hold against a suspected outage.
+    const outcome = await PrevisitBrief.generateVisitBrief(req.params.id, { force: true });
     // A skip is not a success: only 'unchanged' (the hash-cache no-op) is a
     // legitimate 200. The row vanishing mid-request reads as 404 (matching
     // the ownership probe's answer); everything else — terminal status, a
