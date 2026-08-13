@@ -61,22 +61,29 @@ function maskPhone(value) {
  * So the secret stays server-side (Railway env, and the Twilio Function env
  * that renders the sandbox TwiML) and the URL carries only
  *
- *     v1.<expiry-epoch-seconds>.<HMAC-SHA256(secret, "v1.<callSid>.<expiry>")>
+ *     v1.<expiry-epoch-seconds>.<nonce>.<HMAC-SHA256(secret, "v1.<callSid>.<expiry>.<nonce>")>
  *
  * which is useless twice over: it is bound to ONE CallSid, and it dies minutes
  * after the call it was minted for. A captured URL buys an attacker a session
  * on a call that has already ended — which the one-time claim in relay-server
  * refuses anyway.
+ *
+ * ⭐ THE NONCE IS WHAT MAKES EVERY MINT UNIQUE. Without it the token was a pure
+ * function of (CallSid, expiry-second): two renders for the SAME call inside
+ * one second — a <Connect action> retry after a dropped socket is exactly that —
+ * minted byte-identical tokens, and the first upgrade had already burned the
+ * string, so the legitimate retry was refused at the door. Sixteen random hex
+ * chars make each render its own one-time credential; the burn stays exact.
  */
 const CALL_TOKEN_VERSION = 'v1';
 // How long a minted token stays valid. The relay socket opens seconds after the
 // TwiML renders; five minutes is slack for a slow answer, not a window.
 const CALL_TOKEN_TTL_MS = 5 * 60 * 1000;
 
-function callTokenMac(callSid, expSec, secret) {
+function callTokenMac(callSid, expSec, nonce, secret) {
   return require('crypto')
     .createHmac('sha256', String(secret))
-    .update(`${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}`)
+    .update(`${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}.${nonce}`)
     .digest('hex')
     .slice(0, 32); // 128 bits — plenty against forgery, short enough for a URL
 }
@@ -90,7 +97,8 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
   const sid = String(callSid || '').trim();
   if (!secret || !sid) return '';
   const expSec = Math.floor((now + ttlMs) / 1000);
-  return `${CALL_TOKEN_VERSION}.${expSec}.${callTokenMac(sid, expSec, secret)}`;
+  const nonce = require('crypto').randomBytes(8).toString('hex');
+  return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret)}`;
 }
 
 /**
@@ -106,18 +114,22 @@ function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_S
   const sid = String(callSid || '').trim();
   if (!secret || !sid) return false;
   const parts = String(token || '').split('.');
-  if (parts.length !== 3 || parts[0] !== CALL_TOKEN_VERSION) return false;
+  if (parts.length !== 4 || parts[0] !== CALL_TOKEN_VERSION) return false;
   const expSec = Number(parts[1]);
   if (!Number.isSafeInteger(expSec)) return false;
+  // The nonce is opaque but bounded: it feeds the MAC input and a burn-table
+  // hash, so an attacker must not get to choose an arbitrarily long string.
+  const nonce = String(parts[2]);
+  if (!/^[0-9a-f]{16}$/.test(nonce)) return false;
   const expMs = expSec * 1000;
   if (expMs <= now) return false; // expired
   // Allow a minute of clock skew between the renderer and this process on top
   // of the grant the minter is permitted.
   if (expMs > now + maxTtlMs + 60 * 1000) return false;
-  const expected = callTokenMac(sid, expSec, secret);
+  const expected = callTokenMac(sid, expSec, nonce, secret);
   const crypto = require('crypto');
   const a = Buffer.from(expected);
-  const b = Buffer.from(String(parts[2]));
+  const b = Buffer.from(String(parts[3]));
   if (a.length !== b.length) return false; // timingSafeEqual throws on length mismatch
   return crypto.timingSafeEqual(a, b);
 }

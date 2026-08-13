@@ -303,15 +303,28 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // PHONE, and when the caller gave an ALTERNATE callback number that number
   // can already belong to somebody else's lead — so reusing it would rewrite
   // that lead's customer_id to this authenticated caller and hand them another
-  // person's record. An authenticated call therefore only reuses a lead that is
-  // unclaimed or already this customer's; anything else starts a fresh one.
-  if (existingLead && opts.identityCustomerId
-    && existingLead.customer_id && existingLead.customer_id !== customerId) {
-    logger.info(
-      `[voice-agent-lead] callback number ${maskPhone(phone)} already belongs to another customer's lead — `
-      + 'not reusing it for the authenticated caller'
-    );
-    existingLead = null;
+  // person's record.
+  //
+  // ⭐ AND "UNCLAIMED" IS NOT "OURS". The first cut of this guard rejected only
+  // a lead already stamped with a DIFFERENT customer_id — but a lead with NO
+  // customer_id on an alternate number is somebody's too: it is the record of
+  // whoever owns that number calling in as a prospect (a spouse's own inquiry,
+  // say), and reusing it would assign it to the authenticated caller and
+  // overwrite its rolling fields. So on an authenticated call, a lead found by
+  // a number OTHER than the caller's own ANI is reused only when it is already
+  // linked to this customer; an unclaimed lead by the caller's OWN ANI is
+  // their pre-customer history and stays reusable (idempotency by phone).
+  if (existingLead && opts.identityCustomerId && existingLead.customer_id !== customerId) {
+    const ownAni = phoneDigits(opts.aniPhone).slice(-10);
+    const lookupNumber = phoneDigits(phone).slice(-10);
+    const phoneIsOwnAni = !!ownAni && ownAni === lookupNumber;
+    if (existingLead.customer_id || !phoneIsOwnAni) {
+      logger.info(
+        `[voice-agent-lead] lead on ${maskPhone(phone)} is ${existingLead.customer_id ? 'another customer\'s' : 'an unclaimed lead on an alternate number'} — `
+        + 'not reusing it for the authenticated caller'
+      );
+      existingLead = null;
+    }
   }
 
   // Don't reuse a lead that belongs to a different person on a shared line: if

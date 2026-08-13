@@ -1026,6 +1026,9 @@ async function executeTool(name, input = {}, ctx = {}) {
         // FULL-tier ANI match is an identity — a contact-slot recognition
         // authenticates nobody, so it stays a phone match like any other.
         identityCustomerId: matchedCallerTier(ctx) === 'full' ? (ctx.customerId || null) : null,
+        // The caller's OWN number, so the lead lookup can tell "their history"
+        // from "an unclaimed lead on somebody else's callback number".
+        aniPhone: ctx.from || null,
         toPhone: ctx.to || null,
         callSid: ctx.callSid || null,
         language: ctx.language || null,

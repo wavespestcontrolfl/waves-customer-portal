@@ -183,6 +183,47 @@ describe('normalization', () => {
   });
 });
 
+// ⭐ "UNCLAIMED" IS NOT "OURS". Leads resolve by phone; on an authenticated
+// call the phone may be an ALTERNATE callback number, and a customer_id-NULL
+// lead on that number is the record of whoever owns it calling in as their own
+// prospect. Reusing it would assign it to the authenticated caller and
+// overwrite its rolling fields. The caller's OWN ANI keeps its history.
+describe('authenticated caller + alternate callback number — lead reuse boundary', () => {
+  const ANI = '+19415550142';
+  const ALTERNATE = '+19415550777';
+
+  test('an unclaimed lead on an ALTERNATE number is NOT reused — a fresh lead is created', async () => {
+    existingLead = { id: 'lead-spouse', phone: ALTERNATE, customer_id: null, first_name: 'Dana' };
+    primeDb();
+    // The authenticated identity must RESOLVE for the guard to be in play.
+    tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);
+    await createLeadFromExtraction(
+      { call_summary: 'Booked; callback on spouse line.' },
+      { phone: ALTERNATE, aniPhone: ANI, identityCustomerId: 'c-777', callSid: 'CA-alt-1' },
+    );
+    // A SEPARATE lead was inserted — Dana's was explicitly not reused. (The
+    // update that follows targets the FRESH row: linking the caller's own new
+    // lead to their own account is the point; the flat builder just cannot
+    // show which row an update aimed at, so the reuse refusal is pinned by the
+    // insert + the guard's own log line.)
+    expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeTruthy();
+    const logger = require('../services/logger');
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/not reusing it for the authenticated caller/i));
+  });
+
+  test('an unclaimed lead on the caller\'s OWN ANI is still reused (their pre-customer history)', async () => {
+    existingLead = { id: 'lead-own', phone: ANI, customer_id: null, first_name: null };
+    primeDb();
+    tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);
+    await createLeadFromExtraction(
+      { call_summary: 'Existing prospect calling back.' },
+      { phone: ANI, aniPhone: ANI, identityCustomerId: 'c-777', callSid: 'CA-own-1' },
+    );
+    expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeFalsy();
+    expect(leadUpdate()).toBeTruthy(); // reused + updated in place
+  });
+});
+
 describe('persistence through the lead pipeline', () => {
   test('a stated preference lands in extracted_data AND the ai_triage activity — no suppression write', async () => {
     await createLeadFromExtraction({

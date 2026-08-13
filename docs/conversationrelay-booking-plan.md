@@ -75,11 +75,14 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
    where the token is minted from the CallSid the Function is answering:
 
    ```js
-   // Twilio Function — VOICE_RELAY_WS_SECRET lives in the Function's env, never in the URL
+   // Twilio Function — VOICE_RELAY_WS_SECRET lives in the Function's env, never in the URL.
+   // The nonce makes every mint unique (a Connect-action retry must not reproduce
+   // an already-burned token).
    const exp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+   const nonce = require('crypto').randomBytes(8).toString('hex');
    const mac = require('crypto').createHmac('sha256', process.env.VOICE_RELAY_WS_SECRET)
-     .update(`v1.${event.CallSid}.${exp}`).digest('hex').slice(0, 32);
-   const token = `v1.${exp}.${mac}`;
+     .update(`v1.${event.CallSid}.${exp}.${nonce}`).digest('hex').slice(0, 32);
+   const token = `v1.${exp}.${nonce}.${mac}`;
    ```
 
    (`relay-protocol.buildRelayTwiML({ wsUrl, callSid })` renders exactly this server-side, and `mintCallToken` is the same function.) The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the token verifies against that CallSid, is unexpired, and has not been used — so a captured URL is worth one replay attempt on a call that has already ended. **A URL carrying the raw secret is refused**: the whole point is that what leaks from a logged URL is no longer a working credential.

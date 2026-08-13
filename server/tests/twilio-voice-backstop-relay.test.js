@@ -148,7 +148,7 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
     expect(xml).toContain('<Connect>');
     expect(xml).toContain('<ConversationRelay ');
     expect(xml).toContain('callSid=CA-live-1');
-    expect(xml).toMatch(/t=v1\.\d+\.[0-9a-f]{32}/);
+    expect(xml).toMatch(/t=v1\.\d+\.[0-9a-f]{16}\.[0-9a-f]{32}/);
     expect(xml).toContain('&amp;t='); // the URL is XML-escaped inside the attribute
     expect(xml).not.toContain('shh-secret-123'); // the minting key stays server-side
     expect(xml).not.toContain('key=');
@@ -242,7 +242,7 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
 describe('relay-protocol auth/PII helpers', () => {
   test('appendCallAuth carries CallSid + token, drops any stale key, no-op without a secret', () => {
     const url = appendCallAuth('wss://h/ws', { callSid: 'CA1', secret: 'sek' });
-    expect(url).toMatch(/^wss:\/\/h\/ws\?callSid=CA1&t=v1\.\d+\.[0-9a-f]{32}$/);
+    expect(url).toMatch(/^wss:\/\/h\/ws\?callSid=CA1&t=v1\.\d+\.[0-9a-f]{16}\.[0-9a-f]{32}$/);
     expect(appendCallAuth('wss://h/ws?key=stale&x=1', { callSid: 'CA1', secret: 'sek' })).not.toContain('key=');
     expect(appendCallAuth('wss://h/ws?key=stale&x=1', { callSid: 'CA1', secret: 'sek' })).toContain('x=1');
     expect(appendCallAuth('wss://h/ws', { callSid: 'CA1', secret: '' })).toBe('wss://h/ws');
@@ -253,6 +253,15 @@ describe('relay-protocol auth/PII helpers', () => {
   // refused; so is one minted to live far longer than this code grants, which is
   // what keeps the lifetime a property of the server rather than of whoever
   // rendered the URL.
+  test('two mints for the SAME call are DIFFERENT tokens (a Connect-action retry must survive the burn)', () => {
+    const now = Date.UTC(2026, 7, 12, 12, 0, 0);
+    const a = mintCallToken('CA1', { secret: 'sek', now });
+    const b = mintCallToken('CA1', { secret: 'sek', now }); // same call, same second
+    expect(a).not.toBe(b);
+    expect(verifyCallToken(a, 'CA1', { secret: 'sek', now })).toBe(true);
+    expect(verifyCallToken(b, 'CA1', { secret: 'sek', now })).toBe(true);
+  });
+
   test('verifyCallToken accepts only its own CallSid, secret, and lifetime', () => {
     const now = Date.UTC(2026, 7, 12, 12, 0, 0);
     const token = mintCallToken('CA1', { secret: 'sek', now });
@@ -262,7 +271,10 @@ describe('relay-protocol auth/PII helpers', () => {
     expect(verifyCallToken(token, 'CA1', { secret: 'sek', now: now + CALL_TOKEN_TTL_MS + 1000 })).toBe(false); // expired
     expect(verifyCallToken('', 'CA1', { secret: 'sek', now })).toBe(false);
     expect(verifyCallToken('v1.999.abc', 'CA1', { secret: 'sek', now })).toBe(false); // malformed
-    expect(verifyCallToken(`v9.${Math.floor((now + 1000) / 1000)}.${'a'.repeat(32)}`, 'CA1', { secret: 'sek', now })).toBe(false);
+    expect(verifyCallToken(`v9.${Math.floor((now + 1000) / 1000)}.${'a'.repeat(16)}.${'a'.repeat(32)}`, 'CA1', { secret: 'sek', now })).toBe(false);
+    // The pre-nonce 3-part shape is not grandfathered — a deterministic token
+    // is exactly what the nonce exists to retire.
+    expect(verifyCallToken(`v1.${Math.floor((now + 1000) / 1000)}.${'a'.repeat(32)}`, 'CA1', { secret: 'sek', now })).toBe(false);
     // A far-future expiry is a token minted to live forever — refused.
     const farFuture = mintCallToken('CA1', { secret: 'sek', now, ttlMs: 400 * 24 * 60 * 60 * 1000 });
     expect(verifyCallToken(farFuture, 'CA1', { secret: 'sek', now })).toBe(false);
