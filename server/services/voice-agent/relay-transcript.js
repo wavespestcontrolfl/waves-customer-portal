@@ -131,13 +131,76 @@ function scrubForStorage(text) {
 }
 
 /**
+ * ⭐ THE TURN LIST IS SCRUBBED AS A SEQUENCE, NOT TURN BY TURN. STT hands the
+ * relay one utterance per prompt frame, so a caller reading a card slowly —
+ * "4111 1111", pause, "1111 1111" — lands as TWO turns, each side under the
+ * 13-digit floor a per-turn scrub needs. Scrubbed independently, both halves
+ * survived and the full PAN was reconstructable from the stored transcript
+ * (and the composed summary). `scrubSegments` is the recording pipeline's own
+ * cross-boundary scrub, built for exactly this diarization split: per-segment
+ * first, then adjacent windows re-checked joined, a hit masking in the first
+ * segment and emptying the rest.
+ *
+ * Fails CLOSED as a unit: if the scrubber cannot run, NO turn text persists —
+ * the same rule the per-turn path had, applied to the whole record.
+ * Returns [{ role, text }] with scrubbed text ('' where a turn was consumed
+ * by a bridge or dropped), or null when the scrubber is unavailable.
+ */
+function scrubTurnsForStorage(turns = []) {
+  const prepared = (Array.isArray(turns) ? turns : [])
+    .map((t) => ({ role: t && t.role, text: clean(t && t.text, MAX_TURN_CHARS) }));
+  let scrubbedTexts;
+  try {
+    const { scrubSegments } = require('../../utils/pan-scrub');
+    const texts = prepared.map((t) => t.text);
+    // Pass 1 — the CALLER turns as their own sequence. scrubSegments bridges
+    // ADJACENT segments, and on a live call the agent talks back: "it starts
+    // 4111 1111" / (agent objects) / "and then 1111 1111" defeats an adjacency
+    // join, while the caller-only subsequence puts the two halves side by
+    // side. Only the caller can speak new digits; the agent echoing them is
+    // covered by pass 2.
+    let count = 0;
+    const callerIdx = prepared.map((t, i) => (t.role === 'caller' ? i : -1)).filter((i) => i >= 0);
+    const callerScrub = scrubSegments(callerIdx.map((i) => ({ text: texts[i] })));
+    count += callerScrub.count;
+    callerIdx.forEach((i, k) => {
+      const seg = callerScrub.segments[k];
+      texts[i] = seg && typeof seg.text === 'string' ? seg.text : '';
+    });
+    // Pass 2 — the full sequence in order: adjacent cross-speaker splits and
+    // any digits the AGENT text carries (a model echo) are caught here.
+    const fullScrub = scrubSegments(texts.map((t) => ({ text: t })));
+    count += fullScrub.count;
+    if (count > 0) {
+      logger.warn(`[voice-relay-transcript] scrubbed ${count} card-number candidate(s) across relay turns before storage`);
+    }
+    scrubbedTexts = fullScrub.segments.map((seg) => (seg && typeof seg.text === 'string' ? seg.text : ''));
+  } catch (err) {
+    logger.error(`[voice-relay-transcript] PAN scrub unavailable — dropping ALL turn text rather than storing it unscrubbed: ${err.message}`);
+    return null;
+  }
+  return prepared.map((t, i) => {
+    let text = scrubbedTexts[i] || '';
+    if (text) {
+      try {
+        const { redactAccessCodes } = require('../context-aggregator');
+        if (typeof redactAccessCodes === 'function') text = redactAccessCodes(text);
+      } catch { /* gate-code scrub is best-effort; the PAN scrub above is not */ }
+    }
+    return { role: t.role, text };
+  });
+}
+
+/**
  * Render the session's ordered turn list as the pipeline's labeled dialogue.
  * turns: [{ role: 'caller'|'agent'|'tool', text }]
  */
 function buildTranscriptText(turns = []) {
+  const scrubbed = scrubTurnsForStorage(turns);
+  if (!scrubbed) return ''; // scrubber unavailable — nothing persists
   const lines = [];
-  for (const turn of Array.isArray(turns) ? turns : []) {
-    const text = scrubForStorage(clean(turn && turn.text, MAX_TURN_CHARS));
+  for (const turn of scrubbed) {
+    const text = turn.text;
     if (!text) continue;
     if (turn.role === 'caller') lines.push(`${CALLER_LABEL}: ${text}`);
     else if (turn.role === 'agent') lines.push(`${AGENT_LABEL}: ${text}`);
@@ -157,9 +220,13 @@ function buildTranscriptText(turns = []) {
 function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {}) {
   const provided = scrubForStorage(clean(modelSummary, MAX_SUMMARY_CHARS));
   if (provided) return provided;
-  const callerTurns = (Array.isArray(turns) ? turns : [])
-    .filter((t) => t && t.role === 'caller')
-    .map((t) => scrubForStorage(clean(t.text, 300)))
+  // Same cross-turn scrub as the transcript: the summary joins caller turns
+  // back together, which is precisely how a split PAN would reassemble.
+  const scrubbedAll = scrubTurnsForStorage(
+    (Array.isArray(turns) ? turns : []).filter((t) => t && t.role === 'caller'),
+  );
+  const callerTurns = (scrubbedAll || [])
+    .map((t) => clean(t.text, 300))
     .filter(Boolean);
   const head = leadCaptured
     ? 'AI phone assistant handled this call.'
@@ -247,6 +314,7 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
 module.exports = {
   buildTranscriptText,
   scrubForStorage,
+  scrubTurnsForStorage,
   buildCallSummary,
   buildTranscriptUpdate,
   TRANSCRIPTION_PROVIDER,

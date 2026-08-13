@@ -745,6 +745,43 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 
+  test('an unreadable POST-hook status refuses the stamp too (fail closed, retryable)', async () => {
+    // Entry read succeeds; the post-legs re-read throws. An unreadable status
+    // cannot prove the cancellation race did not happen, so the activation
+    // must not report complete — false leaves the row unstamped for the sweep.
+    // The harness mints a fresh builder per db(table) call, so count reads by
+    // wrapping the db fn itself. The LAST scheduled_services .first() of a
+    // clean run is the post-hook re-read this test wants to fail.
+    const countingDb = (failAt) => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const state = { reads: 0 };
+      const wrapped = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const orig = q.first;
+          q.first = jest.fn(async (...a) => {
+            state.reads += 1;
+            if (state.reads === failAt) throw new Error('db gone');
+            return orig(...a);
+          });
+        }
+        return q;
+      };
+      Object.assign(wrapped, { fn: base.fn, transaction: base.transaction, raw: base.raw, _state: base._state });
+      return { wrapped, state };
+    };
+
+    const probe = countingDb(Infinity);
+    expect(await runOutboundReviewConfirmHook(probe.wrapped, svc, 'test')).toBe(true);
+    const totalReads = probe.state.reads;
+    expect(totalReads).toBeGreaterThan(1);
+
+    const failing = countingDb(totalReads); // ONLY the post-hook re-read throws
+    const ok = await runOutboundReviewConfirmHook(failing.wrapped, svc, 'test');
+    expect(ok).toBe(false);
+    expect(failing.state.reads).toBe(totalReads);
+  });
+
   test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
     // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
     // card in person, so the funnel leg is skipped on the tech-track path —

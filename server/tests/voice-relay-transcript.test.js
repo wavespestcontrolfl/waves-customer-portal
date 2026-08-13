@@ -132,6 +132,42 @@ describe('transcript composition (pure)', () => {
     expect(summary).not.toContain('4111 1111 1111 1111');
   });
 
+  // ⭐ THE SCRUB SEES THE SEQUENCE, NOT ONE TURN AT A TIME. STT delivers one
+  // utterance per prompt frame, so a caller reading a card SLOWLY — half the
+  // digits, a pause, the other half — lands as two turns, each side under the
+  // 13-digit floor a per-turn scrub needs. Scrubbed independently, both halves
+  // survived and the PAN was reconstructable from the stored transcript.
+  test('a PAN split across TWO caller turns is scrubbed (cross-turn bridging)', () => {
+    const turns = [
+      { role: 'caller', text: 'my card number is 4111 1111' },
+      { role: 'caller', text: '1111 1111' },
+      { role: 'agent', text: 'I cannot take a card on this call.' },
+    ];
+    const text = relayTranscript.buildTranscriptText(turns);
+    expect(text.replace(/\D/g, '')).not.toContain('4111111111111111');
+    expect(text).toMatch(/I cannot take a card/); // the agent's line survives
+
+    // The composed summary joins caller turns back together — the exact way a
+    // split PAN would reassemble — so it takes the same cross-turn scrub.
+    const summary = relayTranscript.buildCallSummary({ modelSummary: '', turns, leadCaptured: false });
+    expect(summary.replace(/\D/g, '')).not.toContain('4111111111111111');
+  });
+
+  // The agent talking BETWEEN the halves must not protect them: the caller-only
+  // subsequence is scrubbed as its own sequence first, so Sandy's interjection
+  // does not break the digit bridge. (Words spoken INSIDE the number — "and
+  // then 1111…" — are beyond any digit-run scrub, the recording pipeline's
+  // own documented bound.)
+  test('a PAN split across turns WITH an agent turn between still cannot reassemble', () => {
+    const text = relayTranscript.buildTranscriptText([
+      { role: 'caller', text: 'it starts 4111 1111' },
+      { role: 'agent', text: 'I really cannot take that.' },
+      { role: 'caller', text: '1111 1111, did you get it?' },
+    ]);
+    expect(text.replace(/\D/g, '')).not.toContain('4111111111111111');
+    expect(text).toMatch(/I really cannot take that/); // the agent line survives
+  });
+
   test('transcript is bounded (a runaway loop can never write an unbounded column)', () => {
     const turns = Array.from({ length: 5000 }, () => ({ role: 'caller', text: 'x'.repeat(500) }));
     const text = relayTranscript.buildTranscriptText(turns);

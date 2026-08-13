@@ -430,7 +430,12 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       return false;
     }
   } catch (postErr) {
-    logger.warn(`[${routeTag}] post-hook status re-read failed for ${svc.id}: ${postErr.message}`);
+    // Fail CLOSED, same as the entry check: an unreadable status cannot prove
+    // the cancellation race did not happen, and returning coreLegsOk here would
+    // let the stamp land over an unverified activation. False leaves the row
+    // unstamped — the retry rail — and every leg is idempotent on the retry.
+    logger.error(`[${routeTag}] post-hook status re-read failed for ${svc.id} — reporting retryable: ${postErr.message}`);
+    return false;
   }
 
   return coreLegsOk;

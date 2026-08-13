@@ -91,6 +91,55 @@ describe('GATE OFF — dark', () => {
   });
 });
 
+// ⭐ ONE PAGE PER CALL, DURABLY. The session latch is per RelayConversation,
+// and a legitimate reconnect (fresh token, same CallSid) builds a NEW
+// conversation with the latch clear — so the receipt lives on the call's own
+// call_log row (metadata.relay_hot_alert_at, one atomic winner), released on a
+// failed send so the retry rail stays open, and fail-OPEN on a claim error: a
+// rare duplicate page is safer than a missed swarm call.
+describe('GATE ON — the durable one-page-per-CALL receipt', () => {
+  const db = require('../models/db');
+
+  function primeClaimDb({ claimWins }) {
+    const builder = {};
+    for (const m of ['where', 'whereRaw']) builder[m] = jest.fn(() => builder);
+    builder.update = jest.fn(() => ({ returning: jest.fn(async () => (claimWins ? [{ id: 'cl-1' }] : [])) }));
+    builder.first = jest.fn(async () => ({ id: 'cl-1' })); // the row exists
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    return builder;
+  }
+
+  beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
+
+  test('a reconnected session (fresh latch, same CallSid) does NOT page twice', async () => {
+    primeClaimDb({ claimWins: false }); // an earlier session already burned it
+    const ctx = { callSid: 'CA-reconnect', markOwnerAlerted: jest.fn() };
+    const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    // …and the session is told the call IS covered: latch set, promise stands.
+    expect(ctx.markOwnerAlerted).toHaveBeenCalled();
+    expect(out).toBe(true);
+  });
+
+  test('a FAILED send releases the durable claim so a retry can still page', async () => {
+    const builder = primeClaimDb({ claimWins: true });
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, notificationUndelivered: true });
+    const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-release', markOwnerAlerted: jest.fn() });
+    expect(out).toBe(false);
+    // Two updates: the claim burn, then the release (metadata minus the key).
+    const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+    expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_at'"))).toBe(true);
+  });
+
+  test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(out).toBe(true);
+  });
+});
+
 describe('GATE ON — the alert', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 

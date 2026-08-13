@@ -99,6 +99,56 @@ function buildHotLeadAlert({ firstName, lastName, phone, city, requestedService,
  * @param {object} ctx    the relay session tool ctx (callSid, ownerAlerted,
  *                        markOwnerAlerted, customerId)
  */
+// ⭐ ONE PAGE PER CALL — DURABLY. The in-memory latch below is per
+// RelayConversation, and a legitimate reconnect (Twilio retrying the socket
+// with a freshly minted token) builds a NEW conversation with the latch clear:
+// same CallSid, second page. The receipt therefore lives where the session
+// claim already does — a jsonb key burned atomically on the call's own
+// call_log row, one statement, exactly one winner. A send FAILURE releases the
+// key so the retry rail stays open (the latch doctrine below, made durable).
+// Fail-OPEN on a claim error: for an internal hot-lead page, a rare duplicate
+// is safer than a missed swarm call.
+const HOT_ALERT_KEY = 'relay_hot_alert_at';
+
+async function claimHotAlertForCall(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return { claimed: true, durable: false }; // no call row to claim on
+  try {
+    const db = require('../../models/db');
+    const rows = await db('call_log')
+      .where({ twilio_call_sid: key })
+      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}') IS NULL`)
+      .update({
+        metadata: db.raw(
+          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_KEY}}', to_jsonb(now()::text), true)`,
+        ),
+      })
+      .returning('id');
+    if (rows && rows.length > 0) return { claimed: true, durable: true };
+    // No unclaimed row: either another session already paged this call, or
+    // there is no call_log row at all (nothing to dedupe against) — only the
+    // former means "stand down".
+    const exists = await db('call_log').where({ twilio_call_sid: key }).first('id');
+    return exists ? { claimed: false, durable: true } : { claimed: true, durable: false };
+  } catch (err) {
+    logger.warn(`[voice-relay-alert] hot-alert claim failed for ${key} — paging anyway (fail-open): ${err.message}`);
+    return { claimed: true, durable: false };
+  }
+}
+
+async function releaseHotAlertClaim(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return;
+  try {
+    const db = require('../../models/db');
+    await db('call_log')
+      .where({ twilio_call_sid: key })
+      .update({ metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) - '${HOT_ALERT_KEY}'`) });
+  } catch (err) {
+    logger.warn(`[voice-relay-alert] hot-alert claim release failed for ${key}: ${err.message}`);
+  }
+}
+
 async function alertOwnerHotLead(lead = {}, ctx = {}) {
   try {
     const { isContextEnabled } = require('./relay-context');
@@ -117,6 +167,17 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     if (!to) {
       logger.warn('[voice-relay-alert] hot lead captured but ADAM_PHONE is unset — no owner alert sent');
       return false;
+    }
+
+    // The durable one-per-CALL receipt (reconnects build a fresh session).
+    const claim = await claimHotAlertForCall(ctx.callSid);
+    if (!claim.claimed) {
+      // An earlier session of this same call already paged (or is completing
+      // its page): this call IS covered, so the session latch is set and the
+      // caller may keep being told the team was notified.
+      if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+      logger.info(`[voice-relay-alert] hot-lead page already sent for callSid=${ctx.callSid} — not paging twice`);
+      return true;
     }
 
     const body = buildHotLeadAlert({
@@ -145,6 +206,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
         `[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
         + `(${sent && sent.notificationError ? 'notification error' : 'notification undelivered'}) — latch left open for a retry`
       );
+      if (claim.durable) await releaseHotAlertClaim(ctx.callSid); // the retry rail stays open
       return false;
     }
     // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
@@ -163,6 +225,9 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // one-per-call latch is deliberately NOT set here, so a later attempt on
     // this same call can still page the owner.
     logger.error(`[voice-relay-alert] hot-lead owner alert FAILED callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    // Give back the durable claim too — a failed page must stay retryable
+    // across sessions, not just within this one.
+    await releaseHotAlertClaim(ctx.callSid).catch(() => {});
     return false;
   }
 }
